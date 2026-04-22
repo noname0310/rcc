@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-07: Pin every manifest rev to a commit SHA
 
 **Phase:** 01-test-infra    **Depends on:** 01-01 .. 01-06    **Milestone:** M0.5

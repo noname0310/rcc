@@ -15,7 +15,7 @@ harness. Without this phase no later task can be scored.
 - [x] [04-fetch-tcc-tests2](04-fetch-tcc-tests2.md)
 - [x] [05-fetch-llvm-test-suite](05-fetch-llvm-test-suite.md)
 - [x] [06-fetch-csmith](06-fetch-csmith.md)
-- [ ] [07-pin-manifest-revs](07-pin-manifest-revs.md)
+- [x] [07-pin-manifest-revs](07-pin-manifest-revs.md)
 - [ ] [08-ctestsuite-adapter](08-ctestsuite-adapter.md)
 - [ ] [09-chibicc-adapter](09-chibicc-adapter.md)
 - [ ] [10-conformance-report-json](10-conformance-report-json.md)

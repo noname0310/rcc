@@ -210,6 +210,43 @@ mod tests {
     }
 
     #[test]
+    fn manifest_has_expected_suite_count() {
+        let m = load_real_manifest();
+        assert_eq!(m.suite.len(), 6, "MANIFEST.toml should contain exactly 6 suites");
+    }
+
+    #[test]
+    fn all_revs_are_pinned_shas() {
+        let m = load_real_manifest();
+        for suite in &m.suite {
+            if let Some(rev) = &suite.rev {
+                assert!(
+                    is_sha_rev(rev),
+                    "suite `{}` rev must be a 40-char hex SHA, got: {rev}",
+                    suite.name
+                );
+            } else {
+                assert!(
+                    suite.git.is_none(),
+                    "suite `{}` has `git` but no `rev` — every git suite must be pinned",
+                    suite.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn show_manifest_output_contains_all_suites() {
+        let m = load_real_manifest();
+        let output = format!("{m:#?}");
+        let expected_names =
+            ["c-testsuite", "chibicc", "gcc-torture", "tcc-tests2", "llvm-test-suite", "csmith"];
+        for name in &expected_names {
+            assert!(output.contains(name), "show-manifest output should contain suite `{name}`");
+        }
+    }
+
+    #[test]
     fn llvm_test_suite_sparse_includes_unittests_and_license() {
         let m = load_real_manifest();
         let suite =
