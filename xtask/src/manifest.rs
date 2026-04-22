@@ -40,3 +40,27 @@ pub fn load(path: &Path) -> anyhow::Result<Manifest> {
     let s = std::fs::read_to_string(path)?;
     Ok(toml::from_str(&s)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_sha_rev(s: &str) -> bool {
+        s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    fn load_real_manifest() -> Manifest {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let path = root.join("third_party/MANIFEST.toml");
+        load(&path).expect("MANIFEST.toml should parse")
+    }
+
+    #[test]
+    fn c_testsuite_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "c-testsuite").expect("c-testsuite entry");
+        let rev = suite.rev.as_deref().expect("c-testsuite must have a rev");
+        assert!(is_sha_rev(rev), "c-testsuite rev must be a 40-char hex SHA, got: {rev}");
+    }
+}

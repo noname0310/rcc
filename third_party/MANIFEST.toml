@@ -9,7 +9,7 @@ name        = "c-testsuite"
 description = "Small standalone C programs with .expected stdout; used by cproc/lacc/chibicc"
 license     = "MIT"
 git         = "https://github.com/c-testsuite/c-testsuite.git"
-rev         = "master"   # TODO: pin to a specific commit hash before merge
+rev         = "5c7275656d751de0e68b2d340a95b5681858ed07"
 
 [[suite]]
 name        = "chibicc"

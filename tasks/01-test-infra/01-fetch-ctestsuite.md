@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-01: Vendor c-testsuite
 
 **Phase:** 01-test-infra    **Depends on:** —    **Milestone:** M0.5

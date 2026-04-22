@@ -9,7 +9,7 @@ harness. Without this phase no later task can be scored.
 
 ## Tasks (pick in order)
 
-- [ ] [01-fetch-ctestsuite](01-fetch-ctestsuite.md)
+- [x] [01-fetch-ctestsuite](01-fetch-ctestsuite.md)
 - [ ] [02-fetch-chibicc](02-fetch-chibicc.md)
 - [ ] [03-fetch-gcc-torture](03-fetch-gcc-torture.md)
 - [ ] [04-fetch-tcc-tests2](04-fetch-tcc-tests2.md)
