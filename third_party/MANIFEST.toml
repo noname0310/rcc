@@ -25,8 +25,9 @@ description = "GCC C torture tests (execute/ + compile/)"
 license     = "GPL-3.0-or-later WITH GCC-exception-3.1"
 gpl         = true
 git         = "https://gcc.gnu.org/git/gcc.git"
-rev         = "releases/gcc-14"  # TODO: pin
-sparse      = ["gcc/testsuite/gcc.c-torture"]
+rev         = "cd0059a1976303638cea95f216de129334fc04d1"
+tag         = "releases/gcc-14.1.0"
+sparse      = ["gcc/testsuite/gcc.c-torture", "COPYING3"]
 
 [[suite]]
 name        = "tcc-tests2"

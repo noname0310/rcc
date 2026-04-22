@@ -21,5 +21,11 @@ default and are **not** linked into any rcc binary. They are executed as
 separate processes only, and results are collected through stdout/exit
 codes — see `crates/rcc_conformance/`.
 
+**Note on GPL test isolation:** GPL-gated test programs are compiled and
+run as independent executables by the rcc conformance harness. No GPL
+source code is ever compiled into, linked with, or distributed alongside
+the rcc compiler. The `--include-gpl` flag on `cargo xtask fetch-testsuites`
+must be passed explicitly to download these suites.
+
 When a suite is fetched, `cargo xtask fetch-testsuites` will copy its license
 file into `LICENSES/<suite>.txt` for easy review.

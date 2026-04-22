@@ -42,6 +42,7 @@ pub fn run(manifest: &Manifest, include_gpl: bool, only: Option<&str>) -> Result
         }
 
         copy_license(suite, &dst, &root)?;
+        write_suite_readme(suite, &dst)?;
     }
     Ok(())
 }
@@ -54,8 +55,27 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
         run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
         return Ok(());
     }
+
     if suite.sparse.is_empty() {
         run_cmd(Command::new("git").args(["clone", git, &dst.to_string_lossy()]))?;
+    } else if let Some(tag) = &suite.tag {
+        // Shallow sparse clone pinned to a tag — keeps multi-GB repos manageable.
+        run_cmd(Command::new("git").args([
+            "clone",
+            "--filter=blob:none",
+            "--sparse",
+            "--depth=1",
+            "--branch",
+            tag,
+            git,
+            &dst.to_string_lossy(),
+        ]))?;
+        let mut sparse = Command::new("git");
+        sparse.args(["-C", &dst.to_string_lossy(), "sparse-checkout", "set", "--no-cone"]);
+        for p in &suite.sparse {
+            sparse.arg(p);
+        }
+        run_cmd(&mut sparse)?;
     } else {
         run_cmd(Command::new("git").args([
             "clone",
@@ -70,8 +90,8 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
             sparse.arg(p);
         }
         run_cmd(&mut sparse)?;
+        run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
     }
-    run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
     Ok(())
 }
 
@@ -103,9 +123,32 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// Write a README.md into a suite's checkout directory naming the upstream
+/// license and warning against copying sources into the repo tree.
+fn write_suite_readme(suite: &Suite, dst: &Path) -> Result<()> {
+    let readme = dst.join("README.md");
+    let content = format!(
+        "# {name}\n\
+         \n\
+         Upstream: {git}\n\
+         License: {license}\n\
+         \n\
+         > **Warning:** do not copy these sources into the rcc repository.\n\
+         > This directory is populated by `cargo xtask fetch-testsuites` and\n\
+         > is git-ignored. The tests are executed as separate processes and\n\
+         > are never linked into any rcc binary.\n",
+        name = suite.name,
+        git = suite.git.as_deref().unwrap_or("(unknown)"),
+        license = suite.license,
+    );
+    std::fs::write(&readme, content).with_context(|| format!("writing {}", readme.display()))?;
+    println!("  readme -> {}", readme.display());
+    Ok(())
+}
+
 /// After a suite is fetched, copy its license file into `LICENSES/<name>.txt`.
 fn copy_license(suite: &Suite, src_dir: &Path, root: &Path) -> Result<()> {
-    let candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"];
+    let candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING3"];
     let license_src = candidates.iter().map(|f| src_dir.join(f)).find(|p| p.is_file());
 
     if let Some(src) = license_src {
@@ -148,6 +191,7 @@ mod tests {
             gpl: false,
             git: None,
             rev: None,
+            tag: None,
             tarball: None,
             sparse: vec![],
         };
@@ -177,6 +221,7 @@ mod tests {
             gpl: false,
             git: None,
             rev: None,
+            tag: None,
             tarball: None,
             sparse: vec![],
         };
@@ -186,6 +231,57 @@ mod tests {
 
         let dst = root.join("LICENSES/empty-suite.txt");
         assert!(!dst.exists(), "no license should be created when source is missing");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn gpl_suite_skipped_without_flag() {
+        let manifest = crate::manifest::Manifest {
+            suite: vec![Suite {
+                name: "gpl-test".into(),
+                description: String::new(),
+                license: "GPL-3.0".into(),
+                gpl: true,
+                git: Some("https://example.com/repo.git".into()),
+                rev: Some("abc".into()),
+                tag: None,
+                tarball: None,
+                sparse: vec![],
+            }],
+        };
+        // include_gpl = false → should skip and not error
+        // (actual git clone is never reached because gpl gate fires first)
+        let result = run(&manifest, false, None);
+        assert!(result.is_ok(), "skipping GPL suites should not error");
+    }
+
+    #[test]
+    fn write_suite_readme_creates_file() {
+        let tmp = std::env::temp_dir().join("rcc_test_write_readme");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let suite = Suite {
+            name: "gcc-torture".into(),
+            description: "GCC C torture tests".into(),
+            license: "GPL-3.0-or-later WITH GCC-exception-3.1".into(),
+            gpl: true,
+            git: Some("https://gcc.gnu.org/git/gcc.git".into()),
+            rev: Some("abc123".into()),
+            tag: Some("releases/gcc-14.1.0".into()),
+            tarball: None,
+            sparse: vec![],
+        };
+
+        write_suite_readme(&suite, &tmp).unwrap();
+
+        let readme = tmp.join("README.md");
+        assert!(readme.exists(), "README.md should be created");
+        let content = fs::read_to_string(&readme).unwrap();
+        assert!(content.contains("gcc-torture"), "README should name the suite");
+        assert!(content.contains("GPL"), "README should mention the license");
+        assert!(content.contains("do not copy"), "README should warn about not copying sources");
 
         let _ = fs::remove_dir_all(&tmp);
     }

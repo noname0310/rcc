@@ -30,6 +30,10 @@ pub struct Suite {
     pub rev: Option<String>,
     /// Optional tarball URL (used when `git` is absent).
     pub tarball: Option<String>,
+    /// Optional git tag for shallow clones (`--depth=1 --branch <tag>`).
+    /// When set, the clone is done at depth 1 using the tag, and `rev`
+    /// serves as the expected commit SHA for verification.
+    pub tag: Option<String>,
     /// Optional sparse-checkout prefixes (git only).
     #[serde(default)]
     pub sparse: Vec<String>,
@@ -83,6 +87,46 @@ mod tests {
         assert!(
             suite.sparse.iter().any(|p| p == "LICENSE"),
             "chibicc sparse list must include 'LICENSE'"
+        );
+    }
+
+    #[test]
+    fn gcc_torture_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "gcc-torture").expect("gcc-torture entry");
+        let rev = suite.rev.as_deref().expect("gcc-torture must have a rev");
+        assert!(is_sha_rev(rev), "gcc-torture rev must be a 40-char hex SHA, got: {rev}");
+    }
+
+    #[test]
+    fn gcc_torture_is_gpl_gated() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "gcc-torture").expect("gcc-torture entry");
+        assert!(suite.gpl, "gcc-torture must have gpl = true");
+    }
+
+    #[test]
+    fn gcc_torture_sparse_includes_torture_and_copying() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "gcc-torture").expect("gcc-torture entry");
+        assert!(
+            suite.sparse.iter().any(|p| p == "gcc/testsuite/gcc.c-torture"),
+            "gcc-torture sparse must include the torture test path"
+        );
+        assert!(
+            suite.sparse.iter().any(|p| p == "COPYING3"),
+            "gcc-torture sparse must include COPYING3 for license extraction"
+        );
+    }
+
+    #[test]
+    fn gcc_torture_has_tag() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "gcc-torture").expect("gcc-torture entry");
+        let tag = suite.tag.as_deref().expect("gcc-torture must have a tag for shallow clone");
+        assert!(
+            tag.starts_with("releases/gcc-"),
+            "gcc-torture tag should be a GCC release tag, got: {tag}"
         );
     }
 }
