@@ -44,8 +44,8 @@ name        = "llvm-test-suite"
 description = "LLVM test-suite (SingleSource/UnitTests subset)"
 license     = "Apache-2.0 WITH LLVM-exception"
 git         = "https://github.com/llvm/llvm-test-suite.git"
-rev         = "main"     # TODO: pin
-sparse      = ["SingleSource/UnitTests"]
+rev         = "ed4e04cb2365f9709ff8a1113b37d481cfeb5e95"
+sparse      = ["SingleSource/UnitTests", "LICENSE.TXT", "CMakeLists.txt"]
 
 [[suite]]
 name        = "csmith"

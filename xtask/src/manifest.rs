@@ -169,4 +169,40 @@ mod tests {
             "tcc-tests2 tag should be a TCC release tag, got: {tag}"
         );
     }
+
+    #[test]
+    fn llvm_test_suite_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite =
+            m.suite.iter().find(|s| s.name == "llvm-test-suite").expect("llvm-test-suite entry");
+        let rev = suite.rev.as_deref().expect("llvm-test-suite must have a rev");
+        assert!(is_sha_rev(rev), "llvm-test-suite rev must be a 40-char hex SHA, got: {rev}");
+    }
+
+    #[test]
+    fn llvm_test_suite_not_gpl_gated() {
+        let m = load_real_manifest();
+        let suite =
+            m.suite.iter().find(|s| s.name == "llvm-test-suite").expect("llvm-test-suite entry");
+        assert!(!suite.gpl, "llvm-test-suite is Apache-2.0, must not be gpl-gated");
+    }
+
+    #[test]
+    fn llvm_test_suite_sparse_includes_unittests_and_license() {
+        let m = load_real_manifest();
+        let suite =
+            m.suite.iter().find(|s| s.name == "llvm-test-suite").expect("llvm-test-suite entry");
+        assert!(
+            suite.sparse.iter().any(|p| p == "SingleSource/UnitTests"),
+            "llvm-test-suite sparse must include 'SingleSource/UnitTests'"
+        );
+        assert!(
+            suite.sparse.iter().any(|p| p == "LICENSE.TXT"),
+            "llvm-test-suite sparse must include 'LICENSE.TXT' for license extraction"
+        );
+        assert!(
+            suite.sparse.iter().any(|p| p == "CMakeLists.txt"),
+            "llvm-test-suite sparse must include 'CMakeLists.txt' for metadata"
+        );
+    }
 }

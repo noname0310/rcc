@@ -148,7 +148,7 @@ fn write_suite_readme(suite: &Suite, dst: &Path) -> Result<()> {
 
 /// After a suite is fetched, copy its license file into `LICENSES/<name>.txt`.
 fn copy_license(suite: &Suite, src_dir: &Path, root: &Path) -> Result<()> {
-    let candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "COPYING3"];
+    let candidates = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENSE.TXT", "COPYING", "COPYING3"];
     let license_src = candidates.iter().map(|f| src_dir.join(f)).find(|p| p.is_file());
 
     if let Some(src) = license_src {
@@ -231,6 +231,38 @@ mod tests {
 
         let dst = root.join("LICENSES/empty-suite.txt");
         assert!(!dst.exists(), "no license should be created when source is missing");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_license_finds_license_txt_uppercase() {
+        let tmp = std::env::temp_dir().join("rcc_test_copy_license_upper");
+        let _ = fs::remove_dir_all(&tmp);
+        let src_dir = tmp.join("suite");
+        let root = tmp.join("root");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&root).unwrap();
+
+        fs::write(src_dir.join("LICENSE.TXT"), "Apache-2.0\n").unwrap();
+
+        let suite = Suite {
+            name: "llvm-test-suite".into(),
+            description: String::new(),
+            license: "Apache-2.0 WITH LLVM-exception".into(),
+            gpl: false,
+            git: None,
+            rev: None,
+            tag: None,
+            tarball: None,
+            sparse: vec![],
+        };
+
+        copy_license(&suite, &src_dir, &root).unwrap();
+
+        let dst = root.join("LICENSES/llvm-test-suite.txt");
+        assert!(dst.exists(), "LICENSE.TXT (uppercase) should be found and copied");
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "Apache-2.0\n");
 
         let _ = fs::remove_dir_all(&tmp);
     }
