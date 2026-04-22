@@ -35,8 +35,9 @@ description = "Tiny C Compiler tests (tests/tests2)"
 license     = "LGPL-2.1"
 gpl         = true  # LGPL: gated under the same flag for simplicity
 git         = "https://repo.or.cz/tinycc.git"
-rev         = "mob"      # TODO: pin
-sparse      = ["tests/tests2"]
+rev         = "d348a9a51d32cece842b7885d27a411436d7887b"
+tag         = "release_0_9_27"
+sparse      = ["tests/tests2", "COPYING"]
 
 [[suite]]
 name        = "llvm-test-suite"

@@ -129,4 +129,44 @@ mod tests {
             "gcc-torture tag should be a GCC release tag, got: {tag}"
         );
     }
+
+    #[test]
+    fn tcc_tests2_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "tcc-tests2").expect("tcc-tests2 entry");
+        let rev = suite.rev.as_deref().expect("tcc-tests2 must have a rev");
+        assert!(is_sha_rev(rev), "tcc-tests2 rev must be a 40-char hex SHA, got: {rev}");
+    }
+
+    #[test]
+    fn tcc_tests2_is_gpl_gated() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "tcc-tests2").expect("tcc-tests2 entry");
+        assert!(suite.gpl, "tcc-tests2 must have gpl = true");
+    }
+
+    #[test]
+    fn tcc_tests2_sparse_includes_tests2_and_copying() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "tcc-tests2").expect("tcc-tests2 entry");
+        assert!(
+            suite.sparse.iter().any(|p| p == "tests/tests2"),
+            "tcc-tests2 sparse must include 'tests/tests2'"
+        );
+        assert!(
+            suite.sparse.iter().any(|p| p == "COPYING"),
+            "tcc-tests2 sparse must include 'COPYING' for license extraction"
+        );
+    }
+
+    #[test]
+    fn tcc_tests2_has_tag() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "tcc-tests2").expect("tcc-tests2 entry");
+        let tag = suite.tag.as_deref().expect("tcc-tests2 must have a tag for shallow clone");
+        assert!(
+            tag.starts_with("release_"),
+            "tcc-tests2 tag should be a TCC release tag, got: {tag}"
+        );
+    }
 }
