@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+# Keep cargo-fuzz's sub-workspace separate: it requires nightly and a
+# different set of deps.
+exclude = ["fuzz"]
+members = [
+    "crates/rcc_span",
+    "crates/rcc_errors",
+    "crates/rcc_session",
+    "crates/rcc_data_structures",
+    "crates/rcc_lexer",
+    "crates/rcc_preprocess",
+    "crates/rcc_ast",
+    "crates/rcc_parse",
+    "crates/rcc_hir",
+    "crates/rcc_hir_lower",
+    "crates/rcc_typeck",
+    "crates/rcc_cfg",
+    "crates/rcc_cfg_transform",
+    "crates/rcc_codegen_llvm",
+    "crates/rcc_driver",
+    "crates/rcc_conformance",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/noname/rcc"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+rcc_span             = { path = "crates/rcc_span" }
+rcc_errors           = { path = "crates/rcc_errors" }
+rcc_session          = { path = "crates/rcc_session" }
+rcc_data_structures  = { path = "crates/rcc_data_structures" }
+rcc_lexer            = { path = "crates/rcc_lexer" }
+rcc_preprocess       = { path = "crates/rcc_preprocess" }
+rcc_ast              = { path = "crates/rcc_ast" }
+rcc_parse            = { path = "crates/rcc_parse" }
+rcc_hir              = { path = "crates/rcc_hir" }
+rcc_hir_lower        = { path = "crates/rcc_hir_lower" }
+rcc_typeck           = { path = "crates/rcc_typeck" }
+rcc_cfg              = { path = "crates/rcc_cfg" }
+rcc_cfg_transform    = { path = "crates/rcc_cfg_transform" }
+rcc_codegen_llvm     = { path = "crates/rcc_codegen_llvm" }
+rcc_driver           = { path = "crates/rcc_driver" }
+rcc_conformance      = { path = "crates/rcc_conformance" }
+
+# External
+rustc-hash  = "2"
+indexmap    = "2"
+ariadne     = "0.5"
+clap        = { version = "4", features = ["derive"] }
+anyhow      = "1"
+thiserror   = "2"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.8"
+
+# Dev / test
+insta       = "1"
+
+# LLVM backend (optional)
+# Pin to an llvm-18 compatible release; user must install LLVM 18 separately.
+inkwell     = { version = "0.6", features = ["llvm18-1"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# Faster incremental builds for compiler dev.
+opt-level = 0
+debug = 1

@@ -1,0 +1,13 @@
+[package]
+name = "rcc_data_structures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Shared data structures: FxHash, index-vec, typed arenas"
+
+[dependencies]
+rustc-hash = { workspace = true }
+indexmap   = { workspace = true }

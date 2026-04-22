@@ -1,0 +1,13 @@
+[package]
+name = "rcc_ast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "C abstract syntax tree"
+
+[dependencies]
+rcc_span            = { workspace = true }
+rcc_data_structures = { workspace = true }

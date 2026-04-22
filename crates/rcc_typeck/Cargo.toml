@@ -1,0 +1,15 @@
+[package]
+name = "rcc_typeck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "C99 type checking, usual arithmetic conversions, const eval"
+
+[dependencies]
+rcc_span    = { workspace = true }
+rcc_errors  = { workspace = true }
+rcc_session = { workspace = true }
+rcc_hir     = { workspace = true }

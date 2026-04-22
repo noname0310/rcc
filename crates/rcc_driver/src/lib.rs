@@ -1,0 +1,57 @@
+//! `rcc_driver`: CLI parsing + pipeline orchestration for the `rcc` compiler.
+//!
+//! Analogous to `rustc_driver`. The public API is thin because the real work
+//! lives in subordinate crates; the driver's job is wiring + error propagation.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+use std::path::PathBuf;
+
+use rcc_session::{Options, Session};
+
+pub mod cli;
+pub mod pipeline;
+
+pub use cli::Cli;
+
+/// Run the driver with a pre-parsed CLI. Returns a UNIX-style exit code.
+pub fn run(cli: Cli) -> i32 {
+    let opts = options_from_cli(&cli);
+    let mut session = Session::new(opts);
+    match pipeline::compile(&mut session, &cli.input) {
+        Ok(()) => {
+            if session.handler.has_errors() {
+                1
+            } else {
+                0
+            }
+        }
+        Err(msg) => {
+            eprintln!("rcc: {msg}");
+            1
+        }
+    }
+}
+
+/// Convert parsed CLI flags into a `rcc_session::Options`.
+pub fn options_from_cli(cli: &Cli) -> Options {
+    Options {
+        include_paths: cli.include_paths.clone(),
+        cli_defines: cli.defines.clone(),
+        target: None,
+        emit: cli.emit.clone(),
+        output: cli.output.clone(),
+        opt_level: cli.opt_level,
+        include_gpl_tests: cli.include_gpl_tests,
+    }
+}
+
+/// Helper used in tests: turn a `&str` into a temporary file path.
+pub type InputPath = PathBuf;
+
+/// Re-exports for tests / external users.
+pub mod reexports {
+    pub use rcc_session::EmitKind;
+    pub use rcc_session::OptLevel;
+}

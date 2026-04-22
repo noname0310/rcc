@@ -1,0 +1,13 @@
+[package]
+name = "rcc_errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Diagnostics: Diagnostic, Handler, Emitter for the rcc C compiler"
+
+[dependencies]
+rcc_span = { workspace = true }
+ariadne = { workspace = true }

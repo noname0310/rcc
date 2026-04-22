@@ -1,0 +1,53 @@
+# External C test suites fetched by `cargo xtask fetch-testsuites`.
+#
+# Every entry is pinned by `rev` (git) or URL (tarball). License columns are
+# informational; the GPL gate is enforced by the `gpl = true` flag, which
+# requires `cargo xtask fetch-testsuites --include-gpl`.
+
+[[suite]]
+name        = "c-testsuite"
+description = "Small standalone C programs with .expected stdout; used by cproc/lacc/chibicc"
+license     = "MIT"
+git         = "https://github.com/c-testsuite/c-testsuite.git"
+rev         = "master"   # TODO: pin to a specific commit hash before merge
+
+[[suite]]
+name        = "chibicc"
+description = "Rui Ueyama's C compiler's test suite (test/ subtree)"
+license     = "MIT"
+git         = "https://github.com/rui314/chibicc.git"
+rev         = "main"     # TODO: pin to a specific commit hash before merge
+sparse      = ["test", "LICENSE"]
+
+[[suite]]
+name        = "gcc-torture"
+description = "GCC C torture tests (execute/ + compile/)"
+license     = "GPL-3.0-or-later WITH GCC-exception-3.1"
+gpl         = true
+git         = "https://gcc.gnu.org/git/gcc.git"
+rev         = "releases/gcc-14"  # TODO: pin
+sparse      = ["gcc/testsuite/gcc.c-torture"]
+
+[[suite]]
+name        = "tcc-tests2"
+description = "Tiny C Compiler tests (tests/tests2)"
+license     = "LGPL-2.1"
+gpl         = true  # LGPL: gated under the same flag for simplicity
+git         = "https://repo.or.cz/tinycc.git"
+rev         = "mob"      # TODO: pin
+sparse      = ["tests/tests2"]
+
+[[suite]]
+name        = "llvm-test-suite"
+description = "LLVM test-suite (SingleSource/UnitTests subset)"
+license     = "Apache-2.0 WITH LLVM-exception"
+git         = "https://github.com/llvm/llvm-test-suite.git"
+rev         = "main"     # TODO: pin
+sparse      = ["SingleSource/UnitTests"]
+
+[[suite]]
+name        = "csmith"
+description = "Random C program generator; drives differential fuzzing"
+license     = "BSD-2-Clause"
+git         = "https://github.com/csmith-project/csmith.git"
+rev         = "master"   # TODO: pin

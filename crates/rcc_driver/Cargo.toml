@@ -1,0 +1,30 @@
+[package]
+name = "rcc_driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Compiler driver (CLI + pipeline orchestration)"
+
+[[bin]]
+name = "rcc"
+path = "src/main.rs"
+
+[dependencies]
+rcc_span            = { workspace = true }
+rcc_errors          = { workspace = true }
+rcc_session         = { workspace = true, features = ["clap"] }
+rcc_lexer           = { workspace = true }
+rcc_preprocess      = { workspace = true }
+rcc_parse           = { workspace = true }
+rcc_ast             = { workspace = true }
+rcc_hir             = { workspace = true }
+rcc_hir_lower       = { workspace = true }
+rcc_typeck          = { workspace = true }
+rcc_cfg             = { workspace = true }
+rcc_cfg_transform   = { workspace = true }
+rcc_codegen_llvm    = { workspace = true }
+rcc_data_structures = { workspace = true }
+clap               = { workspace = true }

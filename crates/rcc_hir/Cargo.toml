@@ -1,0 +1,13 @@
+[package]
+name = "rcc_hir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "High-level IR: name-resolved tree + C99 type system"
+
+[dependencies]
+rcc_span            = { workspace = true }
+rcc_data_structures = { workspace = true }

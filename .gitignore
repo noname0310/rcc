@@ -1,0 +1,20 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local editor files
+.vscode/
+.idea/
+
+# Test suite caches (fetched by `cargo xtask fetch-testsuites`)
+third_party/testsuites/gcc-torture/
+third_party/testsuites/tcc-tests2/
+third_party/testsuites/llvm-test-suite/
+third_party/.cache/
+
+# Fuzz corpora
+fuzz/corpus/
+fuzz/artifacts/
+
+# Conformance reports
+docs/conformance.json

@@ -1,0 +1,15 @@
+[package]
+name = "rcc_cfg_transform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "CFG passes: constant folding, dead-block elimination, etc."
+
+[dependencies]
+rcc_span    = { workspace = true }
+rcc_session = { workspace = true }
+rcc_hir     = { workspace = true }
+rcc_cfg     = { workspace = true }

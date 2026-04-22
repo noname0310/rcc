@@ -1,0 +1,16 @@
+[package]
+name = "rcc_cfg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Control-flow graph IR (MIR-like) and HIR -> CFG lowering"
+
+[dependencies]
+rcc_span            = { workspace = true }
+rcc_errors          = { workspace = true }
+rcc_session         = { workspace = true }
+rcc_hir             = { workspace = true }
+rcc_data_structures = { workspace = true }

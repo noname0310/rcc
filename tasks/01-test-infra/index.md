@@ -1,0 +1,30 @@
+# 01-test-infra: index
+
+Vendor every external C test suite and stand up the conformance
+harness. Without this phase no later task can be scored.
+
+## Upstream deps (must be `[x]` globally)
+
+- None (root phase).
+
+## Tasks (pick in order)
+
+- [ ] [01-fetch-ctestsuite](01-fetch-ctestsuite.md)
+- [ ] [02-fetch-chibicc](02-fetch-chibicc.md)
+- [ ] [03-fetch-gcc-torture](03-fetch-gcc-torture.md)
+- [ ] [04-fetch-tcc-tests2](04-fetch-tcc-tests2.md)
+- [ ] [05-fetch-llvm-test-suite](05-fetch-llvm-test-suite.md)
+- [ ] [06-fetch-csmith](06-fetch-csmith.md)
+- [ ] [07-pin-manifest-revs](07-pin-manifest-revs.md)
+- [ ] [08-ctestsuite-adapter](08-ctestsuite-adapter.md)
+- [ ] [09-chibicc-adapter](09-chibicc-adapter.md)
+- [ ] [10-conformance-report-json](10-conformance-report-json.md)
+- [ ] [11-conformance-dashboard-md](11-conformance-dashboard-md.md)
+- [ ] [12-xfail-seed](12-xfail-seed.md)
+- [ ] [13-ci-wire-conformance](13-ci-wire-conformance.md)
+
+## Downstream
+
+Unblocks every other implementation phase. Specifically required by
+`11-conformance` (numeric gates) and by every "run against suite"
+task in phases 03–09.

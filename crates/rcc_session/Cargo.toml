@@ -1,0 +1,18 @@
+[package]
+name = "rcc_session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Compilation session: options, source map, diagnostic handler"
+
+[features]
+default = []
+clap = ["dep:clap"]
+
+[dependencies]
+rcc_span    = { workspace = true }
+rcc_errors  = { workspace = true }
+clap       = { workspace = true, optional = true }

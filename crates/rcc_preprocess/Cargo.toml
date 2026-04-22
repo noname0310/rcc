@@ -1,0 +1,16 @@
+[package]
+name = "rcc_preprocess"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "C preprocessor: macro expansion, conditional compilation, #include"
+
+[dependencies]
+rcc_span             = { workspace = true }
+rcc_errors           = { workspace = true }
+rcc_session          = { workspace = true }
+rcc_lexer            = { workspace = true }
+rcc_data_structures  = { workspace = true }

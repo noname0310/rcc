@@ -1,0 +1,12 @@
+[package]
+name = "rcc_span"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Source positions, Span, SourceMap, and Symbol interner for the rcc C compiler"
+
+[dependencies]
+rustc-hash = { workspace = true }

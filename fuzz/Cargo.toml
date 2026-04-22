@@ -1,0 +1,31 @@
+[package]
+name = "rcc-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rcc_span       = { path = "../crates/rcc_span" }
+rcc_lexer      = { path = "../crates/rcc_lexer" }
+rcc_preprocess = { path = "../crates/rcc_preprocess" }
+rcc_parse      = { path = "../crates/rcc_parse" }
+rcc_session    = { path = "../crates/rcc_session" }
+
+[[bin]]
+name = "lex"
+path = "fuzz_targets/lex.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "preprocess"
+path = "fuzz_targets/preprocess.rs"
+test = false
+doc  = false
+
+[workspace]
+# Keep cargo-fuzz out of the parent workspace.

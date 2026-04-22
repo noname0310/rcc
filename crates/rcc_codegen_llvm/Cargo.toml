@@ -1,0 +1,25 @@
+[package]
+name = "rcc_codegen_llvm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "LLVM IR code generator (via inkwell) for the rcc C compiler"
+
+[features]
+# Off by default so `cargo build` succeeds without a local LLVM install.
+# Enable with `--features llvm` (or at the workspace level) once LLVM 18 is
+# on PATH and llvm-config is reachable.
+default = []
+llvm = ["dep:inkwell"]
+
+[dependencies]
+rcc_span            = { workspace = true }
+rcc_errors          = { workspace = true }
+rcc_session         = { workspace = true }
+rcc_hir             = { workspace = true }
+rcc_cfg             = { workspace = true }
+rcc_data_structures = { workspace = true }
+inkwell            = { workspace = true, optional = true }
