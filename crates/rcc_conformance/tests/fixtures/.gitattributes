@@ -1,0 +1,2 @@
+# Expected-output files must keep their exact byte content (Unix LF).
+*.c.expected binary

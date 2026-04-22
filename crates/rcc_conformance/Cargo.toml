@@ -12,4 +12,5 @@ description = "External C test-suite runner and reporting"
 anyhow     = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+tempfile   = { workspace = true }
 toml       = { workspace = true }

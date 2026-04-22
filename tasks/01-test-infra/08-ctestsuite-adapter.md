@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-08: Implement `CTestSuiteAdapter`
 
 **Phase:** 01-test-infra    **Depends on:** 01-01, 01-07    **Milestone:** M0.5
