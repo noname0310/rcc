@@ -1,3 +1,7 @@
+> ✓ done — 2026-04-23
+
+> ✓ done — 2026-04-23
+
 # 01-09: Implement `ChibiccAdapter`
 
 **Phase:** 01-test-infra    **Depends on:** 01-02, 01-07    **Milestone:** M0.5

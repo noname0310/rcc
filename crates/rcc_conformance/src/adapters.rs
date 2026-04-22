@@ -184,15 +184,140 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Result<std:
 }
 
 /// `chibicc` adapter. Runs the `chibicc/test/*.c` files the same way chibicc's
-/// Makefile does: compile, link with a tiny runtime, run, check exit code.
+/// Makefile does: compile each test together with `test/common`, link, run,
+/// check exit code == 0.
 pub struct ChibiccAdapter;
 
-impl Adapter for ChibiccAdapter {
-    fn discover(&self, _root: &Path) -> anyhow::Result<Vec<TestCase>> {
-        Ok(Vec::new())
+impl ChibiccAdapter {
+    /// Path to the support file compiled alongside every test.
+    fn common_path(root: &Path) -> std::path::PathBuf {
+        root.join("test").join("common")
     }
-    fn run(&self, _rcc: &Path, _case: &TestCase) -> anyhow::Result<Outcome> {
-        Ok(Outcome::Skip { reason: "chibicc adapter not yet implemented".into() })
+}
+
+impl Adapter for ChibiccAdapter {
+    fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+        let dir = root.join("test");
+        anyhow::ensure!(dir.is_dir(), "chibicc test directory not found: {}", dir.display(),);
+
+        let mut cases = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("c") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", path.display()))?;
+            if stem == "common" {
+                continue;
+            }
+            cases.push(TestCase { id: format!("chibicc::{stem}"), path });
+        }
+        cases.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(cases)
+    }
+
+    fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let common =
+            Self::common_path(case.path.parent().and_then(|p| p.parent()).ok_or_else(|| {
+                anyhow::anyhow!("cannot derive suite root from {}", case.path.display())
+            })?);
+
+        if !common.exists() {
+            return Ok(Outcome::Skip {
+                reason: format!("common helper not found: {}", common.display()),
+            });
+        }
+
+        let tmp = tempfile::tempdir()?;
+        let test_obj = tmp.path().join("test.o");
+        let common_obj = tmp.path().join("common.o");
+        let exe_path =
+            if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
+
+        // Step 1: compile the test file with rcc
+        let mut compile_test = Command::new(rcc_path);
+        compile_test.arg("--emit=obj").arg("-o").arg(&test_obj).arg(&case.path);
+        match run_with_timeout(&mut compile_test, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "rcc compilation failed for {}: exit {}; {}",
+                        case.path.display(),
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") });
+            }
+        }
+
+        // Step 2: compile common with rcc
+        let mut compile_common = Command::new(rcc_path);
+        compile_common.arg("--emit=obj").arg("-o").arg(&common_obj).arg(&common);
+        match run_with_timeout(&mut compile_common, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "rcc compilation failed for common: exit {}; {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail {
+                    reason: format!("rcc invocation failed for common: {e}"),
+                });
+            }
+        }
+
+        // Step 3: link both objects with host cc
+        let mut link_cmd = Command::new("cc");
+        link_cmd.arg("-o").arg(&exe_path).arg(&test_obj).arg(&common_obj);
+        match run_with_timeout(&mut link_cmd, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "link failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("link invocation failed: {e}") });
+            }
+        }
+
+        // Step 4: execute and check exit code == 0
+        let mut exec_cmd = Command::new(&exe_path);
+        match run_with_timeout(&mut exec_cmd, TIMEOUT) {
+            Ok(output) => {
+                if output.status.code() == Some(0) {
+                    Ok(Outcome::Pass)
+                } else {
+                    Ok(Outcome::Fail {
+                        reason: format!(
+                            "non-zero exit code: {}",
+                            output
+                                .status
+                                .code()
+                                .map_or_else(|| "killed by signal".into(), |c| c.to_string()),
+                        ),
+                    })
+                }
+            }
+            Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
+        }
     }
 }
 

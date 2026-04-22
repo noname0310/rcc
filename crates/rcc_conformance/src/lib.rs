@@ -133,8 +133,7 @@ pub fn run_suites(rrcc_path: &Path, suites: &[Suite]) -> Report {
         let cases = match suite.adapter.discover(&suite.root) {
             Ok(c) => c,
             Err(e) => {
-                sr.cases
-                    .insert("<discovery>".into(), Outcome::Fail { reason: e.to_string() });
+                sr.cases.insert("<discovery>".into(), Outcome::Fail { reason: e.to_string() });
                 report.suites.push(sr);
                 continue;
             }
