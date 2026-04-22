@@ -8,7 +8,7 @@ tasks here** — the phase checkbox in `tasks/index.md` is pre-set to
 
 - [x] [01-phase-ordering](01-phase-ordering.md) — phase DAG and rationale.
 - [x] [02-kpi-dashboard](02-kpi-dashboard.md) — milestone-indexed KPI matrix.
-- [x] [03-working-agreement](03-working-agreement.md) — PR / review conventions.
+- [x] [03-working-agreement](03-working-agreement.md) — commit / review conventions.
 - [x] [04-glossary](04-glossary.md) — vocabulary used in tasks.
 
 ## Upstream deps

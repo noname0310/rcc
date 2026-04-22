@@ -1,4 +1,4 @@
-# 01-13: CI: wire conformance into PR gates
+# 01-13: CI: wire conformance into CI commit gates
 
 **Phase:** 01-test-infra    **Depends on:** 01-10 .. 01-12    **Milestone:** M0.5
 
@@ -22,7 +22,7 @@ which KPI cells are required; failures block merge.
 ## Acceptance
 - CI green on main after this task lands (KPI at M0.5 is trivially
   satisfied: no suite is required to pass anything yet).
-- Intentionally-failing PR demo: edit `docs/milestone.txt` to `M3`
+- Intentionally-failing commit demo: edit `docs/milestone.txt` to `M3`
   on a branch and verify CI's conformance job fails because nothing
   actually passes yet.
 

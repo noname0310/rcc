@@ -1,7 +1,7 @@
 # Testing strategy
 
 Derived from §8 of the architecture plan. This file is a **checklist for
-contributors**: every PR touches the matching bullets.
+contributors**: every commit touches the matching bullets.
 
 ## Three layers
 
@@ -70,7 +70,7 @@ program, compile+run with both `rcc` and `cc`, compare stdout + exit
 code.
 
 CI budgets:
-- PR: 30 s fuzz smoke on `lex` (see `.github/workflows/ci.yml`).
+- per-commit: 30 s fuzz smoke on `lex` (see `.github/workflows/ci.yml`).
 - nightly: 24 h fuzz + 1 h csmith differential (configured out of band).
 
 ## CI gates (see `.github/workflows/ci.yml`)

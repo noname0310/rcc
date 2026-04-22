@@ -69,7 +69,7 @@ merge-eligible".
   [`tasks/README.md`](../README.md).
 - CI's `conformance` job (from [`01-test-infra/13-ci-wire-conformance.md`](../01-test-infra/13-ci-wire-conformance.md))
   runs the *minimal subset* required by the current milestone and
-  blocks PR merge on it.
+  blocks commit approval on it.
 
 ## References
 - Plan §9 "External C99 테스트셋 벤더링"

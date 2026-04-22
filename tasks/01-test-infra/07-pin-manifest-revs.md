@@ -6,7 +6,7 @@
 Replace every `rev = "master" | "main" | "releases/..."` in
 `third_party/MANIFEST.toml` with a **full 40-character commit SHA**.
 Branch names are fine while prototyping but cause flake the moment
-upstream force-pushes. This task is the "merge-gate" for everything
+upstream force-pushes. This task is the "commit-gate" for everything
 else in phase 01.
 
 ## Scope
