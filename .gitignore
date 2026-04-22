@@ -8,6 +8,7 @@ Cargo.lock.bak
 
 # Test suite caches (fetched by `cargo xtask fetch-testsuites`)
 third_party/testsuites/c-testsuite/
+third_party/testsuites/chibicc/
 third_party/testsuites/gcc-torture/
 third_party/testsuites/tcc-tests2/
 third_party/testsuites/llvm-test-suite/

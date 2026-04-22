@@ -65,7 +65,7 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
             &dst.to_string_lossy(),
         ]))?;
         let mut sparse = Command::new("git");
-        sparse.args(["-C", &dst.to_string_lossy(), "sparse-checkout", "set"]);
+        sparse.args(["-C", &dst.to_string_lossy(), "sparse-checkout", "set", "--no-cone"]);
         for p in &suite.sparse {
             sparse.arg(p);
         }

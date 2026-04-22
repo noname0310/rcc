@@ -16,7 +16,7 @@ name        = "chibicc"
 description = "Rui Ueyama's C compiler's test suite (test/ subtree)"
 license     = "MIT"
 git         = "https://github.com/rui314/chibicc.git"
-rev         = "main"     # TODO: pin to a specific commit hash before merge
+rev         = "90d1f7f199cc55b13c7fdb5839d1409806633fdb"
 sparse      = ["test", "LICENSE"]
 
 [[suite]]

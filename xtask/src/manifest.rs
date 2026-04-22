@@ -63,4 +63,26 @@ mod tests {
         let rev = suite.rev.as_deref().expect("c-testsuite must have a rev");
         assert!(is_sha_rev(rev), "c-testsuite rev must be a 40-char hex SHA, got: {rev}");
     }
+
+    #[test]
+    fn chibicc_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "chibicc").expect("chibicc entry");
+        let rev = suite.rev.as_deref().expect("chibicc must have a rev");
+        assert!(is_sha_rev(rev), "chibicc rev must be a 40-char hex SHA, got: {rev}");
+    }
+
+    #[test]
+    fn chibicc_sparse_includes_test_and_license() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "chibicc").expect("chibicc entry");
+        assert!(
+            suite.sparse.iter().any(|p| p == "test"),
+            "chibicc sparse list must include 'test'"
+        );
+        assert!(
+            suite.sparse.iter().any(|p| p == "LICENSE"),
+            "chibicc sparse list must include 'LICENSE'"
+        );
+    }
 }
