@@ -12,6 +12,7 @@ third_party/testsuites/chibicc/
 third_party/testsuites/gcc-torture/
 third_party/testsuites/tcc-tests2/
 third_party/testsuites/llvm-test-suite/
+third_party/testsuites/csmith/
 third_party/.cache/
 
 # Fuzz corpora

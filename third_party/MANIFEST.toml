@@ -52,4 +52,4 @@ name        = "csmith"
 description = "Random C program generator; drives differential fuzzing"
 license     = "BSD-2-Clause"
 git         = "https://github.com/csmith-project/csmith.git"
-rev         = "master"   # TODO: pin
+rev         = "0cdc710315cfee9035e22ef4363ca479270d1934"

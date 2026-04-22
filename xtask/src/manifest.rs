@@ -188,6 +188,28 @@ mod tests {
     }
 
     #[test]
+    fn csmith_rev_is_pinned_sha() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "csmith").expect("csmith entry");
+        let rev = suite.rev.as_deref().expect("csmith must have a rev");
+        assert!(is_sha_rev(rev), "csmith rev must be a 40-char hex SHA, got: {rev}");
+    }
+
+    #[test]
+    fn csmith_not_gpl_gated() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "csmith").expect("csmith entry");
+        assert!(!suite.gpl, "csmith is BSD-2-Clause, must not be gpl-gated");
+    }
+
+    #[test]
+    fn csmith_no_sparse() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "csmith").expect("csmith entry");
+        assert!(suite.sparse.is_empty(), "csmith should clone the full repo (no sparse checkout)");
+    }
+
+    #[test]
     fn llvm_test_suite_sparse_includes_unittests_and_license() {
         let m = load_real_manifest();
         let suite =

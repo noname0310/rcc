@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-06: Vendor + build csmith
 
 **Phase:** 01-test-infra    **Depends on:** 01-01    **Milestone:** M0.5

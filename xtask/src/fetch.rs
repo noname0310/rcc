@@ -43,6 +43,10 @@ pub fn run(manifest: &Manifest, include_gpl: bool, only: Option<&str>) -> Result
 
         copy_license(suite, &dst, &root)?;
         write_suite_readme(suite, &dst)?;
+
+        if suite.name == "csmith" {
+            write_csmith_install_md(&dst)?;
+        }
     }
     Ok(())
 }
@@ -58,6 +62,7 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
 
     if suite.sparse.is_empty() {
         run_cmd(Command::new("git").args(["clone", git, &dst.to_string_lossy()]))?;
+        run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
     } else if let Some(tag) = &suite.tag {
         // Shallow sparse clone pinned to a tag — keeps multi-GB repos manageable.
         run_cmd(Command::new("git").args([
@@ -143,6 +148,47 @@ fn write_suite_readme(suite: &Suite, dst: &Path) -> Result<()> {
     );
     std::fs::write(&readme, content).with_context(|| format!("writing {}", readme.display()))?;
     println!("  readme -> {}", readme.display());
+    Ok(())
+}
+
+/// Write `INSTALL.md` into the csmith checkout with build instructions.
+/// csmith is a build tool (random C program generator), not a test data
+/// source. We clone it for future differential fuzzing (phase 12) but do
+/// not build it during fetch.
+fn write_csmith_install_md(dst: &Path) -> Result<()> {
+    let install = dst.join("INSTALL.md");
+    let content = "\
+# Building csmith
+
+csmith is a random C program generator used for differential fuzzing.
+It is **not** built during `cargo xtask fetch-testsuites`; this document
+records the manual build steps for the CI runner.
+
+## Prerequisites
+
+- CMake >= 3.10
+- A C++ compiler (GCC or Clang)
+- `m4` (GNU m4)
+
+## Build commands
+
+```sh
+cd third_party/testsuites/csmith
+cmake -S . -B build
+cmake --build build
+```
+
+The `csmith` binary will be at `build/src/csmith` (Linux/macOS) or
+`build\\src\\Debug\\csmith.exe` (Windows).
+
+## Usage (differential fuzzing)
+
+See `tasks/12-fuzz-differential/` for the harness that invokes csmith
+to generate random C programs and compares rcc output against a
+reference compiler.
+";
+    std::fs::write(&install, content).with_context(|| format!("writing {}", install.display()))?;
+    println!("  install -> {}", install.display());
     Ok(())
 }
 
@@ -286,6 +332,24 @@ mod tests {
         // (actual git clone is never reached because gpl gate fires first)
         let result = run(&manifest, false, None);
         assert!(result.is_ok(), "skipping GPL suites should not error");
+    }
+
+    #[test]
+    fn write_csmith_install_md_creates_file() {
+        let tmp = std::env::temp_dir().join("rcc_test_csmith_install");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        write_csmith_install_md(&tmp).unwrap();
+
+        let install = tmp.join("INSTALL.md");
+        assert!(install.exists(), "INSTALL.md should be created");
+        let content = fs::read_to_string(&install).unwrap();
+        assert!(content.contains("cmake -S . -B build"), "should document cmake configure");
+        assert!(content.contains("cmake --build build"), "should document cmake build");
+        assert!(content.contains("m4"), "should mention m4 prerequisite");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
