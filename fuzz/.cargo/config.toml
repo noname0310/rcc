@@ -1,0 +1,24 @@
+# Fuzz sub-workspace cargo config (task 03-lex/12-fuzz-target).
+#
+# cargo-fuzz (0.13+) injects its own rustflags for coverage and the
+# selected sanitiser, so this file intentionally does not touch
+# `[build] rustflags`. What it *does* provide is a small set of
+# project-defined aliases so that every developer — and CI — runs the
+# fuzzer with the same libFuzzer options.
+#
+# Options encoded here:
+#
+#   -max_len=131072     Upper bound on generated input size (128 KiB).
+#                       Matches the largest real preprocessed C source
+#                       we expect to tokenise in a single call.
+#   -rss_limit_mb=4096  Safety cap; the lexer is O(n) but we pull in
+#                       the whole session for other targets too.
+#   --sanitizer=address Use AddressSanitizer where the host supports it
+#                       (Linux / macOS nightly). Windows MSVC ships an
+#                       ASAN runtime but libFuzzer integration is still
+#                       rough — the `-nosan` alias below is the
+#                       documented fallback (see fuzz/README.md).
+
+[alias]
+fuzz-lex        = "fuzz run lex --sanitizer=address -- -max_len=131072 -rss_limit_mb=4096"
+fuzz-lex-nosan  = "fuzz run lex --sanitizer=none    -- -max_len=131072 -rss_limit_mb=4096"

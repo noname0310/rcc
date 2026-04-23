@@ -22,8 +22,13 @@ third_party/testsuites/csmith/*
 !third_party/testsuites/csmith/xfail.toml
 third_party/.cache/
 
-# Fuzz corpora
-fuzz/corpus/
+# Fuzz corpora: generated inputs are ignored, but the curated seed
+# corpora checked in under fuzz/corpus/<target>/ are not (see
+# scripts/fuzz/seed-*.{sh,ps1} and task 03-lex/12-fuzz-target).
+fuzz/corpus/*
+!fuzz/corpus/lex/
+fuzz/corpus/lex/*
+!fuzz/corpus/lex/*.c
 fuzz/artifacts/
 
 # Conformance reports

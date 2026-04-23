@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-12: Fuzz target (24 h no-panic)
 
 **Phase:** 03-lex    **Depends on:** 03-11    **Milestone:** M1
