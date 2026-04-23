@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 06-01: `DefId` assignment
 
 **Phase:** 06-hir-lower    **Depends on:** —    **Milestone:** M2
