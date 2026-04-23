@@ -57,6 +57,7 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev
           echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
       - run: cargo test --workspace --features rcc_codegen_llvm/llvm
 
@@ -70,6 +71,8 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+      - name: Fetch test suites (permissive only)
+        run: cargo xtask fetch-testsuites
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - uses: actions/upload-artifact@v4
         with:
@@ -90,7 +93,7 @@ jobs:
         run: |
           if [ -d fuzz ]; then
             cd fuzz
-            cargo +nightly fuzz run lex -- -max_total_time=30
+            cargo +nightly fuzz run lex --target x86_64-unknown-linux-gnu -- -max_total_time=30
           else
             echo "fuzz directory not present yet; skipping"
           fi
