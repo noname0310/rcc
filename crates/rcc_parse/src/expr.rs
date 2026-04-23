@@ -172,8 +172,10 @@
 
 use rcc_ast::{AssignOp, BinOp, Expr, ExprKind, UnOp};
 use rcc_lexer::Punct;
-use rcc_span::Symbol;
+use rcc_span::{Span, Symbol};
 
+use crate::decl::parse_type_name;
+use crate::keywords::Keyword;
 use crate::token::TokenKind;
 use crate::Parser;
 
@@ -292,10 +294,13 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
 ///
 /// C99 `sizeof` (§6.5.3.4) is also a unary-expression but has two
 /// shapes — `sizeof unary-expression` and `sizeof ( type-name )` —
-/// whose disambiguation needs typedef-name lookahead; it lands in
-/// task 05-10 alongside the cast-expression. This function
-/// intentionally does **not** match `Keyword::Sizeof` so that task
-/// 05-10 has a clean place to weave in the ambiguity handling.
+/// whose disambiguation needs typedef-name lookahead. Task 05-10
+/// wires both forms in here alongside the cast expression
+/// (§6.5.4); see [`parse_sizeof`] and [`parse_cast`] for the
+/// disambiguation code. The sibling construct compound literal
+/// `( type-name ) { ... }` shares the same `(` lookahead but
+/// depends on initializer-list parsing and is deferred to task
+/// 05-10b.
 ///
 /// Returns `None` only when the inner `parse_postfix` call has
 /// already emitted a diagnostic and nothing can be built; a partial
@@ -306,6 +311,23 @@ pub fn parse_prefix_unary(p: &mut Parser<'_>) -> Option<Expr> {
     // postfix / primary path without paying for a speculative bump.
     let tok = p.peek()?;
     let op_span = tok.span;
+
+    // `sizeof`-expression (§6.5.3.4). Two shapes: `sizeof ( type-name )`
+    // and `sizeof unary-expression`; both handled by the helper.
+    if matches!(tok.kind, TokenKind::Keyword(Keyword::Sizeof)) {
+        return parse_sizeof(p);
+    }
+
+    // Cast-expression (§6.5.4): `( type-name ) cast-expression`.
+    // We only take this branch when the one-token lookahead past `(`
+    // unambiguously starts a type-name; otherwise we fall through to
+    // `parse_postfix` → `parse_primary`, which handles the ordinary
+    // parenthesised-expression shape and the three-way ambiguity
+    // with `( ident )` described on [`starts_type_name_after_lparen`].
+    if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) && starts_type_name_after_lparen(p) {
+        return parse_cast(p);
+    }
+
     let un_op = match tok.kind {
         TokenKind::Punct(Punct::PlusPlus) => UnOp::PreInc,
         TokenKind::Punct(Punct::MinusMinus) => UnOp::PreDec,
@@ -327,6 +349,156 @@ pub fn parse_prefix_unary(p: &mut Parser<'_>) -> Option<Expr> {
     let span = op_span.to(operand.span);
     let id = p.fresh_id();
     Some(Expr { id, kind: ExprKind::Unary { op: un_op, operand: Box::new(operand) }, span })
+}
+
+/// Parse a C99 §6.5.4 *cast-expression* of the `( type-name )
+/// cast-expression` shape. Caller has already verified via
+/// [`starts_type_name_after_lparen`] that the current `(` opens a
+/// type-name; we consume `( type-name )` and then recurse into
+/// [`parse_prefix_unary`] for the operand, which handles further
+/// cast / prefix / postfix nesting (`(int)-x`, `(int)(long)y`,
+/// `(int)x++`, ...).
+///
+/// Compound-literal disambiguation — the C99 §6.5.2.5 postfix
+/// `( type-name ) { init }` shape — is intentionally **not**
+/// detected here yet. Task 05-10b adds a post-`)` peek at `{` and
+/// branches into `ExprKind::CompoundLiteral` + the initializer
+/// parser (task 05-24). Until then, writing `(T){0}` will fail the
+/// operand parse with "expected primary expression" at the `{`;
+/// that's acceptable since 05-24 is still `[ ]` and compound
+/// literal is the next thing on 05-10b's plate.
+fn parse_cast(p: &mut Parser<'_>) -> Option<Expr> {
+    let lparen_span = p.cur_span();
+    p.bump(); // `(`
+    let ty = parse_type_name(p);
+    expect_rparen_after_type(p, lparen_span, "cast expression");
+    let operand = parse_prefix_unary(p)?;
+    let span = lparen_span.to(operand.span);
+    let id = p.fresh_id();
+    Some(Expr { id, kind: ExprKind::Cast { ty, expr: Box::new(operand) }, span })
+}
+
+/// Parse a C99 §6.5.3.4 *sizeof-expression*. Two shapes:
+///
+/// - `sizeof ( type-name )` — produces [`ExprKind::SizeofType`]
+/// - `sizeof unary-expression` — produces [`ExprKind::SizeofExpr`],
+///   wrapping whatever [`parse_prefix_unary`] returns (which itself
+///   folds further casts, sizeofs, and prefix operators).
+///
+/// Disambiguation mirrors the cast path: a following `(` starts a
+/// type-name only when the one-token lookahead past it is a
+/// type-specifier / type-qualifier keyword, or an identifier that
+/// the scope stack currently classifies as a typedef-name (§6.7.2p2
+/// footnote). Everything else — including `sizeof (x)` with an
+/// ordinary `x` — is the unary-expression form; the outer
+/// [`parse_primary`] will later unwrap the inner paren-expression.
+fn parse_sizeof(p: &mut Parser<'_>) -> Option<Expr> {
+    let kw_span = p.cur_span();
+    p.bump(); // `sizeof`
+
+    // `sizeof ( type-name )` — the `(` must immediately follow
+    // `sizeof` AND the token past it must start a type-name.
+    if let Some(tok) = p.peek() {
+        if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) && starts_type_name_after_lparen(p) {
+            let lparen_span = tok.span;
+            p.bump(); // `(`
+            let ty = parse_type_name(p);
+            let end_span = expect_rparen_after_type(p, lparen_span, "sizeof");
+            let span = kw_span.to(end_span.unwrap_or(kw_span));
+            let id = p.fresh_id();
+            return Some(Expr { id, kind: ExprKind::SizeofType(ty), span });
+        }
+    }
+
+    // `sizeof unary-expression` — the operand may itself be
+    // parenthesised as `sizeof(expr)`, which falls through the
+    // non-type branch above and reaches here; the `(` then parses
+    // as a primary paren-expression inside the recursive call.
+    let operand = parse_prefix_unary(p)?;
+    let span = kw_span.to(operand.span);
+    let id = p.fresh_id();
+    Some(Expr { id, kind: ExprKind::SizeofExpr(Box::new(operand)), span })
+}
+
+/// One-token lookahead: does the token immediately after the current
+/// `(` start a C99 *type-name* (§6.7.6)?
+///
+/// A type-name begins with a *specifier-qualifier-list*, which in
+/// turn may start with any of:
+///
+/// - a *type-specifier* keyword — `void`, `char`, `short`, `int`,
+///   `long`, `float`, `double`, `signed`, `unsigned`, `_Bool`,
+///   `_Complex`, `_Imaginary`, `struct`, `union`, `enum`.
+/// - a *type-qualifier* keyword — `const`, `volatile`, `restrict`.
+/// - an identifier that names a typedef — detected via
+///   [`crate::scope::ScopeStack::is_typedef`].
+///
+/// The caller must have already confirmed the current token is `(`;
+/// this helper looks at `p.cursor + 1`. The check is only
+/// side-effect-free peeking, so the caller can still fall through
+/// to the paren-expression path if it returns `false`.
+fn starts_type_name_after_lparen(p: &Parser<'_>) -> bool {
+    match p.tokens.get(p.cursor + 1).map(|t| &t.kind) {
+        Some(TokenKind::Keyword(kw)) => is_type_name_start_kw(*kw),
+        Some(TokenKind::Ident(sym)) => p.scopes.is_typedef(*sym),
+        _ => false,
+    }
+}
+
+/// Keyword predicate for [`starts_type_name_after_lparen`]. Covers
+/// every keyword that can sit at the front of a
+/// *specifier-qualifier-list* (§6.7.2 type specifiers + §6.7.3 type
+/// qualifiers). Non-type keywords — control-flow, storage class,
+/// function specifier — return `false` so we fall through to the
+/// paren-expression path for shapes like `(sizeof x)` or `(inline
+/// ...)` (the latter is ill-formed but that's for later passes).
+fn is_type_name_start_kw(kw: Keyword) -> bool {
+    matches!(
+        kw,
+        Keyword::Void
+            | Keyword::Char
+            | Keyword::Short
+            | Keyword::Int
+            | Keyword::Long
+            | Keyword::Float
+            | Keyword::Double
+            | Keyword::Signed
+            | Keyword::Unsigned
+            | Keyword::Bool
+            | Keyword::Complex
+            | Keyword::Imaginary
+            | Keyword::Struct
+            | Keyword::Union
+            | Keyword::Enum
+            | Keyword::Const
+            | Keyword::Volatile
+            | Keyword::Restrict
+    )
+}
+
+/// Consume the closing `)` after a type-name in a cast or sizeof
+/// construct. Returns the `)`'s span on success so the caller can
+/// stitch a tight overall span; on a missing `)` we emit a
+/// diagnostic that points at both the current cursor and the `(`
+/// that opened the construct, and return `None` — the caller then
+/// falls back to the keyword span so downstream nodes still have
+/// *some* span to hang diagnostics on.
+fn expect_rparen_after_type(p: &mut Parser<'_>, lparen_span: Span, ctx: &str) -> Option<Span> {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::RParen)) => {
+            let s = t.span;
+            p.bump();
+            Some(s)
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), format!("expected `)` after type name in {ctx}"))
+                .label(lparen_span, "type name begins here")
+                .emit();
+            None
+        }
+    }
 }
 
 /// Parse a C99 §6.5.2 *postfix-expression*: a primary-expression
@@ -2413,5 +2585,258 @@ mod tests {
             matches!(parser.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Comma)),);
         assert!(at_comma, "cursor must point at `,`, peek is {:?}", parser.peek().map(|t| &t.kind));
         assert!(cap.diagnostics().is_empty(), "clean stop, no diagnostics");
+    }
+
+    // ── Cast and sizeof (C99 §6.5.4 / §6.5.3.4) ─────────────────────
+    //
+    // These tests need the *real* tokenizer because they feed
+    // multi-char keywords (`int`, `sizeof`) and the `lex_ascii`
+    // mini-lexer used elsewhere only emits one-byte idents / digits.
+    //
+    // The helper mirrors the one in `decl::tests`: tokenize, run
+    // phase-7 conversion, build a parser, optionally declare some
+    // typedef symbols in the scope stack, then parse a full
+    // expression.
+
+    use crate::scope::NameKind;
+    use rcc_ast::TypeSpec;
+    use rcc_lexer::Tokenizer;
+
+    fn parse_expr_full(
+        src: &str,
+        typedefs: &[&str],
+    ) -> (Expr, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let pps: Vec<PpToken> = Tokenizer::new(fid, src).collect();
+        let tokens = convert(&mut sess, &pps);
+        let typedef_syms: Vec<_> = typedefs.iter().map(|name| sess.interner.intern(name)).collect();
+        let mut parser = Parser::new(&mut sess, tokens);
+        for sym in typedef_syms {
+            parser.scopes.declare(sym, NameKind::Typedef);
+        }
+        let e = parse_expression(&mut parser).expect("expression parses");
+        (e, cap.diagnostics(), sess)
+    }
+
+    #[test]
+    fn cast_int_of_ident_parses() {
+        // `(int)x` — the canonical cast shape. The `(` is followed by
+        // the `int` keyword, so `starts_type_name_after_lparen` fires
+        // and `parse_cast` builds `ExprKind::Cast { ty: int, expr:
+        // Ident(x) }`. Span must cover the whole `(int)x` sequence.
+        let src = "(int)x";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Cast { ty, expr } => {
+                assert!(matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(ty.declarator.name.is_none());
+                assert!(ty.declarator.derived.is_empty());
+                match &expr.kind {
+                    ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                    other => panic!("expected Ident(x) operand, got {other:?}"),
+                }
+            }
+            other => panic!("expected Cast, got {other:?}"),
+        }
+        assert_eq!(e.span.lo.0, 0);
+        assert_eq!(e.span.hi.0 as usize, src.len());
+    }
+
+    #[test]
+    fn sizeof_ident_parses_to_sizeof_expr() {
+        // `sizeof x` — unary-expression form (no parens). Produces
+        // `ExprKind::SizeofExpr(Ident(x))`.
+        let src = "sizeof x";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::SizeofExpr(inner) => match &inner.kind {
+                ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                other => panic!("expected Ident(x), got {other:?}"),
+            },
+            other => panic!("expected SizeofExpr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sizeof_parenthesised_ident_stays_sizeof_expr() {
+        // `sizeof (x)` — the token past `(` is an ordinary ident that
+        // isn't a typedef-name, so we fall through to the unary-
+        // expression form. The inner `(x)` parses as a paren-
+        // expression and the whole thing becomes
+        // `SizeofExpr(Paren(Ident(x)))`. This is regression-critical:
+        // an overzealous type-name probe would wrongly pick the
+        // `SizeofType` branch and fail to parse `x` as a type.
+        let src = "sizeof(x)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::SizeofExpr(inner) => match &inner.kind {
+                ExprKind::Paren(p) => match &p.kind {
+                    ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                    other => panic!("expected Ident(x), got {other:?}"),
+                },
+                other => panic!("expected Paren(Ident(x)), got {other:?}"),
+            },
+            other => panic!("expected SizeofExpr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sizeof_type_int_parses() {
+        // `sizeof(int)` — token past `(` is `int`, a type-specifier
+        // keyword, so we take the `SizeofType` branch.
+        let src = "sizeof(int)";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::SizeofType(ty) => {
+                assert!(matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(ty.declarator.name.is_none());
+                assert!(ty.declarator.derived.is_empty());
+            }
+            other => panic!("expected SizeofType, got {other:?}"),
+        }
+        assert_eq!(e.span.lo.0, 0);
+        assert_eq!(e.span.hi.0 as usize, src.len());
+    }
+
+    #[test]
+    fn sizeof_type_pointer_parses() {
+        // `sizeof(int*)` — pointer abstract declarator inside the
+        // type-name. The `TypeName::declarator` carries a single
+        // `[Pointer]` derivation.
+        let src = "sizeof(int*)";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::SizeofType(ty) => {
+                assert!(matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(
+                    matches!(
+                        ty.declarator.derived.as_slice(),
+                        [rcc_ast::DerivedDeclarator::Pointer(_)]
+                    ),
+                    "expected [Pointer], got {:?}",
+                    ty.declarator.derived
+                );
+            }
+            other => panic!("expected SizeofType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typedef_name_disambiguates_to_cast() {
+        // `typedef int T; (T)x` — with `T` declared as a typedef-name
+        // in the enclosing scope, `(T)` must parse as a cast's type-
+        // name, NOT as a parenthesised expression. Mirrors the
+        // §6.7.2p2 footnote: without the typedef classification the
+        // grammar is ambiguous.
+        let src = "(T)x";
+        let (e, diags, sess) = parse_expr_full(src, &["T"]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Cast { ty, expr } => {
+                match ty.specs.type_specs.as_slice() {
+                    [TypeSpec::TypedefName(sym)] => {
+                        assert_eq!(sess.interner.get(*sym), "T");
+                    }
+                    other => panic!("expected TypedefName(T), got {other:?}"),
+                }
+                match &expr.kind {
+                    ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                    other => panic!("expected Ident(x) operand, got {other:?}"),
+                }
+            }
+            other => panic!("expected Cast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_name_disambiguates_to_paren() {
+        // `int T = 0; (T)` — with `T` NOT a typedef-name, `(T)` must
+        // parse as a parenthesised expression wrapping `Ident(T)`.
+        // The expression stops there; typeck / name-resolution will
+        // later decide what `T` actually refers to. This exercises
+        // the "NOT typedef → fall through to parse_primary" arm.
+        //
+        // We don't pre-declare `T` in the scope stack (or declare it
+        // as `Ordinary`); either way `is_typedef(T)` is false.
+        let src = "(T)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Paren(inner) => match &inner.kind {
+                ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "T"),
+                other => panic!("expected Ident(T), got {other:?}"),
+            },
+            other => panic!("expected Paren, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cast_nests_into_further_cast_expression() {
+        // `(int)(long)x` — cast-expression recurses into cast-
+        // expression (§6.5.4), not into unary-expression. The outer
+        // Cast's operand must itself be a Cast, not a Paren.
+        let src = "(int)(long)x";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Cast { ty, expr } => {
+                assert!(matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                match &expr.kind {
+                    ExprKind::Cast { ty: inner, expr: inner_expr } => {
+                        assert!(matches!(inner.specs.type_specs.as_slice(), [TypeSpec::Long]));
+                        match &inner_expr.kind {
+                            ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                            other => panic!("expected Ident(x), got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected inner Cast, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer Cast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cast_of_negated_expression_parses() {
+        // `(int)-x` — the cast operand is itself a unary-expression
+        // (`-x`), not a primary. This guards the fall-through from
+        // `parse_cast` into `parse_prefix_unary`, which must pick up
+        // the `-` before recursing into the postfix chain.
+        let src = "(int)-x";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Cast { expr, .. } => match &expr.kind {
+                ExprKind::Unary { op: UnOp::Neg, .. } => {}
+                other => panic!("expected Unary(Neg), got {other:?}"),
+            },
+            other => panic!("expected Cast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sizeof_is_right_associative_with_nested_sizeof() {
+        // `sizeof sizeof x` — two nested sizeof-expressions. The
+        // outer `sizeof` consumes the rest as a unary-expression,
+        // which itself begins with a `sizeof`. Tree shape:
+        // SizeofExpr(SizeofExpr(Ident(x))).
+        let src = "sizeof sizeof x";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::SizeofExpr(outer) => match &outer.kind {
+                ExprKind::SizeofExpr(inner) => match &inner.kind {
+                    ExprKind::Ident(_) => {}
+                    other => panic!("expected Ident, got {other:?}"),
+                },
+                other => panic!("expected nested SizeofExpr, got {other:?}"),
+            },
+            other => panic!("expected SizeofExpr, got {other:?}"),
+        }
     }
 }
