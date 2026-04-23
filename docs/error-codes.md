@@ -222,3 +222,14 @@ difference is an error. Use `#undef` before redefining.
 #define FOO 42
 #define FOO 43  // error[E0022]: macro `FOO` redefined with a different body
 ```
+
+## E0023 — duplicate macro parameter name
+
+A function-like `#define` lists the same identifier more than once in
+its parameter list. C99 §6.10.3p6 requires each parameter name to be
+distinct so that parameter references inside the replacement list are
+unambiguous.
+
+```c
+#define FOO(a, a) a  // error[E0023]: duplicate macro parameter name `a`
+```

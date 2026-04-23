@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-07: Function-like `#define`
 
 **Phase:** 04-preprocess    **Depends on:** 04-06    **Milestone:** M5

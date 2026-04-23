@@ -22,7 +22,7 @@ pub use directive::{parse_directive, ConditionalKind, Directive};
 pub use guard::detect_guard;
 pub use include::{detect_pragma_once, resolve_header, strip_header_delimiters};
 pub use line_stream::LineStream;
-pub use macros::{define_object_like, HideSet, MacroDef, MacroKind, MacroTable};
+pub use macros::{define_macro, define_object_like, HideSet, MacroDef, MacroKind, MacroTable};
 
 /// Entry point: preprocess the file `root` in `session` and return the
 /// expanded pp-token stream that `rcc_parse` should consume.
@@ -92,7 +92,7 @@ impl<'a> Preprocessor<'a> {
             Ok(directive::Directive::Define(def)) => {
                 let result = {
                     let sm = self.session.source_map.read().unwrap();
-                    macros::define_object_like(def, &mut self.macros, &sm, &self.session.interner)
+                    macros::define_macro(def, &mut self.macros, &sm, &self.session.interner)
                 };
                 if let Err(diag) = result {
                     self.session.handler.emit(&diag);
@@ -216,5 +216,120 @@ mod run_tests {
         let mut pp = Preprocessor::new(&mut sess);
         pp.run(id);
         assert!(cap.diagnostics().is_empty(), "undef of an unknown name must be silent");
+    }
+
+    // ── Function-like `#define` end-to-end (task 04-07) ─────────────
+
+    #[test]
+    fn acceptance_function_like_multi_param_is_registered() {
+        // `#define MAX(a,b) ((a)>(b)?(a):(b))` — two params, not variadic.
+        let (mut sess, id, cap) = seed("#define MAX(a,b) ((a)>(b)?(a):(b))\n");
+        let max = sess.interner.intern("MAX");
+        let a_sym = sess.interner.intern("a");
+        let b_sym = sess.interner.intern("b");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let def = pp.macros.get(max).expect("MAX must be defined");
+        match &def.kind {
+            MacroKind::FunctionLike { params, variadic } => {
+                assert_eq!(params, &vec![a_sym, b_sym]);
+                assert!(!variadic);
+            }
+            other => panic!("expected FunctionLike, got {other:?}"),
+        }
+        assert!(!def.body.is_empty());
+        assert!(cap.diagnostics().is_empty(), "well-formed fn-like define must not diagnose");
+    }
+
+    #[test]
+    fn acceptance_variadic_macro_sets_variadic_flag() {
+        let (mut sess, id, cap) = seed("#define V(...) __VA_ARGS__\n");
+        let v = sess.interner.intern("V");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let def = pp.macros.get(v).expect("V must be defined");
+        match &def.kind {
+            MacroKind::FunctionLike { params, variadic } => {
+                assert!(params.is_empty());
+                assert!(*variadic, "`...`-only param list → variadic=true");
+            }
+            other => panic!("expected FunctionLike, got {other:?}"),
+        }
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn function_like_zero_param_form_is_distinct_from_object_like() {
+        // `#define F() 42` is function-like with zero params; it is
+        // NOT the same macro as `#define F 42` (§6.10.3p1 requires
+        // kind agreement).
+        let (mut sess, id, cap) = seed("#define F() 42\n");
+        let f = sess.interner.intern("F");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let def = pp.macros.get(f).expect("F must be defined");
+        assert!(
+            matches!(def.kind, MacroKind::FunctionLike { ref params, variadic: false } if params.is_empty()),
+            "zero-param fn-like expected, got {:?}",
+            def.kind
+        );
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn whitespace_before_paren_keeps_define_object_like() {
+        // §6.10.3p10: `#define F (x) x` is object-like whose body is
+        // `(x) x`, NOT a function-like macro with parameter `x`.
+        let (mut sess, id, cap) = seed("#define F (x) x\n");
+        let f = sess.interner.intern("F");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let def = pp.macros.get(f).expect("F must be defined");
+        assert!(matches!(def.kind, MacroKind::ObjectLike), "space before `(` → object-like");
+        // Body is `(`, `x`, `)`, `x` — four pp-tokens.
+        assert_eq!(def.body.len(), 4);
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn duplicate_param_emits_e0023() {
+        use rcc_errors::codes::E0023;
+        let (mut sess, id, cap) = seed("#define FOO(a, a) a\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0023 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0023));
+    }
+
+    #[test]
+    fn function_like_benign_redefinition_is_silent() {
+        let (mut sess, id, cap) =
+            seed("#define MAX(a,b) ((a)>(b)?(a):(b))\n#define MAX(a,b) ((a)>(b)?(a):(b))\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        assert!(
+            cap.diagnostics().is_empty(),
+            "identical fn-like redefinition must be benign, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn function_like_param_rename_emits_e0022() {
+        use rcc_errors::codes::E0022;
+        let (mut sess, id, cap) =
+            seed("#define MAX(a,b) ((a)>(b)?(a):(b))\n#define MAX(x,b) ((x)>(b)?(x):(b))\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0022 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0022));
     }
 }

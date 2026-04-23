@@ -13,6 +13,15 @@ use rcc_span::{Interner, Span, Symbol};
 
 use crate::macros::{MacroDef, MacroKind};
 
+/// Whether the token that introduces a `#define NAME<?>…` parameter
+/// list is the function-like `(`. Per C99 §6.10.3p10, a `(` *without*
+/// intervening whitespace after the macro name is the lparen of the
+/// parameter list; a `(` separated from the name by whitespace is the
+/// first token of an object-like replacement list.
+fn is_function_like_lparen(tok: &PpToken) -> bool {
+    matches!(tok.kind, PpTokenKind::Punct(Punct::LParen)) && !tok.leading_ws
+}
+
 /// A single preprocessing directive after lexing `#...`.
 #[derive(Clone, Debug)]
 pub enum Directive {
@@ -222,17 +231,98 @@ fn parse_define(
     }
     let name = interner.intern(token_text(name_tok, src));
 
-    // Function-like vs object-like split and parameter parsing belong
-    // to tasks 04-06 / 04-07. For now every `#define` is modelled as
-    // object-like with the raw post-name tokens as its body; later
-    // tasks reclassify in place.
-    let body_tokens = body[1..].to_vec();
-    Ok(Directive::Define(MacroDef {
-        name,
-        kind: MacroKind::ObjectLike,
-        body: body_tokens,
-        def_span: span,
-    }))
+    let rest = &body[1..];
+    let (kind, body_tokens) = match rest.first() {
+        Some(tok) if is_function_like_lparen(tok) => {
+            parse_function_like_signature(rest, src, interner)?
+        }
+        _ => (MacroKind::ObjectLike, rest.to_vec()),
+    };
+
+    Ok(Directive::Define(MacroDef { name, kind, body: body_tokens, def_span: span }))
+}
+
+/// Parse the parameter list of a function-like `#define`, given the
+/// tokens starting at the opening `(`. Returns the resulting
+/// [`MacroKind::FunctionLike`] and the replacement-list tokens that
+/// follow the closing `)`.
+///
+/// Grammar (C99 §6.10.3):
+/// ```text
+///     lparen identifier-list_opt rparen
+///     lparen ... rparen
+///     lparen identifier-list , ... rparen
+/// ```
+/// `identifier-list` is a comma-separated list of distinct identifiers.
+fn parse_function_like_signature(
+    rest: &[PpToken],
+    src: &str,
+    interner: &mut Interner,
+) -> Result<(MacroKind, Vec<PpToken>), Diagnostic> {
+    debug_assert!(
+        matches!(rest.first(), Some(t) if is_function_like_lparen(t)),
+        "parse_function_like_signature expects `rest` to start with the fn-like `(`"
+    );
+
+    let lparen_span = rest[0].span;
+    let mut idx = 1usize;
+    let mut params: Vec<Symbol> = Vec::new();
+    let mut variadic = false;
+
+    // Allow empty `()` as a zero-parameter list. Otherwise the list is
+    // a non-empty comma-separated sequence, each slot holding either
+    // an `Ident` or (in the final slot) an `Ellipsis`.
+    if let Some(tok) = rest.get(idx) {
+        if matches!(tok.kind, PpTokenKind::Punct(Punct::RParen)) {
+            idx += 1;
+        } else {
+            loop {
+                let tok = rest.get(idx).ok_or_else(|| malformed_define_param_list(lparen_span))?;
+                match tok.kind {
+                    PpTokenKind::Ident => {
+                        let text = token_text(tok, src);
+                        let sym = interner.intern(text);
+                        if params.contains(&sym) {
+                            return Err(duplicate_param(tok.span, text));
+                        }
+                        params.push(sym);
+                        idx += 1;
+                    }
+                    PpTokenKind::Punct(Punct::Ellipsis) => {
+                        variadic = true;
+                        idx += 1;
+                        // `...` must be the last slot; only `)` may follow.
+                        let close = rest
+                            .get(idx)
+                            .ok_or_else(|| malformed_define_param_list(lparen_span))?;
+                        if !matches!(close.kind, PpTokenKind::Punct(Punct::RParen)) {
+                            return Err(malformed_define(close.span));
+                        }
+                        idx += 1;
+                        break;
+                    }
+                    _ => return Err(malformed_define(tok.span)),
+                }
+                // Separator: `,` continues the list, `)` ends it.
+                let sep = rest.get(idx).ok_or_else(|| malformed_define_param_list(lparen_span))?;
+                match sep.kind {
+                    PpTokenKind::Punct(Punct::RParen) => {
+                        idx += 1;
+                        break;
+                    }
+                    PpTokenKind::Punct(Punct::Comma) => {
+                        idx += 1;
+                    }
+                    _ => return Err(malformed_define(sep.span)),
+                }
+            }
+        }
+    } else {
+        return Err(malformed_define_param_list(lparen_span));
+    }
+
+    let body_tokens = rest[idx..].to_vec();
+    Ok((MacroKind::FunctionLike { params, variadic }, body_tokens))
 }
 
 fn parse_undef(
@@ -355,6 +445,40 @@ fn malformed_define(span: Span) -> Diagnostic {
     }
 }
 
+/// Unterminated / malformed function-like parameter list
+/// (e.g. EOL encountered before the closing `)`).
+fn malformed_define_param_list(lparen_span: Span) -> Diagnostic {
+    use rcc_errors::codes::E0014;
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0014),
+        message: "invalid #define directive".into(),
+        labels: vec![Label {
+            span: lparen_span,
+            message: "unterminated macro parameter list".into(),
+            primary: true,
+        }],
+        notes: vec!["C99 §6.10.3 requires a `)` to close the parameter list \
+             of a function-like macro"
+            .into()],
+        help: vec![],
+    }
+}
+
+fn duplicate_param(span: Span, name: &str) -> Diagnostic {
+    use rcc_errors::codes::E0023;
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0023),
+        message: format!("duplicate macro parameter name `{name}`"),
+        labels: vec![Label { span, message: "duplicate parameter".into(), primary: true }],
+        notes: vec!["C99 §6.10.3p6 requires each macro parameter name to \
+             be distinct"
+            .into()],
+        help: vec!["rename one of the parameters".into()],
+    }
+}
+
 fn malformed_undef(span: Span) -> Diagnostic {
     use rcc_errors::codes::E0014;
     Diagnostic {
@@ -451,19 +575,132 @@ mod tests {
     }
 
     #[test]
-    fn define_function_like_kept_object_like_for_now() {
-        // Function-like parsing is task 04-07; at this stage the
-        // parens land in `body` and the whole thing is still
-        // ObjectLike.
+    fn define_function_like_two_params() {
+        // C99 §6.10.3: `(` directly after NAME (no whitespace) opens a
+        // function-like parameter list.
         let (d, mut interner) = parse("#define MAX(a,b) ((a)>(b)?(a):(b))\n");
         match d.expect("define classified") {
             Directive::Define(def) => {
                 assert_eq!(interner.intern("MAX"), def.name);
-                assert!(matches!(def.kind, MacroKind::ObjectLike));
-                assert!(!def.body.is_empty());
+                match def.kind {
+                    MacroKind::FunctionLike { params, variadic } => {
+                        assert_eq!(params.len(), 2, "MAX has two parameters");
+                        assert_eq!(params[0], interner.intern("a"));
+                        assert_eq!(params[1], interner.intern("b"));
+                        assert!(!variadic);
+                    }
+                    other => panic!("expected FunctionLike, got {other:?}"),
+                }
+                assert!(!def.body.is_empty(), "body must contain the replacement list");
             }
             other => panic!("expected Define, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn define_function_like_zero_params() {
+        let (d, mut interner) = parse("#define F() 42\n");
+        match d.expect("define classified") {
+            Directive::Define(def) => {
+                assert_eq!(interner.intern("F"), def.name);
+                match def.kind {
+                    MacroKind::FunctionLike { params, variadic } => {
+                        assert!(params.is_empty(), "F has no parameters");
+                        assert!(!variadic);
+                    }
+                    other => panic!("expected FunctionLike, got {other:?}"),
+                }
+                assert_eq!(def.body.len(), 1, "replacement list is just `42`");
+            }
+            other => panic!("expected Define, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn define_function_like_variadic_only() {
+        let (d, mut interner) = parse("#define V(...) __VA_ARGS__\n");
+        match d.expect("define classified") {
+            Directive::Define(def) => {
+                assert_eq!(interner.intern("V"), def.name);
+                match def.kind {
+                    MacroKind::FunctionLike { params, variadic } => {
+                        assert!(params.is_empty(), "V has no named parameters");
+                        assert!(variadic, "V is variadic");
+                    }
+                    other => panic!("expected FunctionLike, got {other:?}"),
+                }
+            }
+            other => panic!("expected Define, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn define_function_like_named_and_variadic() {
+        let (d, mut interner) = parse("#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)\n");
+        match d.expect("define classified") {
+            Directive::Define(def) => {
+                assert_eq!(interner.intern("LOG"), def.name);
+                match def.kind {
+                    MacroKind::FunctionLike { params, variadic } => {
+                        assert_eq!(params.len(), 1);
+                        assert_eq!(params[0], interner.intern("fmt"));
+                        assert!(variadic);
+                    }
+                    other => panic!("expected FunctionLike, got {other:?}"),
+                }
+            }
+            other => panic!("expected Define, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn define_function_like_duplicate_param_is_e0023() {
+        // C99 §6.10.3p6: parameter names must be distinct.
+        let (d, _) = parse("#define FOO(a, a) a\n");
+        let diag = d.expect_err("duplicate parameter must fail");
+        assert_eq!(diag.code, Some(rcc_errors::codes::E0023));
+        assert!(
+            diag.message.contains("duplicate"),
+            "diag message should mention duplication, got {:?}",
+            diag.message
+        );
+        assert!(
+            diag.labels.iter().any(|l| l.primary),
+            "E0023 must carry a primary label on the duplicate"
+        );
+    }
+
+    #[test]
+    fn define_space_before_paren_is_object_like() {
+        // C99 §6.10.3p10: a `(` separated from NAME by whitespace is
+        // part of the replacement list, NOT the parameter-list opener.
+        let (d, mut interner) = parse("#define F (x) x\n");
+        match d.expect("define classified") {
+            Directive::Define(def) => {
+                assert_eq!(interner.intern("F"), def.name);
+                assert!(
+                    matches!(def.kind, MacroKind::ObjectLike),
+                    "whitespace before `(` → object-like"
+                );
+                // Body: `(`, `x`, `)`, `x` — four pp-tokens.
+                assert_eq!(def.body.len(), 4);
+            }
+            other => panic!("expected Define, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn define_function_like_unterminated_param_list_is_e0014() {
+        let (d, _) = parse("#define FOO(a, b\n");
+        let diag = d.expect_err("missing `)` must fail");
+        assert_eq!(diag.code, Some(rcc_errors::codes::E0014));
+    }
+
+    #[test]
+    fn define_function_like_non_ident_param_is_e0014() {
+        let (d, _) = parse("#define FOO(1) x\n");
+        let diag = d.expect_err("non-ident parameter must fail");
+        assert_eq!(diag.code, Some(rcc_errors::codes::E0014));
     }
 
     #[test]

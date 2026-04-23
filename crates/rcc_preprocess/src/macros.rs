@@ -76,39 +76,66 @@ impl MacroTable {
     }
 }
 
-/// Install an object-like `#define` in `macros`, enforcing C99
-/// §6.10.3p1's "benign redefinition" rule.
+/// Install a `#define` (object-like **or** function-like) in
+/// `macros`, enforcing C99 §6.10.3p1's "benign redefinition" rule.
 ///
 /// - No existing definition → insert and return `Ok(())`.
-/// - Existing definition whose replacement list is *identical* to the
-///   new one → silently accept (no insert required — the entries are
+/// - Existing definition that is *identical* to the new one →
+///   silently accept (no insert required — the entries are
 ///   interchangeable) and return `Ok(())`.
-/// - Existing definition with a *differing* replacement list → return
-///   an E0022 diagnostic with primary label on the new definition and
-///   a secondary label on the previous one; the table is left
+/// - Existing definition that *differs* from the new one → return an
+///   E0022 diagnostic with primary label on the new definition and a
+///   secondary label on the previous one; the table is left
 ///   unchanged.
 ///
-/// Two replacement lists are identical iff they have the same token
-/// count, ordering, spellings (as source slices), and whitespace
-/// separation between tokens. Whitespace counts from
+/// Two definitions are identical iff their
+/// [`MacroKind`] values match exactly (object-like vs function-like;
+/// same parameter names in the same order; same variadicity) **and**
+/// their replacement lists have the same token count, ordering,
+/// spellings (as source slices), and whitespace separation between
+/// tokens. Whitespace counts from
 /// [`PpToken::leading_ws`](rcc_lexer::PpToken::leading_ws) so that
 /// `#define X 1+2` and `#define X 1 + 2` are correctly distinguished.
 /// `source_map` provides the text for spelling comparison; `interner`
 /// resolves the macro name for diagnostic messages.
-pub fn define_object_like(
+pub fn define_macro(
     def: MacroDef,
     macros: &mut MacroTable,
     source_map: &SourceMap,
     interner: &Interner,
 ) -> Result<(), Diagnostic> {
     if let Some(existing) = macros.get(def.name) {
-        if bodies_equivalent(&existing.body, &def.body, source_map) {
+        if definitions_equivalent(existing, &def, source_map) {
             return Ok(());
         }
         return Err(redefinition_diagnostic(existing, &def, interner));
     }
     macros.define(def);
     Ok(())
+}
+
+/// Back-compat alias retained while call sites migrate. Accepts any
+/// [`MacroDef`] (object-like or function-like); new code should call
+/// [`define_macro`] directly.
+#[doc(hidden)]
+pub fn define_object_like(
+    def: MacroDef,
+    macros: &mut MacroTable,
+    source_map: &SourceMap,
+    interner: &Interner,
+) -> Result<(), Diagnostic> {
+    define_macro(def, macros, source_map, interner)
+}
+
+/// Compare two definitions for C99 §6.10.3p1 "identical" status:
+/// matching [`MacroKind`] (object-like vs function-like, including
+/// parameter names in order and variadicity) plus identical
+/// replacement lists per [`bodies_equivalent`].
+fn definitions_equivalent(a: &MacroDef, b: &MacroDef, source_map: &SourceMap) -> bool {
+    if a.kind != b.kind {
+        return false;
+    }
+    bodies_equivalent(&a.body, &b.body, source_map)
 }
 
 /// Compare two replacement-lists for C99 §6.10.3p1 "identical" status.
@@ -324,5 +351,145 @@ mod tests {
         define_object_like(b, &mut macros, &sm, &interner)
             .expect("after #undef, any body is fresh again");
         assert_eq!(token_text(&macros.get(sym).unwrap().body[0], &sm), "43");
+    }
+
+    // ── Function-like benign-redefinition tests (task 04-07) ────────
+
+    /// Build a function-like [`MacroDef`] directly without going
+    /// through the directive parser; used by the tests below to keep
+    /// the coverage of [`define_macro`] self-contained.
+    fn seed_fn_define(
+        source_map: &mut SourceMap,
+        interner: &mut Interner,
+        name_str: &str,
+        params: &[&str],
+        variadic: bool,
+        src: &str,
+    ) -> MacroDef {
+        let id = source_map.add_file(PathBuf::from(format!("<{name_str}>")), Arc::from(src));
+        let tokens: Vec<PpToken> = tokenize(id, src).collect();
+        // Tokens after `#`, `define`, NAME, `(`, params…, `)` up to newline.
+        let mut body = Vec::new();
+        let mut iter = tokens.into_iter().peekable();
+        // `#`, `define`, NAME
+        iter.next();
+        iter.next();
+        iter.next();
+        // `(` and everything up to matching `)`
+        assert!(
+            matches!(iter.next(), Some(t) if matches!(t.kind, rcc_lexer::PpTokenKind::Punct(rcc_lexer::Punct::LParen)))
+        );
+        for tok in iter.by_ref() {
+            if matches!(tok.kind, rcc_lexer::PpTokenKind::Punct(rcc_lexer::Punct::RParen)) {
+                break;
+            }
+        }
+        for tok in iter {
+            if tok.kind == rcc_lexer::PpTokenKind::Newline {
+                break;
+            }
+            body.push(tok);
+        }
+        let file_len = src.len() as u32;
+        let def_span = Span::new(id, BytePos(0), BytePos(file_len));
+        let param_syms = params.iter().map(|p| interner.intern(p)).collect();
+        MacroDef {
+            name: interner.intern(name_str),
+            kind: MacroKind::FunctionLike { params: param_syms, variadic },
+            body,
+            def_span,
+        }
+    }
+
+    #[test]
+    fn function_like_benign_redefinition_is_silent() {
+        let mut sm = SourceMap::new();
+        let mut interner = Interner::new();
+        let mut macros = MacroTable::default();
+
+        let a = seed_fn_define(
+            &mut sm,
+            &mut interner,
+            "MAX",
+            &["a", "b"],
+            false,
+            "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
+        );
+        define_macro(a, &mut macros, &sm, &interner).unwrap();
+
+        let b = seed_fn_define(
+            &mut sm,
+            &mut interner,
+            "MAX",
+            &["a", "b"],
+            false,
+            "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
+        );
+        define_macro(b, &mut macros, &sm, &interner)
+            .expect("identical function-like redefinition must be benign");
+    }
+
+    #[test]
+    fn function_like_redefinition_with_different_param_name_is_e0022() {
+        let mut sm = SourceMap::new();
+        let mut interner = Interner::new();
+        let mut macros = MacroTable::default();
+
+        let a = seed_fn_define(
+            &mut sm,
+            &mut interner,
+            "MAX",
+            &["a", "b"],
+            false,
+            "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
+        );
+        define_macro(a, &mut macros, &sm, &interner).unwrap();
+
+        // Rename parameter but keep an equivalent-looking body; the
+        // §6.10.3p1 comparison demands identical parameter *names*.
+        let b = seed_fn_define(
+            &mut sm,
+            &mut interner,
+            "MAX",
+            &["x", "b"],
+            false,
+            "#define MAX(x,b) ((x)>(b)?(x):(b))\n",
+        );
+        let diag = define_macro(b, &mut macros, &sm, &interner)
+            .expect_err("parameter-name change must be rejected");
+        assert_eq!(diag.code, Some(E0022));
+    }
+
+    #[test]
+    fn function_like_vs_object_like_same_name_is_e0022() {
+        let mut sm = SourceMap::new();
+        let mut interner = Interner::new();
+        let mut macros = MacroTable::default();
+
+        // Object-like FOO.
+        let a = seed_define(&mut sm, &mut interner, "FOO", "#define FOO 42\n");
+        define_macro(a, &mut macros, &sm, &interner).unwrap();
+
+        // Function-like FOO with (allegedly) the same body. Kind
+        // mismatch alone must trigger E0022.
+        let b = seed_fn_define(&mut sm, &mut interner, "FOO", &[], false, "#define FOO() 42\n");
+        let diag = define_macro(b, &mut macros, &sm, &interner)
+            .expect_err("object-like vs function-like mismatch must be rejected");
+        assert_eq!(diag.code, Some(E0022));
+    }
+
+    #[test]
+    fn function_like_variadic_mismatch_is_e0022() {
+        let mut sm = SourceMap::new();
+        let mut interner = Interner::new();
+        let mut macros = MacroTable::default();
+
+        let a = seed_fn_define(&mut sm, &mut interner, "V", &[], false, "#define V() 0\n");
+        define_macro(a, &mut macros, &sm, &interner).unwrap();
+
+        let b = seed_fn_define(&mut sm, &mut interner, "V", &[], true, "#define V(...) 0\n");
+        let diag = define_macro(b, &mut macros, &sm, &interner)
+            .expect_err("variadic-ness mismatch must be rejected");
+        assert_eq!(diag.code, Some(E0022));
     }
 }

@@ -42,6 +42,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0020, E0020_DESC),
     (E0021, E0021_DESC),
     (E0022, E0022_DESC),
+    (E0023, E0023_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -150,6 +151,14 @@ const E0021_DESC: &str = "cannot find header";
 /// whitespace separation is ill-formed.
 pub const E0022: &str = "E0022";
 const E0022_DESC: &str = "macro redefined with a different body";
+
+/// Duplicate parameter name in a function-like `#define`.
+///
+/// C99 §6.10.3p6: the identifiers naming the parameters of a
+/// function-like macro "shall be distinct" — two identical names in
+/// the same parameter list is a constraint violation.
+pub const E0023: &str = "E0023";
+const E0023_DESC: &str = "duplicate macro parameter name";
 
 #[cfg(test)]
 mod tests {
