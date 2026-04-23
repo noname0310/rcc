@@ -328,12 +328,18 @@ pub struct Block {
 }
 
 /// Block item (C99 allows declarations interleaved with statements).
+///
+/// `Stmt` is boxed because `Stmt` is substantially larger than `Decl`
+/// (statement kinds recursively embed expressions and sub-statements),
+/// so keeping it inline would bloat every `BlockItem` and every
+/// `Vec<BlockItem>` element. Boxing balances the enum and silences
+/// `clippy::large_enum_variant` without changing AST semantics.
 #[derive(Debug, Clone)]
 pub enum BlockItem {
     /// A declaration.
     Decl(Decl),
     /// A statement.
-    Stmt(Stmt),
+    Stmt(Box<Stmt>),
 }
 
 /// A statement.

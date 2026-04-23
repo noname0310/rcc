@@ -45,19 +45,17 @@ pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
             let b = integer_promotion(tcx, b);
             match (tcx.get(a), tcx.get(b)) {
                 (Ty::Int { signed: sa, rank: ra }, Ty::Int { signed: sb, rank: rb }) => {
-                    if ra == rb && sa == sb {
-                        a
-                    } else if ra > rb {
+                    if ra > rb {
                         a
                     } else if rb > ra {
                         b
+                    } else if sa == sb || !sa {
+                        // Equal rank: same signedness -> either (pick `a`);
+                        // different signedness -> the unsigned operand wins
+                        // (C99 §6.3.1.8), and `!sa` means `a` is unsigned.
+                        a
                     } else {
-                        // Same rank, different signedness -> unsigned wins.
-                        if !sa {
-                            a
-                        } else {
-                            b
-                        }
+                        b
                     }
                 }
                 _ => a,

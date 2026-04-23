@@ -47,6 +47,12 @@ pub struct IntLiteral {
 }
 
 /// Integer-literal suffix / deduced type.
+// Variant spellings mirror the C source suffix set (`u`, `l`, `ul`, `ll`,
+// `ull`) so every variant stays fully uppercase for a consistent mapping;
+// that means `ULL` would trip `clippy::upper_case_acronyms` even though
+// renaming only that variant to `Ull` (while leaving `UL`/`LL` intact)
+// would be the inconsistent choice.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum IntSuffix {
     /// No suffix.
