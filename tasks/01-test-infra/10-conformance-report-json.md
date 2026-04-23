@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-10: Write `docs/conformance.json`
 
 **Phase:** 01-test-infra    **Depends on:** 01-08, 01-09    **Milestone:** M0.5
