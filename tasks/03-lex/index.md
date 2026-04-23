@@ -18,7 +18,7 @@ Build the full C99 preprocessing-token lexer with fuzz + corpus tests.
 - [x] [08-punctuator-table](08-punctuator-table.md)
 - [x] [09-header-name-context](09-header-name-context.md)
 - [x] [10-unit-tests-tables](10-unit-tests-tables.md)
-- [ ] [11-unit-tests-ctestsuite-corpus](11-unit-tests-ctestsuite-corpus.md)
+- [x] [11-unit-tests-ctestsuite-corpus](11-unit-tests-ctestsuite-corpus.md)
 - [ ] [12-fuzz-target](12-fuzz-target.md)
 - [ ] [13-snapshot-tokens-emit](13-snapshot-tokens-emit.md)
 

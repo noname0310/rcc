@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-11: Corpus-wide sanity against c-testsuite
 
 **Phase:** 03-lex    **Depends on:** 03-10, 01-01    **Milestone:** M1
