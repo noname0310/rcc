@@ -60,6 +60,14 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // The directory may already exist with rcc-tracked overlay files
+    // (e.g. xfail.toml, README.md) that are excluded from .gitignore.
+    // `git clone` requires an empty (or absent) target, so remove it
+    // first — the overlay files are regenerated after the clone.
+    if dst.is_dir() {
+        std::fs::remove_dir_all(dst)?;
+    }
+
     if suite.sparse.is_empty() {
         run_cmd(Command::new("git").args(["clone", git, &dst.to_string_lossy()]))?;
         run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
