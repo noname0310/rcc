@@ -18,7 +18,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [08-pratt-precedence](08-pratt-precedence.md)
 - [x] [09-postfix-unary](09-postfix-unary.md)
 - [ ] [10-cast-sizeof](10-cast-sizeof.md)
-- [ ] [11-conditional-expr](11-conditional-expr.md)
+- [x] [11-conditional-expr](11-conditional-expr.md)
 - [ ] [12-comma-expr](12-comma-expr.md)
 - [ ] [13-statements-expr-block](13-statements-expr-block.md)
 - [ ] [14-statements-if-else](14-statements-if-else.md)

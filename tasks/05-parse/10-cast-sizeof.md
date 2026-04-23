@@ -25,3 +25,6 @@ disambiguation: cast `(T)e`, `sizeof(T)`, and C99 compound literal
 
 ## References
 - C99 §6.5.3.4 (`sizeof`), §6.5.4 (cast), §6.5.2.5 (compound literal).
+
+## Notes (agent)
+- 2026-04-23: skipped in favour of 05-11 — upstream deps 05-20 (abstract-declarator) and 05-24 (init-list-designators) are still `[ ]` in `tasks/05-parse/index.md`, so this task's type-name lookahead has nothing to call into. Will be picked up after both land.

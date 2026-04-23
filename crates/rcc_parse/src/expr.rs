@@ -11,8 +11,13 @@
 //! - Unary / postfix (`++`, `--`, `*`, `&`, `sizeof`, calls, member
 //!   access, indexing) — task 05-09.
 //! - Cast / `sizeof(type)` — task 05-10.
-//! - Conditional `?:` — task 05-11.
 //! - Comma `,` — task 05-12.
+//!
+//! Conditional `?:` (task 05-11) is folded here — see
+//! [`reduce_conditional`] and the `COND_*_BP` constants below —
+//! because its precedence slot (§6.5.15, just above assignment) is
+//! inside the Pratt loop proper, even though its ternary shape
+//! cannot be described by the plain `(l_bp, r_bp)` infix table.
 //!
 //! ## Precedence & associativity (C99 §6.5)
 //!
@@ -33,8 +38,15 @@
 //! bitwise OR      a|b                ( 7,  8)       left
 //! logical AND     a&&b               ( 5,  6)       left
 //! logical OR      a||b               ( 3,  4)       left
+//! conditional     a?b:c              ( 2,  1)*      right  (ternary)
 //! assignment      a=b a+=b ...       ( 2,  1)       right
 //! ```
+//!
+//! \*Conditional shares the `(l_bp, r_bp)` numbers with
+//! assignment because both sit at the bottom of the table and
+//! conditional is handled by a dedicated branch in [`parse_expr_bp`]
+//! — the Pratt loop never sees `?` via [`peek_infix`], so there is
+//! no ambiguity between the two at the same numeric slot.
 //!
 //! Left-associative operators get `(n, n+1)`: after we consume one, we
 //! recurse with `min_bp = n+1`, so a same-family op on the right (which
@@ -621,7 +633,31 @@ pub fn parse_expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<Expr> {
     // for the unary levels themselves (their relative strength is
     // encoded by *where* in the call graph they live).
     let mut lhs = parse_prefix_unary(p)?;
-    while let Some(op) = peek_infix(p) {
+    loop {
+        // `?` (C99 §6.5.15) is not an infix operator in the sense
+        // `peek_infix` knows — its RHS is a pair `then : else` — so
+        // we pattern-match it here, before the binary/assignment
+        // path, when the Pratt floor allows it.
+        if let Some(q_span) = peek_question(p) {
+            if COND_L_BP < min_bp {
+                break;
+            }
+            match reduce_conditional(p, lhs, q_span) {
+                Ok(new_lhs) => {
+                    lhs = new_lhs;
+                    continue;
+                }
+                Err(recovered_lhs) => {
+                    // Recovery path: the `?:` reducer already emitted
+                    // a diagnostic (missing `:`, missing then/else
+                    // operand). Returning the partially-built LHS
+                    // keeps downstream phases from seeing a
+                    // synthesised node with a dummy span.
+                    return Some(*recovered_lhs);
+                }
+            }
+        }
+        let Some(op) = peek_infix(p) else { break };
         let (l_bp, r_bp) = infix_bp(op);
         if l_bp < min_bp {
             break;
@@ -650,6 +686,120 @@ pub fn parse_expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<Expr> {
         };
     }
     Some(lhs)
+}
+
+/// Left binding power of the conditional operator `?:` (§6.5.15).
+///
+/// The C99 precedence table places conditional *just above*
+/// assignment and *just below* logical-OR. In the Matklad encoding
+/// that means:
+///
+/// - `COND_L_BP (2) > assignment.r_bp (1)` so that `a = b ? c : d`
+///   pulls the whole `b ? c : d` into the assignment RHS.
+/// - `COND_L_BP (2) < LogOr.r_bp (4)` so that `a || b ? c : d`
+///   folds `a || b` first — the cond operator never fires inside
+///   the LogOr recursion — matching the C99 grammar where the
+///   first operand of `?:` is a *logical-OR-expression*.
+const COND_L_BP: u8 = 2;
+
+/// Right binding power for the *else* operand. Must be strictly
+/// less than [`COND_L_BP`] so that `a ? b : c ? d : e` re-enters
+/// the conditional branch on the right and yields the
+/// §6.5.15-mandated `a ? b : (c ? d : e)` shape. Setting it to `1`
+/// also lets an assignment-expression appear in the else slot —
+/// the permissive reading shared by gcc, clang, and chibicc —
+/// without disturbing the right-associativity of `?:`. A stricter
+/// "C99 conditional-expression only" reading would bump this to
+/// `3`, but every real-world C compiler accepts the permissive
+/// form and the lvalue rule is enforced downstream in typeck.
+const COND_R_BP: u8 = 1;
+
+/// Peek the current token and return its span if it is `?`,
+/// without advancing the cursor. Returns `None` for every other
+/// token — including end-of-input — so the Pratt loop falls
+/// through to its regular infix handling.
+fn peek_question(p: &Parser<'_>) -> Option<rcc_span::Span> {
+    let t = p.peek()?;
+    if matches!(t.kind, TokenKind::Punct(Punct::Question)) {
+        Some(t.span)
+    } else {
+        None
+    }
+}
+
+/// Reduce a conditional expression given the already-parsed
+/// first operand (`cond`) and the span of the `?` we are about
+/// to consume. On success, returns `Ok(Cond { .. })`; on any
+/// recovery path — missing `then`, missing `:`, missing `else`
+/// — emits a diagnostic and returns `Err(Box<cond>)` so the
+/// caller can hand the partially-built LHS back unwrapped.
+/// Returning `cond` on failure (rather than `None`) is how we
+/// thread the original LHS ownership back out past the consumed
+/// `?` without cloning a whole sub-tree; boxing the `Err`
+/// variant keeps the `Result` itself pointer-sized per the
+/// `clippy::result_large_err` guidance.
+///
+/// The shape `cond ? then : else` is parsed as:
+///
+/// - `then`: a full expression via [`parse_expression`]. Per
+///   §6.5.15, the second operand of `?:` is an *expression*
+///   (comma operator included once task 05-12 lands), not merely
+///   a conditional-expression.
+/// - `else`: a recursive [`parse_expr_bp`] call at
+///   [`COND_R_BP`], which both preserves §6.5.15 right-
+///   associativity and lets an assignment-expression fill the
+///   slot (matching real compilers).
+///
+/// Spans: the produced `Cond` node spans `cond.lo .. else.hi`
+/// — the widest range that still comes from real source text,
+/// without synthesising a span for the operator punctuation.
+fn reduce_conditional(
+    p: &mut Parser<'_>,
+    cond: Expr,
+    q_span: rcc_span::Span,
+) -> Result<Expr, Box<Expr>> {
+    // Consume the `?`.
+    p.bump();
+    // `then` is a full expression — no Pratt floor, so any
+    // operator weaker than `:` can appear inside. Failure leaves
+    // the cursor on the offending token with a diagnostic
+    // already emitted by `parse_primary`.
+    let Some(then_expr) = parse_expression(p) else {
+        return Err(Box::new(cond));
+    };
+    // Expect `:`.
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Colon)) => {
+            p.bump();
+        }
+        _ => {
+            let at = p.cur_span();
+            p.session
+                .handler
+                .struct_err(at, "expected `:` in conditional expression")
+                .label(q_span, "`?` here")
+                .emit();
+            return Err(Box::new(cond));
+        }
+    }
+    // `else` binds right-associatively. `COND_R_BP < COND_L_BP`
+    // allows another `?:` (or a weaker-binding assignment) to
+    // nest on the right; any operator stronger than cond is
+    // already handled by the Pratt recursion.
+    let Some(else_expr) = parse_expr_bp(p, COND_R_BP) else {
+        return Err(Box::new(cond));
+    };
+    let span = cond.span.to(else_expr.span);
+    let id = p.fresh_id();
+    Ok(Expr {
+        id,
+        kind: ExprKind::Cond {
+            cond: Box::new(cond),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        },
+        span,
+    })
 }
 
 /// Infix-operator discriminant consumed by [`parse_expr_bp`].
@@ -1145,6 +1295,8 @@ mod tests {
                     b'.' => Punct::Dot,
                     b'~' => Punct::Tilde,
                     b'!' => Punct::Bang,
+                    b'?' => Punct::Question,
+                    b':' => Punct::Colon,
                     other => panic!("lex_ascii: unsupported byte {:?}", other as char),
                 };
                 (single, 1)
@@ -1836,5 +1988,184 @@ mod tests {
         assert!(matches!(e.kind, ExprKind::Member { .. }));
         assert_eq!(e.span.lo.0, 0);
         assert_eq!(e.span.hi.0, 3);
+    }
+
+    // ── 05-11 conditional `?:` (§6.5.15) ────────────────────────────
+
+    #[test]
+    fn conditional_basic_builds_cond_node() {
+        // `a ? b : c` → Cond { cond = a, then = b, else = c }.
+        let src = "a ? b : c";
+        let (e, cap) = parse_expr_str(src);
+        assert!(cap.diagnostics().is_empty(), "valid `?:` must be diag-free");
+        match e.kind {
+            ExprKind::Cond { cond, then_expr, else_expr } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)), "cond must be `a`");
+                assert!(matches!(then_expr.kind, ExprKind::Ident(_)), "then must be `b`");
+                assert!(matches!(else_expr.kind, ExprKind::Ident(_)), "else must be `c`");
+            }
+            other => panic!("expected Cond, got {other:?}"),
+        }
+        // Span must cover the whole run.
+        assert_eq!(e.span.lo.0, 0);
+        assert_eq!(e.span.hi.0, src.len() as u32);
+    }
+
+    #[test]
+    fn conditional_is_right_associative_in_else_arm() {
+        // Acceptance (§6.5.15): `a ? b : c ? d : e` parses as
+        // `a ? b : (c ? d : e)` — the else-operand is itself a
+        // conditional-expression, so the inner `?:` nests on the right.
+        let (e, _cap) = parse_expr_str("a ? b : c ? d : e");
+        match e.kind {
+            ExprKind::Cond { cond, then_expr, else_expr } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)), "outer cond must be `a`");
+                assert!(matches!(then_expr.kind, ExprKind::Ident(_)), "outer then must be `b`");
+                match else_expr.kind {
+                    ExprKind::Cond {
+                        cond: inner_cond,
+                        then_expr: inner_then,
+                        else_expr: inner_else,
+                    } => {
+                        assert!(matches!(inner_cond.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_then.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_else.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("outer else must be inner Cond, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_nests_inside_then_arm() {
+        // `a ? b ? c : d : e` — the then-operand is parsed as a *full*
+        // expression (§6.5.15: second operand), so another `?:` is
+        // perfectly legal between the outer `?` and `:`. Expected
+        // tree: `a ? (b ? c : d) : e`.
+        let (e, _cap) = parse_expr_str("a ? b ? c : d : e");
+        match e.kind {
+            ExprKind::Cond { cond, then_expr, else_expr } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)), "outer cond must be `a`");
+                assert!(matches!(else_expr.kind, ExprKind::Ident(_)), "outer else must be `e`");
+                match then_expr.kind {
+                    ExprKind::Cond {
+                        cond: inner_cond,
+                        then_expr: inner_then,
+                        else_expr: inner_else,
+                    } => {
+                        assert!(matches!(inner_cond.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_then.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_else.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("outer then must be inner Cond, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_folds_inside_assignment_rhs() {
+        // `a = b ? c : d` → `a = (b ? c : d)`. Conditional sits just
+        // above assignment (§6.5.15 vs §6.5.16), so when the Pratt
+        // loop recurses into the assignment RHS it picks `?` up.
+        let (e, _cap) = parse_expr_str("a = b ? c : d");
+        match e.kind {
+            ExprKind::Assign { op: AssignOp::Eq, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)), "lhs must be `a`");
+                match rhs.kind {
+                    ExprKind::Cond { cond, then_expr, else_expr } => {
+                        assert!(matches!(cond.kind, ExprKind::Ident(_)));
+                        assert!(matches!(then_expr.kind, ExprKind::Ident(_)));
+                        assert!(matches!(else_expr.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("rhs must be Cond, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level assignment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_lhs_includes_full_logical_or() {
+        // `a || b ? c : d` → `(a || b) ? c : d`. The first operand of
+        // `?:` is a *logical-OR-expression* per §6.5.15, so `||` binds
+        // *tighter* than `?:` and the whole disjunction folds into the
+        // cond slot.
+        let (e, _cap) = parse_expr_str("a || b ? c : d");
+        match e.kind {
+            ExprKind::Cond { cond, then_expr, else_expr } => {
+                match cond.kind {
+                    ExprKind::Binary { op: BinOp::LogOr, .. } => {}
+                    other => panic!("cond must be `a || b`, got {other:?}"),
+                }
+                assert!(matches!(then_expr.kind, ExprKind::Ident(_)), "then must be `c`");
+                assert!(matches!(else_expr.kind, ExprKind::Ident(_)), "else must be `d`");
+            }
+            other => panic!("expected top-level Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_else_branch_absorbs_assignment() {
+        // Pragmatic extension matched by gcc/clang: the else-operand
+        // allows an assignment-expression. `a ? b : c = d` parses as
+        // `a ? b : (c = d)`. Semantically the `=` needs an lvalue, but
+        // that is checked by typeck — the parser is permissive. This
+        // pins the behaviour down so task 05-12 (comma operator) does
+        // not accidentally regress it.
+        let (e, _cap) = parse_expr_str("a ? b : c = d");
+        match e.kind {
+            ExprKind::Cond { cond, then_expr, else_expr } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)), "cond must be `a`");
+                assert!(matches!(then_expr.kind, ExprKind::Ident(_)), "then must be `b`");
+                match else_expr.kind {
+                    ExprKind::Assign { op: AssignOp::Eq, .. } => {}
+                    other => panic!("else must be `c = d`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_missing_colon_emits_diagnostic_and_recovers() {
+        // `a ? b c` — no `:`. The parser must emit a diagnostic that
+        // mentions the conditional expression and label the `?` token,
+        // then hand back *some* AST so downstream phases can keep
+        // making progress. We accept either "return lhs" or "return a
+        // Cond shell"; the stable contract is that a diagnostic is
+        // emitted and the cursor does not spin.
+        let src = "a ? b c";
+        let (mut sess, fid, cap) = mk_session(src);
+        let pps = lex_ascii(fid, src);
+        let tokens = convert(&mut sess, &pps);
+        let total_tokens = tokens.len();
+        let mut parser = Parser::new(&mut sess, tokens);
+        let _ = parse_expression(&mut parser);
+        let diags = cap.diagnostics();
+        assert!(!diags.is_empty(), "missing `:` must diagnose");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("conditional expression") && d.message.contains(':')),
+            "diagnostic must mention `:` and conditional expression, got {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
+        // Parser must not have gone past the token stream or spun.
+        assert!(parser.cursor <= total_tokens, "cursor must stay within token stream");
+    }
+
+    #[test]
+    fn conditional_span_covers_full_range() {
+        // Span must stretch from the cond operand's start to the
+        // else operand's end — used by later diagnostics to underline
+        // the whole ternary cleanly.
+        let src = "a ? b : c";
+        let (e, _cap) = parse_expr_str(src);
+        assert_eq!(e.span.lo.0, 0, "span must start at `a`");
+        assert_eq!(e.span.hi.0, src.len() as u32, "span must end at `c`");
     }
 }
