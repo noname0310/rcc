@@ -508,6 +508,23 @@ keeps going so the rest of the declaration still gets parsed (which
 usually surfaces more useful follow-up diagnostics than bailing at
 the first error).
 
+## E0062 — abstract declarator cannot contain a name
+
+C99 §6.7.6 defines a `type-name` as a specifier-qualifier-list
+optionally followed by an *abstract* declarator — the kind that has
+no identifier atom. Type names appear in casts `(T)e`, `sizeof(T)`,
+compound literals `(T){...}`, and (with the same shape) in parameter
+type lists. A name written in that slot is a constraint violation:
+
+```c
+int *x = (int *p)0;    // error[E0062]: abstract declarator cannot contain a name
+                       //                              ^^^^
+```
+
+The parser recovers by discarding the name and keeping the rest of
+the declarator (pointer / array / function chain) so later passes
+can still report any further mistakes in the surrounding expression.
+
 ---
 
 ## W0001 — unknown #pragma directive

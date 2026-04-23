@@ -52,7 +52,7 @@
 
 use rcc_ast::{
     ArrayDeclarator, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Expr, FunctionDeclarator,
-    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeQuals, TypeSpec,
+    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeName, TypeQuals, TypeSpec,
 };
 use rcc_errors::codes;
 use rcc_lexer::Punct;
@@ -762,20 +762,100 @@ const _SYMBOL_IS_LIVE: fn(Symbol) -> Symbol = |s| s;
 // the chain *after* the direct-declarator's own suffixes and in
 // rightmost-first order.
 
+/// Which declarator flavour we are parsing. Drives atom-parsing
+/// behaviour: concrete declarators require a name (§6.7.5), parameter
+/// declarators permit one (§6.7.5.3), and abstract declarators forbid
+/// one (§6.7.6). Everything else — pointer prefix, array / function
+/// suffixes, type-qualifier lists — is shared across all three.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum DeclCtx {
+    /// Regular declarator: the atom must be an identifier (or a
+    /// nested concrete declarator). Missing atom → diagnostic +
+    /// [`parse_declarator`] returns `None`.
+    Concrete,
+    /// Parameter declarator (§6.7.5.3p10): the atom is optional; a
+    /// name is accepted but not required, and the parser decides
+    /// `(` ambiguity via one-token lookahead.
+    Param,
+    /// Abstract declarator (§6.7.6): the atom is optional and MUST
+    /// NOT be a name. If an ident appears, we emit E0062 and discard
+    /// it as recovery so the rest of the surrounding construct
+    /// (cast / sizeof / compound literal / param type) parses clean.
+    Abstract,
+}
+
 /// Parse a C99 *declarator* (§6.7.5), including leading pointer
 /// modifiers, the identifier (or nested `(declarator)`), and any
 /// trailing array / function suffixes.
 ///
 /// The returned [`Declarator::derived`] chain is outer-to-inner as
-/// described above. Abstract declarators (identifier omitted) are
-/// out of scope for this task — task 05-20 adds them — but the
-/// parameter-list path already tolerates a missing name so that
-/// prototype parameters like `int f(int, char)` work without
-/// recursing into full abstract-declarator territory.
+/// described above. Callers that need an *abstract* declarator —
+/// type-name position in `sizeof(T)`, casts `(T)e`, compound literals
+/// `(T){...}`, and parameter-type lists with an omitted name — use
+/// [`parse_abstract_declarator`] instead. The three flavours share
+/// the pointer-prefix / suffix-loop machinery via a private
+/// [`DeclCtx`] flag; only the atom-parsing step differs.
 pub fn parse_declarator(p: &mut Parser<'_>) -> Option<Declarator> {
+    parse_declarator_in_ctx(p, DeclCtx::Concrete)
+}
+
+/// Parse a C99 *abstract-declarator* (§6.7.6) — same shape as a
+/// concrete declarator but with the identifier atom forbidden. The
+/// result always has `name = None`; if a name appears in source we
+/// emit E0062 and drop it as recovery.
+///
+/// Abstract declarators never fail: the grammar allows an entirely
+/// empty abstract declarator (e.g. in `sizeof(int)` the abstract
+/// declarator is literally zero tokens), so this function always
+/// returns a `Declarator` — the `derived` chain may be empty. That
+/// is why the signature is `Declarator` and not `Option<Declarator>`.
+pub fn parse_abstract_declarator(p: &mut Parser<'_>) -> Declarator {
+    parse_declarator_in_ctx(p, DeclCtx::Abstract)
+        .expect("abstract declarator parsing never returns None")
+}
+
+/// Parse a C99 *type-name* (§6.7.6): a specifier-qualifier-list
+/// followed by an optional abstract declarator.
+///
+/// The grammar production is:
+///
+/// ```text
+/// type-name:
+///     specifier-qualifier-list abstract-declarator?
+/// ```
+///
+/// Strictly speaking, `type-name` does not permit a *storage-class-
+/// specifier* or a *function-specifier*, only specifiers and
+/// qualifiers. We reuse [`parse_decl_specs`] for symmetry (it handles
+/// typedef-name recognition and the type-specifier multiset checks
+/// already) and rely on a later pass to enforce the narrower rule;
+/// the parser only cares that specs + abstract-declarator form a
+/// well-shaped span here.
+pub fn parse_type_name(p: &mut Parser<'_>) -> TypeName {
+    let start = p.cur_span();
+    let specs = parse_decl_specs(p).unwrap_or_default();
+    let declarator = parse_abstract_declarator(p);
+    let end = last_consumed_span(p, start);
+    TypeName { specs, declarator, span: start.to(end) }
+}
+
+/// Shared declarator engine. Pointer prefix + atom (ctx-dependent) +
+/// suffix loop, with the chain folded the same way regardless of
+/// flavour.
+///
+/// Abstract / parameter declarators may consume *zero* tokens (e.g.
+/// the abstract declarator inside `sizeof(int)` is empty, and the
+/// parser is already past end-of-input when the outer `parse_type_
+/// name` calls us). In that case we return `start` as the span
+/// unchanged — [`Span::to`] would otherwise debug-assert on a merge
+/// between the `DUMMY_SP` returned by [`Parser::cur_span`] at EOF
+/// and the last consumed token's span.
+fn parse_declarator_in_ctx(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<Declarator> {
+    let start_cursor = p.cursor;
     let start = p.cur_span();
     let pointer_prefix = parse_pointer_prefix(p);
-    let (name, mut chain) = parse_direct_declarator(p)?;
+    let (name, mut chain) = parse_declarator_atom(p, ctx)?;
+    parse_declarator_suffixes(p, &mut chain);
     // Pointer prefix modifiers wrap the *whole* direct-declarator from
     // the outside in the source but fold INSIDE of its suffixes in the
     // inside-out type, so they append after the direct-declarator's
@@ -783,8 +863,9 @@ pub fn parse_declarator(p: &mut Parser<'_>) -> Option<Declarator> {
     // closest to the direct-declarator and therefore applies first:
     // reverse the source order when stitching.
     chain.extend(pointer_prefix.into_iter().rev());
-    let end = last_consumed_span(p, start);
-    Some(Declarator { name, derived: chain, span: start.to(end) })
+    let span =
+        if p.cursor == start_cursor { start } else { start.to(last_consumed_span(p, start)) };
+    Some(Declarator { name, derived: chain, span })
 }
 
 /// Consume zero or more `*` pointer tokens together with any
@@ -841,46 +922,130 @@ fn parse_type_qualifier_list(p: &mut Parser<'_>) -> TypeQuals {
 /// the way out, in outer-to-inner order.
 type DirectDecl = (Option<(Symbol, Span)>, Vec<DerivedDeclarator>);
 
-/// Parse a *direct-declarator*: the identifier atom (or a nested
-/// `( declarator )`) followed by any number of `[...]` / `(...)`
-/// suffixes.
+/// Parse the atom of a direct-declarator: either an identifier, a
+/// nested `( declarator )`, or nothing (for parameter / abstract
+/// declarators that may start directly with a suffix or be empty).
 ///
-/// Returns `(name, chain)` where `chain` is outer-to-inner starting
-/// from whatever operation the direct-declarator's outermost suffix
-/// contributes. A missing atom (neither `IDENT` nor `(` present) is
-/// reported as an error and `None` is returned so the outer declarator
-/// parser can bail. Parameter declarators that may legally lack a
-/// name go through [`parse_param_declarator`] instead.
-fn parse_direct_declarator(p: &mut Parser<'_>) -> Option<DirectDecl> {
-    let (name, mut chain) = match p.peek() {
+/// Returns `(name, chain)` where `chain` is the *inner* chain
+/// contributed by a nested declarator, if any; the caller runs the
+/// suffix loop afterwards. Missing atom:
+///
+/// - `Concrete` — diagnosed, returns `None` so the outer parser can
+///   bail.
+/// - `Param` / `Abstract` — legal (the declarator may be empty or
+///   start with a suffix); returns `Some((None, vec![]))`.
+///
+/// `Abstract` context additionally rejects an identifier atom with
+/// E0062 and recovers by discarding the name.
+///
+/// ## `(` disambiguation in Param / Abstract contexts
+///
+/// A `(` at the atom slot could open either a nested declarator or
+/// a function-suffix acting on an empty direct-abstract-declarator.
+/// We peek one token past the `(`:
+///
+/// - `*`, `(`, `[`        — nested declarator (prefix / nested paren /
+///   leading array, which direct-declarator can start with in a
+///   nested position) — `Param`: a non-typedef ident also qualifies.
+/// - anything else        — the `(` is a function suffix on an empty
+///   direct-declarator; leave it untouched for the suffix loop.
+///
+/// Concrete declarators always recurse on `(` because a concrete
+/// declarator must contain an identifier somewhere, so a top-level
+/// `(` must be wrapping it (`(*fp)(int)` shape).
+fn parse_declarator_atom(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<DirectDecl> {
+    match p.peek() {
         Some(tok) => match tok.kind {
             TokenKind::Ident(sym) => {
                 let span = tok.span;
                 p.bump();
-                (Some((sym, span)), Vec::new())
+                match ctx {
+                    DeclCtx::Concrete | DeclCtx::Param => Some((Some((sym, span)), Vec::new())),
+                    DeclCtx::Abstract => {
+                        p.session
+                            .handler
+                            .struct_err(span, "abstract declarator cannot contain a name")
+                            .code(codes::E0062)
+                            .emit();
+                        Some((None, Vec::new()))
+                    }
+                }
             }
             TokenKind::Punct(Punct::LParen) => {
-                p.bump();
-                let inner = parse_declarator(p)?;
-                expect_rparen(p, "declarator");
-                (inner.name, inner.derived)
+                let is_nested = match ctx {
+                    DeclCtx::Concrete => true,
+                    _ => looks_like_nested_declarator(p, p.cursor + 1, ctx),
+                };
+                if is_nested {
+                    p.bump();
+                    let inner = parse_declarator_in_ctx(p, ctx);
+                    match inner {
+                        Some(d) => {
+                            expect_rparen(p, "declarator");
+                            Some((d.name, d.derived))
+                        }
+                        None => {
+                            // Concrete-only failure path: consume `)`
+                            // for recovery so the outer parser doesn't
+                            // spin on it, then propagate the failure.
+                            expect_rparen(p, "declarator");
+                            None
+                        }
+                    }
+                } else {
+                    // `(` is a function suffix on an empty direct-
+                    // declarator; leave it for the suffix loop.
+                    Some((None, Vec::new()))
+                }
             }
-            _ => {
-                let sp = tok.span;
-                p.session.handler.struct_err(sp, "expected identifier or `(` in declarator").emit();
-                return None;
-            }
+            _ => match ctx {
+                DeclCtx::Concrete => {
+                    let sp = tok.span;
+                    p.session
+                        .handler
+                        .struct_err(sp, "expected identifier or `(` in declarator")
+                        .emit();
+                    None
+                }
+                _ => Some((None, Vec::new())),
+            },
         },
-        None => {
-            p.session
-                .handler
-                .struct_err(p.cur_span(), "expected declarator but found end of input")
-                .emit();
-            return None;
-        }
-    };
-    parse_declarator_suffixes(p, &mut chain);
-    Some((name, chain))
+        None => match ctx {
+            DeclCtx::Concrete => {
+                p.session
+                    .handler
+                    .struct_err(p.cur_span(), "expected declarator but found end of input")
+                    .emit();
+                None
+            }
+            _ => Some((None, Vec::new())),
+        },
+    }
+}
+
+/// One-token lookahead used by [`parse_declarator_atom`] to decide
+/// whether a `(` at the atom position of a Param / Abstract declarator
+/// opens a nested declarator or a function suffix on an empty direct-
+/// declarator. See the docstring on the caller for the full table.
+fn looks_like_nested_declarator(p: &Parser<'_>, at: usize, ctx: DeclCtx) -> bool {
+    match p.tokens.get(at).map(|t| &t.kind) {
+        Some(TokenKind::Punct(Punct::Star)) => true,
+        Some(TokenKind::Punct(Punct::LParen)) => true,
+        Some(TokenKind::Punct(Punct::LBracket)) => true,
+        Some(TokenKind::Ident(sym)) => match ctx {
+            // A non-typedef ident inside a parameter atom is almost
+            // certainly the name of a concrete nested declarator;
+            // a typedef-name is the start of a parameter type.
+            DeclCtx::Param => !p.scopes.is_typedef(*sym),
+            // Abstract declarators never contain names; any ident
+            // here (typedef or not) belongs to a following parameter
+            // list parsed as a function suffix.
+            DeclCtx::Abstract => false,
+            // Concrete context never reaches this helper.
+            DeclCtx::Concrete => true,
+        },
+        _ => false,
+    }
 }
 
 /// Run the trailing `[...]` / `(...)` suffix loop of a direct-
@@ -1062,73 +1227,16 @@ fn parse_function_suffix(p: &mut Parser<'_>) -> FunctionDeclarator {
     FunctionDeclarator { params, is_void, variadic, kr_names }
 }
 
-/// Parse a parameter declarator — the same shape as
-/// [`parse_declarator`] but with the atom slot optional, because a
-/// prototype parameter may omit the identifier entirely (e.g.
-/// `int f(int, char)`). When neither an `IDENT` nor a nested
-/// `( declarator )` is available we return a declarator with
-/// `name = None` and an empty chain; any leading pointer prefix still
-/// folds in normally so `int f(int *, int *const)` continues to work.
+/// Parse a parameter declarator — the shared engine is
+/// [`parse_declarator_in_ctx`] with the [`DeclCtx::Param`] flavour.
+/// A parameter declarator's atom is optional (prototype parameters
+/// may omit the identifier entirely — `int f(int, char)` — and may
+/// also contain a full nested concrete declarator for function-
+/// pointer parameters like `int f(int (*pf)(int))`), so this call
+/// site never returns `None`.
 fn parse_param_declarator(p: &mut Parser<'_>) -> Declarator {
-    let start = p.cur_span();
-    let pointer_prefix = parse_pointer_prefix(p);
-
-    let mut name: Option<(Symbol, Span)> = None;
-    let mut chain: Vec<DerivedDeclarator> = Vec::new();
-    if let Some(tok) = p.peek() {
-        match tok.kind {
-            TokenKind::Ident(sym) => {
-                let span = tok.span;
-                p.bump();
-                name = Some((sym, span));
-            }
-            TokenKind::Punct(Punct::LParen) => {
-                // A `(` at the atom position of a parameter declarator
-                // could begin either a nested declarator (concrete,
-                // e.g. `int (*pf)(int)`) or an abstract function-
-                // suffix (`int (int)` — a function-pointer-less
-                // parameter whose type is "function of int"). We only
-                // recurse into a nested declarator when the lookahead
-                // past the `(` looks like the start of another
-                // declarator; otherwise we fall through to the suffix
-                // loop, where the `(` is read as a function suffix.
-                // Full abstract-declarator disambiguation lands in
-                // task 05-20.
-                let looks_nested = looks_like_declarator_start(p, p.cursor + 1);
-                if looks_nested {
-                    p.bump();
-                    if let Some(inner) = parse_declarator(p) {
-                        name = inner.name;
-                        chain = inner.derived;
-                    }
-                    expect_rparen(p, "declarator");
-                }
-            }
-            _ => {}
-        }
-    }
-    parse_declarator_suffixes(p, &mut chain);
-    chain.extend(pointer_prefix.into_iter().rev());
-    let end = last_consumed_span(p, start);
-    Declarator { name, derived: chain, span: start.to(end) }
-}
-
-/// Cheap one-token lookahead to decide whether a `(` inside a
-/// parameter's atom slot starts a nested concrete declarator
-/// (`(*pf)(int)`) or a function suffix on an abstract parameter
-/// (`int(int)`). We treat leading `*` or another `(` — both of which
-/// cannot start a *parameter-declaration* on their own — as hints of
-/// a nested declarator; anything else (a keyword / type-specifier)
-/// is interpreted as the start of a parameter list. This heuristic
-/// is good enough for the subset handled by this task; task 05-20
-/// refines it with full abstract-declarator lookahead.
-fn looks_like_declarator_start(p: &Parser<'_>, at: usize) -> bool {
-    match p.tokens.get(at).map(|t| &t.kind) {
-        Some(TokenKind::Punct(Punct::Star)) => true,
-        Some(TokenKind::Punct(Punct::LParen)) => true,
-        Some(TokenKind::Ident(sym)) => !p.scopes.is_typedef(*sym),
-        _ => false,
-    }
+    parse_declarator_in_ctx(p, DeclCtx::Param)
+        .expect("parameter declarator parsing never returns None")
 }
 
 /// Consume a `)` if present, or emit a "expected `)`" diagnostic
@@ -1839,8 +1947,9 @@ mod tests {
     #[test]
     fn missing_name_errors() {
         // `*` on its own is not a valid concrete declarator — the
-        // name is mandatory in this task (abstract declarators live
-        // in task 05-20).
+        // name is mandatory here; abstract-declarator parsing lives
+        // in [`parse_abstract_declarator`] and is exercised by the
+        // §6.7.6 tests further below.
         let src = "*";
         let (mut sess, fid, cap) = mk_session(src);
         let tokens = tokens_from_src(&mut sess, fid, src);
@@ -1849,5 +1958,139 @@ mod tests {
         assert!(d.is_none(), "missing name should bail");
         let diags = cap.diagnostics();
         assert!(!diags.is_empty(), "expected a diagnostic");
+    }
+
+    // ── Abstract declarator + type-name (C99 §6.7.6) ────────────────
+    //
+    // `parse_type_name` wraps `parse_decl_specs` + `parse_abstract_
+    // declarator`; exercising it end-to-end keeps the helpers below
+    // small.
+
+    fn parse_tn(src: &str) -> (TypeName, usize, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let total = tokens.len();
+        let mut parser = Parser::new(&mut sess, tokens);
+        let tn = parse_type_name(&mut parser);
+        let remaining = total.saturating_sub(parser.cursor);
+        (tn, remaining, cap.diagnostics(), sess)
+    }
+
+    #[test]
+    fn type_name_plain_int_parses() {
+        // `int` — bare type-name with an empty abstract declarator.
+        let (tn, rem, diags, _sess) = parse_tn("int");
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+        assert!(tn.declarator.name.is_none());
+        assert!(tn.declarator.derived.is_empty());
+        assert_eq!(rem, 0);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn type_name_pointer_parses() {
+        // `int *` — pointer abstract declarator.
+        let (tn, _rem, diags, _sess) = parse_tn("int *");
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+        assert!(tn.declarator.name.is_none());
+        assert!(matches!(tn.declarator.derived.as_slice(), [DerivedDeclarator::Pointer(_)]));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn type_name_pointer_qualified_parses() {
+        // `int *const` — a const-qualified pointer. The qualifier
+        // sits on the pointer, not the pointee (§6.7.5.1p1).
+        let (tn, _rem, diags, _sess) = parse_tn("int *const");
+        match tn.declarator.derived.as_slice() {
+            [DerivedDeclarator::Pointer(q)] => {
+                assert!(q.const_ && !q.volatile);
+            }
+            other => panic!("expected [Pointer(const)], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn type_name_array_parses() {
+        // `int [3]` — abstract declarator is a sole `[3]` suffix.
+        let (tn, _rem, diags, sess) = parse_tn("int [3]");
+        assert!(tn.declarator.name.is_none());
+        match tn.declarator.derived.as_slice() {
+            [DerivedDeclarator::Array(a)] => {
+                let s = a.size.as_ref().expect("size present");
+                assert_eq!(int_lit_text(s, &sess), "3");
+            }
+            other => panic!("expected [Array(3)], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn type_name_function_pointer_parses() {
+        // `int (*)(int)` — function pointer. This is the canonical
+        // acceptance shape for task 05-20. Chain must be exactly
+        // [Pointer, Function(int)]: the abstract declarator reads
+        // the nested `(*)`, then the outer `(int)` attaches as a
+        // function suffix of the whole parenthesised atom.
+        let (tn, _rem, diags, _sess) = parse_tn("int (*)(int)");
+        assert!(tn.declarator.name.is_none());
+        match tn.declarator.derived.as_slice() {
+            [DerivedDeclarator::Pointer(_), DerivedDeclarator::Function(fd)] => {
+                assert_eq!(fd.params.len(), 1);
+                assert!(matches!(fd.params[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(fd.params[0].declarator.name.is_none());
+            }
+            other => panic!("expected [Pointer, Function(int)], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn type_name_with_name_errors_e0062() {
+        // `int *foo` where a type-name was expected: `foo` is a name
+        // and abstract declarators must not carry one — E0062.
+        // Recovery keeps the rest of the shape so the pointer chain
+        // still lands in the declarator.
+        let (tn, _rem, diags, _sess) = parse_tn("int *foo");
+        assert_eq!(codes_of(&diags), vec!["E0062"], "{diags:?}");
+        assert!(tn.declarator.name.is_none(), "name recovered away");
+        assert!(matches!(tn.declarator.derived.as_slice(), [DerivedDeclarator::Pointer(_)]));
+    }
+
+    #[test]
+    fn param_with_nested_abstract_function_pointer_parses() {
+        // Regression for the shared atom-parser: now that parameter
+        // declarators recurse with ctx=Param, a nested abstract
+        // function-pointer parameter (`int (*)(int)` inside a
+        // parameter list) parses correctly. Before task 05-20 the
+        // nested recursion was Concrete, which required an ident.
+        let (d, _rem, diags, sess) = parse_decl("f(int (*)(int))");
+        assert_name(&d, &sess, "f");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert_eq!(fd.params.len(), 1);
+                let p0 = &fd.params[0];
+                assert!(p0.declarator.name.is_none());
+                match p0.declarator.derived.as_slice() {
+                    [DerivedDeclarator::Pointer(_), DerivedDeclarator::Function(inner)] => {
+                        assert_eq!(inner.params.len(), 1);
+                    }
+                    other => panic!("expected [Pointer, Function] param, got {other:?}"),
+                }
+            }
+            other => panic!("expected Function([nested abstract]), got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn type_name_span_covers_all_consumed_tokens() {
+        // End-to-end span: type-name's span must span from the first
+        // specifier token to the last declarator token.
+        let src = "int (*)(int)";
+        let (tn, _rem, _diags, _sess) = parse_tn(src);
+        assert_eq!(tn.span.lo.0, 0);
+        assert_eq!(tn.span.hi.0 as usize, src.len());
     }
 }

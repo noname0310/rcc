@@ -63,6 +63,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0041, E0041_DESC),
     (E0060, E0060_DESC),
     (E0061, E0061_DESC),
+    (E0062, E0062_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -291,6 +292,19 @@ const E0060_DESC: &str = "conflicting storage-class specifiers";
 /// that breaks the combination.
 pub const E0061: &str = "E0061";
 const E0061_DESC: &str = "invalid combination of type specifiers";
+
+/// Declarator carries a name where an abstract declarator was
+/// required.
+///
+/// C99 §6.7.6 defines `type-name : specifier-qualifier-list
+/// abstract-declarator?`. An *abstract* declarator — the kind that
+/// appears inside `sizeof(T)`, casts `(T)e`, compound literals
+/// `(T){...}`, and parameter-type lists — lacks the identifier atom
+/// of a concrete declarator (§6.7.5). Writing a name there is a
+/// constraint violation; the parser recovers by discarding the name
+/// so the rest of the construct still lowers cleanly.
+pub const E0062: &str = "E0062";
+const E0062_DESC: &str = "abstract declarator cannot contain a name";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 05-20: Abstract declarators
 
 **Phase:** 05-parse    **Depends on:** 05-19    **Milestone:** M1+
