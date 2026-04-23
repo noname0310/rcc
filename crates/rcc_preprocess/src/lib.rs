@@ -16,6 +16,7 @@ use rcc_lexer::{PpToken, PpTokenKind, Punct};
 use rcc_session::Session;
 use rcc_span::{BytePos, FileId, Span, Symbol};
 
+pub mod cond_stack;
 pub mod directive;
 pub mod expand;
 pub mod guard;
@@ -24,6 +25,7 @@ pub mod include;
 pub mod line_stream;
 pub mod macros;
 
+pub use cond_stack::{CondFrame, CondStack};
 pub use directive::{parse_directive, ConditionalKind, Directive};
 pub use expand::expand_line;
 pub use guard::detect_guard;
@@ -74,12 +76,28 @@ impl<'a> Preprocessor<'a> {
     /// Run preprocessing and return the expanded token stream.
     ///
     /// Directive lines apply their side effects (`#define` / `#undef`
-    /// populate [`Self::macros`]; other directive variants are parsed
-    /// and then skipped pending later tasks 04-13 / 04-14 / 04-15 /
-    /// 04-16). Non-directive lines are fed through Prosser's
-    /// hide-set macro expander (task 04-08), and the rescanned tokens
-    /// are concatenated into the returned stream. Newline separators
-    /// are consumed by [`line_stream::LineStream`] and not re-emitted.
+    /// populate [`Self::macros`]; conditional directives drive a
+    /// per-file [`CondStack`] state machine; other directive variants
+    /// are parsed and then skipped pending later tasks 04-15 / 04-16).
+    /// Non-directive lines are fed through Prosser's hide-set macro
+    /// expander (task 04-08), and the rescanned tokens are
+    /// concatenated into the returned stream. Newline separators are
+    /// consumed by [`line_stream::LineStream`] and not re-emitted.
+    ///
+    /// ### Conditional compilation (task 04-14)
+    ///
+    /// A fresh [`CondStack`] is created at entry and torn down at
+    /// exit, so each translation unit / `#include`d file starts with
+    /// an empty nesting. Lines are filtered by
+    /// [`CondStack::is_active`]: inactive branches skip token output
+    /// and suppress every non-conditional directive (no `#define`
+    /// installs a macro; no `#include` is resolved). The
+    /// `#if`/`#elif` controlling expression is evaluated *only* when
+    /// the parent stack is already active, matching GCC/Clang and
+    /// preventing dead-code E0028 (e.g. `#if 0 ... #if 1/0`). If any
+    /// frames remain open at end of file, one E0018 is emitted per
+    /// frame, each pointing at its originating `#if`/`#ifdef`/
+    /// `#ifndef` keyword.
     ///
     /// Before any source is seen, [`Self::install_cli_defines`] and
     /// [`Self::install_predefined`] seed the macro table in that
@@ -98,18 +116,29 @@ impl<'a> Preprocessor<'a> {
 
         let mut out: Vec<PpToken> = Vec::new();
         let mut ls = line_stream::LineStream::new(tokens.into_iter());
+        let mut cond = cond_stack::CondStack::new();
         while let Some(line) = ls.next_line() {
             if is_directive_line(&line) {
                 // Null directive (`#` alone): no side effect, no output.
                 if line.len() == 1 {
                     continue;
                 }
-                self.dispatch_directive(&line, &src);
+                self.dispatch_directive(&line, &src, &mut cond);
                 continue;
             }
-            // Non-directive: run Prosser expansion.
+            if !cond.is_active() {
+                continue;
+            }
             let expanded = self.expand_tokens(line);
             out.extend(expanded);
+        }
+
+        // Unterminated `#if` / `#ifdef` / `#ifndef` at end of file.
+        // One diagnostic per still-open frame, each labelled at its
+        // own opening keyword — helps when several groups were nested.
+        for frame in cond.into_unclosed() {
+            let diag = cond_stack::missing_endif(frame.open_span);
+            self.session.handler.emit(&diag);
         }
 
         out
@@ -265,7 +294,39 @@ impl<'a> Preprocessor<'a> {
     ///
     /// Caller must guarantee `line` starts with `#` at line-start and
     /// has at least two tokens (see [`is_directive_line`]).
-    fn dispatch_directive(&mut self, line: &[PpToken], src: &str) {
+    ///
+    /// Conditional-control directives (`#if` / `#ifdef` / `#ifndef` /
+    /// `#elif` / `#else` / `#endif`) always participate in the
+    /// [`CondStack`] state machine — even inside an already-inactive
+    /// region they must bump the nesting so the matching `#endif`
+    /// pops the right frame. Every other directive is skipped
+    /// entirely when [`CondStack::is_active`] is false: no
+    /// diagnostics are produced for malformed `#define`s in dead
+    /// code, no `#error` fires, no macro table changes.
+    fn dispatch_directive(
+        &mut self,
+        line: &[PpToken],
+        src: &str,
+        cond: &mut cond_stack::CondStack,
+    ) {
+        // Peek the directive name so we can identify conditional
+        // control directives without running the full parser (and
+        // therefore without emitting unrelated diagnostics while in
+        // a skipped branch). Line layout: [0] = `#`, [1] = name.
+        let name_kind = is_conditional_by_name(line, src);
+
+        if let Some(kind) = name_kind {
+            self.dispatch_conditional(line, src, cond, kind);
+            return;
+        }
+
+        // Non-conditional directive: if we're inside an inactive
+        // region, drop the line with no parsing, no diagnostics, no
+        // side effects. C99 §6.10p5 calls this "skipping groups".
+        if !cond.is_active() {
+            return;
+        }
+
         match directive::parse_directive(line, src, &mut self.session.interner) {
             Ok(directive::Directive::Define(def)) => {
                 let result = {
@@ -288,27 +349,131 @@ impl<'a> Preprocessor<'a> {
                     self.session.handler.emit(&diag);
                 }
             }
-            Ok(directive::Directive::Conditional {
-                kind: directive::ConditionalKind::If | directive::ConditionalKind::ElIf,
-                condition,
-                ..
-            }) => {
-                // Task 04-13: evaluate the controlling expression
-                // purely for its side-effects (diagnostics). The
-                // conditional-stack state machine that actually uses
-                // the truth value to skip branches is task 04-14;
-                // until it lands, evaluating here simply surfaces
-                // E0028 for division-by-zero and similar.
-                let _ = self.eval_conditional(&condition);
-            }
-            // Other directives (Include / Line / Error / Pragma, plus
-            // the `#ifdef`/`#ifndef`/`#else`/`#endif` conditional
-            // variants) are parsed-but-not-dispatched here; later
-            // tasks (04-14 conditional stack, 04-15 #line, 04-16
-            // #error/pragma) take them.
+            // Other directives (Include / Line / Error / Pragma) are
+            // parsed-but-not-dispatched here; later tasks (04-15
+            // #line, 04-16 #error/pragma) take them. Conditional
+            // variants are routed above.
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
         }
+    }
+
+    /// Drive [`CondStack`] for a conditional-control directive. Called
+    /// from [`Self::dispatch_directive`] regardless of current
+    /// active-ness so the nesting counter stays consistent.
+    fn dispatch_conditional(
+        &mut self,
+        line: &[PpToken],
+        src: &str,
+        cond: &mut cond_stack::CondStack,
+        kind: directive::ConditionalKind,
+    ) {
+        // `keyword_span` labels the `#<name>` introducer; used for
+        // E0016/E0017/E0018 so the diagnostic points at the offending
+        // directive rather than at its whole tail. `line` always has
+        // at least 2 tokens by [`is_directive_line`]/length guard.
+        let keyword_span = line[0].span.to(line[1].span);
+
+        // We defer parsing of the directive's tail as much as possible
+        // so dead-branch directives leave no diagnostic footprint.
+        // Only `#if` / `#elif` / `#ifdef` / `#ifndef` carry a body
+        // whose parsing we can shortcut; `#else` / `#endif` are pure.
+        match kind {
+            directive::ConditionalKind::If => {
+                let parent_active = cond.is_active();
+                let value = if parent_active {
+                    self.eval_if_line(line, src).unwrap_or(false)
+                } else {
+                    false
+                };
+                cond.push_if(value, keyword_span);
+            }
+            directive::ConditionalKind::IfDef => {
+                let parent_active = cond.is_active();
+                let value = if parent_active {
+                    self.eval_ifdef_line(line, src, keyword_span, false).unwrap_or(false)
+                } else {
+                    false
+                };
+                cond.push_if(value, keyword_span);
+            }
+            directive::ConditionalKind::IfNDef => {
+                let parent_active = cond.is_active();
+                let value = if parent_active {
+                    self.eval_ifdef_line(line, src, keyword_span, true).unwrap_or(false)
+                } else {
+                    false
+                };
+                cond.push_if(value, keyword_span);
+            }
+            directive::ConditionalKind::ElIf => {
+                // Borrow-checker dance: `on_elif` holds `&mut cond`,
+                // and the closure it wants to call needs `&mut self`.
+                // We side-step the conflict by snapshotting whether
+                // evaluation is even needed (parent active + no
+                // prior branch taken + no prior `#else`) from the
+                // frame state, then running evaluation before the
+                // stack transition.
+                let would_evaluate = cond.parent_active() && needs_elif_eval(cond);
+                let value = if would_evaluate {
+                    self.eval_if_line(line, src).unwrap_or(false)
+                } else {
+                    false
+                };
+                if let Some(diag) = cond.on_elif(|| value, keyword_span) {
+                    self.session.handler.emit(&diag);
+                }
+            }
+            directive::ConditionalKind::Else => {
+                if let Some(diag) = cond.on_else(keyword_span) {
+                    self.session.handler.emit(&diag);
+                }
+            }
+            directive::ConditionalKind::EndIf => {
+                if let Some(diag) = cond.on_endif(keyword_span) {
+                    self.session.handler.emit(&diag);
+                }
+            }
+        }
+    }
+
+    /// Helper for [`Self::dispatch_conditional`]: run [`if_eval::eval_if`]
+    /// on the tail of a `#if` / `#elif` line. Returns `None` on a
+    /// controlling-expression diagnostic (already emitted through
+    /// [`Self::eval_conditional`]); callers treat that as a false
+    /// branch so the stack state stays well-defined.
+    fn eval_if_line(&mut self, line: &[PpToken], _src: &str) -> Option<bool> {
+        let tail = &line[2..];
+        let raw = self.eval_conditional(tail)?;
+        Some(raw != 0)
+    }
+
+    /// Helper: run the `#ifdef` / `#ifndef` identifier lookup. Returns
+    /// `None` on E0015 (already emitted). The identifier is
+    /// interned anew per call; lookup is O(1) against the macro
+    /// table.
+    fn eval_ifdef_line(
+        &mut self,
+        line: &[PpToken],
+        src: &str,
+        keyword_span: Span,
+        is_ndef: bool,
+    ) -> Option<bool> {
+        let tail = &line[2..];
+        let Some(tok) = tail.first() else {
+            let diag = cond_stack::expected_ident_after_ifdef(keyword_span, is_ndef);
+            self.session.handler.emit(&diag);
+            return None;
+        };
+        if tok.kind != PpTokenKind::Ident {
+            let diag = cond_stack::expected_ident_after_ifdef(tok.span, is_ndef);
+            self.session.handler.emit(&diag);
+            return None;
+        }
+        let text = &src[tok.span.lo.0 as usize..tok.span.hi.0 as usize];
+        let sym = self.session.interner.intern(text);
+        let defined = self.macros.is_defined(sym);
+        Some(if is_ndef { !defined } else { defined })
     }
 
     /// Evaluate the controlling expression of a `#if` / `#elif` and
@@ -344,6 +509,56 @@ fn is_directive_line(line: &[PpToken]) -> bool {
     line.first()
         .map(|t| matches!(t.kind, PpTokenKind::Punct(Punct::Hash)) && t.at_line_start)
         .unwrap_or(false)
+}
+
+/// Identify the conditional-control directive at the head of `line`
+/// without invoking the full directive parser. Returns the matching
+/// [`directive::ConditionalKind`] for `#if` / `#ifdef` / `#ifndef` /
+/// `#elif` / `#else` / `#endif`, and `None` for any other directive
+/// (or a malformed `#<not-an-ident>` line).
+///
+/// The lightweight probe matters in skipped branches: a dead-group
+/// `#define 123` must not reach the full parser (which would emit
+/// E0014), but we still need to notice that e.g. `#if 1/0` inside
+/// the dead group is a new nesting level. Matching on the raw
+/// directive-name text is sufficient and sidesteps the parser
+/// entirely.
+fn is_conditional_by_name(line: &[PpToken], src: &str) -> Option<directive::ConditionalKind> {
+    // `is_directive_line` guards `line[0] == Hash`; `dispatch_directive`
+    // guards `line.len() >= 2`. The name slot must therefore exist
+    // and be an identifier to name any directive at all.
+    let name_tok = line.get(1)?;
+    if name_tok.kind != PpTokenKind::Ident {
+        return None;
+    }
+    let name = &src[name_tok.span.lo.0 as usize..name_tok.span.hi.0 as usize];
+    match name {
+        "if" => Some(directive::ConditionalKind::If),
+        "ifdef" => Some(directive::ConditionalKind::IfDef),
+        "ifndef" => Some(directive::ConditionalKind::IfNDef),
+        "elif" => Some(directive::ConditionalKind::ElIf),
+        "else" => Some(directive::ConditionalKind::Else),
+        "endif" => Some(directive::ConditionalKind::EndIf),
+        _ => None,
+    }
+}
+
+/// Whether a `#elif`'s controlling expression should be evaluated
+/// given the current stack. Mirrors the condition under which
+/// [`cond_stack::CondStack::on_elif`] would actually call its
+/// closure: the stack must be non-empty, the current frame must not
+/// have taken a prior branch, and must not have seen `#else` yet.
+/// The parent-active predicate is checked separately at the call
+/// site (it is independent of the top frame).
+fn needs_elif_eval(cond: &cond_stack::CondStack) -> bool {
+    let n = cond.depth();
+    if n == 0 {
+        return false;
+    }
+    // SAFETY: depth() > 0, so the frame slice is non-empty. We need
+    // the top frame's `taken` / `else_seen` flags; expose them via
+    // a tiny accessor-less peek.
+    cond.top_needs_eval().unwrap_or(false)
 }
 
 /// Render the host's current UTC wall-clock time as the two strings
@@ -845,5 +1060,290 @@ mod run_tests {
             let def = pp.macros.get(*sym).unwrap_or_else(|| panic!("{label} must be defined"));
             assert!(def.is_predefined, "{label} must carry is_predefined=true");
         }
+    }
+
+    // ── Conditional-compilation state machine (task 04-14) ──────────
+
+    use rcc_errors::codes::{E0016, E0017, E0018};
+
+    #[test]
+    fn if_true_keeps_body() {
+        let (mut sess, id, cap) = seed("#if 1\nfoo\n#endif\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "foo");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn if_false_skips_body() {
+        let (mut sess, id, cap) = seed("#if 0\nfoo\n#endif\nbar\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "bar", "dead `#if 0` body must be skipped");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn else_branch_materialises_when_if_false() {
+        let (mut sess, id, cap) = seed("#if 0\nlive\n#else\ndead\n#endif\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "dead");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_deeply_nested_combos() {
+        // Four nesting levels; only the innermost A=1/B=1 combo reaches
+        // `hit`. A distinctive sentinel per dead branch lets us be sure
+        // we didn't simply pick the wrong slot.
+        let src = "\
+#if 1
+#if 1
+#if 1
+#if 1
+hit
+#else
+dead4
+#endif
+#else
+dead3
+#endif
+#else
+dead2
+#endif
+#else
+dead1
+#endif
+";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "hit");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_inner_if_in_dead_outer_stays_dead() {
+        // Inner `#if 1` must still be dead because outer `#if 0` is.
+        // The matching `#endif` must still pop the inner frame so the
+        // trailing `bar` is emitted outside both groups.
+        let src = "#if 0\n#if 1\nfoo\n#endif\n#endif\nbar\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "bar");
+        assert!(
+            cap.diagnostics().is_empty(),
+            "nested conditionals in a dead group must not diagnose: {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn acceptance_define_in_dead_branch_has_no_side_effect() {
+        // §6.10p5: skipped groups do not execute any directive. A
+        // `#define` inside the dead side must not install the macro.
+        let src = "#if 0\n#define SHOULD_NOT_APPEAR 1\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let sym = sess.interner.intern("SHOULD_NOT_APPEAR");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        assert!(pp.macros.get(sym).is_none(), "dead-branch `#define` must not install a macro");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_malformed_define_in_dead_branch_is_silent() {
+        // Dead-group directive bodies are not diagnosed — `#define 123`
+        // would normally emit E0014, but inside `#if 0` it is skipped
+        // silently per §6.10p5.
+        let src = "#if 0\n#define 123\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        assert!(
+            cap.diagnostics().is_empty(),
+            "dead-branch malformed directives must not diagnose: {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn acceptance_elif_selects_first_true_branch() {
+        let src = "#if 0\none\n#elif 0\ntwo\n#elif 1\nthree\n#elif 1\nfour\n#else\nfive\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "three");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_elif_after_taken_does_not_evaluate_condition() {
+        // `#if 1` takes the branch; the `#elif 1/0` that follows is
+        // dead code and must not reach the `#if`-expression evaluator
+        // (which would otherwise surface E0028 for 1/0).
+        let src = "#if 1\nfoo\n#elif 1/0\nbar\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "foo");
+        assert!(
+            cap.diagnostics().is_empty(),
+            "dead `#elif` must not evaluate its controlling expression: {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn acceptance_ifdef_with_defined_name_takes_branch() {
+        let src = "#define FOO 1\n#ifdef FOO\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "yes");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_ifdef_with_undefined_name_skips_branch() {
+        let src = "#ifdef FOO\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "no");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_ifndef_mirrors_ifdef() {
+        let defined = "#define FOO 1\n#ifndef FOO\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(defined);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "no");
+        assert!(cap.diagnostics().is_empty());
+
+        let undefined = "#ifndef FOO\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(undefined);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "yes");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_duplicate_else_emits_e0017() {
+        let src = "#if 0\n#else\n#else\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0017)),
+            "duplicate `#else` must carry E0017, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn acceptance_elif_after_else_emits_e0017() {
+        let src = "#if 0\n#else\n#elif 1\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0017)),
+            "`#elif` after `#else` must carry E0017, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn acceptance_unmatched_endif_emits_e0016() {
+        let src = "#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0016 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0016));
+    }
+
+    #[test]
+    fn acceptance_unmatched_else_emits_e0017() {
+        let src = "#else\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0017)),
+            "bare `#else` must carry E0017, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn acceptance_missing_endif_at_eof_emits_e0018_labeled_at_if() {
+        let src = "#ifdef FOO\nbody\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        let e18: Vec<_> = diags.iter().filter(|d| d.code == Some(E0018)).collect();
+        assert_eq!(e18.len(), 1, "exactly one E0018 expected, got {diags:?}");
+        let label = e18[0].labels.iter().find(|l| l.primary).expect("primary label");
+        // The label must cover the `#ifdef` keyword — at byte offsets
+        // 0..6 in this single-file source (`#ifdef`).
+        assert_eq!(label.span.lo.0, 0, "E0018 should label the opening keyword");
+        assert_eq!(
+            label.span.hi.0, 6,
+            "E0018 primary label should cover `#ifdef` (got {:?})",
+            label.span
+        );
+    }
+
+    #[test]
+    fn acceptance_nested_unterminated_groups_all_surface() {
+        // Two unclosed groups → two E0018 diagnostics, each at its own
+        // opening keyword.
+        let src = "#if 1\n#ifdef FOO\nbody\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        let e18: Vec<_> = diags.iter().filter(|d| d.code == Some(E0018)).collect();
+        assert_eq!(e18.len(), 2, "one E0018 per unclosed frame, got {diags:?}");
+    }
+
+    #[test]
+    fn acceptance_ifdef_without_identifier_emits_e0015() {
+        use rcc_errors::codes::E0015;
+        let src = "#ifdef\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0015)),
+            "bare `#ifdef` must carry E0015, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn acceptance_dead_if_expression_is_not_evaluated() {
+        // `#if 1/0` inside a dead outer group would normally emit
+        // E0028 (division by zero), but §6.10p5 skipping suppresses
+        // the evaluation entirely.
+        let src = "#if 0\n#if 1/0\nfoo\n#endif\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        assert!(
+            cap.diagnostics().is_empty(),
+            "dead `#if 1/0` must not evaluate and not emit E0028: {:?}",
+            cap.diagnostics()
+        );
     }
 }

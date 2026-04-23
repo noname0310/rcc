@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-14: Conditional-compilation state machine
 
 **Phase:** 04-preprocess    **Depends on:** 04-13    **Milestone:** M5

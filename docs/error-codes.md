@@ -165,21 +165,49 @@ An `#endif` was found without a corresponding `#if` / `#ifdef` /
 
 ## E0017 — unmatched #else/#elif
 
-An `#else` or `#elif` appeared without an opening `#if`.
+An `#else` or `#elif` appears in a position the C99 §6.10.1 state
+machine does not allow. Three distinct constraint violations share
+this code:
+
+- **Bare `#else` / `#elif`** — no conditional group is currently
+  open, so there is nothing to branch off of.
+- **`#elif` after `#else`** — once the `#else` group has opened, no
+  further branches may be introduced; only `#endif` may close the
+  group.
+- **Duplicate `#else`** — a conditional group may contain at most
+  one `#else`.
 
 ```c
-#else  // error[E0017]: unmatched #else/#elif
+#else                         // error[E0017]: unmatched `#else`
+#endif
+
+#if 0
+#else
+#elif 1                       // error[E0017]: `#elif` after `#else`
+#endif
+
+#if 0
+#else
+#else                         // error[E0017]: duplicate `#else`
 #endif
 ```
 
+The diagnostic always labels the offending directive's keyword so
+the user can locate the transgressor at a glance. The conditional
+stack remains internally consistent after the report — a matching
+`#endif` later in the file still pops the group — so downstream
+parsing is not destabilised by a single misplaced branch.
+
 ## E0018 — missing #endif at end of file
 
-An `#if` / `#ifdef` / `#ifndef` was opened but never closed.
+An `#if` / `#ifdef` / `#ifndef` was opened but never closed. One
+diagnostic is emitted per still-open frame, each labelled at its
+own originating keyword so nested groups are easy to match up.
 
 ```c
 #ifdef FOO
 int x = 1;
-// error[E0018]: missing #endif at end of file
+// error[E0018]: missing `#endif` at end of file
 ```
 
 ## E0019 — unknown preprocessor directive
