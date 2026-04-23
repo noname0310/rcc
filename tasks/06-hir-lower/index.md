@@ -9,7 +9,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 ## Tasks (pick in order)
 
 - [x] [01-defid-assignment](01-defid-assignment.md)
-- [ ] [02-name-resolution-ordinary](02-name-resolution-ordinary.md)
+- [x] [02-name-resolution-ordinary](02-name-resolution-ordinary.md)
 - [ ] [03-name-resolution-tags](03-name-resolution-tags.md)
 - [ ] [04-name-resolution-labels](04-name-resolution-labels.md)
 - [ ] [05-typedef-expansion](05-typedef-expansion.md)

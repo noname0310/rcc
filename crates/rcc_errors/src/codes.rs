@@ -66,6 +66,8 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0061, E0061_DESC),
     (E0062, E0062_DESC),
     (E0063, E0063_DESC),
+    (E0070, E0070_DESC),
+    (E0071, E0071_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -328,6 +330,26 @@ const E0062_DESC: &str = "abstract declarator cannot contain a name";
 /// violation.
 pub const E0063: &str = "E0063";
 const E0063_DESC: &str = "K&R declaration names unknown parameter";
+
+// ── HIR lowering block: E0070..E0080 ────────────────────────────────
+
+/// Redeclaration of an identifier with conflicting linkage or type.
+///
+/// C99 §6.2.2p7: if within a translation unit the same identifier
+/// appears with both internal and external linkage the behaviour is
+/// undefined. `rcc` rejects this at lowering time rather than
+/// silently accepting the ambiguity.
+pub const E0070: &str = "E0070";
+const E0070_DESC: &str = "conflicting redeclaration";
+
+/// Use of an undeclared identifier.
+///
+/// C99 §6.5.1p2: an identifier shall designate an entity visible in
+/// the current scope. When lookup finds no binding, this error is
+/// emitted with a `help:` line suggesting similarly-named symbols if
+/// any exist within edit-distance 3.
+pub const E0071: &str = "E0071";
+const E0071_DESC: &str = "undeclared identifier";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

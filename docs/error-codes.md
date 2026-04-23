@@ -539,6 +539,32 @@ The parser recovers by discarding the name and keeping the rest of
 the declarator (pointer / array / function chain) so later passes
 can still report any further mistakes in the surrounding expression.
 
+## E0070 — conflicting redeclaration
+
+A redeclaration of an identifier with conflicting linkage or type.
+C99 §6.2.2p7: if within a translation unit the same identifier
+appears with both internal and external linkage the behaviour is
+undefined. `rcc` rejects this at lowering time.
+
+```c
+static int x;
+extern int x;   // error[E0070]: conflicting redeclaration of `x`
+```
+
+## E0071 — undeclared identifier
+
+An identifier is used that has not been declared in any visible scope.
+C99 §6.5.1p2: an identifier shall designate an entity visible in the
+current scope. A `help:` line suggests similarly-named symbols if any
+exist within edit-distance 3.
+
+```c
+int main(void) {
+    return coutn;  // error[E0071]: use of undeclared identifier `coutn`
+                   //   help: did you mean `count`?
+}
+```
+
 ---
 
 ## W0001 — unknown #pragma directive
