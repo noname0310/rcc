@@ -62,8 +62,9 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
 
     // The directory may already exist with rcc-tracked overlay files
     // (e.g. xfail.toml, README.md) that are excluded from .gitignore.
-    // `git clone` requires an empty (or absent) target, so remove it
-    // first — the overlay files are regenerated after the clone.
+    // `git clone` requires an empty (or absent) target, so save those
+    // files, remove the directory, clone, then restore them.
+    let saved = save_overlay_files(dst)?;
     if dst.is_dir() {
         std::fs::remove_dir_all(dst)?;
     }
@@ -104,6 +105,31 @@ fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
         }
         run_cmd(&mut sparse)?;
         run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
+    }
+    restore_overlay_files(dst, &saved)?;
+    Ok(())
+}
+
+/// Overlay files tracked by rcc's own git (e.g. xfail.toml) that live
+/// inside a suite directory. We must preserve them across re-clones.
+const OVERLAY_FILES: &[&str] = &["xfail.toml"];
+
+/// Save overlay files from `dir` into memory before the directory is removed.
+fn save_overlay_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut saved = Vec::new();
+    for name in OVERLAY_FILES {
+        let p = dir.join(name);
+        if p.is_file() {
+            saved.push((name.to_string(), std::fs::read(&p)?));
+        }
+    }
+    Ok(saved)
+}
+
+/// Restore previously saved overlay files into `dir`.
+fn restore_overlay_files(dir: &Path, saved: &[(String, Vec<u8>)]) -> Result<()> {
+    for (name, contents) in saved {
+        std::fs::write(dir.join(name), contents)?;
     }
     Ok(())
 }
