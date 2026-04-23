@@ -13,11 +13,13 @@ use rcc_session::Session;
 use rcc_span::{FileId, Symbol};
 
 pub mod directive;
+pub mod guard;
 pub mod include;
 pub mod line_stream;
 pub mod macros;
 
 pub use directive::{parse_directive, ConditionalKind, Directive};
+pub use guard::detect_guard;
 pub use include::{resolve_header, strip_header_delimiters};
 pub use line_stream::LineStream;
 pub use macros::{HideSet, MacroDef, MacroKind, MacroTable};

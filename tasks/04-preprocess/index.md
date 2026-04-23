@@ -11,7 +11,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [01-tokenize-lines](01-tokenize-lines.md)
 - [x] [02-directive-parser](02-directive-parser.md)
 - [x] [03-include-search-path](03-include-search-path.md)
-- [ ] [04-include-guard-detection](04-include-guard-detection.md)
+- [x] [04-include-guard-detection](04-include-guard-detection.md)
 - [ ] [05-pragma-once](05-pragma-once.md)
 - [ ] [06-define-object-like](06-define-object-like.md)
 - [ ] [07-define-function-like](07-define-function-like.md)

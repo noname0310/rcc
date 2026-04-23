@@ -57,6 +57,18 @@ impl MacroTable {
         self.map.get(&name)
     }
 
+    /// Whether a macro with this name is currently defined.
+    ///
+    /// Used by the include-guard fast-path (task 04-04): on a repeat
+    /// `#include`, the preprocessor checks `is_defined(guard_sym)` to
+    /// decide whether the body would expand to nothing under `#ifndef
+    /// guard_sym`. Once task 04-06 wires real `#define` processing
+    /// this becomes the authoritative predicate for `#ifdef`/`#ifndef`
+    /// as well.
+    pub fn is_defined(&self, name: Symbol) -> bool {
+        self.map.contains_key(&name)
+    }
+
     /// Iterate every definition.
     pub fn iter(&self) -> impl Iterator<Item = &MacroDef> {
         self.map.values()

@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 
 use rcc_errors::{codes::E0021, Diagnostic, Label, Level};
 use rcc_lexer::PpToken;
-use rcc_span::{FileId, Span};
+use rcc_span::{BytePos, FileId, Span};
 
+use crate::guard::detect_guard;
+use crate::macros::{MacroDef, MacroKind};
 use crate::Preprocessor;
 
 /// Resolve `name` against C99 §6.10.2 search rules.
@@ -102,8 +104,8 @@ impl Preprocessor<'_> {
     /// Recursion currently calls back into [`Preprocessor::run`], which
     /// is still a pass-through tokeniser in the overall M5 schedule
     /// (tasks 04-06..04-14 populate the directive loop itself).
-    /// Include-guard caching (04-04) and `#pragma once` (04-05) layer
-    /// on top of this method later.
+    /// Include-guard caching (04-04) short-circuits repeated
+    /// inclusions here; `#pragma once` (04-05) layers on top later.
     pub fn process_include(
         &mut self,
         header: &str,
@@ -128,15 +130,63 @@ impl Preprocessor<'_> {
             return Vec::new();
         };
 
-        let new_file = match self.session.source_map.write().unwrap().load_file(&resolved) {
-            Ok(id) => id,
-            Err(err) => {
-                self.session.handler.emit(&cannot_load_header(directive_span, &resolved, &err));
-                return Vec::new();
-            }
+        // Dedupe on the resolved path: if this header was already
+        // loaded during a prior `#include`, reuse its existing
+        // `FileId` so the include-guard cache (keyed by `FileId`) is
+        // stable across repeat inclusions. `SourceMap::load_file`
+        // always appends a fresh entry, so this check is what makes
+        // the guard optimisation reachable at all.
+        let existing = self
+            .session
+            .source_map
+            .read()
+            .unwrap()
+            .files()
+            .find(|f| f.name == resolved)
+            .map(|f| f.id);
+        let new_file = match existing {
+            Some(id) => id,
+            None => match self.session.source_map.write().unwrap().load_file(&resolved) {
+                Ok(id) => id,
+                Err(err) => {
+                    self.session.handler.emit(&cannot_load_header(directive_span, &resolved, &err));
+                    return Vec::new();
+                }
+            },
         };
 
-        self.run(new_file)
+        // Include-guard fast path: if a previous inclusion of the
+        // same file detected a `#ifndef X / #define X / ... / #endif`
+        // guard *and* `X` is still defined, the body would expand to
+        // nothing. Elide the work entirely — O(1) skip.
+        if let Some(&guard_sym) = self.include_guards.get(&new_file) {
+            if self.macros.is_defined(guard_sym) {
+                return Vec::new();
+            }
+        }
+
+        let tokens = self.run(new_file);
+
+        // First-inclusion fingerprinting: try to recognise the idiomatic
+        // guard pattern. If found, cache it and stub-define the guard
+        // symbol in the macro table so the next inclusion hits the
+        // skip branch above. Task 04-06 will replace the stub with a
+        // real `#define NAME` expansion of the guard directive; until
+        // then the stub is what keeps the optimisation self-contained.
+        if !self.include_guards.contains_key(&new_file) {
+            let src = self.session.source_map.read().unwrap().file(new_file).src.clone();
+            if let Some(guard) = detect_guard(&tokens, &src, &mut self.session.interner) {
+                self.include_guards.insert(new_file, guard);
+                self.macros.define(MacroDef {
+                    name: guard,
+                    kind: MacroKind::ObjectLike,
+                    body: Vec::new(),
+                    def_span: Span::new(new_file, BytePos(0), BytePos(0)),
+                });
+            }
+        }
+
+        tokens
     }
 }
 
@@ -382,5 +432,54 @@ mod tests {
         Preprocessor::new(&mut sess).process_include("\"util.h\"", false, span, main_id);
         let after = sess.source_map.read().unwrap().files().count();
         assert_eq!(after, before + 1, "included file must be registered in the source map");
+    }
+
+    // ── 04-04 include-guard optimisation ────────────────────────────
+
+    #[test]
+    fn guarded_header_is_skipped_on_repeat_include() {
+        // Canonical guard shape: first inclusion yields tokens and
+        // populates `include_guards`; a second inclusion of the same
+        // file must return an empty token stream without re-lexing.
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "ok.h", "#ifndef OK_H\n#define OK_H\nint ok;\n#endif\n");
+        let (mut sess, main_id, cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let first = pp.process_include("\"ok.h\"", false, span, main_id);
+        assert!(!first.is_empty(), "first inclusion must deliver the header tokens");
+        assert_eq!(pp.include_guards.len(), 1, "guard must be cached after first inclusion");
+
+        let second = pp.process_include("\"ok.h\"", false, span, main_id);
+        assert!(second.is_empty(), "guarded re-include must contribute no tokens");
+        assert!(cap.diagnostics().is_empty(), "skipping must not produce diagnostics");
+    }
+
+    #[test]
+    fn unguarded_header_is_processed_fully_each_time() {
+        // `bad.h` has a stray declaration before `#ifndef` — the
+        // guard pattern does NOT match, so the file must be processed
+        // in full on every inclusion.
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "bad.h",
+            "int stray;\n#ifndef BAD_H\n#define BAD_H\n#endif\n",
+        );
+        let (mut sess, main_id, _cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let first = pp.process_include("\"bad.h\"", false, span, main_id);
+        assert!(pp.include_guards.is_empty(), "non-guard shape must not be cached");
+        assert!(!first.is_empty());
+
+        let second = pp.process_include("\"bad.h\"", false, span, main_id);
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "unguarded header must produce identical token counts on each inclusion"
+        );
     }
 }
