@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
-use rcc_session::{EmitKind, OptLevel};
 use clap::Parser;
+use rcc_session::{EmitKind, OptLevel};
 
 /// The `rcc` command-line interface.
 #[derive(Debug, Parser, Clone)]

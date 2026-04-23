@@ -18,6 +18,8 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     // 1. Load.
     let file = session
         .source_map
+        .write()
+        .unwrap()
         .load_file(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
 

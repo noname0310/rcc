@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 02-01: Ariadne-backed emitter
 
 **Phase:** 02-diagnostics    **Depends on:** —    **Milestone:** M0.5

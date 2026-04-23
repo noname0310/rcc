@@ -1,5 +1,5 @@
-use rcc_driver::Cli;
 use clap::Parser;
+use rcc_driver::Cli;
 
 fn main() {
     let cli = Cli::parse();

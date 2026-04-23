@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use rcc_errors::{Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
@@ -90,8 +91,8 @@ impl Default for Options {
 pub struct Session {
     /// Parsed CLI options.
     pub opts: Options,
-    /// All loaded source files.
-    pub source_map: SourceMap,
+    /// All loaded source files (shared with the diagnostic emitter).
+    pub source_map: Arc<RwLock<SourceMap>>,
     /// Symbol interner (identifiers + string literals).
     pub interner: Interner,
     /// Diagnostic sink.
@@ -101,16 +102,22 @@ pub struct Session {
 impl Session {
     /// Build a session that prints diagnostics to stderr.
     pub fn new(opts: Options) -> Self {
+        let sm = Arc::new(RwLock::new(SourceMap::new()));
         Self {
             opts,
-            source_map: SourceMap::new(),
+            source_map: sm.clone(),
             interner: Interner::new(),
-            handler: Handler::with_emitter(Box::new(StderrEmitter)),
+            handler: Handler::with_emitter(Box::new(StderrEmitter::new(sm))),
         }
     }
 
     /// Build a session with a user-supplied `Handler`. Used by tests.
     pub fn with_handler(opts: Options, handler: Handler) -> Self {
-        Self { opts, source_map: SourceMap::new(), interner: Interner::new(), handler }
+        Self {
+            opts,
+            source_map: Arc::new(RwLock::new(SourceMap::new())),
+            interner: Interner::new(),
+            handler,
+        }
     }
 }

@@ -1,0 +1,19 @@
+---
+source: crates/rcc_errors/tests/render.rs
+assertion_line: 38
+expression: output
+---
+[E0001] Error: unexpected token
+   ╭─[ test.c:1:5 ]
+   │
+ 1 │ int main() {
+   │     ──┬─  
+   │       ╰─── expected `;`
+ 2 │     return 0;
+   │      ───┬──  
+   │         ╰──── in this function
+   │ 
+   │ Help: see C99 §6.7
+   │ 
+   │ Note: try adding `;` at end
+───╯

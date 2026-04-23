@@ -52,7 +52,7 @@ impl<'a> Preprocessor<'a> {
     /// M1 scope: pass-through mode — emits the raw `rcc_lexer` output with no
     /// directive handling. Full implementation arrives in M5.
     pub fn run(&mut self, root: FileId) -> Vec<PpToken> {
-        let src = self.session.source_map.file(root).src.clone();
+        let src = self.session.source_map.read().unwrap().file(root).src.clone();
         rcc_lexer::tokenize(root, &src).collect()
     }
 }

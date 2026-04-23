@@ -11,3 +11,6 @@ description = "Diagnostics: Diagnostic, Handler, Emitter for the rcc C compiler"
 [dependencies]
 rcc_span = { workspace = true }
 ariadne = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

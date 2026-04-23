@@ -10,7 +10,7 @@ diagnostic will use.
 
 ## Tasks (pick in order)
 
-- [ ] [01-ariadne-emitter](01-ariadne-emitter.md)
+- [x] [01-ariadne-emitter](01-ariadne-emitter.md)
 - [ ] [02-error-codes-registry](02-error-codes-registry.md)
 - [ ] [03-multi-file-rendering](03-multi-file-rendering.md)
 - [ ] [04-capture-emitter-tests](04-capture-emitter-tests.md)

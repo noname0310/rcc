@@ -44,10 +44,7 @@ pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
             let a = integer_promotion(tcx, a);
             let b = integer_promotion(tcx, b);
             match (tcx.get(a), tcx.get(b)) {
-                (
-                    Ty::Int { signed: sa, rank: ra },
-                    Ty::Int { signed: sb, rank: rb },
-                ) => {
+                (Ty::Int { signed: sa, rank: ra }, Ty::Int { signed: sb, rank: rb }) => {
                     if ra == rb && sa == sb {
                         a
                     } else if ra > rb {
@@ -56,7 +53,11 @@ pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
                         b
                     } else {
                         // Same rank, different signedness -> unsigned wins.
-                        if !sa { a } else { b }
+                        if !sa {
+                            a
+                        } else {
+                            b
+                        }
                     }
                 }
                 _ => a,
