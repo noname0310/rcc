@@ -41,18 +41,30 @@
 //! call sites; this local lookup is enough for the simple
 //! declaration shapes exercised by the task-18 acceptance fixtures.
 //!
-//! ## Struct / union / enum — stub
+//! ## Struct / union / enum
 //!
-//! Tasks 05-22 and 05-23 own struct/union and enum parsing. For now
-//! [`parse_record_spec_stub`] and [`parse_enum_spec_stub`] recognise
-//! the keyword, the optional tag, and a brace-balanced body they
-//! skip without interpreting the contents. That is enough for the
-//! `typedef struct S { ... } S` fixture in this task without pulling
-//! in field-list / enumerator-list parsing.
+//! [`parse_record_spec`] implements C99 §6.7.2.1 — a `struct` or
+//! `union` specifier followed by an optional tag and an optional
+//! `{ field-decl* }` body. A field-decl is a specifier-qualifier
+//! list followed by a comma-separated list of field declarators,
+//! each of which may be a plain declarator, an anonymous bitfield
+//! (`: width`), or a named bitfield (`declarator : width`). A bare
+//! tag reference (e.g. `struct S *p;`) leaves `fields = None`.
+//!
+//! [`parse_enum_spec`] implements C99 §6.7.2.2 — an `enum` keyword
+//! with an optional tag and an optional `{ enumerator-list , }`
+//! body. An enumerator is an identifier optionally followed by
+//! `= constant-expression`; a trailing comma is permitted
+//! (§6.7.2.2p5). An empty body `enum {}` is a constraint violation.
+//!
+//! Duplicate-name detection, underlying-type selection for `enum`,
+//! and enumerator-value evaluation are all deferred to HIR lowering
+//! — the parser's job here is purely syntactic.
 
 use rcc_ast::{
-    ArrayDeclarator, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Expr, FunctionDeclarator,
-    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeName, TypeQuals, TypeSpec,
+    ArrayDeclarator, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Enumerator, Expr,
+    FieldDecl, FieldDeclarator, FunctionDeclarator, ParamDecl, RecordKind, RecordSpec,
+    StorageClass, TypeName, TypeQuals, TypeSpec,
 };
 use rcc_errors::codes;
 use rcc_lexer::Punct;
@@ -547,10 +559,10 @@ fn accept_record(
             span,
         );
         // Still parse the body so recovery is clean.
-        let _ = parse_record_spec_stub(p, kind);
+        let _ = parse_record_spec(p, kind);
         return;
     }
-    let rec = parse_record_spec_stub(p, kind);
+    let rec = parse_record_spec(p, kind);
     state.base = Some(BaseKind::Record);
     specs.type_specs.push(TypeSpec::Record(rec));
 }
@@ -558,10 +570,10 @@ fn accept_record(
 fn accept_enum(p: &mut Parser<'_>, specs: &mut DeclSpecs, state: &mut TypeState, span: Span) {
     if state.base.is_some() || !is_type_state_clean(state) {
         specifier_conflict(p, "cannot combine `enum` with previous type specifier", span);
-        let _ = parse_enum_spec_stub(p);
+        let _ = parse_enum_spec(p);
         return;
     }
-    let e = parse_enum_spec_stub(p);
+    let e = parse_enum_spec(p);
     state.base = Some(BaseKind::Enum);
     specs.type_specs.push(TypeSpec::Enum(e));
 }
@@ -580,20 +592,20 @@ fn specifier_conflict(p: &mut Parser<'_>, msg: impl Into<String>, span: Span) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Stubs for tagged types (tasks 05-22, 05-23)
+//  Tagged types: struct / union (C99 §6.7.2.1) and enum (§6.7.2.2)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Minimal struct/union recogniser used by task 05-18.
+/// Parse a *struct-or-union-specifier* (C99 §6.7.2.1). Consumes the
+/// `struct`/`union` keyword, an optional tag identifier, and — if
+/// present — a full `{ field-decl* }` body. A bare reference
+/// (`struct S`) leaves `fields = None`; a definition with or without
+/// tag yields `fields = Some(..)` — possibly empty for `struct {}`
+/// which is a C99 constraint violation diagnosed later at HIR.
 ///
-/// Consumes the `struct`/`union` keyword, an optional tag identifier,
-/// and — if present — a brace-balanced body that is skipped without
-/// interpretation. The result has `fields = None` either way; task
-/// 05-22 will replace this with a real field-list parser and fill in
-/// the body.
-///
-/// The caller has already validated the peek; this function assumes
-/// the cursor is positioned on the `struct`/`union` keyword.
-pub(crate) fn parse_record_spec_stub(p: &mut Parser<'_>, kind: RecordKind) -> RecordSpec {
+/// The caller has already confirmed the lookahead is `struct` /
+/// `union`; this function assumes the cursor is positioned on that
+/// keyword.
+pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordSpec {
     let kw_span = p.cur_span();
     p.bump(); // struct/union
 
@@ -610,15 +622,13 @@ pub(crate) fn parse_record_spec_stub(p: &mut Parser<'_>, kind: RecordKind) -> Re
     };
 
     let mut end_span = tag.map(|(_, s)| s).unwrap_or(kw_span);
-    let mut has_body = false;
-    if let Some(t) = p.peek() {
-        if matches!(t.kind, TokenKind::Punct(Punct::LBrace)) {
-            has_body = true;
-            end_span = skip_brace_body(p);
-        }
-    }
+    let mut fields: Option<Vec<FieldDecl>> = None;
 
-    if tag.is_none() && !has_body {
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
+        let (fs, close) = parse_struct_body(p);
+        end_span = close;
+        fields = Some(fs);
+    } else if tag.is_none() {
         let name = match kind {
             RecordKind::Struct => "struct",
             RecordKind::Union => "union",
@@ -631,12 +641,154 @@ pub(crate) fn parse_record_spec_stub(p: &mut Parser<'_>, kind: RecordKind) -> Re
     }
 
     let id = p.fresh_id();
-    RecordSpec { id, kind, tag: tag.map(|(sym, _)| sym), fields: None, span: kw_span.to(end_span) }
+    RecordSpec { id, kind, tag: tag.map(|(sym, _)| sym), fields, span: kw_span.to(end_span) }
 }
 
-/// Minimal enum recogniser used by task 05-18. Same shape as
-/// [`parse_record_spec_stub`].
-pub(crate) fn parse_enum_spec_stub(p: &mut Parser<'_>) -> EnumSpec {
+/// Parse a `{ field-decl* }` struct/union body. Cursor must be on
+/// `{`. Returns the field vector and the span of the closing `}`.
+///
+/// Each field-decl is `specifier-qualifier-list struct-declarator-
+/// list ;`. On a parse failure inside a field-decl we skip forward
+/// to the next `;` or the surrounding `}` so the remaining fields
+/// still parse; bracket depth is tracked to stay inside the current
+/// body level when skipping.
+fn parse_struct_body(p: &mut Parser<'_>) -> (Vec<FieldDecl>, Span) {
+    // Caller has already confirmed the cursor is on `{`.
+    let open = p.bump().expect("caller peeked `{`").span;
+    let mut fields: Vec<FieldDecl> = Vec::new();
+
+    loop {
+        match p.peek() {
+            Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RBrace)) => {
+                let close = tok.span;
+                p.bump();
+                return (fields, close);
+            }
+            Some(_) => {}
+            None => {
+                p.session
+                    .handler
+                    .struct_err(p.cur_span(), "unexpected end of input inside struct/union body")
+                    .label(open, "unclosed `{` here")
+                    .code(codes::E0061)
+                    .emit();
+                return (fields, open);
+            }
+        }
+
+        match parse_field_decl(p) {
+            Some(fd) => fields.push(fd),
+            None => {
+                skip_to_semi_or_rbrace(p);
+                if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
+                    p.bump();
+                }
+            }
+        }
+    }
+}
+
+/// Parse a single `struct-declaration` (C99 §6.7.2.1):
+/// specifier-qualifier-list struct-declarator-list `;`.
+///
+/// Returns `None` when the specifier-qualifier-list was empty (a
+/// constraint violation that we diagnose here and let the caller
+/// recover from by skipping to the next `;` / `}`).
+fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
+    let start = p.cur_span();
+    let specs = parse_decl_specs(p)?;
+
+    let specs_empty = specs.type_specs.is_empty()
+        && specs.storage.is_none()
+        && !specs.quals.const_
+        && !specs.quals.volatile
+        && !specs.quals.restrict
+        && !specs.func_specs.inline;
+    if specs_empty {
+        p.session
+            .handler
+            .struct_err(start, "expected type in struct/union field declaration")
+            .code(codes::E0061)
+            .emit();
+        return None;
+    }
+
+    let mut declarators: Vec<FieldDeclarator> = Vec::new();
+    loop {
+        let fd = parse_field_declarator(p);
+        declarators.push(fd);
+        match p.peek().map(|t| &t.kind) {
+            Some(TokenKind::Punct(Punct::Comma)) => {
+                p.bump();
+                continue;
+            }
+            _ => break,
+        }
+    }
+
+    let end = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Semi)) => {
+            let s = tok.span;
+            p.bump();
+            s
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `;` after struct/union field declaration")
+                .code(codes::E0061)
+                .emit();
+            p.cur_span()
+        }
+    };
+
+    Some(FieldDecl { specs, declarators, span: start.to(end) })
+}
+
+/// Parse one *struct-declarator* (C99 §6.7.2.1):
+///
+/// ```text
+/// struct-declarator:
+///     declarator
+///     declarator? : constant-expression
+/// ```
+///
+/// Three shapes:
+///
+/// - `declarator`            — regular field
+/// - `declarator : width`    — named bitfield
+/// - `: width`               — anonymous bitfield (no declarator)
+///
+/// The bitfield width is a *constant-expression*; we parse it as an
+/// assignment-expression (matching the existing array-size
+/// precedent) and defer constant-folding to a later pass.
+fn parse_field_declarator(p: &mut Parser<'_>) -> FieldDeclarator {
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Colon))) {
+        p.bump();
+        let bit_width = crate::expr::parse_assignment_expression(p);
+        return FieldDeclarator { declarator: None, bit_width };
+    }
+
+    let declarator = parse_declarator(p);
+    let bit_width = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Colon))) {
+        p.bump();
+        crate::expr::parse_assignment_expression(p)
+    } else {
+        None
+    };
+    FieldDeclarator { declarator, bit_width }
+}
+
+/// Parse an *enum-specifier* (C99 §6.7.2.2). Consumes `enum`, an
+/// optional tag, and an optional `{ enumerator-list , }` body. A
+/// bare reference (`enum E`) leaves `enumerators = None`; a
+/// definition yields `enumerators = Some(..)`.
+///
+/// An empty body `enum {}` is a constraint violation per §6.7.2.2p1
+/// ("An identifier declared as an enumeration constant …"), reported
+/// as E0061 here; the empty enumerators vector is still stored so
+/// downstream shape checks do not choke on `None`.
+pub(crate) fn parse_enum_spec(p: &mut Parser<'_>) -> EnumSpec {
     let kw_span = p.cur_span();
     p.bump(); // enum
 
@@ -653,15 +805,13 @@ pub(crate) fn parse_enum_spec_stub(p: &mut Parser<'_>) -> EnumSpec {
     };
 
     let mut end_span = tag.map(|(_, s)| s).unwrap_or(kw_span);
-    let mut has_body = false;
-    if let Some(t) = p.peek() {
-        if matches!(t.kind, TokenKind::Punct(Punct::LBrace)) {
-            has_body = true;
-            end_span = skip_brace_body(p);
-        }
-    }
+    let mut enumerators: Option<Vec<Enumerator>> = None;
 
-    if tag.is_none() && !has_body {
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
+        let (list, close) = parse_enum_body(p);
+        end_span = close;
+        enumerators = Some(list);
+    } else if tag.is_none() {
         p.session
             .handler
             .struct_err(kw_span, "`enum` specifier needs a tag or a `{` body")
@@ -670,45 +820,171 @@ pub(crate) fn parse_enum_spec_stub(p: &mut Parser<'_>) -> EnumSpec {
     }
 
     let id = p.fresh_id();
-    EnumSpec { id, tag: tag.map(|(sym, _)| sym), enumerators: None, span: kw_span.to(end_span) }
+    EnumSpec { id, tag: tag.map(|(sym, _)| sym), enumerators, span: kw_span.to(end_span) }
 }
 
-/// Consume a brace-balanced `{ ... }` body at the cursor, returning the
-/// span of the closing `}` (or the span of the opening `{` if EOI is
-/// reached before a matching close — which is also diagnosed).
+/// Parse a `{ enumerator-list , }` body. Cursor must be on `{`.
+/// Returns the enumerator vector and the span of the closing `}`.
 ///
-/// Used by the struct/union/enum stubs. Nested braces are counted so a
-/// body containing a compound literal or an inner aggregate initialiser
-/// does not short-circuit the match. At end-of-input we emit a
-/// diagnostic pointing at the unclosed `{` and return the `{`'s span so
-/// the caller can still synthesise a reasonable overall span.
-fn skip_brace_body(p: &mut Parser<'_>) -> Span {
+/// The trailing comma is optional (C99 §6.7.2.2p1 grammar admits
+/// both `{ list }` and `{ list , }`). An empty body is a constraint
+/// violation (§6.7.2.2p1 requires at least one enumerator).
+fn parse_enum_body(p: &mut Parser<'_>) -> (Vec<Enumerator>, Span) {
     // Caller has already confirmed the cursor is on `{`.
     let open = p.bump().expect("caller peeked `{`").span;
-    let mut depth: u32 = 1;
+    let mut list: Vec<Enumerator> = Vec::new();
+
+    // Empty `{}` is a constraint violation.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RBrace))) {
+        let close = p.cur_span();
+        p.bump();
+        p.session
+            .handler
+            .struct_err(open, "`enum` declaration requires at least one enumerator")
+            .code(codes::E0061)
+            .emit();
+        return (list, close);
+    }
+
     loop {
-        let Some(tok) = p.peek() else {
+        // Trailing-comma support: a `}` after a `,` ends the list.
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RBrace))) {
+            break;
+        }
+        match parse_enumerator(p) {
+            Some(en) => list.push(en),
+            None => {
+                skip_until_comma_or_rbrace(p);
+            }
+        }
+        match p.peek().map(|t| &t.kind) {
+            Some(TokenKind::Punct(Punct::Comma)) => {
+                p.bump();
+                continue;
+            }
+            _ => break,
+        }
+    }
+
+    let close = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RBrace)) => {
+            let s = tok.span;
+            p.bump();
+            s
+        }
+        _ => {
             p.session
                 .handler
-                .struct_err(p.cur_span(), "unexpected end of input inside `{`-delimited body")
+                .struct_err(p.cur_span(), "expected `}` to close `enum` body")
                 .label(open, "unclosed `{` here")
                 .code(codes::E0061)
                 .emit();
-            return open;
-        };
-        let span = tok.span;
-        match tok.kind {
+            open
+        }
+    };
+    (list, close)
+}
+
+/// Parse one *enumerator* (C99 §6.7.2.2):
+///
+/// ```text
+/// enumerator:  enumeration-constant
+///              enumeration-constant = constant-expression
+/// ```
+///
+/// Returns `None` when the name slot is missing — the caller then
+/// synchronises to the next `,` or `}` for recovery.
+fn parse_enumerator(p: &mut Parser<'_>) -> Option<Enumerator> {
+    let (sym, name_span) = match p.peek() {
+        Some(tok) => match tok.kind {
+            TokenKind::Ident(sym) => {
+                let s = tok.span;
+                p.bump();
+                (sym, s)
+            }
+            _ => {
+                let sp = tok.span;
+                p.session
+                    .handler
+                    .struct_err(sp, "expected enumerator name")
+                    .code(codes::E0061)
+                    .emit();
+                return None;
+            }
+        },
+        None => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected enumerator name before end of input")
+                .code(codes::E0061)
+                .emit();
+            return None;
+        }
+    };
+
+    let value = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
+        p.bump();
+        crate::expr::parse_assignment_expression(p)
+    } else {
+        None
+    };
+    let end = match &value {
+        Some(e) => e.span,
+        None => name_span,
+    };
+    Some(Enumerator { name: sym, value, span: name_span.to(end) })
+}
+
+/// Recovery: advance the cursor until a top-level `;` or `}` is
+/// seen, without consuming it. Nested `{ ... }` blocks are skipped
+/// over so that e.g. a nested-struct initialiser inside a broken
+/// field doesn't terminate our scan prematurely.
+fn skip_to_semi_or_rbrace(p: &mut Parser<'_>) {
+    let mut depth: u32 = 0;
+    while let Some(tok) = p.peek() {
+        match &tok.kind {
             TokenKind::Punct(Punct::LBrace) => {
                 depth += 1;
                 p.bump();
             }
             TokenKind::Punct(Punct::RBrace) => {
+                if depth == 0 {
+                    return;
+                }
                 depth -= 1;
                 p.bump();
-                if depth == 0 {
-                    return span;
-                }
             }
+            TokenKind::Punct(Punct::Semi) if depth == 0 => return,
+            _ => {
+                p.bump();
+            }
+        }
+    }
+}
+
+/// Recovery: advance the cursor until a top-level `,` or `}` is
+/// seen (not consumed). Used inside the enumerator-list loop so a
+/// malformed enumerator doesn't derail the whole list.
+fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
+    let mut depth: u32 = 0;
+    while let Some(tok) = p.peek() {
+        match &tok.kind {
+            TokenKind::Punct(Punct::LBrace) | TokenKind::Punct(Punct::LParen) => {
+                depth += 1;
+                p.bump();
+            }
+            TokenKind::Punct(Punct::RBrace) => {
+                if depth == 0 {
+                    return;
+                }
+                depth -= 1;
+                p.bump();
+            }
+            TokenKind::Punct(Punct::RParen) => {
+                depth = depth.saturating_sub(1);
+                p.bump();
+            }
+            TokenKind::Punct(Punct::Comma) if depth == 0 => return,
             _ => {
                 p.bump();
             }
@@ -1407,8 +1683,15 @@ mod tests {
                 assert!(rec.tag.is_some(), "struct tag should be preserved");
                 let name = parser.session.interner.get(rec.tag.unwrap());
                 assert_eq!(name, "S");
-                // Body was brace-matched; field parsing is task 05-22.
-                assert!(rec.fields.is_none(), "stub returns fields=None");
+                let fs = rec.fields.as_ref().expect("body defines fields");
+                assert_eq!(fs.len(), 1, "one field decl `int x;`");
+                assert!(matches!(fs[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert_eq!(fs[0].declarators.len(), 1);
+                let fd = &fs[0].declarators[0];
+                assert!(fd.bit_width.is_none());
+                let d = fd.declarator.as_ref().expect("named field");
+                let (sym, _) = d.name.as_ref().expect("field has a name");
+                assert_eq!(parser.session.interner.get(*sym), "x");
             }
             other => panic!("expected single Record spec, got {other:?}"),
         }
@@ -1565,7 +1848,7 @@ mod tests {
     // ── stub shapes: enum / union ──────────────────────────────────
 
     #[test]
-    fn enum_tagged_stub_parses() {
+    fn enum_tagged_parses() {
         let src = "enum E { A, B, C }";
         let (mut sess, fid, cap) = mk_session(src);
         let tokens = tokens_from_src(&mut sess, fid, src);
@@ -1575,7 +1858,12 @@ mod tests {
             [TypeSpec::Enum(e)] => {
                 assert!(e.tag.is_some());
                 assert_eq!(parser.session.interner.get(e.tag.unwrap()), "E");
-                assert!(e.enumerators.is_none(), "stub: enumerators not parsed yet");
+                let list = e.enumerators.as_ref().expect("body defines enumerators");
+                assert_eq!(list.len(), 3);
+                assert_eq!(parser.session.interner.get(list[0].name), "A");
+                assert_eq!(parser.session.interner.get(list[1].name), "B");
+                assert_eq!(parser.session.interner.get(list[2].name), "C");
+                assert!(list.iter().all(|en| en.value.is_none()));
             }
             other => panic!("expected Enum, got {other:?}"),
         }
@@ -2361,5 +2649,269 @@ mod tests {
         );
 
         assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
+    }
+
+    // ── Struct / union bodies (C99 §6.7.2.1, task 05-22) ────────────
+    //
+    // `parse_decl_specs` dispatches to `parse_record_spec` as soon as
+    // it sees `struct` / `union`. The tests below drive the whole
+    // specifier-list entry point so they exercise the full path the
+    // declaration parser will take in task 05-25.
+
+    /// Parse a specifier list and return the sole record specifier.
+    /// Panics if the specs hold anything other than one
+    /// `TypeSpec::Record`.
+    fn parse_record(src: &str) -> (RecordSpec, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let specs = parse_decl_specs(&mut parser).expect("parser returns specs");
+        let rec = match specs.type_specs.as_slice() {
+            [TypeSpec::Record(r)] => r.clone(),
+            other => panic!("expected single Record spec, got {other:?}"),
+        };
+        (rec, cap.diagnostics(), sess)
+    }
+
+    fn parse_enum(src: &str) -> (EnumSpec, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let specs = parse_decl_specs(&mut parser).expect("parser returns specs");
+        let e = match specs.type_specs.as_slice() {
+            [TypeSpec::Enum(e)] => e.clone(),
+            other => panic!("expected single Enum spec, got {other:?}"),
+        };
+        (e, cap.diagnostics(), sess)
+    }
+
+    #[test]
+    fn struct_anonymous_with_fields_parses() {
+        // `struct { int a; }` — no tag, body present. Fields = Some.
+        let (rec, diags, sess) = parse_record("struct { int a; }");
+        assert_eq!(rec.kind, RecordKind::Struct);
+        assert!(rec.tag.is_none());
+        let fs = rec.fields.as_ref().expect("body defines fields");
+        assert_eq!(fs.len(), 1);
+        assert!(matches!(fs[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+        let (sym, _) =
+            fs[0].declarators[0].declarator.as_ref().unwrap().name.as_ref().expect("named field");
+        assert_eq!(sess.interner.get(*sym), "a");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_bare_reference_has_no_fields() {
+        // `struct S` — forward reference, no body. Fields = None.
+        let (rec, diags, sess) = parse_record("struct S");
+        assert_eq!(rec.kind, RecordKind::Struct);
+        assert_eq!(sess.interner.get(rec.tag.expect("tag")), "S");
+        assert!(rec.fields.is_none(), "no body means fields=None");
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn struct_tagged_with_two_fields_parses() {
+        // `struct S { int a; int b; }` — tagged, two separate field
+        // decls. Each carries one declarator and no bitfield.
+        let (rec, diags, sess) = parse_record("struct S { int a; int b; }");
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 2);
+        let names: Vec<String> = fs
+            .iter()
+            .map(|f| {
+                let (s, _) = f.declarators[0].declarator.as_ref().unwrap().name.as_ref().unwrap();
+                sess.interner.get(*s).to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(fs.iter().all(|f| f.declarators[0].bit_width.is_none()));
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_named_bitfield_parses() {
+        // `struct S { int x : 3; }` — named 3-bit bitfield. Width is
+        // stored as an Expr; constant-folding deferred to HIR.
+        let (rec, diags, sess) = parse_record("struct S { int x : 3; }");
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 1);
+        let fd = &fs[0].declarators[0];
+        let (sym, _) = fd.declarator.as_ref().unwrap().name.as_ref().expect("named");
+        assert_eq!(sess.interner.get(*sym), "x");
+        let w = fd.bit_width.as_ref().expect("bitfield width present");
+        assert_eq!(int_lit_text(w, &sess), "3");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_anonymous_bitfield_parses() {
+        // `struct S { int : 3; }` — anonymous bitfield: no declarator,
+        // only a width. Used in C for manual padding.
+        let (rec, diags, sess) = parse_record("struct S { int : 3; }");
+        let fs = rec.fields.as_ref().expect("body");
+        let fd = &fs[0].declarators[0];
+        assert!(fd.declarator.is_none(), "anonymous bitfield has no declarator");
+        let w = fd.bit_width.as_ref().expect("width present");
+        assert_eq!(int_lit_text(w, &sess), "3");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_flexible_array_member_parses() {
+        // `struct S { int x[]; }` — flexible array member (C99
+        // §6.7.2.1p16). Parsed as an ordinary field with an empty-
+        // size array in the declarator chain; context validation
+        // (must be last, must not be alone) is HIR's job.
+        let (rec, diags, sess) = parse_record("struct S { int x[]; }");
+        let fs = rec.fields.as_ref().expect("body");
+        let fd = &fs[0].declarators[0];
+        let d = fd.declarator.as_ref().expect("named");
+        let (sym, _) = d.name.as_ref().expect("name");
+        assert_eq!(sess.interner.get(*sym), "x");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(a)] => {
+                assert!(a.size.is_none(), "flexible array: empty []");
+                assert!(!a.has_static && !a.star);
+            }
+            other => panic!("expected [Array()], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_recursive_self_pointer_parses() {
+        // `struct Node { struct Node *next; }` — canonical linked-
+        // list shape. The inner `struct Node` is a bare tag reference
+        // (no body); the declarator chain is [Pointer]. Name
+        // resolution is HIR's concern; the parser only has to keep
+        // the two `struct Node`s both as Record specs and distinguish
+        // the inner (fields=None) from the outer (fields=Some).
+        let (rec, diags, sess) = parse_record("struct Node { struct Node *next; }");
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 1);
+        match fs[0].specs.type_specs.as_slice() {
+            [TypeSpec::Record(inner)] => {
+                assert_eq!(inner.kind, RecordKind::Struct);
+                let tag = inner.tag.expect("inner tag");
+                assert_eq!(sess.interner.get(tag), "Node");
+                assert!(inner.fields.is_none(), "inner is a bare reference");
+            }
+            other => panic!("expected inner Record specifier, got {other:?}"),
+        }
+        let fd = &fs[0].declarators[0];
+        let d = fd.declarator.as_ref().expect("declarator");
+        assert!(matches!(d.derived.as_slice(), [DerivedDeclarator::Pointer(_)]));
+        let (sym, _) = d.name.as_ref().expect("name");
+        assert_eq!(sess.interner.get(*sym), "next");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn union_with_two_fields_parses() {
+        // `union U { int i; float f; }` — same shape as struct with
+        // kind=Union. Two alternative members, each a simple field.
+        let (rec, diags, sess) = parse_record("union U { int i; float f; }");
+        assert_eq!(rec.kind, RecordKind::Union);
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 2);
+        assert!(matches!(fs[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+        assert!(matches!(fs[1].specs.type_specs.as_slice(), [TypeSpec::Float]));
+        let (sym_i, _) = fs[0].declarators[0].declarator.as_ref().unwrap().name.as_ref().unwrap();
+        let (sym_f, _) = fs[1].declarators[0].declarator.as_ref().unwrap().name.as_ref().unwrap();
+        assert_eq!(sess.interner.get(*sym_i), "i");
+        assert_eq!(sess.interner.get(*sym_f), "f");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn struct_multi_declarator_field_parses() {
+        // `struct S { int a, b; }` — one specifier + two declarators.
+        // Both land in the same FieldDecl with declarators.len() == 2.
+        let (rec, diags, sess) = parse_record("struct S { int a, b; }");
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 1, "single field-decl with two declarators");
+        assert_eq!(fs[0].declarators.len(), 2);
+        let n0 = fs[0].declarators[0].declarator.as_ref().unwrap().name.as_ref().unwrap().0;
+        let n1 = fs[0].declarators[1].declarator.as_ref().unwrap().name.as_ref().unwrap().0;
+        assert_eq!(sess.interner.get(n0), "a");
+        assert_eq!(sess.interner.get(n1), "b");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    // ── Enum bodies (C99 §6.7.2.2, task 05-23) ──────────────────────
+
+    #[test]
+    fn enum_three_implicit_values_parses() {
+        // `enum { A, B, C }` — anonymous enum, three enumerators,
+        // none with explicit values. Acceptance basic.
+        let (e, diags, sess) = parse_enum("enum { A, B, C }");
+        assert!(e.tag.is_none());
+        let list = e.enumerators.as_ref().expect("body");
+        let names: Vec<String> =
+            list.iter().map(|en| sess.interner.get(en.name).to_string()).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
+        assert!(list.iter().all(|en| en.value.is_none()));
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn enum_mixed_explicit_and_implicit_values_parses() {
+        // Canonical acceptance shape: `enum { A = 1, B, C = 10 }` —
+        // middle enumerator has no explicit value; first and last do.
+        let (e, diags, sess) = parse_enum("enum { A = 1, B, C = 10 }");
+        let list = e.enumerators.as_ref().expect("body");
+        assert_eq!(list.len(), 3);
+        let a = &list[0];
+        let b = &list[1];
+        let c = &list[2];
+        assert_eq!(sess.interner.get(a.name), "A");
+        assert_eq!(int_lit_text(a.value.as_ref().expect("A=1"), &sess), "1");
+        assert_eq!(sess.interner.get(b.name), "B");
+        assert!(b.value.is_none(), "B carries no explicit value");
+        assert_eq!(sess.interner.get(c.name), "C");
+        assert_eq!(int_lit_text(c.value.as_ref().expect("C=10"), &sess), "10");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn enum_trailing_comma_is_accepted() {
+        // `enum { A, B, }` — trailing `,` permitted by §6.7.2.2p1.
+        let (e, diags, sess) = parse_enum("enum { A, B, }");
+        let list = e.enumerators.as_ref().expect("body");
+        assert_eq!(list.len(), 2);
+        assert_eq!(sess.interner.get(list[0].name), "A");
+        assert_eq!(sess.interner.get(list[1].name), "B");
+        assert!(diags.is_empty(), "trailing comma is legal: {diags:?}");
+    }
+
+    #[test]
+    fn enum_empty_body_errors_e0061() {
+        // `enum {}` — empty body is a constraint violation per
+        // §6.7.2.2p1 (the enumerator-list is non-empty by grammar).
+        let (e, diags, _sess) = parse_enum("enum {}");
+        assert!(e.enumerators.as_ref().expect("body").is_empty());
+        assert_eq!(codes_of(&diags), vec!["E0061"], "{diags:?}");
+    }
+
+    #[test]
+    fn enum_bare_reference_has_no_body() {
+        // `enum E` — forward reference only. Enumerators = None.
+        let (e, diags, sess) = parse_enum("enum E");
+        assert_eq!(sess.interner.get(e.tag.expect("tag")), "E");
+        assert!(e.enumerators.is_none());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn enum_tagged_with_body_parses() {
+        // `enum E { A, B }` — both tag and body present.
+        let (e, diags, sess) = parse_enum("enum E { A, B }");
+        assert_eq!(sess.interner.get(e.tag.expect("tag")), "E");
+        let list = e.enumerators.as_ref().expect("body");
+        assert_eq!(list.len(), 2);
+        assert_eq!(sess.interner.get(list[0].name), "A");
+        assert_eq!(sess.interner.get(list[1].name), "B");
+        assert!(diags.is_empty());
     }
 }
