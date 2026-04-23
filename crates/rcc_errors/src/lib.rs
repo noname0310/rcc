@@ -10,6 +10,7 @@
 use rcc_span::Span;
 
 mod builder;
+pub mod codes;
 mod emitter;
 mod handler;
 

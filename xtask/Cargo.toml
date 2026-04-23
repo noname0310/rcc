@@ -8,6 +8,10 @@ repository.workspace = true
 publish.workspace = true
 description = "Project-management tasks: fetch-testsuites, conformance run, etc."
 
+[lib]
+name = "xtask"
+path = "src/lib.rs"
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"

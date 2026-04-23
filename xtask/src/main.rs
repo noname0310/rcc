@@ -27,6 +27,9 @@ enum Cmd {
     },
     /// Print the pinned manifest.
     ShowManifest,
+    /// Verify every error code in codes.rs has a docs/error-codes.md
+    /// entry and vice-versa. CI should run this gate.
+    CheckErrorCodes,
 }
 
 fn main() -> Result<()> {
@@ -45,6 +48,7 @@ fn main() -> Result<()> {
             println!("{manifest:#?}");
             Ok(())
         }
+        Cmd::CheckErrorCodes => xtask::check_error_codes::run(&project_root()),
     }
 }
 
