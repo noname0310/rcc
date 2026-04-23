@@ -41,6 +41,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0019, E0019_DESC),
     (E0020, E0020_DESC),
     (E0021, E0021_DESC),
+    (E0022, E0022_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -140,6 +141,15 @@ const E0020_DESC: &str = "#error directive encountered";
 /// `<...>` form only `include_paths` is consulted (C99 §6.10.2).
 pub const E0021: &str = "E0021";
 const E0021_DESC: &str = "cannot find header";
+
+/// `#define` redefines a macro with a different replacement list.
+///
+/// C99 §6.10.3p1 permits "benign" redefinition — repeating an
+/// identical `#define` is silently accepted — but any difference in
+/// the replacement-list's token count, ordering, spelling, or
+/// whitespace separation is ill-formed.
+pub const E0022: &str = "E0022";
+const E0022_DESC: &str = "macro redefined with a different body";
 
 #[cfg(test)]
 mod tests {

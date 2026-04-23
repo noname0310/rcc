@@ -208,3 +208,17 @@ include paths (`-I`); the `<...>` form searches only the include paths.
 ```c
 #include <missing.h>  // error[E0021]: cannot find header `missing.h`
 ```
+
+## E0022 — macro redefined with a different body
+
+A macro name appears in a second `#define` directive whose replacement
+list differs from the first. C99 §6.10.3p1 permits *benign*
+redefinition — a repeated `#define` with a replacement list that
+matches the original in token count, ordering, spelling, and
+whitespace separation is silently accepted — but any substantive
+difference is an error. Use `#undef` before redefining.
+
+```c
+#define FOO 42
+#define FOO 43  // error[E0022]: macro `FOO` redefined with a different body
+```
