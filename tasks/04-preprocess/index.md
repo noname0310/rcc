@@ -26,7 +26,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [16-error-pragma](16-error-pragma.md)
 - [x] [17-unit-tests](17-unit-tests.md)
 - [x] [18-chibicc-preprocess-tests](18-chibicc-preprocess-tests.md)
-- [ ] [19-fuzz-target](19-fuzz-target.md)
+- [x] [19-fuzz-target](19-fuzz-target.md)
 - [ ] [20-gnu-extensions](20-gnu-extensions.md)
 
 ## Downstream

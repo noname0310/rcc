@@ -24,11 +24,16 @@ third_party/.cache/
 
 # Fuzz corpora: generated inputs are ignored, but the curated seed
 # corpora checked in under fuzz/corpus/<target>/ are not (see
-# scripts/fuzz/seed-*.{sh,ps1} and task 03-lex/12-fuzz-target).
+# scripts/fuzz/seed-*.{sh,ps1} and tasks 03-lex/12-fuzz-target,
+# 04-preprocess/19-fuzz-target).
 fuzz/corpus/*
 !fuzz/corpus/lex/
 fuzz/corpus/lex/*
 !fuzz/corpus/lex/*.c
+!fuzz/corpus/preprocess/
+fuzz/corpus/preprocess/*
+!fuzz/corpus/preprocess/*.c
+!fuzz/corpus/preprocess/*.h
 fuzz/artifacts/
 
 # Conformance reports

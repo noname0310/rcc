@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-19: Fuzz target
 
 **Phase:** 04-preprocess    **Depends on:** 04-17    **Milestone:** M5
