@@ -17,12 +17,16 @@ use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
 mod keywords;
+mod phase7;
 mod scope;
 mod token;
 
 pub use keywords::{Keyword, KEYWORDS};
+pub use phase7::{convert as pp_stream_to_tokens, pp_to_token};
 pub use scope::{NameKind, Scope, ScopeStack};
-pub use token::{Token, TokenKind};
+pub use token::{
+    CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
+};
 
 /// Parse a translation unit. Returns `None` if unrecoverable.
 ///
