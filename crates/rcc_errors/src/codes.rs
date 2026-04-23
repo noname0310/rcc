@@ -59,6 +59,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0027, E0027_DESC),
     (E0028, E0028_DESC),
     (E0029, E0029_DESC),
+    (E0030, E0030_DESC),
     (E0040, E0040_DESC),
     (E0041, E0041_DESC),
     (E0060, E0060_DESC),
@@ -245,6 +246,15 @@ const E0028_DESC: &str = "invalid #if expression";
 /// bounds are constraint violations and carry this code.
 pub const E0029: &str = "E0029";
 const E0029_DESC: &str = "`#line` argument out of range";
+
+/// Unexpected token during parsing.
+///
+/// The parser encountered a token that does not belong to any valid
+/// statement, declaration, or expression at the current position.
+/// Recovery skips forward to the next `;` or `}` so that subsequent
+/// constructs can still be diagnosed independently.
+pub const E0030: &str = "E0030";
+const E0030_DESC: &str = "unexpected token";
 
 /// Integer literal is too large to fit in the widest representable type.
 ///

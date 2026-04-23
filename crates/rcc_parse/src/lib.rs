@@ -52,12 +52,24 @@ pub fn parse(session: &mut Session, tokens: Vec<PpToken>) -> Option<TranslationU
     let mut decls = Vec::new();
     while parser.peek().is_some() {
         let before = parser.cursor;
+        let err_before = parser.session.handler.error_count();
         match decl::parse_external_decl(&mut parser) {
             Some(d) => decls.push(d),
             None => {
                 if parser.cursor == before {
-                    // Avoid infinite loop on unparseable input.
-                    parser.bump();
+                    // Emit a diagnostic (if none was already emitted
+                    // at this position) and skip to the next sync
+                    // point so downstream constructs still get parsed.
+                    if parser.session.handler.error_count() == err_before {
+                        let at = parser.cur_span();
+                        parser
+                            .session
+                            .handler
+                            .struct_err(at, "unexpected token at file scope")
+                            .code(rcc_errors::codes::E0030)
+                            .emit();
+                    }
+                    parser.recover_to_sync();
                 }
             }
         }
@@ -135,5 +147,30 @@ impl<'a> Parser<'a> {
         let id = NodeId(self.next_node_id);
         self.next_node_id += 1;
         id
+    }
+
+    /// Skip tokens until a synchronisation point (`;`, `}`, or EOF).
+    ///
+    /// After an unexpected-token diagnostic, calling this method
+    /// advances the cursor past the junk tokens so that the next
+    /// iteration of the enclosing parse loop starts from a reasonable
+    /// position. `;` is consumed (the statement is over); `}` is
+    /// **not** consumed (the caller's block-loop needs to see it).
+    pub fn recover_to_sync(&mut self) {
+        while let Some(tok) = self.peek() {
+            match tok.kind {
+                token::TokenKind::Punct(rcc_lexer::Punct::Semi) => {
+                    self.bump(); // consume the `;`
+                    return;
+                }
+                token::TokenKind::Punct(rcc_lexer::Punct::RBrace) => {
+                    // Don't consume — the block loop needs this `}`.
+                    return;
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
     }
 }

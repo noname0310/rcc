@@ -423,6 +423,20 @@ are constraint violations.
 A missing or non-numeric argument (`#line`, `#line abc`) is a
 different error — see E0015.
 
+## E0030 — unexpected token
+
+The parser encountered a token that does not belong to any valid
+statement, declaration, or expression at the current position.
+Recovery skips forward to the next `;` or `}` so that subsequent
+constructs can still be diagnosed independently.
+
+```c
+int main(void) {
+    ) ;          // error[E0030]: unexpected token
+    int x = 1;  // still parsed normally after recovery
+}
+```
+
 ## E0040 — integer literal too large
 
 The magnitude of an integer constant exceeds the range of `u128`, the

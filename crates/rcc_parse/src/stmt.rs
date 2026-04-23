@@ -586,13 +586,24 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
             }
             _ => {
                 let before = p.cursor;
+                let err_before = p.session.handler.error_count();
                 if let Some(item) = parse_block_item(p) {
                     items.push(item);
                 } else if p.cursor == before {
-                    // parse_block_item emitted a diagnostic but did
-                    // not consume anything; advance one token to
-                    // guarantee loop progress.
-                    p.bump();
+                    // parse_block_item could not make sense of the
+                    // current token. Emit a diagnostic (if none was
+                    // already emitted at this position) and skip to
+                    // the next `;` or `}` so that subsequent items
+                    // still get a chance to parse.
+                    if p.session.handler.error_count() == err_before {
+                        let at = p.cur_span();
+                        p.session
+                            .handler
+                            .struct_err(at, "unexpected token in block")
+                            .code(rcc_errors::codes::E0030)
+                            .emit();
+                    }
+                    p.recover_to_sync();
                 }
             }
         }
@@ -1248,5 +1259,59 @@ mod tests {
             _ => panic!(),
         }
         assert!(cap.diagnostics().is_empty());
+    }
+
+    // ── 05-27: error recovery ────────────────────────────────────────
+
+    #[test]
+    fn bad_stmt_produces_three_diagnostics() {
+        // Three intentional syntax errors separated by `;`.
+        // Each `)` is an unexpected token that the expression
+        // parser rejects; the recovery helper skips to `;` so
+        // the next bad line gets its own diagnostic.
+        let src = "{ ) ; ] ; ) ; }";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let block = parse_block(&mut parser).expect("block still returns despite errors");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 3, "exactly 3 diagnostics: {diags:?}");
+        // The block parsed to completion (didn't panic, hit the `}`).
+        assert!(parser.peek().is_none() || matches!(parser.peek().unwrap().kind, TokenKind::Eof));
+        // Verify spans cover the block braces.
+        assert_eq!(block.span.lo.0, 0);
+    }
+
+    #[test]
+    fn recovery_does_not_panic_on_malformed_input() {
+        // Totally broken input with no sync points — just junk.
+        let src = "{ ) ) ) }";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        // Should NOT panic, even though every item is unparseable.
+        let _block = parse_block(&mut parser);
+    }
+
+    #[test]
+    fn valid_code_after_error_still_parses() {
+        // One bad item followed by a valid expression statement.
+        let src = "{ ) ; 42 ; }";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let block = parse_block(&mut parser).expect("block parses");
+        // Should have 1 good item (42;).
+        let stmts: Vec<_> = block
+            .items
+            .iter()
+            .filter(
+                |i| matches!(i, BlockItem::Stmt(s) if matches!(s.kind, StmtKind::Expr(Some(_)))),
+            )
+            .collect();
+        assert_eq!(stmts.len(), 1, "the `42;` statement was recovered and parsed");
+        // Exactly 1 diagnostic for the `)`.
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "one diagnostic for the `)`: {diags:?}");
     }
 }
