@@ -208,9 +208,23 @@ impl Iterator for Tokenizer<'_> {
                     return Some(self.make_token(PpTokenKind::Ident, lo));
                 }
 
+                // ── pp-number, digit-initial form (C99 §6.4.8) ────────
+                c if c.is_ascii_digit() => {
+                    return Some(self.scan_pp_number(lo));
+                }
+
+                // ── pp-number, `.digit` form (C99 §6.4.8) ─────────────
+                // Two-char lookahead disambiguates against a bare `.`
+                // punctuator and against the `...` ellipsis — both of
+                // which fall through to the catch-all arm and will be
+                // picked up by the punctuator recogniser (task 03-lex/08).
+                '.' if matches!(self.cursor.second(), Some(c) if c.is_ascii_digit()) => {
+                    return Some(self.scan_pp_number(lo));
+                }
+
                 // ── Fallback: single-char Unknown. ────────────────────
-                // Real recognisers (pp-number, punct, literals) land
-                // in tasks 03-lex/05..08.
+                // Real recognisers (punct, literals) land in tasks
+                // 03-lex/06..08.
                 _ => {
                     self.cursor.bump();
                     return Some(self.make_token(PpTokenKind::Unknown, lo));
@@ -294,6 +308,101 @@ struct ScannedUcn {
 }
 
 impl Tokenizer<'_> {
+    /// Recognise a C99 preprocessing-number starting at the current
+    /// cursor position, up to the closing byte offset implied by the
+    /// pp-number grammar of §6.4.8:
+    ///
+    /// ```text
+    /// pp-number := digit
+    ///            | . digit
+    ///            | pp-number digit
+    ///            | pp-number identifier-nondigit
+    ///            | pp-number (e|E|p|P) sign
+    ///            | pp-number .
+    /// ```
+    ///
+    /// The recogniser is pure maximal-munch: it never re-examines
+    /// validity, so inputs like `0xzzz` or `1.2.3` lex to a single
+    /// pp-number whose span covers the whole malformed run. Actual
+    /// numeric decoding (and the corresponding diagnostics) live in
+    /// the parser (phase 05).
+    ///
+    /// Classification is recorded in [`PpNumberKind`]:
+    /// - `Float` if the token contains `.`, or (outside a `0x`/`0X`
+    ///   prefix) `e`/`E`, or (inside such a prefix) `p`/`P`.
+    /// - `Integer` otherwise.
+    ///
+    /// Sign-absorption after `e`/`E`/`p`/`P` applies unconditionally
+    /// per the grammar: a trailing `+`/`-` is swallowed into the
+    /// pp-number even when the resulting token is Integer-shaped
+    /// (e.g. `0x1e+2`).
+    fn scan_pp_number(&mut self, lo: BytePos) -> PpToken {
+        // Caller guarantees the first char is either an ASCII digit or
+        // `.` followed by an ASCII digit.
+        let first = self.cursor.bump().expect("pp-number called at EOF");
+        let mut has_dot = first == '.';
+        let mut has_dec_exp = false;
+        let mut has_hex_exp = false;
+
+        // Detect the `0x` / `0X` hex prefix so we can tell apart the
+        // decimal exponent (`e`/`E`) from the hex binary exponent
+        // (`p`/`P`). Only a leading `0` digit can introduce one — a
+        // leading `.` cannot.
+        let is_hex = first == '0' && matches!(self.cursor.first(), Some('x' | 'X'));
+        if is_hex {
+            self.cursor.bump();
+        }
+
+        loop {
+            match self.cursor.first() {
+                Some('.') => {
+                    has_dot = true;
+                    self.cursor.bump();
+                }
+                Some('e' | 'E') => {
+                    self.cursor.bump();
+                    if !is_hex {
+                        has_dec_exp = true;
+                    }
+                    // pp-number grammar: `e sign` / `E sign`. The sign
+                    // is absorbed whenever present; if missing, the
+                    // `e`/`E` simply acts as identifier-nondigit
+                    // continuation (e.g. hex digit in `0xdeadbeef`).
+                    if matches!(self.cursor.first(), Some('+' | '-')) {
+                        self.cursor.bump();
+                    }
+                }
+                Some('p' | 'P') => {
+                    self.cursor.bump();
+                    if is_hex {
+                        has_hex_exp = true;
+                    }
+                    if matches!(self.cursor.first(), Some('+' | '-')) {
+                        self.cursor.bump();
+                    }
+                }
+                Some(c) if is_ident_continue_ascii(c) => {
+                    self.cursor.bump();
+                }
+                // A UCN is a valid identifier-nondigit continuation.
+                // The pp-number grammar is permissive — we do NOT run
+                // UCN validation here (malformed / disallowed UCNs are
+                // re-checked when the token is decoded in phase 05).
+                Some('\\') if matches!(self.cursor.second(), Some('u' | 'U')) => {
+                    let _ = self.scan_ucn();
+                }
+                _ => break,
+            }
+        }
+
+        let kind = if has_dot || (is_hex && has_hex_exp) || (!is_hex && has_dec_exp) {
+            PpNumberKind::Float
+        } else {
+            PpNumberKind::Integer
+        };
+        self.make_token(PpTokenKind::PpNumber(kind), lo)
+    }
+
     /// Consume the greedy body of an identifier after its first
     /// character has already been consumed. Terminates on the first
     /// non-ident character. Embedded UCNs are scanned and validated
