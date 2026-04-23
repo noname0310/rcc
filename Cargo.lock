@@ -479,6 +479,7 @@ version = "0.0.1"
 dependencies = [
  "ariadne",
  "insta",
+ "rcc_session",
  "rcc_span",
 ]
 

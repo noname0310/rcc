@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 02-04: Spread `CaptureEmitter` across the workspace
 
 **Phase:** 02-diagnostics    **Depends on:** 02-01    **Milestone:** M1+

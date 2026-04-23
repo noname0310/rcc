@@ -8,7 +8,7 @@ phase's `index.md` next.
 
 - [x] [00-overview](00-overview/index.md) — meta / working agreement (always current until all phases done)
 - [x] [01-test-infra](01-test-infra/index.md) — vendor suites + conformance harness
-- [ ] [02-diagnostics](02-diagnostics/index.md) — real diagnostic emitter + error-code registry
+- [x] [02-diagnostics](02-diagnostics/index.md) — real diagnostic emitter + error-code registry
 - [ ] [03-lex](03-lex/index.md) — full C99 pp-token lexer
 - [ ] [04-preprocess](04-preprocess/index.md) — C preprocessor
 - [ ] [05-parse](05-parse/index.md) — recursive-descent + Pratt parser

@@ -13,7 +13,7 @@ diagnostic will use.
 - [x] [01-ariadne-emitter](01-ariadne-emitter.md)
 - [x] [02-error-codes-registry](02-error-codes-registry.md)
 - [x] [03-multi-file-rendering](03-multi-file-rendering.md)
-- [ ] [04-capture-emitter-tests](04-capture-emitter-tests.md)
+- [x] [04-capture-emitter-tests](04-capture-emitter-tests.md)
 
 ## Downstream
 

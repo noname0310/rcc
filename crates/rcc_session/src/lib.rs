@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use rcc_errors::{Handler, StderrEmitter};
+use rcc_errors::{CaptureEmitter, Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
 
 /// Stages at which the driver can dump intermediate state.
@@ -119,5 +119,18 @@ impl Session {
             interner: Interner::new(),
             handler,
         }
+    }
+
+    /// Build a test session wired to a [`CaptureEmitter`].
+    ///
+    /// Returns `(Session, CaptureEmitter)` so tests can emit diagnostics
+    /// through the session and then inspect them via the capture handle.
+    pub fn for_test() -> (Self, CaptureEmitter) {
+        let sm = Arc::new(RwLock::new(SourceMap::new()));
+        let cap = CaptureEmitter::new();
+        let handler = Handler::with_emitter(Box::new(cap.clone()));
+        let sess =
+            Self { opts: Options::default(), source_map: sm, interner: Interner::new(), handler };
+        (sess, cap)
     }
 }
