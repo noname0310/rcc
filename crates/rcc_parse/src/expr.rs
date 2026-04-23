@@ -175,6 +175,7 @@ use rcc_lexer::Punct;
 use rcc_span::{Span, Symbol};
 
 use crate::decl::parse_type_name;
+use crate::init::parse_initializer;
 use crate::keywords::Keyword;
 use crate::token::TokenKind;
 use crate::Parser;
@@ -297,10 +298,9 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
 /// whose disambiguation needs typedef-name lookahead. Task 05-10
 /// wires both forms in here alongside the cast expression
 /// (§6.5.4); see [`parse_sizeof`] and [`parse_cast`] for the
-/// disambiguation code. The sibling construct compound literal
-/// `( type-name ) { ... }` shares the same `(` lookahead but
-/// depends on initializer-list parsing and is deferred to task
-/// 05-10b.
+/// disambiguation code. Compound literals `( type-name ) { … }`
+/// share the same `(` lookahead; [`parse_cast`] disambiguates by
+/// peeking for `{` after the closing `)`.
 ///
 /// Returns `None` only when the inner `parse_postfix` call has
 /// already emitted a diagnostic and nothing can be built; a partial
@@ -351,27 +351,31 @@ pub fn parse_prefix_unary(p: &mut Parser<'_>) -> Option<Expr> {
     Some(Expr { id, kind: ExprKind::Unary { op: un_op, operand: Box::new(operand) }, span })
 }
 
-/// Parse a C99 §6.5.4 *cast-expression* of the `( type-name )
-/// cast-expression` shape. Caller has already verified via
-/// [`starts_type_name_after_lparen`] that the current `(` opens a
-/// type-name; we consume `( type-name )` and then recurse into
-/// [`parse_prefix_unary`] for the operand, which handles further
-/// cast / prefix / postfix nesting (`(int)-x`, `(int)(long)y`,
-/// `(int)x++`, ...).
+/// Parse a C99 *cast-expression* (§6.5.4) or *compound literal*
+/// (§6.5.2.5). Both begin with `( type-name )`; the token after
+/// the closing `)` disambiguates:
 ///
-/// Compound-literal disambiguation — the C99 §6.5.2.5 postfix
-/// `( type-name ) { init }` shape — is intentionally **not**
-/// detected here yet. Task 05-10b adds a post-`)` peek at `{` and
-/// branches into `ExprKind::CompoundLiteral` + the initializer
-/// parser (task 05-24). Until then, writing `(T){0}` will fail the
-/// operand parse with "expected primary expression" at the `{`;
-/// that's acceptable since 05-24 is still `[ ]` and compound
-/// literal is the next thing on 05-10b's plate.
+/// - `{` → compound literal: call [`parse_initializer`] for the
+///   braced body, then feed the result through [`parse_postfix_tail`]
+///   so trailing `.field` / `->field` / `[idx]` / `++` / `--` are
+///   consumed (compound literal is a postfix-expression per §6.5.2).
+/// - anything else → cast: recurse into [`parse_prefix_unary`] for
+///   the operand (`(int)-x`, `(int)(long)y`, `(int)x++`, …).
 fn parse_cast(p: &mut Parser<'_>) -> Option<Expr> {
     let lparen_span = p.cur_span();
     p.bump(); // `(`
     let ty = parse_type_name(p);
-    expect_rparen_after_type(p, lparen_span, "cast expression");
+    expect_rparen_after_type(p, lparen_span, "cast / compound literal");
+
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
+        let init = parse_initializer(p)?;
+        let end = p.tokens.get(p.cursor.wrapping_sub(1)).map(|t| t.span).unwrap_or(lparen_span);
+        let span = lparen_span.to(end);
+        let id = p.fresh_id();
+        let lit = Expr { id, kind: ExprKind::CompoundLiteral { ty, init: Box::new(init) }, span };
+        return Some(parse_postfix_tail(p, lit));
+    }
+
     let operand = parse_prefix_unary(p)?;
     let span = lparen_span.to(operand.span);
     let id = p.fresh_id();
@@ -521,21 +525,22 @@ fn expect_rparen_after_type(p: &mut Parser<'_>, lparen_span: Span, ctx: &str) ->
 /// serves as the loop's seed; each iteration takes the partially-
 /// built `lhs` and wraps it in one more layer.
 ///
-/// Compound-literal postfix (`(type){ init }`) is intentionally not
-/// recognised here — distinguishing `(type){...}` from `(expr)`
-/// requires the type-name lookahead that task 05-10 introduces.
-///
 /// Returns `None` only when [`parse_primary`] cannot produce an
 /// initial expression; mid-chain syntax errors (e.g. `a.` with no
 /// field, `f(` with no closing paren) are diagnosed and the
 /// partially-built expression is returned so that higher layers can
 /// keep parsing.
 pub fn parse_postfix(p: &mut Parser<'_>) -> Option<Expr> {
-    let mut lhs = parse_primary(p)?;
-    // Only punctuators start postfix trailers; extract the `Punct`
-    // together with its span up front so the loop body can freely
-    // call `p.bump()` / emit diagnostics without fighting the
-    // borrow checker over the peeked token.
+    let lhs = parse_primary(p)?;
+    Some(parse_postfix_tail(p, lhs))
+}
+
+/// Consume zero or more postfix trailers (`[…]`, `.`, `->`, `++`,
+/// `--`, `(…)`) starting from a pre-built `lhs`. Factored out of
+/// [`parse_postfix`] so that [`parse_cast`] can feed a compound-
+/// literal expression into the same postfix loop without going
+/// through `parse_primary`.
+fn parse_postfix_tail(p: &mut Parser<'_>, mut lhs: Expr) -> Expr {
     while let Some((punct, op_span)) = p.peek().and_then(|t| match t.kind {
         TokenKind::Punct(pu) => Some((pu, t.span)),
         _ => None,
@@ -638,7 +643,7 @@ pub fn parse_postfix(p: &mut Parser<'_>) -> Option<Expr> {
             _ => break,
         }
     }
-    Some(lhs)
+    lhs
 }
 
 /// Consume the identifier that must follow `.` or `->` in a
@@ -2599,7 +2604,7 @@ mod tests {
     // expression.
 
     use crate::scope::NameKind;
-    use rcc_ast::TypeSpec;
+    use rcc_ast::{Initializer, TypeSpec};
     use rcc_lexer::Tokenizer;
 
     fn parse_expr_full(
@@ -2838,5 +2843,110 @@ mod tests {
             },
             other => panic!("expected SizeofExpr, got {other:?}"),
         }
+    }
+
+    // ── Compound literals (C99 §6.5.2.5) ────────────────────────────
+
+    #[test]
+    fn compound_literal_int_array() {
+        // `(int[3]){0}` — compound literal with array type and single
+        // positional initializer.
+        let src = "(int[3]){0}";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::CompoundLiteral { ty, init } => {
+                assert_eq!(ty.specs.type_specs.len(), 1);
+                assert!(matches!(ty.specs.type_specs[0], TypeSpec::Int));
+                assert!(!ty.declarator.derived.is_empty(), "must have array declarator");
+                match init.as_ref() {
+                    Initializer::List(items) => {
+                        assert_eq!(items.len(), 1);
+                        let (desig, sub) = &items[0];
+                        assert!(desig.is_empty(), "positional element");
+                        match sub {
+                            Initializer::Expr(inner) => {
+                                assert_eq!(
+                                    sess.interner.get(match &inner.kind {
+                                        ExprKind::IntLit { text } => *text,
+                                        other => panic!("expected IntLit, got {other:?}"),
+                                    }),
+                                    "0"
+                                );
+                            }
+                            other => panic!("expected Expr, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected List, got {other:?}"),
+                }
+            }
+            other => panic!("expected CompoundLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_literal_struct_with_designator() {
+        // `(struct S){.x = 1}` — compound literal with struct type
+        // and field designator.
+        let src = "(struct S){.x = 1}";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::CompoundLiteral { ty, init } => {
+                assert!(
+                    matches!(ty.specs.type_specs[0], TypeSpec::Record(_)),
+                    "must be struct type"
+                );
+                match init.as_ref() {
+                    Initializer::List(items) => {
+                        assert_eq!(items.len(), 1);
+                        assert_eq!(items[0].0.len(), 1, "one designator");
+                    }
+                    other => panic!("expected List, got {other:?}"),
+                }
+            }
+            other => panic!("expected CompoundLiteral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_literal_postfix_member() {
+        // `((T){0}).x` — postfix `.x` on a compound literal.
+        // Requires typedef `T` in scope.
+        let src = "((T){0}).x";
+        let (e, diags, _sess) = parse_expr_full(src, &["T"]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Member { base, field } => {
+                assert_eq!(_sess.interner.get(*field), "x");
+                match &base.kind {
+                    ExprKind::Paren(inner) => match &inner.kind {
+                        ExprKind::CompoundLiteral { .. } => {}
+                        other => panic!("expected CompoundLiteral inside paren, got {other:?}"),
+                    },
+                    other => panic!("expected Paren, got {other:?}"),
+                }
+            }
+            other => panic!("expected Member, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cast_still_parses_after_compound_literal_addition() {
+        // Regression: `(int)x` must still parse as Cast, not
+        // CompoundLiteral, since `x` does not start with `{`.
+        let src = "(int)x";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        assert!(matches!(e.kind, ExprKind::Cast { .. }), "expected Cast, got {:?}", e.kind);
+    }
+
+    #[test]
+    fn sizeof_type_still_parses_after_compound_literal_addition() {
+        // Regression: `sizeof(int)` must still parse as SizeofType.
+        let src = "sizeof(int)";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        assert!(matches!(e.kind, ExprKind::SizeofType(_)), "expected SizeofType, got {:?}", e.kind);
     }
 }
