@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use rcc_errors::{
-    codes::{E0003, E0004, E0005, E0006, E0007, E0008},
+    codes::{E0001, E0003, E0004, E0005, E0006, E0007, E0008},
     Handler,
 };
 use rcc_span::{BytePos, FileId, Span};
@@ -21,6 +21,7 @@ mod kinds;
 mod line_splice;
 
 pub use cursor::Cursor;
+use kinds::Punct as P;
 pub use kinds::{PpNumberKind, PpTokenKind, Punct, StringEncoding};
 pub use line_splice::LineSpliceCursor;
 
@@ -279,11 +280,30 @@ impl Iterator for Tokenizer<'_> {
                     return Some(self.scan_pp_number(lo));
                 }
 
-                // ── Fallback: single-char Unknown. ────────────────────
-                // Real recognisers (punct, literals) land in tasks
-                // 03-lex/06..08.
+                // ── Punctuator (C99 §6.4.6), max-munch ────────────────
+                // All three-char punctuators are tried before any
+                // two-char prefix, which are in turn tried before the
+                // one-char form. See `scan_punctuator`.
+                c if is_punct_start(c) => {
+                    if let Some(p) = self.scan_punctuator() {
+                        return Some(self.make_token(PpTokenKind::Punct(p), lo));
+                    }
+                    // `is_punct_start` is only true for bytes that can
+                    // begin at least one punctuator, so `scan_punctuator`
+                    // must succeed — but we keep a defensive fallback.
+                    self.cursor.bump();
+                    self.emit_stray_char(lo);
+                    return Some(self.make_token(PpTokenKind::Unknown, lo));
+                }
+
+                // ── Stray character (E0001) ───────────────────────────
+                // Any byte that can begin none of identifier, pp-number,
+                // literal, comment, whitespace, or punctuator. The
+                // lexer still produces a token (so parser recovery can
+                // resynchronise) but also emits a diagnostic.
                 _ => {
                     self.cursor.bump();
+                    self.emit_stray_char(lo);
                     return Some(self.make_token(PpTokenKind::Unknown, lo));
                 }
             }
@@ -756,6 +776,107 @@ impl Tokenizer<'_> {
         }
     }
 
+    /// Recognise a single C99 §6.4.6 punctuator starting at the
+    /// current cursor position, using maximal-munch. Returns `None`
+    /// only if the leading byte does not begin any known punctuator —
+    /// the caller decides how to report that.
+    ///
+    /// Ordering within each leading byte's arm matters: the longest
+    /// form is always tried first. The 3-char forms `<<=`, `>>=` and
+    /// `...` therefore precede the 2-char forms `<<`, `>>`, `..`; the
+    /// 2-char compound-assignments / logical / relational / shift
+    /// operators precede their 1-char shared prefixes. Trigraph /
+    /// digraph punctuators (`%:`, `<:`, …) are deliberately *not*
+    /// handled here per the plan.
+    fn scan_punctuator(&mut self) -> Option<Punct> {
+        let c0 = self.cursor.first()?;
+        let c1 = self.cursor.second();
+        let c2 = self.cursor.peek_at(2);
+
+        let (p, len) = match (c0, c1, c2) {
+            // ── 3-char punctuators ────────────────────────────────────
+            ('<', Some('<'), Some('=')) => (P::ShlEq, 3),
+            ('>', Some('>'), Some('=')) => (P::ShrEq, 3),
+            ('.', Some('.'), Some('.')) => (P::Ellipsis, 3),
+
+            // ── 2-char punctuators ────────────────────────────────────
+            ('-', Some('>'), _) => (P::Arrow, 2),
+            ('+', Some('+'), _) => (P::PlusPlus, 2),
+            ('-', Some('-'), _) => (P::MinusMinus, 2),
+            ('<', Some('<'), _) => (P::ShlShl, 2),
+            ('>', Some('>'), _) => (P::ShrShr, 2),
+            ('<', Some('='), _) => (P::Le, 2),
+            ('>', Some('='), _) => (P::Ge, 2),
+            ('=', Some('='), _) => (P::EqEq, 2),
+            ('!', Some('='), _) => (P::BangEq, 2),
+            ('&', Some('&'), _) => (P::AmpAmp, 2),
+            ('|', Some('|'), _) => (P::PipePipe, 2),
+            ('+', Some('='), _) => (P::PlusEq, 2),
+            ('-', Some('='), _) => (P::MinusEq, 2),
+            ('*', Some('='), _) => (P::StarEq, 2),
+            ('/', Some('='), _) => (P::SlashEq, 2),
+            ('%', Some('='), _) => (P::PercentEq, 2),
+            ('&', Some('='), _) => (P::AmpEq, 2),
+            ('|', Some('='), _) => (P::PipeEq, 2),
+            ('^', Some('='), _) => (P::CaretEq, 2),
+            ('#', Some('#'), _) => (P::HashHash, 2),
+
+            // ── 1-char punctuators ────────────────────────────────────
+            ('[', _, _) => (P::LBracket, 1),
+            (']', _, _) => (P::RBracket, 1),
+            ('(', _, _) => (P::LParen, 1),
+            (')', _, _) => (P::RParen, 1),
+            ('{', _, _) => (P::LBrace, 1),
+            ('}', _, _) => (P::RBrace, 1),
+            ('.', _, _) => (P::Dot, 1),
+            ('&', _, _) => (P::Amp, 1),
+            ('*', _, _) => (P::Star, 1),
+            ('+', _, _) => (P::Plus, 1),
+            ('-', _, _) => (P::Minus, 1),
+            ('~', _, _) => (P::Tilde, 1),
+            ('!', _, _) => (P::Bang, 1),
+            ('/', _, _) => (P::Slash, 1),
+            ('%', _, _) => (P::Percent, 1),
+            ('<', _, _) => (P::Lt, 1),
+            ('>', _, _) => (P::Gt, 1),
+            ('^', _, _) => (P::Caret, 1),
+            ('|', _, _) => (P::Pipe, 1),
+            ('?', _, _) => (P::Question, 1),
+            (':', _, _) => (P::Colon, 1),
+            (';', _, _) => (P::Semi, 1),
+            ('=', _, _) => (P::Eq, 1),
+            (',', _, _) => (P::Comma, 1),
+            ('#', _, _) => (P::Hash, 1),
+
+            _ => return None,
+        };
+
+        for _ in 0..len {
+            self.cursor.bump();
+        }
+        Some(p)
+    }
+
+    /// Emit E0001 for a single stray character at `lo..pos()`.
+    ///
+    /// The token itself is still produced (`PpTokenKind::Unknown`) so
+    /// that downstream consumers have a span to point at; this
+    /// diagnostic is advisory and does not abort lexing.
+    fn emit_stray_char(&mut self, lo: BytePos) {
+        let span = self.span_from(lo);
+        if let Some(h) = self.handler.as_deref_mut() {
+            h.struct_err(span, "stray character in program")
+                .code(E0001)
+                .primary(span, "this byte cannot begin any C99 token")
+                .help(
+                    "remove the character, or quote it inside a string or \
+                     character literal if you meant it as data",
+                )
+                .note("C99 §6.4 lists every legal preprocessing-token start")
+                .emit();
+        }
+    }
+
     fn emit_ucn_error(&mut self, u: &ScannedUcn, message: &str) {
         if let Some(h) = self.handler.as_deref_mut() {
             h.struct_err(u.span, message)
@@ -781,6 +902,41 @@ impl Tokenizer<'_> {
 /// the octal / hex numeric escapes).
 fn is_simple_escape(c: char) -> bool {
     matches!(c, '\'' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v')
+}
+
+/// Whether `c` can begin a C99 §6.4.6 punctuator. Used as the
+/// dispatch predicate in the top-level token loop; the actual
+/// maximal-munch choice is done by
+/// [`Tokenizer::scan_punctuator`]. Keep in sync with the `match`
+/// arms there.
+fn is_punct_start(c: char) -> bool {
+    matches!(
+        c,
+        '[' | ']'
+            | '('
+            | ')'
+            | '{'
+            | '}'
+            | '.'
+            | '&'
+            | '*'
+            | '+'
+            | '-'
+            | '~'
+            | '!'
+            | '/'
+            | '%'
+            | '<'
+            | '>'
+            | '^'
+            | '|'
+            | '?'
+            | ':'
+            | ';'
+            | '='
+            | ','
+            | '#'
+    )
 }
 
 /// ASCII subset of C99 identifier-start characters: underscore and

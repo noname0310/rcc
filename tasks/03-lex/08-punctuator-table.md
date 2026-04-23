@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-08: Punctuator table (max-munch)
 
 **Phase:** 03-lex    **Depends on:** 03-01    **Milestone:** M1
