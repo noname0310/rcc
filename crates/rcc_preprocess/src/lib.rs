@@ -26,7 +26,9 @@ pub use expand::expand_line;
 pub use guard::detect_guard;
 pub use include::{detect_pragma_once, resolve_header, strip_header_delimiters};
 pub use line_stream::LineStream;
-pub use macros::{define_macro, define_object_like, HideSet, MacroDef, MacroKind, MacroTable};
+pub use macros::{
+    define_macro, define_object_like, HideSet, MacroDef, MacroKind, MacroTable, VA_ARGS_NAME,
+};
 
 /// Entry point: preprocess the file `root` in `session` and return the
 /// expanded pp-token stream that `rcc_parse` should consume.
@@ -111,12 +113,14 @@ impl<'a> Preprocessor<'a> {
         // alongside. The expander itself takes the lock (read for
         // text lookup, brief write for the stringize scratch file).
         let sm_arc = Arc::clone(&self.session.source_map);
+        let gnu_va_args_elision = self.session.opts.gnu_va_args_elision;
         expand::expand_line(
             &sm_arc,
             &mut self.session.interner,
             &mut self.session.handler,
             &self.macros,
             line,
+            gnu_va_args_elision,
         )
     }
 

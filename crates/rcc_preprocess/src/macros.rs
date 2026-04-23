@@ -1,6 +1,16 @@
 //! Macro table, macro definitions, and the *hide set* tracked per expansion.
 
 use rcc_data_structures::{FxHashMap, FxHashSet};
+
+/// Canonical spelling of the variadic pseudo-parameter.
+///
+/// C99 §6.10.3p5 reserves the identifier `__VA_ARGS__` for use as a
+/// stand-in for the trailing comma-separated arguments of a variadic
+/// function-like macro. The expander interns this string once per
+/// run and compares body identifiers against the resulting
+/// [`rcc_span::Symbol`] to decide whether to substitute the variadic
+/// slot or (outside a variadic body) emit E0026.
+pub const VA_ARGS_NAME: &str = "__VA_ARGS__";
 use rcc_errors::{codes::E0022, Diagnostic, Label, Level};
 use rcc_lexer::PpToken;
 use rcc_span::{Interner, SourceMap, Span, Symbol};

@@ -270,3 +270,33 @@ end of a replacement list for either macro form.
 #define LEAD ## x   // error[E0025]: `##` at the beginning of a replacement list
 #define TAIL x ##   // error[E0025]: `##` at the end of a replacement list
 ```
+
+## E0026 — `__VA_ARGS__` outside a variadic macro
+
+The identifier `__VA_ARGS__` is reserved by C99 §6.10.3p5 for use
+inside the replacement list of a *variadic* function-like macro —
+one whose parameter list ends with `...`. Using the name anywhere
+else (in an object-like macro, in a non-variadic function-like
+macro, or as an ordinary identifier in regular source) is a
+constraint violation.
+
+```c
+#define F(x) __VA_ARGS__    // error[E0026]: `__VA_ARGS__` outside a variadic macro
+
+#define OBJ __VA_ARGS__     // error[E0026]: `__VA_ARGS__` outside a variadic macro
+```
+
+Variadic macros opt in by ending the parameter list with `...`; the
+body may then refer to `__VA_ARGS__` as a stand-in for the trailing
+comma-separated arguments:
+
+```c
+#define LOG(fmt, ...) printf(fmt, __VA_ARGS__)    // OK
+```
+
+When zero trailing arguments are supplied (`LOG("a")`) `__VA_ARGS__`
+expands to an empty token sequence by default, leaving the preceding
+comma in place (`printf("a", )`). The GNU extension `, ##
+__VA_ARGS__` — which drops the preceding comma when the variadic
+argument list is empty — is gated behind the
+`Options::gnu_va_args_elision` flag and is off by default.

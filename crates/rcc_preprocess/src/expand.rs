@@ -29,7 +29,15 @@
 //!   operands (from empty arguments) follow the §6.10.3.3p2 rule —
 //!   the paste yields the other operand unchanged; if both operands
 //!   are empty the paste produces nothing.
-//! - Variadic `__VA_ARGS__` is still a future task (04-11).
+//! - Variadic `__VA_ARGS__` (task 04-11): function-like macros whose
+//!   parameter list ends with `...` collect every trailing argument
+//!   (commas and all) into a single pseudo-parameter named
+//!   `__VA_ARGS__` (C99 §6.10.3p5). References to `__VA_ARGS__`
+//!   outside a variadic body are constraint violations — E0026.
+//!   The GNU extension `, ## __VA_ARGS__` (delete the preceding
+//!   comma when `__VA_ARGS__` expands to nothing) is gated behind
+//!   [`rcc_session::Options::gnu_va_args_elision`] and is off by
+//!   default.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -37,13 +45,13 @@ use std::sync::{Arc, RwLock};
 
 use rcc_data_structures::FxHashSet;
 use rcc_errors::{
-    codes::{E0024, E0025},
+    codes::{E0024, E0025, E0026},
     Diagnostic, Handler, Label, Level,
 };
 use rcc_lexer::{tokenize, PpToken, PpTokenKind, Punct, StringEncoding};
 use rcc_span::{BytePos, Interner, SourceMap, Span, Symbol};
 
-use crate::macros::{HideSet, MacroKind, MacroTable};
+use crate::macros::{HideSet, MacroKind, MacroTable, VA_ARGS_NAME};
 
 /// Token paired with its Prosser hide set. The hide set travels
 /// alongside the raw [`PpToken`] through every expansion step and is
@@ -71,16 +79,23 @@ struct ExpToken {
 /// operator (task 04-09) can briefly write-lock the map to register a
 /// synthetic source file holding the rendered string literal's text.
 /// The expander holds no long-lived lock across its own work.
+///
+/// `gnu_va_args_elision` enables the GNU extension that drops the
+/// preceding comma in `, ## __VA_ARGS__` when the variadic argument
+/// list is empty (C99 has no equivalent; off by default).
 pub fn expand_line(
     source_map: &Arc<RwLock<SourceMap>>,
     interner: &mut Interner,
     handler: &mut Handler,
     macros: &MacroTable,
     line: Vec<PpToken>,
+    gnu_va_args_elision: bool,
 ) -> Vec<PpToken> {
     let input: Vec<ExpToken> =
         line.into_iter().map(|t| ExpToken { tok: t, hide: FxHashSet::default() }).collect();
-    let mut exp = Expander { source_map, interner, handler, macros };
+    let va_args_sym = interner.intern(VA_ARGS_NAME);
+    let mut exp =
+        Expander { source_map, interner, handler, macros, va_args_sym, gnu_va_args_elision };
     exp.expand(input).into_iter().map(|et| et.tok).collect()
 }
 
@@ -89,6 +104,11 @@ struct Expander<'a> {
     interner: &'a mut Interner,
     handler: &'a mut Handler,
     macros: &'a MacroTable,
+    /// Interned symbol for `__VA_ARGS__` — compared against body
+    /// identifiers to detect the variadic pseudo-parameter.
+    va_args_sym: Symbol,
+    /// Enable GNU-style `, ## __VA_ARGS__` comma elision.
+    gnu_va_args_elision: bool,
 }
 
 impl Expander<'_> {
@@ -130,10 +150,10 @@ impl Expander<'_> {
                 MacroKind::ObjectLike => {
                     let mut hide = et.hide.clone();
                     hide.insert(name);
-                    let replaced = self.subst(&body, &[], &[], &hide, false);
+                    let replaced = self.subst(&body, &[], &[], &hide, false, false);
                     push_front_all(&mut work, replaced);
                 }
-                MacroKind::FunctionLike { params, variadic: _ } => {
+                MacroKind::FunctionLike { params, variadic } => {
                     // Peek for the invocation `(`. Per C99 §6.10.3p10,
                     // a function-like macro name NOT followed by `(`
                     // is NOT a macro invocation — emit the identifier
@@ -148,7 +168,14 @@ impl Expander<'_> {
                     // Consume the `(`.
                     let _lparen = work.pop_front().unwrap();
 
-                    let Some((raw_args, close_hide)) = self.collect_args(&mut work) else {
+                    // Cap argument splitting at `params.len()` commas
+                    // for variadic macros; everything after the last
+                    // named parameter collapses into one slot — the
+                    // future `__VA_ARGS__`. Non-variadic macros have
+                    // no cap (`None`).
+                    let max_splits = if variadic { Some(params.len()) } else { None };
+                    let Some((raw_args, close_hide)) = self.collect_args(&mut work, max_splits)
+                    else {
                         // Missing matching `)` — bail out of this
                         // expansion. Diagnostic is deferred to a
                         // follow-up task; for now the macro name and
@@ -162,11 +189,14 @@ impl Expander<'_> {
                     };
 
                     // Reconcile the natural comma-split against the
-                    // macro's declared arity. `F()` invoking a
-                    // zero-param macro must match; `G(a) G()` is a
-                    // single empty argument.
-                    let args = reconcile_arity(raw_args, params.len());
-                    if args.len() != params.len() {
+                    // macro's declared arity. For variadic macros an
+                    // extra trailing slot carries `__VA_ARGS__`; if
+                    // the caller supplied zero trailing arguments we
+                    // synthesise an empty slot so substitution code
+                    // can rely on `args.len() == params.len() + 1`.
+                    let args = reconcile_arity(raw_args, params.len(), variadic);
+                    let expected = if variadic { params.len() + 1 } else { params.len() };
+                    if args.len() != expected {
                         // Arity mismatch — diagnostic deferred. Skip
                         // expansion and emit the bare name (follow-on
                         // tokens still flow normally via the work
@@ -181,7 +211,7 @@ impl Expander<'_> {
                     let mut hide: HideSet = et.hide.intersection(&close_hide).copied().collect();
                     hide.insert(name);
 
-                    let replaced = self.subst(&body, &params, &args, &hide, true);
+                    let replaced = self.subst(&body, &params, &args, &hide, true, variadic);
                     push_front_all(&mut work, replaced);
                 }
             }
@@ -217,6 +247,13 @@ impl Expander<'_> {
     /// that object-like replacement lists preserve `#` as an ordinary
     /// punctuator. Token paste `##` is handled for both macro forms
     /// since C99 §6.10.3.3p1 permits it in either.
+    ///
+    /// `variadic` indicates that the enclosing macro's parameter list
+    /// ends with `...`; when true, `args` carries one extra trailing
+    /// slot (index `params.len()`) holding the raw `__VA_ARGS__`
+    /// tokens, and body occurrences of the identifier `__VA_ARGS__`
+    /// substitute that slot. When `variadic` is false, any
+    /// `__VA_ARGS__` in the body emits E0026 (C99 §6.10.3p5).
     fn subst(
         &mut self,
         body: &[PpToken],
@@ -224,6 +261,7 @@ impl Expander<'_> {
         args: &[Vec<ExpToken>],
         hide: &HideSet,
         is_fn_like: bool,
+        variadic: bool,
     ) -> Vec<ExpToken> {
         // C99 §6.10.3.3p1: `##` must not appear at the beginning or
         // end of a replacement list. Diagnose up front; the walk
@@ -243,26 +281,47 @@ impl Expander<'_> {
             let tok = body[i];
 
             // Stringize `#param` — only applies inside function-like
-            // replacement lists (C99 §6.10.3.2p1).
+            // replacement lists (C99 §6.10.3.2p1). `#__VA_ARGS__` is
+            // treated as stringization of the variadic pseudo-parameter
+            // when the enclosing macro is variadic; in a non-variadic
+            // function-like macro it is a constraint violation (E0026).
             if is_fn_like && tok.kind == PpTokenKind::Punct(Punct::Hash) {
                 let next = body.get(i + 1).copied();
-                let arg_idx = next.and_then(|nxt| {
+                let lookup = next.and_then(|nxt| {
                     if nxt.kind != PpTokenKind::Ident {
                         return None;
                     }
                     let sym = self.symbol_of(&nxt);
-                    params.iter().position(|p| *p == sym)
+                    Some((nxt, sym))
                 });
-                if let Some(idx) = arg_idx {
-                    let nxt = next.expect("peek matched");
-                    let hash_span = tok.span;
-                    // Stringize against the RAW, not-yet-expanded
-                    // argument — §6.10.3.2p2.
-                    let stringized = self.stringize(&args[idx], hash_span, nxt.span);
-                    out.push(stringized);
-                    prev_empty = false;
-                    i += 2;
-                    continue;
+                if let Some((nxt, sym)) = lookup {
+                    if let Some(idx) = params.iter().position(|p| *p == sym) {
+                        let hash_span = tok.span;
+                        let stringized = self.stringize(&args[idx], hash_span, nxt.span);
+                        out.push(stringized);
+                        prev_empty = false;
+                        i += 2;
+                        continue;
+                    }
+                    if sym == self.va_args_sym {
+                        if variadic {
+                            let hash_span = tok.span;
+                            let stringized =
+                                self.stringize(&args[params.len()], hash_span, nxt.span);
+                            out.push(stringized);
+                        } else {
+                            self.emit_e0026(nxt.span);
+                            // Emit an empty string literal so the
+                            // output shape still has one token where
+                            // the stringize was expected.
+                            let hash_span = tok.span;
+                            let stringized = self.stringize(&[], hash_span, nxt.span);
+                            out.push(stringized);
+                        }
+                        prev_empty = false;
+                        i += 2;
+                        continue;
+                    }
                 }
                 // `#` not followed by a parameter name — C99
                 // §6.10.3.2p1 constraint violation.
@@ -284,7 +343,35 @@ impl Expander<'_> {
                     i += 1;
                     continue;
                 };
-                let rhs_tokens = self.resolve_paste_operand(&rhs_body_tok, params, args);
+                let rhs_tokens = self.resolve_paste_operand(&rhs_body_tok, params, args, variadic);
+                // GNU extension: `, ## __VA_ARGS__` reinterprets the
+                // entire three-token sequence rather than performing
+                // a literal paste. When `__VA_ARGS__` is empty the
+                // preceding comma is dropped; when non-empty the
+                // comma is kept and `__VA_ARGS__` is spliced in
+                // unchanged (skipping the paste, which would
+                // otherwise concatenate `,` with the first argument
+                // token and produce an ill-formed token). Off by
+                // default; gated by `Options::gnu_va_args_elision`.
+                if self.gnu_va_args_elision
+                    && variadic
+                    && rhs_body_tok.kind == PpTokenKind::Ident
+                    && self.symbol_of(&rhs_body_tok) == self.va_args_sym
+                    && out.last().is_some_and(|e| e.tok.kind == PpTokenKind::Punct(Punct::Comma))
+                {
+                    if rhs_tokens.is_empty() {
+                        out.pop();
+                        prev_empty = true;
+                    } else {
+                        // Keep the comma, splice the raw __VA_ARGS__
+                        // tokens in place of the `## __VA_ARGS__`
+                        // pair. This matches GCC / Clang behaviour.
+                        out.extend(rhs_tokens);
+                        prev_empty = false;
+                    }
+                    i += 2;
+                    continue;
+                }
                 self.apply_paste(&mut out, &mut prev_empty, tok.span, rhs_tokens);
                 i += 2;
                 continue;
@@ -298,7 +385,24 @@ impl Expander<'_> {
             // we never reach here with a "prev is `##`" body position.
             if tok.kind == PpTokenKind::Ident {
                 let sym = self.symbol_of(&tok);
-                if let Some(idx) = params.iter().position(|p| *p == sym) {
+                // Named parameter first, then the variadic pseudo-
+                // parameter. Looking up `__VA_ARGS__` in a
+                // non-variadic body is E0026.
+                let idx_opt = if let Some(i) = params.iter().position(|p| *p == sym) {
+                    Some(i)
+                } else if sym == self.va_args_sym {
+                    if variadic {
+                        Some(params.len())
+                    } else {
+                        self.emit_e0026(tok.span);
+                        // Fall through: emit the literal identifier
+                        // so downstream tooling still sees something.
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(idx) = idx_opt {
                     let next_is_paste = body
                         .get(i + 1)
                         .is_some_and(|t| t.kind == PpTokenKind::Punct(Punct::HashHash));
@@ -371,11 +475,23 @@ impl Expander<'_> {
         rhs_body_tok: &PpToken,
         params: &[Symbol],
         args: &[Vec<ExpToken>],
+        variadic: bool,
     ) -> Vec<ExpToken> {
         if rhs_body_tok.kind == PpTokenKind::Ident {
             let sym = self.symbol_of(rhs_body_tok);
             if let Some(idx) = params.iter().position(|p| *p == sym) {
                 return args[idx].clone();
+            }
+            if sym == self.va_args_sym {
+                if variadic {
+                    return args[params.len()].clone();
+                }
+                // Non-variadic `##__VA_ARGS__`: constraint violation.
+                // The caller's positional check already fires E0025
+                // for dangling `##`; we add E0026 for the reference
+                // itself so the diagnostic is specific.
+                self.emit_e0026(rhs_body_tok.span);
+                return Vec::new();
             }
         }
         vec![ExpToken { tok: *rhs_body_tok, hide: FxHashSet::default() }]
@@ -586,6 +702,25 @@ impl Expander<'_> {
         self.handler.emit(&diag);
     }
 
+    /// Emit E0026: `__VA_ARGS__` referenced outside a variadic
+    /// function-like macro body (C99 §6.10.3p5).
+    fn emit_e0026(&mut self, span: Span) {
+        let diag = Diagnostic {
+            level: Level::Error,
+            code: Some(E0026),
+            message: "`__VA_ARGS__` can only appear in a variadic macro".into(),
+            labels: vec![Label { span, message: "`__VA_ARGS__` here".into(), primary: true }],
+            notes: vec!["C99 §6.10.3p5: the identifier `__VA_ARGS__` shall occur \
+                 only in the replacement list of a function-like macro that \
+                 uses the ellipsis notation in the parameters"
+                .into()],
+            help: vec!["change the macro's parameter list to end with `...`, or \
+                 rename the identifier"
+                .into()],
+        };
+        self.handler.emit(&diag);
+    }
+
     /// Emit E0024: `#` in a function-like replacement list not
     /// followed by a parameter name (C99 §6.10.3.2p1).
     fn emit_e0024(&mut self, hash_span: Span, next: Option<PpToken>) {
@@ -622,7 +757,19 @@ impl Expander<'_> {
     /// parentheses protect embedded commas) and `close_hide` is the
     /// hide set of the matching `)` token. Returns `None` if the
     /// closing `)` is never found (unterminated invocation).
-    fn collect_args(&self, work: &mut VecDeque<ExpToken>) -> Option<(Vec<Vec<ExpToken>>, HideSet)> {
+    ///
+    /// `max_splits` caps the number of depth-0 commas that act as
+    /// argument separators. Once that cap is reached, further commas
+    /// (and everything up to the matching `)`) are folded into the
+    /// final slot verbatim. This implements C99 §6.10.3p12: the
+    /// trailing arguments of a variadic invocation are merged —
+    /// commas included — into a single `__VA_ARGS__` slot. `None`
+    /// disables capping (the natural non-variadic behaviour).
+    fn collect_args(
+        &self,
+        work: &mut VecDeque<ExpToken>,
+        max_splits: Option<usize>,
+    ) -> Option<(Vec<Vec<ExpToken>>, HideSet)> {
         let mut args: Vec<Vec<ExpToken>> = Vec::new();
         let mut current: Vec<ExpToken> = Vec::new();
         let mut depth: u32 = 0;
@@ -643,8 +790,15 @@ impl Expander<'_> {
                     current.push(et);
                 }
                 PpTokenKind::Punct(Punct::Comma) if depth == 0 => {
-                    args.push(current);
-                    current = Vec::new();
+                    if max_splits.is_some_and(|cap| args.len() >= cap) {
+                        // Cap reached — this comma is part of the
+                        // trailing `__VA_ARGS__` slot, not a
+                        // separator.
+                        current.push(et);
+                    } else {
+                        args.push(current);
+                        current = Vec::new();
+                    }
                 }
                 _ => current.push(et),
             }
@@ -679,13 +833,40 @@ fn push_front_all(work: &mut VecDeque<ExpToken>, replaced: Vec<ExpToken>) {
 /// `collect_args` always returns at least one entry on success (the
 /// final `current` is pushed unconditionally). That means `F()` comes
 /// back as `vec![vec![]]`. For a zero-parameter macro we re-interpret
-/// that single empty slot as "zero arguments". For any other shape,
-/// the natural list is returned unchanged — caller compares it against
-/// `params.len()` to decide on arity match.
-fn reconcile_arity(mut raw: Vec<Vec<ExpToken>>, param_count: usize) -> Vec<Vec<ExpToken>> {
-    if param_count == 0 && raw.len() == 1 && raw[0].is_empty() {
-        raw.clear();
+/// that single empty slot as "zero arguments".
+///
+/// For variadic macros the expected shape is `params.len() + 1` slots
+/// (named params followed by the `__VA_ARGS__` collector). When the
+/// caller supplies no trailing arguments — `LOG("a")` against
+/// `LOG(fmt, ...)` — the raw split stops at `params.len()` slots; we
+/// synthesise an empty trailing slot so downstream substitution code
+/// can look up the variadic slot unconditionally.
+fn reconcile_arity(
+    mut raw: Vec<Vec<ExpToken>>,
+    param_count: usize,
+    variadic: bool,
+) -> Vec<Vec<ExpToken>> {
+    if !variadic {
+        if param_count == 0 && raw.len() == 1 && raw[0].is_empty() {
+            raw.clear();
+        }
+        return raw;
     }
+
+    // Variadic.
+    let expected = param_count + 1;
+    if param_count == 0 && raw.len() == 1 && raw[0].is_empty() {
+        // `V()` against `V(...)` — zero varargs; reshape the single
+        // empty slot from "one argument" into "the empty __VA_ARGS__".
+        return raw;
+    }
+    if raw.len() == param_count {
+        // No trailing separator: the zero-vararg invocation
+        // (`LOG("a")` against `LOG(fmt, ...)`). Append the empty
+        // __VA_ARGS__ slot.
+        raw.push(Vec::new());
+    }
+    debug_assert!(raw.len() <= expected, "cap in collect_args prevents more than {expected} slots");
     raw
 }
 
@@ -737,6 +918,29 @@ mod tests {
         params: &[&str],
         body_src: &str,
     ) {
+        install_fn_with(session, macros, name, params, false, body_src);
+    }
+
+    /// Same as [`install_fn`] but declares the macro as variadic so
+    /// its body may reference `__VA_ARGS__`.
+    fn install_fn_variadic(
+        session: &mut Session,
+        macros: &mut MacroTable,
+        name: &str,
+        params: &[&str],
+        body_src: &str,
+    ) {
+        install_fn_with(session, macros, name, params, true, body_src);
+    }
+
+    fn install_fn_with(
+        session: &mut Session,
+        macros: &mut MacroTable,
+        name: &str,
+        params: &[&str],
+        variadic: bool,
+        body_src: &str,
+    ) {
         // Reconstruct the directive text only for diagnostic spans.
         let params_joined = params.join(",");
         let full = format!("#define {name}({params_joined}) {body_src}\n");
@@ -747,7 +951,7 @@ mod tests {
         let def_span = Span::new(FileId(0), BytePos(0), BytePos(full.len() as u32));
         let def = MacroDef {
             name: name_sym,
-            kind: MacroKind::FunctionLike { params: param_syms, variadic: false },
+            kind: MacroKind::FunctionLike { params: param_syms, variadic },
             body,
             def_span,
         };
@@ -789,7 +993,8 @@ mod tests {
     /// tests stay focused on their input/output pair.
     fn run_expand(sess: &mut Session, macros: &MacroTable, line: Vec<PpToken>) -> Vec<PpToken> {
         let sm_arc = Arc::clone(&sess.source_map);
-        expand_line(&sm_arc, &mut sess.interner, &mut sess.handler, macros, line)
+        let elide = sess.opts.gnu_va_args_elision;
+        expand_line(&sm_arc, &mut sess.interner, &mut sess.handler, macros, line, elide)
     }
 
     // ── Acceptance ──────────────────────────────────────────────────
@@ -1362,5 +1567,160 @@ mod tests {
         let out = run_expand(&mut sess, &macros, line);
 
         assert_eq!(concat(&sess, &out), "ONEX");
+    }
+
+    // ── Variadic `__VA_ARGS__` (task 04-11) ─────────────────────────
+
+    #[test]
+    fn variadic_log_expands_va_args_with_multiple_trailing_args() {
+        // Acceptance: #define LOG(fmt, ...) printf(fmt, __VA_ARGS__)
+        //             LOG("a", 1, 2) → printf("a", 1, 2)
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "LOG", &["fmt"], "printf(fmt, __VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "LOG(\"a\", 1, 2)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty(), "valid variadic call: {:?}", cap.diagnostics());
+        assert_eq!(pp(&sess, &out), "printf ( \"a\" , 1 , 2 )");
+    }
+
+    #[test]
+    fn variadic_only_macro_collects_every_arg_into_va_args() {
+        // #define V(...) f(__VA_ARGS__) / V(a, b, c) → f(a, b, c)
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "V", &[], "f(__VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "V(a, b, c)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(pp(&sess, &out), "f ( a , b , c )");
+    }
+
+    #[test]
+    fn variadic_zero_extra_args_default_expands_va_args_to_empty() {
+        // Default mode (C99): LOG("a") against LOG(fmt, ...) →
+        // printf("a", ) — the preceding comma stays.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "LOG", &["fmt"], "printf(fmt, __VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "LOG(\"a\")\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty(), "empty __VA_ARGS__ is not an error by default");
+        // Empty __VA_ARGS__ contributes no tokens; the comma from the
+        // body stays.
+        assert_eq!(pp(&sess, &out), "printf ( \"a\" , )");
+    }
+
+    #[test]
+    fn variadic_zero_extra_args_with_gnu_elision_drops_comma() {
+        // With GNU extension enabled: LOG("a") against
+        // `printf(fmt, ##__VA_ARGS__)` → printf("a").
+        let cap = CaptureEmitter::new();
+        let opts = Options { gnu_va_args_elision: true, ..Options::default() };
+        let mut sess = Session::with_handler(opts, Handler::with_emitter(Box::new(cap.clone())));
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "LOG", &["fmt"], "printf(fmt, ## __VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "LOG(\"a\")\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(
+            cap.diagnostics().is_empty(),
+            "GNU elision must not diagnose, got {:?}",
+            cap.diagnostics()
+        );
+        assert_eq!(pp(&sess, &out), "printf ( \"a\" )");
+    }
+
+    #[test]
+    fn variadic_gnu_elision_with_nonempty_va_args_keeps_comma() {
+        // GNU extension still pastes normally when __VA_ARGS__ is
+        // non-empty: LOG("a", 1, 2) → printf("a", 1, 2). `##` drops
+        // to "LHS unchanged" (comma preserved), RHS spliced in.
+        let cap = CaptureEmitter::new();
+        let opts = Options { gnu_va_args_elision: true, ..Options::default() };
+        let mut sess = Session::with_handler(opts, Handler::with_emitter(Box::new(cap.clone())));
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "LOG", &["fmt"], "printf(fmt, ## __VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "LOG(\"a\", 1, 2)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty(), "{:?}", cap.diagnostics());
+        assert_eq!(pp(&sess, &out), "printf ( \"a\" , 1 , 2 )");
+    }
+
+    #[test]
+    fn va_args_in_non_variadic_function_like_macro_emits_e0026() {
+        // Acceptance: #define F(x) __VA_ARGS__ / F(1) → E0026.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "F", &["x"], "__VA_ARGS__");
+
+        let (_file, line) = tok_line(&mut sess, "call", "F(1)\n");
+        let _out = run_expand(&mut sess, &macros, line);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected a single E0026, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0026));
+        assert!(diags[0].labels.iter().any(|l| l.primary), "E0026 must carry a primary label");
+    }
+
+    #[test]
+    fn va_args_in_object_like_macro_emits_e0026() {
+        // Object-like macros are never variadic; `__VA_ARGS__` in
+        // their replacement list is also a constraint violation.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "OBJ", "__VA_ARGS__");
+
+        let (_file, line) = tok_line(&mut sess, "call", "OBJ\n");
+        let _out = run_expand(&mut sess, &macros, line);
+
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0026)),
+            "expected E0026 for __VA_ARGS__ in object-like body, got {diags:?}",
+        );
+    }
+
+    #[test]
+    fn variadic_stringize_of_va_args_joins_with_commas() {
+        // `#define S(...) #__VA_ARGS__` / `S(a, b, c)` →
+        // `"a, b, c"` — the raw arg tokens (commas included) are
+        // stringized as a unit per §6.10.3.2p2 applied to the
+        // variadic pseudo-parameter.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "S", &[], "#__VA_ARGS__");
+
+        let (_file, line) = tok_line(&mut sess, "call", "S(a, b, c)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].kind, PpTokenKind::StringLit { enc: StringEncoding::None }));
+        // Commas come through as part of the raw arg; `leading_ws`
+        // handles the single space between tokens.
+        assert_eq!(expect_single_string(&sess, &out), "\"a, b, c\"");
+    }
+
+    #[test]
+    fn variadic_preserves_embedded_commas_in_nested_parens() {
+        // #define V(...) f(__VA_ARGS__) / V((a, b), c) — the nested
+        // `(a, b)` is depth-1, so its comma is NOT a splitter; the
+        // depth-0 comma between the two args IS part of __VA_ARGS__.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn_variadic(&mut sess, &mut macros, "V", &[], "f(__VA_ARGS__)");
+
+        let (_file, line) = tok_line(&mut sess, "call", "V((a, b), c)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(pp(&sess, &out), "f ( ( a , b ) , c )");
     }
 }

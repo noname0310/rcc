@@ -71,6 +71,16 @@ pub struct Options {
     pub opt_level: OptLevel,
     /// Enable `--include-gpl` test suites.
     pub include_gpl_tests: bool,
+    /// Enable the GNU `, ## __VA_ARGS__` comma-elision extension.
+    ///
+    /// When a variadic function-like macro is invoked with zero
+    /// trailing arguments and its replacement list contains the token
+    /// sequence `,`-`##`-`__VA_ARGS__`, GCC / Clang drop the comma
+    /// together with the empty `__VA_ARGS__`. This is a popular
+    /// extension but not part of C99; turning it on here opts in.
+    /// Off by default — the strict C99 behaviour is to expand
+    /// `__VA_ARGS__` to empty and leave the comma in place.
+    pub gnu_va_args_elision: bool,
 }
 
 impl Default for Options {
@@ -83,6 +93,7 @@ impl Default for Options {
             output: None,
             opt_level: OptLevel::None,
             include_gpl_tests: false,
+            gnu_va_args_elision: false,
         }
     }
 }

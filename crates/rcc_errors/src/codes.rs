@@ -45,6 +45,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0023, E0023_DESC),
     (E0024, E0024_DESC),
     (E0025, E0025_DESC),
+    (E0026, E0026_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -180,6 +181,17 @@ const E0024_DESC: &str = "`#` is not followed by a macro parameter";
 /// list).
 pub const E0025: &str = "E0025";
 const E0025_DESC: &str = "pasting forms an invalid token";
+
+/// `__VA_ARGS__` referenced outside a variadic function-like macro.
+///
+/// C99 §6.10.3p5: the identifier `__VA_ARGS__` shall occur only in
+/// the replacement list of a function-like macro that uses the
+/// ellipsis notation in the parameters. Any other use — inside an
+/// object-like macro body, inside a non-variadic function-like
+/// macro, or as an ordinary identifier in regular source — is a
+/// constraint violation.
+pub const E0026: &str = "E0026";
+const E0026_DESC: &str = "`__VA_ARGS__` outside a variadic macro";
 
 #[cfg(test)]
 mod tests {
