@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-02: Line splicing (C99 translation phase 2)
 
 **Phase:** 03-lex    **Depends on:** 03-01    **Milestone:** M1

@@ -14,9 +14,11 @@ use rcc_span::{BytePos, FileId, Span};
 
 mod cursor;
 mod kinds;
+mod line_splice;
 
 pub use cursor::Cursor;
 pub use kinds::{PpNumberKind, PpTokenKind, Punct, StringEncoding};
+pub use line_splice::LineSpliceCursor;
 
 /// A single preprocessing token.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -41,14 +43,14 @@ pub fn tokenize<'a>(file: FileId, src: &'a str) -> impl Iterator<Item = PpToken>
 pub struct Tokenizer<'a> {
     file: FileId,
     src: &'a str,
-    cursor: Cursor<'a>,
+    cursor: LineSpliceCursor<'a>,
     at_line_start: bool,
 }
 
 impl<'a> Tokenizer<'a> {
     /// Build a new tokenizer.
     pub fn new(file: FileId, src: &'a str) -> Self {
-        Self { file, src, cursor: Cursor::new(src), at_line_start: true }
+        Self { file, src, cursor: LineSpliceCursor::new(src), at_line_start: true }
     }
 
     /// Current byte position.

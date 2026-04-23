@@ -9,7 +9,7 @@ Build the full C99 preprocessing-token lexer with fuzz + corpus tests.
 ## Tasks (pick in order)
 
 - [x] [01-cursor-iteration](01-cursor-iteration.md)
-- [ ] [02-line-splicing](02-line-splicing.md)
+- [x] [02-line-splicing](02-line-splicing.md)
 - [ ] [03-whitespace-comments](03-whitespace-comments.md)
 - [ ] [04-identifier-universal-char](04-identifier-universal-char.md)
 - [ ] [05-pp-number](05-pp-number.md)
