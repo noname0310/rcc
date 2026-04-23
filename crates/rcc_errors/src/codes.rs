@@ -78,9 +78,13 @@ const E0008_DESC: &str = "unterminated string literal";
 pub const E0009: &str = "E0009";
 const E0009_DESC: &str = "integer literal overflow";
 
-/// Floating-point literal overflow.
+/// Unterminated header name in `#include` directive.
+///
+/// A `<...>` or `"..."` header name was opened but the matching
+/// closing delimiter was not found before the end of the logical
+/// line or end of file (C99 §6.4.7).
 pub const E0010: &str = "E0010";
-const E0010_DESC: &str = "floating-point literal overflow";
+const E0010_DESC: &str = "unterminated header name";
 
 /// Invalid octal digit in integer literal.
 pub const E0011: &str = "E0011";

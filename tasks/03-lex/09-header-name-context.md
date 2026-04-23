@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-09: Header-name context
 
 **Phase:** 03-lex    **Depends on:** 03-07    **Milestone:** M5 prep

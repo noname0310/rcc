@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use rcc_errors::{
-    codes::{E0001, E0003, E0004, E0005, E0006, E0007, E0008},
+    codes::{E0001, E0003, E0004, E0005, E0006, E0007, E0008, E0010},
     Handler,
 };
 use rcc_span::{BytePos, FileId, Span};
@@ -873,6 +873,95 @@ impl Tokenizer<'_> {
                      character literal if you meant it as data",
                 )
                 .note("C99 §6.4 lists every legal preprocessing-token start")
+                .emit();
+        }
+    }
+
+    /// One-shot header-name recogniser (C99 §6.4p4, §6.4.7).
+    ///
+    /// `header-name` pp-tokens exist *only* inside `#include` (and
+    /// implementation-defined spots of `#pragma`). The ordinary
+    /// [`Iterator::next`] loop must therefore never emit
+    /// [`PpTokenKind::HeaderName`] spontaneously — it would be
+    /// ambiguous with `<` / `>` / `"` in expression context (e.g.
+    /// `a < b` must yield `Ident`/`Lt`/`Ident`, not `Ident`/`HeaderName`).
+    ///
+    /// The preprocessor calls this method exactly once after it has
+    /// consumed the `include` identifier token. On return:
+    ///
+    /// - `Some(PpToken)` with kind [`PpTokenKind::HeaderName`] covering
+    ///   either `<...>` or `"..."` — leading horizontal whitespace
+    ///   between `include` and the opening delimiter is absorbed but
+    ///   the token span starts at the `<` / `"`.
+    /// - `None` if the next non-whitespace char is neither `<` nor `"`;
+    ///   the cursor is left at that char so the caller can emit its
+    ///   own directive-level diagnostic (E0013) and fall back to
+    ///   ordinary tokenisation.
+    ///
+    /// ### Unterminated input
+    ///
+    /// If a physical newline or EOF interrupts the header-name before
+    /// the matching `>` / `"`, E0010 is emitted and a recovery
+    /// `HeaderName` token is still produced so downstream consumers
+    /// have a span to point at. The terminating newline (if any) is
+    /// NOT consumed, preserving the directive boundary for the
+    /// preprocessor.
+    ///
+    /// ### Scope
+    ///
+    /// The lexer does not know about `#include` itself — that is a
+    /// 04-03 concern. This method is the one place where the caller
+    /// explicitly opts into header-name mode; everywhere else the
+    /// punctuator rules apply.
+    pub fn lex_header_name(&mut self) -> Option<PpToken> {
+        // Absorb horizontal whitespace between `include` and the
+        // opening delimiter, matching what `next()` would do for an
+        // ordinary token.
+        while matches!(self.cursor.first(), Some(c) if is_horizontal_ws(c)) {
+            self.cursor.bump();
+            self.leading_ws = true;
+        }
+
+        let lo = self.pos();
+        let open = self.cursor.first()?;
+        let close = match open {
+            '<' => '>',
+            '"' => '"',
+            _ => return None,
+        };
+        self.cursor.bump(); // consume the opening delimiter
+
+        loop {
+            match self.cursor.first() {
+                Some(c) if c == close => {
+                    self.cursor.bump();
+                    return Some(self.make_token(PpTokenKind::HeaderName, lo));
+                }
+                // A physical newline or EOF inside a header-name is
+                // malformed. The newline itself is left in the stream
+                // so the directive boundary survives.
+                Some('\n') | Some('\r') | None => {
+                    self.emit_unterminated_header_name(lo);
+                    return Some(self.make_token(PpTokenKind::HeaderName, lo));
+                }
+                Some(_) => {
+                    self.cursor.bump();
+                }
+            }
+        }
+    }
+
+    fn emit_unterminated_header_name(&mut self, lo: BytePos) {
+        let span = self.span_from(lo);
+        if let Some(h) = self.handler.as_deref_mut() {
+            h.struct_err(span, "unterminated header name")
+                .code(E0010)
+                .primary(span, "this `#include` header name is missing its closing delimiter")
+                .help(
+                    "close the header name with `>` for a system header (`<stdio.h>`) \
+                     or `\"` for a local header (`\"myheader.h\"`)",
+                )
+                .note("C99 §6.4.7 requires header names to be closed on the same logical line")
                 .emit();
         }
     }

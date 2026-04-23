@@ -96,12 +96,20 @@ representable type (`unsigned long long`).
 int x = 99999999999999999999;  // error[E0009]: integer literal overflow
 ```
 
-## E0010 — floating-point literal overflow
+## E0010 — unterminated header name
 
-A floating-point literal cannot be represented even as `long double`.
+A `#include` header name (`<...>` or `"..."`) was opened but its
+matching closing delimiter was not found before the end of the logical
+line or end of file. Per C99 §6.4.7 a header-name token must be closed
+on the same logical line.
+
+The lexer only emits this after the preprocessor has entered header-name
+context (i.e. directly after `#include`); elsewhere `<` and `"` are
+ordinary punctuator / string-literal starts.
 
 ```c
-double d = 1e99999;  // error[E0010]: floating-point literal overflow
+#include <stdio.h   // error[E0010]: unterminated header name
+#include "missing   // error[E0010]: unterminated header name
 ```
 
 ## E0011 — invalid octal digit
