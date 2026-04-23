@@ -1,17 +1,19 @@
 //! Expression parsing (C99 §6.5).
 //!
 //! Task 05-07 landed `parse_primary` — the leaves of the expression
-//! grammar. Task 05-08 (this file) adds [`parse_expr_bp`] — a Pratt /
+//! grammar. Task 05-08 (this file) added [`parse_expr_bp`] — a Pratt /
 //! precedence-climbing loop driven by [`infix_bp`] that folds binary
 //! and assignment operators per the C99 §6.5 table on top of those
-//! leaves. The public entry point is [`parse_expression`].
+//! leaves. Task 05-12 wires the comma operator (§6.5.17) in as the
+//! lowest-binding infix so the two public entry points —
+//! [`parse_expression`] (a *full* expression, comma folded) and
+//! [`parse_assignment_expression`] (an *assignment-expression*,
+//! comma is left as a separator for the caller) — correspond to the
+//! two non-terminals C grammar productions spell out.
 //!
 //! Non-goals (filed under later tasks):
 //!
-//! - Unary / postfix (`++`, `--`, `*`, `&`, `sizeof`, calls, member
-//!   access, indexing) — task 05-09.
 //! - Cast / `sizeof(type)` — task 05-10.
-//! - Comma `,` — task 05-12.
 //!
 //! Conditional `?:` (task 05-11) is folded here — see
 //! [`reduce_conditional`] and the `COND_*_BP` constants below —
@@ -40,6 +42,7 @@
 //! logical OR      a||b               ( 3,  4)       left
 //! conditional     a?b:c              ( 2,  1)*      right  (ternary)
 //! assignment      a=b a+=b ...       ( 2,  1)       right
+//! comma           a,b                 ( 0,  1)       left
 //! ```
 //!
 //! \*Conditional shares the `(l_bp, r_bp)` numbers with
@@ -125,27 +128,44 @@
 //! through. A follow-up task (see `## TODO` below) will migrate the
 //! AST to the decoded shape once the broader expression grammar is in.
 //!
-//! ## Parenthesised-expression stub
+//! ## Parenthesised-expression
 //!
 //! `( expression )` is parsed by [`parse_primary`] with its inner
-//! production delegating to [`parse_expr_bp`] (the Pratt loop landed
-//! in 05-08). That covers every binary and assignment operator; the
-//! comma operator (§6.5.17) is still outside the loop and arrives in
-//! task 05-12 — until then a top-level `,` inside parentheses won't
-//! reduce into a `Comma` node, but every `( assignment-expression )`
-//! input — which is what every real expression context below the
-//! comma operator accepts — parses exactly as the standard requires.
-//! The error recovery is simple: on a missing inner expression the
-//! outer `Paren` arm returns `None`; on a missing `)` it still
-//! returns the inner expression unwrapped (not wrapped in `Paren`)
-//! and diagnoses the unbalanced paren so the rest of the token
-//! stream is not desynchronised.
+//! production delegating to [`parse_expr_bp`] at the zero floor, so
+//! every operator — including the comma operator (§6.5.17) folded by
+//! task 05-12 — may appear inside. That matches the C99 grammar where
+//! the parenthesised production is `( expression )`, not
+//! `( assignment-expression )`. The error recovery is simple: on a
+//! missing inner expression the outer `Paren` arm returns `None`; on
+//! a missing `)` it still returns the inner expression unwrapped
+//! (not wrapped in `Paren`) and diagnoses the unbalanced paren so
+//! the rest of the token stream is not desynchronised.
+//!
+//! ## Entry-point contract (§6.5.17 vs §6.5.16)
+//!
+//! C99 distinguishes two non-terminals at the top of the expression
+//! grammar:
+//!
+//! - *expression* (§6.5.17) — folds the comma operator. This is the
+//!   thing a statement-expression, the middle of `for (;e;)`, or the
+//!   parenthesised-expression production accepts.
+//! - *assignment-expression* (§6.5.16) — stops at a top-level `,`.
+//!   This is the thing function-call arguments, initialiser
+//!   elements, and subscripts inside designators accept, because
+//!   the comma in those contexts is a *list separator*, not the
+//!   comma operator.
+//!
+//! The Pratt loop encodes the split with a single constant: the
+//! comma's left binding power is [`COMMA_L_BP`] (`0`). Any caller
+//! that wants to *exclude* the comma operator from its fold recurses
+//! with a minimum binding power of [`COMMA_R_BP`] (`1`, one above
+//! comma's left), so the infix loop stops before consuming a `,`.
+//! [`parse_expression`] is the `min_bp = 0` entry (folds comma);
+//! [`parse_assignment_expression`] is the `min_bp = COMMA_R_BP`
+//! entry (leaves comma to the caller).
 //!
 //! ## TODO
 //!
-//! - [ ] 05-12: extend [`parse_expression`] to fold the comma
-//!   operator above the assignment level — that task subsumes the
-//!   current "assignment-expression" top.
 //! - [ ] post-M1: migrate `ExprKind::{Int,Float,Char,String}Lit` to
 //!   carry decoded payloads (`IntLiteral`, `FloatLiteral`,
 //!   `CharLiteral`, `StringLiteral`) instead of `text: Symbol`.
@@ -212,9 +232,12 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
             p.bump();
-            // The inner production is `assignment-expression` — the
-            // top of this task's Pratt loop. Task 05-12 will raise
-            // this to the full comma-including expression.
+            // `( expression )` per §6.5.1 — the inner production is a
+            // *full* expression, so the comma operator is allowed
+            // here even though it is disallowed at the argument-list
+            // layer (§6.5.2.2: each argument is an
+            // *assignment-expression*). Recursing with `min_bp = 0`
+            // folds comma inside the parentheses.
             let inner = parse_expr_bp(p, 0)?;
             // Consume the closing `)` if present; otherwise diagnose
             // and return the inner expression unwrapped so the caller
@@ -347,9 +370,10 @@ pub fn parse_postfix(p: &mut Parser<'_>) -> Option<Expr> {
     }) {
         match punct {
             // `a[b]` — §6.5.2.1 array subscript. The bracketed
-            // expression is a full expression (comma operator
-            // included once task 05-12 lands); for now `parse_expr_bp`
-            // at min_bp 0 covers every operator we have.
+            // production is a *full expression*, so comma is allowed
+            // here (`a[b, c]` is legal, if unusual, C). Recursing at
+            // `min_bp = 0` folds comma inside the brackets, exactly
+            // like the parenthesised-expression arm does.
             Punct::LBracket => {
                 let lbracket_span = op_span;
                 p.bump();
@@ -422,11 +446,13 @@ pub fn parse_postfix(p: &mut Parser<'_>) -> Option<Expr> {
             // `f(args...)` — function call. Arguments are
             // *assignment-expressions* per §6.5.2.2, so the comma
             // between them is a separator, not the comma operator.
-            // We call `parse_expr_bp(p, 0)` for each argument because
-            // the Pratt loop does not currently fold comma (that's
-            // task 05-12); once it does, this call site must bump to
-            // the assignment binding-power floor — grep for
-            // "05-12 follow-up" when that task lands.
+            // Argument parsing runs through
+            // [`parse_assignment_expression`], which recurses with
+            // `min_bp = COMMA_R_BP` so a top-level `,` stays a list
+            // separator instead of folding into an
+            // [`ExprKind::Comma`]; a nested `(a, b)` still builds a
+            // comma-expression because the parenthesised-expression
+            // arm re-enters at `min_bp = 0`.
             Punct::LParen => {
                 let lparen_span = op_span;
                 p.bump();
@@ -503,11 +529,13 @@ fn expect_member_ident(
 /// is diagnosed but the already-collected prefix of arguments is
 /// still returned so higher-level callers can make progress.
 ///
-/// We read arguments with `parse_expr_bp(p, 0)` because comma is
-/// not a Pratt-folded operator yet (task 05-12). Once it is, the
-/// floor must rise to the assignment binding power so that a bare
-/// `,` at this layer stays a separator; see the comment in
-/// [`parse_postfix`] for the grep-able marker.
+/// Each argument is an *assignment-expression* per §6.5.2.2 ¶1, so
+/// we delegate to [`parse_assignment_expression`] — which runs the
+/// Pratt loop with a minimum binding power of [`COMMA_R_BP`] — and
+/// leave the top-level `,` visible to this function's own
+/// separator-dispatch below. A nested `(a, b)` still reaches the
+/// comma operator because the parenthesised-expression arm of
+/// [`parse_primary`] re-enters the loop at `min_bp = 0`.
 fn parse_call_args(p: &mut Parser<'_>, lparen_span: rcc_span::Span) -> (Vec<Expr>, rcc_span::Span) {
     let mut args = Vec::new();
     // `last_span` tracks the best real-source span we can fall back
@@ -526,7 +554,7 @@ fn parse_call_args(p: &mut Parser<'_>, lparen_span: rcc_span::Span) -> (Vec<Expr
         }
     }
     loop {
-        let Some(arg) = parse_expr_bp(p, 0) else {
+        let Some(arg) = parse_assignment_expression(p) else {
             return (args, last_span);
         };
         last_span = arg.span;
@@ -581,16 +609,23 @@ fn parse_call_args(p: &mut Parser<'_>, lparen_span: rcc_span::Span) -> (Vec<Expr
     }
 }
 
-/// Top-level C99 expression entry point.
+/// Top-level C99 *expression* entry point (§6.5.17).
 ///
 /// Drives a Pratt / precedence-climbing loop starting at the lowest
-/// binding power, so every binary and assignment operator in the
-/// table documented at the module level is accepted. The comma
-/// operator (§6.5.17) is *not* folded here — that's task 05-12 —
-/// so the current shape corresponds to the *assignment-expression*
-/// non-terminal, which is exactly what most C grammar productions
-/// (function arguments, array sizes, initializer expressions, etc.)
-/// spell out anyway.
+/// binding power (`min_bp = 0`), so every operator in the table
+/// documented at the module level is accepted — including the
+/// comma operator, which folds left-associatively into a chain of
+/// [`ExprKind::Comma`] nodes.
+///
+/// This is the entry point to use whenever the C grammar spells the
+/// context as *expression*: the middle clause of `for (; e ; )`, the
+/// body of a parenthesised expression `( expression )`, the
+/// expression-statement (§6.8.3), and the subscript slot
+/// `a [ expression ]` (§6.5.2.1). Every other context where commas
+/// act as list separators — function-call arguments (§6.5.2.2),
+/// initialiser elements (§6.7.8), etc. — must call
+/// [`parse_assignment_expression`] instead so that the `,` remains
+/// visible to the caller's separator logic.
 ///
 /// Returns `None` when no primary expression is available at the
 /// cursor position; in that case a diagnostic has already been
@@ -598,6 +633,23 @@ fn parse_call_args(p: &mut Parser<'_>, lparen_span: rcc_span::Span) -> (Vec<Expr
 /// error happened so the caller can decide how to recover.
 pub fn parse_expression(p: &mut Parser<'_>) -> Option<Expr> {
     parse_expr_bp(p, 0)
+}
+
+/// Parse a C99 *assignment-expression* (§6.5.16).
+///
+/// Runs the same Pratt loop as [`parse_expression`] but with a
+/// minimum binding power of [`COMMA_R_BP`], which is strictly
+/// greater than the comma operator's left binding power
+/// ([`COMMA_L_BP`]). That makes the loop stop before consuming a
+/// top-level `,`, matching the §6.5.16 grammar — the caller (e.g.
+/// [`parse_call_args`]) then treats the comma as its own separator.
+///
+/// A nested `( a , b )` still builds a comma-expression, because
+/// the parenthesised-expression arm in [`parse_primary`] re-enters
+/// the loop at `min_bp = 0` — the "min_bp" restriction is scoped to
+/// the current Pratt call, not the whole subtree.
+pub fn parse_assignment_expression(p: &mut Parser<'_>) -> Option<Expr> {
+    parse_expr_bp(p, COMMA_R_BP)
 }
 
 /// Parse an expression whose top-level operator has a left binding
@@ -683,10 +735,36 @@ pub fn parse_expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<Expr> {
                 kind: ExprKind::Assign { op: aop, lhs: Box::new(lhs), rhs: Box::new(rhs) },
                 span,
             },
+            InfixOp::Comma => {
+                Expr { id, kind: ExprKind::Comma { lhs: Box::new(lhs), rhs: Box::new(rhs) }, span }
+            }
         };
     }
     Some(lhs)
 }
+
+/// Left binding power of the comma operator `,` (§6.5.17).
+///
+/// Comma sits at the very bottom of the C precedence table — every
+/// other operator binds tighter. The left-binding-power is `0` so it
+/// is *only* folded when the Pratt loop is entered at `min_bp = 0`
+/// (i.e. via [`parse_expression`]); callers that want to keep commas
+/// as list separators enter at [`COMMA_R_BP`] via
+/// [`parse_assignment_expression`].
+const COMMA_L_BP: u8 = 0;
+
+/// Right binding power of the comma operator `,`.
+///
+/// Setting the pair to `(0, 1)` encodes left-associativity in the
+/// Matklad `(l_bp, r_bp)` convention: after we consume one `,`, we
+/// recurse with `min_bp = 1`, which is strictly above
+/// [`COMMA_L_BP`], so the RHS cannot itself grow another top-level
+/// `,` — forcing the expected `(a , b) , c` shape for `a, b, c`. It
+/// also doubles as the "assignment-expression floor": recursing at
+/// `min_bp = 1` lets every operator above comma (including
+/// assignment, whose left binding power is `2`) fold inside the
+/// RHS, exactly mirroring the §6.5.16 grammar.
+const COMMA_R_BP: u8 = 1;
 
 /// Left binding power of the conditional operator `?:` (§6.5.15).
 ///
@@ -743,8 +821,8 @@ fn peek_question(p: &Parser<'_>) -> Option<rcc_span::Span> {
 ///
 /// - `then`: a full expression via [`parse_expression`]. Per
 ///   §6.5.15, the second operand of `?:` is an *expression*
-///   (comma operator included once task 05-12 lands), not merely
-///   a conditional-expression.
+///   (comma operator included), not merely a
+///   conditional-expression.
 /// - `else`: a recursive [`parse_expr_bp`] call at
 ///   [`COND_R_BP`], which both preserves §6.5.15 right-
 ///   associativity and lets an assignment-expression fill the
@@ -813,6 +891,16 @@ fn reduce_conditional(
 enum InfixOp {
     Binary(BinOp),
     Assign(AssignOp),
+    /// The C99 §6.5.17 comma operator. It does not map to `BinOp`
+    /// because semantically it is neither arithmetic nor bitwise —
+    /// it sequences two evaluations and yields the value of the
+    /// right-hand operand. Keeping it as its own variant means the
+    /// fold site in [`parse_expr_bp`] dispatches to
+    /// [`ExprKind::Comma`] directly instead of stuffing a fake
+    /// `BinOp::Comma` through the general binary path (which would
+    /// muddy the arithmetic-oriented `BinOp` enum and its folding
+    /// rules in typeck / HIR lowering).
+    Comma,
 }
 
 /// Peek at the current token and, if it is a binary or assignment
@@ -860,8 +948,14 @@ fn peek_infix(p: &Parser<'_>) -> Option<InfixOp> {
         Punct::AmpEq => InfixOp::Assign(AssignOp::AndEq),
         Punct::CaretEq => InfixOp::Assign(AssignOp::XorEq),
         Punct::PipeEq => InfixOp::Assign(AssignOp::OrEq),
-        // Everything else — including `,`, `?`, `:`, and all brackets
-        // / delimiters — is NOT an infix operator at this layer.
+        // Comma operator (§6.5.17). Reported here so [`parse_expr_bp`]
+        // folds it through the same machinery as every other infix;
+        // the `min_bp` floor at call sites that want comma as a
+        // separator (e.g. [`parse_assignment_expression`]) naturally
+        // bails out before consuming it.
+        Punct::Comma => InfixOp::Comma,
+        // Everything else — including `?`, `:`, and all brackets /
+        // delimiters — is NOT an infix operator at this layer.
         _ => return None,
     })
 }
@@ -877,7 +971,9 @@ fn peek_infix(p: &Parser<'_>) -> Option<InfixOp> {
 /// `(a + b) + c`.
 fn infix_bp(op: InfixOp) -> (u8, u8) {
     match op {
-        // Level 1: assignment — right-associative, lowest in §6.5.
+        // Level 0: comma — lowest in §6.5, left-associative.
+        InfixOp::Comma => (COMMA_L_BP, COMMA_R_BP),
+        // Level 1: assignment — right-associative, just above comma.
         InfixOp::Assign(_) => (2, 1),
         // Level 2 … 10: binary operators in ascending C99 precedence.
         InfixOp::Binary(bin) => match bin {
@@ -2167,5 +2263,155 @@ mod tests {
         let (e, _cap) = parse_expr_str(src);
         assert_eq!(e.span.lo.0, 0, "span must start at `a`");
         assert_eq!(e.span.hi.0, src.len() as u32, "span must end at `c`");
+    }
+
+    // ── 05-12 comma operator (§6.5.17) ──────────────────────────────
+
+    #[test]
+    fn comma_is_left_associative_three_operands() {
+        // Acceptance: `a, b, c` folds as `Comma(Comma(a, b), c)` —
+        // the C99 grammar `expression: expression , assignment-expr`
+        // is left-recursive, so every new `,` wraps the prefix
+        // already built.
+        let (e, cap) = parse_expr_str("a, b, c");
+        assert!(cap.diagnostics().is_empty(), "valid `,` must be diag-free");
+        match e.kind {
+            ExprKind::Comma { lhs, rhs } => {
+                // Outer rhs is the rightmost operand `c`.
+                assert!(matches!(rhs.kind, ExprKind::Ident(_)), "outer rhs must be `c`");
+                // Outer lhs is the inner `Comma(a, b)`.
+                match lhs.kind {
+                    ExprKind::Comma { lhs: inner_l, rhs: inner_r } => {
+                        assert!(matches!(inner_l.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_r.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("outer lhs must be inner Comma, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level Comma, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_arguments_are_not_comma_folded() {
+        // Acceptance: `f(a, b)` yields `Call { args: [a, b] }`, NOT
+        // `Call { args: [Comma(a, b)] }`. This pins down §6.5.2.2 ¶1
+        // (each argument is an *assignment-expression*) now that the
+        // Pratt loop folds `,` at lower precedence.
+        let (e, cap) = parse_expr_str("f(a, b)");
+        assert!(cap.diagnostics().is_empty());
+        match e.kind {
+            ExprKind::Call { args, .. } => {
+                assert_eq!(args.len(), 2, "must be two separate arguments");
+                assert!(
+                    !matches!(args[0].kind, ExprKind::Comma { .. }),
+                    "arg 0 must not be a Comma node",
+                );
+                assert!(matches!(args[0].kind, ExprKind::Ident(_)));
+                assert!(matches!(args[1].kind, ExprKind::Ident(_)));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_with_three_arguments_has_three_slots() {
+        // Extension of the two-arg check: `f(a, b, c)` must land
+        // exactly three args in the vector, not a nested
+        // `Comma(Comma(a, b), c)` smuggled into arg 0.
+        let (e, _cap) = parse_expr_str("f(a, b, c)");
+        match e.kind {
+            ExprKind::Call { args, .. } => {
+                assert_eq!(args.len(), 3);
+                for a in &args {
+                    assert!(matches!(a.kind, ExprKind::Ident(_)));
+                }
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parenthesised_comma_inside_call_arg_reaches_comma_operator() {
+        // Acceptance: `f((a, b))` — the outer `(a, b)` is a
+        // parenthesised expression, and the parenthesised-expression
+        // production is *expression* (§6.5.1), not
+        // assignment-expression. So the inner `,` *does* fold into a
+        // `Comma` node, wrapped in a `Paren`, and becomes argument 0
+        // of a one-arg call.
+        let (e, cap) = parse_expr_str("f((a, b))");
+        assert!(cap.diagnostics().is_empty());
+        match e.kind {
+            ExprKind::Call { args, .. } => {
+                assert_eq!(args.len(), 1, "parenthesised comma counts as one arg");
+                match &args[0].kind {
+                    ExprKind::Paren(inner) => match &inner.kind {
+                        ExprKind::Comma { lhs, rhs } => {
+                            assert!(matches!(lhs.kind, ExprKind::Ident(_)));
+                            assert!(matches!(rhs.kind, ExprKind::Ident(_)));
+                        }
+                        other => panic!("inside Paren must be Comma, got {other:?}"),
+                    },
+                    other => panic!("arg 0 must be Paren, got {other:?}"),
+                }
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comma_binds_weaker_than_assignment() {
+        // Acceptance: `a = b, c = d` parses as
+        // `Comma(Assign(a, b), Assign(c, d))` — assignment's
+        // `(2, 1)` bp is strictly above comma's `(0, 1)`, so each
+        // assignment folds fully before the `,` is even considered.
+        let (e, _cap) = parse_expr_str("a = b, c = d");
+        match e.kind {
+            ExprKind::Comma { lhs, rhs } => {
+                match lhs.kind {
+                    ExprKind::Assign { op: AssignOp::Eq, .. } => {}
+                    other => panic!("lhs must be `a = b`, got {other:?}"),
+                }
+                match rhs.kind {
+                    ExprKind::Assign { op: AssignOp::Eq, .. } => {}
+                    other => panic!("rhs must be `c = d`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level Comma, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comma_span_covers_both_operands() {
+        // The folded node's span must stretch from the leftmost
+        // operand's start to the rightmost's end — same invariant
+        // as every other binary node; downstream diagnostics rely
+        // on it to underline the whole sequence.
+        let src = "a, b";
+        let (e, _cap) = parse_expr_str(src);
+        assert!(matches!(e.kind, ExprKind::Comma { .. }));
+        assert_eq!(e.span.lo.0, 0, "span must start at `a`");
+        assert_eq!(e.span.hi.0, src.len() as u32, "span must end at `b`");
+    }
+
+    #[test]
+    fn parse_assignment_expression_stops_at_top_level_comma() {
+        // Direct contract test for the second entry point: calling
+        // [`parse_assignment_expression`] on `a, b` must return just
+        // `a` (an `Ident`) and leave the cursor on the `,` so the
+        // caller can dispatch it as a separator. This is exactly
+        // what `parse_call_args` relies on.
+        let src = "a, b";
+        let (mut sess, fid, cap) = mk_session(src);
+        let pps = lex_ascii(fid, src);
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_assignment_expression(&mut parser).expect("`a` parses");
+        assert!(matches!(e.kind, ExprKind::Ident(_)), "must stop at `,`");
+        // Cursor is now on the `,`.
+        let at_comma =
+            matches!(parser.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Comma)),);
+        assert!(at_comma, "cursor must point at `,`, peek is {:?}", parser.peek().map(|t| &t.kind));
+        assert!(cap.diagnostics().is_empty(), "clean stop, no diagnostics");
     }
 }
