@@ -1,0 +1,8 @@
+# Expected-failure list for chibicc.
+# Schema: see crates/rcc_conformance/src/xfail.rs
+# Policy: see tasks/00-overview/03-working-agreement.md
+#
+# Each [[xfail]] entry marks a test that is known to fail.
+# Feature tasks add entries here; they shrink as rcc improves.
+
+xfail = []

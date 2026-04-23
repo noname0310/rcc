@@ -1,0 +1,54 @@
+# Expected-failure list for c-testsuite.
+# Schema: see crates/rcc_conformance/src/xfail.rs
+# Policy: see tasks/00-overview/03-working-agreement.md
+#
+# Each [[xfail]] entry marks a test that is known to fail.
+# Feature tasks add entries here; they shrink as rcc improves.
+
+[[xfail]]
+id     = "c-testsuite::00046"
+reason = "anonymous struct/union members (C11 extension, not yet supported)"
+
+[[xfail]]
+id     = "c-testsuite::00050"
+reason = "anonymous union member inside struct (C11 extension, not yet supported)"
+
+[[xfail]]
+id     = "c-testsuite::00104"
+reason = "#include <stdint.h> — system headers not available in parse-only mode"
+
+[[xfail]]
+id     = "c-testsuite::00152"
+reason = "#line directive not fully implemented in preprocessor"
+
+[[xfail]]
+id     = "c-testsuite::00189"
+reason = "#include <stdio.h> — system headers not available in parse-only mode"
+
+[[xfail]]
+id     = "c-testsuite::00204"
+reason = "#include <stdarg.h>/<stdint.h> — system headers not available in parse-only mode"
+
+[[xfail]]
+id     = "c-testsuite::00210"
+reason = "anonymous union/struct members (C11 extension, not yet supported)"
+
+[[xfail]]
+id     = "c-testsuite::00213"
+reason = "extern declaration with variadic printf — parser limitation"
+
+[[xfail]]
+id     = "c-testsuite::00214"
+reason = "extern printf + typedef unsigned long size_t — parser limitation"
+
+[[xfail]]
+id     = "c-testsuite::00216"
+reason = "empty struct typedef — parser limitation (zero-size struct)"
+
+[[xfail]]
+id     = "c-testsuite::00219"
+reason = "#include <stdio.h> — system headers not available in parse-only mode"
+
+[[xfail]]
+id     = "c-testsuite::00220"
+reason = "#include <stdio.h>/<wchar.h> — system headers not available in parse-only mode"

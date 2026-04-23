@@ -7,19 +7,25 @@ Cargo.lock.bak
 .idea/
 
 # Test suite caches (fetched by `cargo xtask fetch-testsuites`).
-# Each suite dir is ignored except its xfail.toml (checked in).
+# Each suite dir is ignored except its xfail.toml and README.md (checked in).
 third_party/testsuites/c-testsuite/*
 !third_party/testsuites/c-testsuite/xfail.toml
+!third_party/testsuites/c-testsuite/README.md
 third_party/testsuites/chibicc/*
 !third_party/testsuites/chibicc/xfail.toml
+!third_party/testsuites/chibicc/README.md
 third_party/testsuites/gcc-torture/*
 !third_party/testsuites/gcc-torture/xfail.toml
+!third_party/testsuites/gcc-torture/README.md
 third_party/testsuites/tcc-tests2/*
 !third_party/testsuites/tcc-tests2/xfail.toml
+!third_party/testsuites/tcc-tests2/README.md
 third_party/testsuites/llvm-test-suite/*
 !third_party/testsuites/llvm-test-suite/xfail.toml
+!third_party/testsuites/llvm-test-suite/README.md
 third_party/testsuites/csmith/*
 !third_party/testsuites/csmith/xfail.toml
+!third_party/testsuites/csmith/README.md
 third_party/.cache/
 
 # Fuzz corpora: generated inputs are ignored, but the curated seed
