@@ -19,6 +19,7 @@ use rcc_span::{BytePos, FileId, Span, Symbol};
 pub mod directive;
 pub mod expand;
 pub mod guard;
+pub mod if_eval;
 pub mod include;
 pub mod line_stream;
 pub mod macros;
@@ -26,6 +27,7 @@ pub mod macros;
 pub use directive::{parse_directive, ConditionalKind, Directive};
 pub use expand::expand_line;
 pub use guard::detect_guard;
+pub use if_eval::eval_if;
 pub use include::{detect_pragma_once, resolve_header, strip_header_delimiters};
 pub use line_stream::LineStream;
 pub use macros::{
@@ -286,12 +288,51 @@ impl<'a> Preprocessor<'a> {
                     self.session.handler.emit(&diag);
                 }
             }
-            // Other directives (Include / Conditional / Line / Error /
-            // Pragma) are parsed-but-not-dispatched here; later tasks
-            // (04-08 expansion, 04-13 #if eval, 04-14 conditional
-            // stack, 04-15 #line, 04-16 #error/pragma) take them.
+            Ok(directive::Directive::Conditional {
+                kind: directive::ConditionalKind::If | directive::ConditionalKind::ElIf,
+                condition,
+                ..
+            }) => {
+                // Task 04-13: evaluate the controlling expression
+                // purely for its side-effects (diagnostics). The
+                // conditional-stack state machine that actually uses
+                // the truth value to skip branches is task 04-14;
+                // until it lands, evaluating here simply surfaces
+                // E0028 for division-by-zero and similar.
+                let _ = self.eval_conditional(&condition);
+            }
+            // Other directives (Include / Line / Error / Pragma, plus
+            // the `#ifdef`/`#ifndef`/`#else`/`#endif` conditional
+            // variants) are parsed-but-not-dispatched here; later
+            // tasks (04-14 conditional stack, 04-15 #line, 04-16
+            // #error/pragma) take them.
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
+        }
+    }
+
+    /// Evaluate the controlling expression of a `#if` / `#elif` and
+    /// return its value (or `None` if the expression was ill-formed
+    /// and a diagnostic was emitted). Thin wrapper around
+    /// [`if_eval::eval_if`] that hands over the session's interner,
+    /// handler, and source map; extracted so task 04-14 can call it
+    /// from the conditional-stack driver.
+    pub fn eval_conditional(&mut self, condition: &[PpToken]) -> Option<i128> {
+        let sm_arc = Arc::clone(&self.session.source_map);
+        let gnu_va_args_elision = self.session.opts.gnu_va_args_elision;
+        match if_eval::eval_if(
+            condition,
+            &sm_arc,
+            &mut self.session.interner,
+            &mut self.session.handler,
+            &self.macros,
+            gnu_va_args_elision,
+        ) {
+            Ok(v) => Some(v),
+            Err(diag) => {
+                self.session.handler.emit(&diag);
+                None
+            }
         }
     }
 }

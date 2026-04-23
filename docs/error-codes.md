@@ -323,3 +323,48 @@ loses to the built-in `__STDC__ = 1`). The identifier `__func__` is
 **not** a predefined macro — per C99 §6.4.2.2 it is a predeclared
 identifier materialised by the parser inside every function
 definition — and is therefore not covered by E0027.
+
+## E0028 — invalid `#if` expression
+
+C99 §6.10.1 gives the preprocessor its own integer-only constant
+expression language, independent of C's general expression parser:
+no floats, no casts, no pointers, no `sizeof`, no enumeration
+constants. The `#if` / `#elif` controlling expression must parse
+cleanly in that restricted grammar and must not exhibit any
+constraint violation that only the preprocessor can catch. E0028 is
+the umbrella code for every such failure.
+
+The concrete cases that raise it:
+
+- **Division or remainder by zero in a live branch.** `#if 1/0` or
+  `#if 1 % 0` is undefined per §6.5.5p5; the evaluator refuses to
+  produce a value and emits E0028 pointing at the operator.
+  Short-circuited dead sides are exempt — `#if 1 ? 42 : 1/0`
+  evaluates cleanly because §6.5.15p4 says the unused operand is
+  not evaluated.
+- **Malformed `defined` operator.** The only legal shapes are
+  `defined IDENT` and `defined ( IDENT )` — anything else (e.g.
+  `defined 42`, `defined (`, `defined(A, B)`) is ill-formed per
+  §6.10.1p1.
+- **Unexpected tokens in the expression.** Leftover punctuators,
+  unbalanced parens, missing operands, and trailing garbage after
+  the expression all fall under this code.
+- **Floating-point or other forbidden literals.** A pp-number
+  containing `.`, `e` / `E` (decimal exponent), or `p` / `P`
+  (hex-float exponent) is a float by pp-tokenisation and therefore
+  §6.10.1p4-forbidden in `#if`; the same goes for malformed integer
+  suffixes.
+
+```c
+#if 1/0                  // error[E0028]: division by zero in #if expression
+#if defined 123          // error[E0028]: malformed `defined` operator
+#if 1.0 + 2              // error[E0028]: floating-point literal `1.0` not allowed
+#if (1 + 2               // error[E0028]: expected `)` in #if expression
+```
+
+Identifiers that survive macro expansion are **not** an error —
+§6.10.1p4 silently replaces them with the pp-number `0`, so
+`#if NO_SUCH_MACRO == 0` is always true rather than ill-formed.
+The `defined` operator sees raw spellings before expansion, which
+is how `#if defined FOO` can distinguish an undefined `FOO` from
+one `#define FOO 0`'d to zero.

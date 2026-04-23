@@ -20,7 +20,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [10-paste-hashhash](10-paste-hashhash.md)
 - [x] [11-variadic-va-args](11-variadic-va-args.md)
 - [x] [12-predefined-macros](12-predefined-macros.md)
-- [ ] [13-if-expression-const-eval](13-if-expression-const-eval.md)
+- [x] [13-if-expression-const-eval](13-if-expression-const-eval.md)
 - [ ] [14-conditional-stack](14-conditional-stack.md)
 - [ ] [15-line-directive](15-line-directive.md)
 - [ ] [16-error-pragma](16-error-pragma.md)

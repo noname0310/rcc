@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-13: `#if` expression evaluator
 
 **Phase:** 04-preprocess    **Depends on:** 04-08    **Milestone:** M5

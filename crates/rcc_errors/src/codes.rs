@@ -47,6 +47,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0025, E0025_DESC),
     (E0026, E0026_DESC),
     (E0027, E0027_DESC),
+    (E0028, E0028_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -205,6 +206,15 @@ const E0026_DESC: &str = "`__VA_ARGS__` outside a variadic macro";
 /// constraint violation.
 pub const E0027: &str = "E0027";
 const E0027_DESC: &str = "cannot redefine or undefine a predefined macro";
+
+/// Ill-formed `#if` / `#elif` controlling expression.
+///
+/// Covers C99 §6.10.1 constraint violations in the integer constant
+/// expression evaluator: division or remainder by zero in a live
+/// branch, unexpected tokens, missing operands, unbalanced parens,
+/// and malformed integer literals.
+pub const E0028: &str = "E0028";
+const E0028_DESC: &str = "invalid #if expression";
 
 #[cfg(test)]
 mod tests {
