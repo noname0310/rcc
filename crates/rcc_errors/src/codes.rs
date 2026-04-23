@@ -19,6 +19,12 @@
 //! `#include` resolver. Downstream parser tasks should allocate from
 //! E0022 onward; see the `## Notes (agent)` in
 //! `tasks/04-preprocess/03-include-search-path.md`.
+//!
+//! Task 05-18 (declaration specifiers) spends E0060 and E0061 out of
+//! the reserved-for-future type-checking block because the
+//! corresponding constraints are first raised in the parser (conflict
+//! of storage-class / type-specifier) — the type-checker never gets a
+//! chance to reject them on its own.
 
 /// Collects every registered error code for programmatic iteration.
 ///
@@ -55,9 +61,12 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0029, E0029_DESC),
     (E0040, E0040_DESC),
     (E0041, E0041_DESC),
+    (E0060, E0060_DESC),
+    (E0061, E0061_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
+    (W0004, W0004_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -260,6 +269,29 @@ const E0040_DESC: &str = "integer literal too large";
 pub const E0041: &str = "E0041";
 const E0041_DESC: &str = "incompatible string literal encodings";
 
+/// Multiple, conflicting storage-class specifiers on a single
+/// declaration.
+///
+/// C99 §6.7.1p2: "At most, one storage-class specifier may be given in
+/// the declaration specifiers in a declaration." The parser flags any
+/// second storage-class keyword — both the classic conflict
+/// (`static extern`) and the self-duplicate (`static static`) — with
+/// this code at the offending keyword.
+pub const E0060: &str = "E0060";
+const E0060_DESC: &str = "conflicting storage-class specifiers";
+
+/// Invalid combination of type specifiers inside a single declaration.
+///
+/// C99 §6.7.2p2 enumerates the legal multisets of type-specifier
+/// keywords (`int`, `signed int`, `unsigned long long`, `long double`,
+/// `_Complex float`, …). Anything outside that table is a constraint
+/// violation — e.g. `short long`, `long long long`, `int int`,
+/// `float int`, a typedef-name after `unsigned`, or two struct/union
+/// tags in one specifier list. The parser reports the first token
+/// that breaks the combination.
+pub const E0061: &str = "E0061";
+const E0061_DESC: &str = "invalid combination of type specifiers";
+
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
 /// Unknown `#pragma` directive — accepted but ignored.
@@ -300,6 +332,19 @@ const W0002_DESC: &str = "float literal overflow";
 /// that has surprised users of every major C compiler.
 pub const W0003: &str = "W0003";
 const W0003_DESC: &str = "multi-character constant";
+
+/// Redundant (duplicated) type qualifier or function specifier.
+///
+/// C99 §6.7.3p4 explicitly permits repeating the same type qualifier
+/// in a declaration ("If the same qualifier appears more than once in
+/// the same specifier-qualifier-list, either directly or via one or
+/// more typedefs, the behavior is the same as if it appeared only
+/// once"), and §6.7.4p5 says the same thing for `inline`. Repetition
+/// is therefore well-formed, but it is almost always a mistake — the
+/// parser accepts it and warns so the duplicate stands out in tooling
+/// output.
+pub const W0004: &str = "W0004";
+const W0004_DESC: &str = "duplicate type qualifier or function specifier";
 
 #[cfg(test)]
 mod tests {

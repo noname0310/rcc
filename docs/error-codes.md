@@ -463,6 +463,51 @@ began. After emitting the diagnostic the parser splits the run at the
 conflict and continues — any subsequent well-formed concatenation
 still merges normally.
 
+## E0060 — conflicting storage-class specifiers
+
+C99 §6.7.1p2: "At most, one storage-class specifier may be given in
+the declaration specifiers in a declaration." Any second storage-class
+keyword — whether a real conflict or a self-duplicate — is reported at
+the offending keyword and the first-chosen specifier is kept.
+
+```c
+static extern int x;    // error[E0060]: cannot combine `extern` with previous storage-class specifier
+static static int y;    // error[E0060]: duplicate `static` storage-class specifier
+```
+
+The parser still continues through the specifier list after emitting
+the diagnostic so subsequent tokens (qualifiers, the type specifier,
+the declarator) get a chance to parse and report their own problems
+independently.
+
+## E0061 — invalid combination of type specifiers
+
+C99 §6.7.2p2 enumerates the legal multisets of type-specifier keywords
+in a single declaration — e.g. `unsigned long long int`, `long
+double`, `_Complex float`, `signed char`. Anything outside that table
+is a constraint violation.
+
+```c
+short long x;           // error[E0061]: cannot combine `long` with `short`
+long long long y;       // error[E0061]: `long long long` is not a valid type specifier
+int int z;              // error[E0061]: cannot combine `int` with previous type specifier
+signed unsigned w;      // error[E0061]: cannot combine `unsigned` with opposite sign specifier
+float int v;            // error[E0061]: cannot combine `int` with previous type specifier
+```
+
+A `struct`/`union`/`enum` specifier with neither a tag nor a `{…}`
+body is also E0061 — §6.7.2.1 / §6.7.2.2 both require at least one of
+the two.
+
+```c
+struct ;                // error[E0061]: `struct` specifier needs a tag or a `{` body
+```
+
+The parser reports the first token that breaks the combination and
+keeps going so the rest of the declaration still gets parsed (which
+usually surfaces more useful follow-up diagnostics than bailing at
+the first error).
+
 ---
 
 ## W0001 — unknown #pragma directive
@@ -493,3 +538,19 @@ totally empty `#pragma` (no body tokens) is silently dropped.
 W0001 does **not** count as an error for `Handler::has_errors`, so a
 translation unit with only unknown-pragma warnings still compiles
 cleanly.
+
+## W0004 — duplicate type qualifier or function specifier
+
+C99 §6.7.3p4 explicitly permits repeating the same type qualifier in
+a declaration ("If the same qualifier appears more than once in the
+same specifier-qualifier-list … the behavior is the same as if it
+appeared only once"), and §6.7.4p5 says the same thing about
+`inline`. Repetition is therefore well-formed — the declaration
+compiles — but it is almost always a copy-paste mistake.
+
+```c
+const const int x;       // warning[W0004]: duplicate `const` type qualifier
+inline inline void f();  // warning[W0004]: duplicate `inline` function specifier
+```
+
+Like every warning, W0004 does not count toward `Handler::has_errors`.

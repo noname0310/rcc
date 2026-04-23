@@ -16,6 +16,7 @@ use rcc_lexer::PpToken;
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
+mod decl;
 mod expr;
 mod keywords;
 mod literal;
@@ -24,6 +25,7 @@ mod scope;
 mod stmt;
 mod token;
 
+pub use decl::parse_decl_specs;
 pub use expr::{
     parse_assignment_expression, parse_expr_bp, parse_expression, parse_postfix,
     parse_prefix_unary, parse_primary,
