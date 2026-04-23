@@ -16,7 +16,7 @@ pub mod directive;
 pub mod line_stream;
 pub mod macros;
 
-pub use directive::Directive;
+pub use directive::{parse_directive, ConditionalKind, Directive};
 pub use line_stream::LineStream;
 pub use macros::{HideSet, MacroDef, MacroKind, MacroTable};
 
