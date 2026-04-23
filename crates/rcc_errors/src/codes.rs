@@ -46,9 +46,13 @@ const E0001_DESC: &str = "unexpected character";
 pub const E0002: &str = "E0002";
 const E0002_DESC: &str = "unterminated string literal";
 
-/// Unterminated character constant.
+/// Nested block comment (`/*` inside another `/* ... */`).
+///
+/// C99 block comments do not nest (§6.4.9). A nested `/*` is almost
+/// always a typo — the outer comment is silently closed at the first
+/// `*/`, leaking the remaining lines into regular source.
 pub const E0003: &str = "E0003";
-const E0003_DESC: &str = "unterminated character constant";
+const E0003_DESC: &str = "nested block comment";
 
 /// Unterminated block comment (`/* ... */`).
 pub const E0004: &str = "E0004";

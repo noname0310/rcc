@@ -23,12 +23,16 @@ A `"` was opened but never closed before end of line or file.
 char *s = "hello;  // error[E0002]: unterminated string literal
 ```
 
-## E0003 — unterminated character constant
+## E0003 — nested block comment
 
-A `'` was opened but never closed.
+A `/*` appeared inside another `/* ... */` block comment. C99 block
+comments do not nest (§6.4.9); the outer comment silently closes at the
+first `*/`, which is almost always a mistake.
 
 ```c
-char c = 'a;  // error[E0003]: unterminated character constant
+/* outer
+   /* inner */          // error[E0003]: nested block comment
+   still inside? */
 ```
 
 ## E0004 — unterminated block comment
