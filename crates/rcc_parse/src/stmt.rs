@@ -614,14 +614,57 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
 ///     statement
 /// ```
 ///
-/// Declaration parsing lands in tasks 05-18+; for now every item is
-/// routed through [`parse_stmt`] and wrapped as `BlockItem::Stmt`.
-/// A line like `int x;` therefore reaches the expression-statement
-/// fallthrough and is diagnosed as "expected primary expression" —
-/// a deliberate stand-in until the declaration parser lands.
+/// Declarations are recognised by attempting [`crate::decl::parse_declaration`]
+/// first; if the cursor is not at the start of a declaration, it
+/// falls through to the statement path.
 pub fn parse_block_item(p: &mut Parser<'_>) -> Option<BlockItem> {
+    if looks_like_decl(p) {
+        if let Some(decl) = crate::decl::parse_declaration(p) {
+            return Some(BlockItem::Decl(decl));
+        }
+    }
     let stmt = parse_stmt(p)?;
     Some(BlockItem::Stmt(Box::new(stmt)))
+}
+
+/// Heuristic: does the current token look like it starts a
+/// declaration? Used by [`parse_block_item`] to decide whether to
+/// try the declaration path before falling through to statements.
+fn looks_like_decl(p: &Parser<'_>) -> bool {
+    match p.peek() {
+        Some(tok) => match &tok.kind {
+            TokenKind::Keyword(kw) => matches!(
+                kw,
+                Keyword::Typedef
+                    | Keyword::Extern
+                    | Keyword::Static
+                    | Keyword::Auto
+                    | Keyword::Register
+                    | Keyword::Void
+                    | Keyword::Char
+                    | Keyword::Short
+                    | Keyword::Int
+                    | Keyword::Long
+                    | Keyword::Float
+                    | Keyword::Double
+                    | Keyword::Signed
+                    | Keyword::Unsigned
+                    | Keyword::Bool
+                    | Keyword::Complex
+                    | Keyword::Imaginary
+                    | Keyword::Const
+                    | Keyword::Volatile
+                    | Keyword::Restrict
+                    | Keyword::Inline
+                    | Keyword::Struct
+                    | Keyword::Union
+                    | Keyword::Enum
+            ),
+            TokenKind::Ident(sym) => p.scopes.is_typedef(*sym),
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 #[cfg(test)]

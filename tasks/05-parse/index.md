@@ -33,7 +33,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [22-struct-union-fields](22-struct-union-fields.md)
 - [x] [23-enum-enumerators](23-enum-enumerators.md)
 - [x] [24-init-list-designators](24-init-list-designators.md)
-- [ ] [25-function-definition](25-function-definition.md)
+- [x] [25-function-definition](25-function-definition.md)
 - [ ] [26-kr-declarations](26-kr-declarations.md)
 - [ ] [27-error-recovery](27-error-recovery.md)
 - [ ] [28-unit-tests-grammar](28-unit-tests-grammar.md)

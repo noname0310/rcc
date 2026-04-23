@@ -27,8 +27,8 @@ mod stmt;
 mod token;
 
 pub use decl::{
-    declare_declarator_name, parse_abstract_declarator, parse_decl_specs, parse_declarator,
-    parse_type_name,
+    declare_declarator_name, parse_abstract_declarator, parse_decl_specs, parse_declaration,
+    parse_declarator, parse_external_decl, parse_type_name,
 };
 pub use expr::{
     parse_assignment_expression, parse_expr_bp, parse_expression, parse_postfix,
@@ -45,10 +45,29 @@ pub use token::{
 };
 
 /// Parse a translation unit. Returns `None` if unrecoverable.
-///
-/// M1 scope: interface only. Implementation lands in M1-follow-up.
-pub fn parse(_session: &mut Session, _tokens: Vec<PpToken>) -> Option<TranslationUnit> {
-    None
+pub fn parse(session: &mut Session, tokens: Vec<PpToken>) -> Option<TranslationUnit> {
+    let converted = phase7::convert(session, &tokens);
+    let mut parser = Parser::new(session, converted);
+    let start = parser.cur_span();
+    let mut decls = Vec::new();
+    while parser.peek().is_some() {
+        let before = parser.cursor;
+        match decl::parse_external_decl(&mut parser) {
+            Some(d) => decls.push(d),
+            None => {
+                if parser.cursor == before {
+                    // Avoid infinite loop on unparseable input.
+                    parser.bump();
+                }
+            }
+        }
+    }
+    let end = if parser.cursor > 0 {
+        parser.tokens.get(parser.cursor - 1).map(|t| t.span).unwrap_or(start)
+    } else {
+        start
+    };
+    Some(TranslationUnit { decls, span: start.to(end) })
 }
 
 /// Parser state. Public so UI tests can instantiate partial parses.

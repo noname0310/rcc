@@ -62,9 +62,9 @@
 //! — the parser's job here is purely syntactic.
 
 use rcc_ast::{
-    ArrayDeclarator, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Enumerator, Expr,
-    FieldDecl, FieldDeclarator, FunctionDeclarator, ParamDecl, RecordKind, RecordSpec,
-    StorageClass, TypeName, TypeQuals, TypeSpec,
+    ArrayDeclarator, Decl, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Enumerator, Expr,
+    ExternalDecl, FieldDecl, FieldDeclarator, FunctionDeclarator, FunctionDef, InitDeclarator,
+    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeName, TypeQuals, TypeSpec,
 };
 use rcc_errors::codes;
 use rcc_lexer::Punct;
@@ -990,6 +990,187 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  External declarations (C99 §6.9)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Parse a top-level *external-declaration* (C99 §6.9):
+///
+/// ```text
+/// external-declaration:
+///     function-definition
+///     declaration
+///
+/// function-definition:
+///     declaration-specifiers declarator declaration-list? compound-statement
+///
+/// declaration:
+///     declaration-specifiers init-declarator-list? ;
+/// ```
+///
+/// Disambiguation: after parsing `declaration-specifiers declarator`,
+/// peek at the current token:
+///
+/// - `{`        → function definition
+/// - `;`, `,`, `=` → declaration
+///
+/// K&R-style `declaration-list` between declarator and `{` is
+/// deferred to task 05-26.
+pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
+    let start = p.cur_span();
+    let specs = parse_decl_specs(p)?;
+
+    // Bare `;` after specifiers → declaration with no init-declarator-list.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
+        let end = p.cur_span();
+        p.bump();
+        let id = p.fresh_id();
+        return Some(ExternalDecl::Decl(Decl {
+            id,
+            span: start.to(end),
+            specs,
+            inits: Vec::new(),
+        }));
+    }
+
+    // Parse the first declarator.
+    let declarator = parse_declarator(p)?;
+
+    // Disambiguate: `{` → function definition.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
+        declare_declarator_name(p, &specs, &declarator);
+        let body = crate::stmt::parse_block(p)?;
+        let end = body.span;
+        let id = p.fresh_id();
+        return Some(ExternalDecl::Function(FunctionDef {
+            id,
+            span: start.to(end),
+            specs,
+            declarator,
+            kr_decls: Vec::new(),
+            body,
+        }));
+    }
+
+    // Otherwise it's a declaration — finish the init-declarator-list.
+    let init = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
+        p.bump();
+        crate::init::parse_initializer(p)
+    } else {
+        None
+    };
+    declare_declarator_name(p, &specs, &declarator);
+    let mut inits = vec![InitDeclarator { declarator, init }];
+
+    while matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Comma))) {
+        p.bump();
+        let d = match parse_declarator(p) {
+            Some(d) => d,
+            None => break,
+        };
+        let init = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
+            p.bump();
+            crate::init::parse_initializer(p)
+        } else {
+            None
+        };
+        declare_declarator_name(p, &specs, &d);
+        inits.push(InitDeclarator { declarator: d, init });
+    }
+
+    let end = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Semi)) => {
+            let s = tok.span;
+            p.bump();
+            s
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), "expected `;` after declaration").emit();
+            last_consumed_span(p, start)
+        }
+    };
+
+    let id = p.fresh_id();
+    Some(ExternalDecl::Decl(Decl { id, span: start.to(end), specs, inits }))
+}
+
+/// Parse a `declaration` inside a block (C99 §6.7):
+///
+/// ```text
+/// declaration:
+///     declaration-specifiers init-declarator-list? ;
+/// ```
+///
+/// Returns `None` when the cursor is not positioned on something that
+/// starts a declaration. The caller ([`parse_block_item`]) uses this
+/// to fall through to the statement path.
+pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
+    let start = p.cur_span();
+    let saved_cursor = p.cursor;
+    let specs = parse_decl_specs(p)?;
+
+    // If the specifier list consumed nothing, it is not a declaration.
+    let specs_empty = specs.type_specs.is_empty()
+        && specs.storage.is_none()
+        && !specs.quals.const_
+        && !specs.quals.volatile
+        && !specs.quals.restrict
+        && !specs.func_specs.inline;
+    if specs_empty {
+        p.cursor = saved_cursor;
+        return None;
+    }
+
+    // Bare `;` after specifiers.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
+        let end = p.cur_span();
+        p.bump();
+        let id = p.fresh_id();
+        return Some(Decl { id, span: start.to(end), specs, inits: Vec::new() });
+    }
+
+    let declarator = parse_declarator(p)?;
+    let init = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
+        p.bump();
+        crate::init::parse_initializer(p)
+    } else {
+        None
+    };
+    declare_declarator_name(p, &specs, &declarator);
+    let mut inits = vec![InitDeclarator { declarator, init }];
+
+    while matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Comma))) {
+        p.bump();
+        let d = match parse_declarator(p) {
+            Some(d) => d,
+            None => break,
+        };
+        let init = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
+            p.bump();
+            crate::init::parse_initializer(p)
+        } else {
+            None
+        };
+        declare_declarator_name(p, &specs, &d);
+        inits.push(InitDeclarator { declarator: d, init });
+    }
+
+    let end = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Semi)) => {
+            let s = tok.span;
+            p.bump();
+            s
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), "expected `;` after declaration").emit();
+            last_consumed_span(p, start)
+        }
+    };
+
+    let id = p.fresh_id();
+    Some(Decl { id, span: start.to(end), specs, inits })
 }
 
 /// Dead-code guard: re-export for potential callers within the crate.
@@ -2913,5 +3094,127 @@ mod tests {
         assert_eq!(sess.interner.get(list[0].name), "A");
         assert_eq!(sess.interner.get(list[1].name), "B");
         assert!(diags.is_empty());
+    }
+
+    // ── External declarations / function definitions (§6.9) ─────────
+
+    use rcc_ast::{ExternalDecl, StmtKind};
+
+    fn parse_external(src: &str) -> (ExternalDecl, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let ed = parse_external_decl(&mut parser).expect("parse_external_decl returns Some");
+        (ed, cap.diagnostics(), sess)
+    }
+
+    #[test]
+    fn function_def_int_main_void_return_0() {
+        // `int main(void) { return 0; }` → FunctionDef.
+        let src = "int main(void) { return 0; }";
+        let (ed, diags, sess) = parse_external(src);
+        assert!(diags.is_empty(), "clean parse: {diags:?}");
+        match ed {
+            ExternalDecl::Function(fd) => {
+                assert!(matches!(fd.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                let (sym, _) = fd.declarator.name.expect("function has a name");
+                assert_eq!(sess.interner.get(sym), "main");
+                assert!(fd.kr_decls.is_empty());
+                assert_eq!(fd.body.items.len(), 1, "body has one item");
+            }
+            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+        }
+    }
+
+    #[test]
+    fn prototype_declaration_int_f_int() {
+        // `int f(int);` → Decl.
+        let src = "int f(int);";
+        let (ed, diags, sess) = parse_external(src);
+        assert!(diags.is_empty(), "clean parse: {diags:?}");
+        match ed {
+            ExternalDecl::Decl(decl) => {
+                assert!(matches!(decl.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert_eq!(decl.inits.len(), 1);
+                let d = &decl.inits[0].declarator;
+                let (sym, _) = d.name.expect("declarator has a name");
+                assert_eq!(sess.interner.get(sym), "f");
+            }
+            ExternalDecl::Function(_) => panic!("expected Decl, got FunctionDef"),
+        }
+    }
+
+    #[test]
+    fn parameterless_void_f_void_definition() {
+        // `void f(void) { }` → FunctionDef with empty body.
+        let src = "void f(void) { }";
+        let (ed, diags, sess) = parse_external(src);
+        assert!(diags.is_empty(), "clean parse: {diags:?}");
+        match ed {
+            ExternalDecl::Function(fd) => {
+                assert!(matches!(fd.specs.type_specs.as_slice(), [TypeSpec::Void]));
+                let (sym, _) = fd.declarator.name.expect("function has a name");
+                assert_eq!(sess.interner.get(sym), "f");
+                assert!(fd.body.items.is_empty(), "empty body");
+            }
+            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+        }
+    }
+
+    #[test]
+    fn variable_declaration_with_init() {
+        // `int x = 0;` → Decl with initializer.
+        let src = "int x = 0;";
+        let (ed, diags, sess) = parse_external(src);
+        assert!(diags.is_empty(), "clean parse: {diags:?}");
+        match ed {
+            ExternalDecl::Decl(decl) => {
+                assert!(matches!(decl.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert_eq!(decl.inits.len(), 1);
+                let d = &decl.inits[0].declarator;
+                let (sym, _) = d.name.expect("declarator has a name");
+                assert_eq!(sess.interner.get(sym), "x");
+                assert!(decl.inits[0].init.is_some(), "has initializer");
+            }
+            ExternalDecl::Function(_) => panic!("expected Decl, got FunctionDef"),
+        }
+    }
+
+    #[test]
+    fn function_def_then_variable_decl() {
+        // Two external declarations side-by-side parse cleanly.
+        let src = "int main(void) { return 0; } int x = 0;";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let ed1 = parse_external_decl(&mut parser).expect("first external decl");
+        let ed2 = parse_external_decl(&mut parser).expect("second external decl");
+        assert!(cap.diagnostics().is_empty(), "clean parse: {:?}", cap.diagnostics());
+        assert!(matches!(ed1, ExternalDecl::Function(_)), "first is FunctionDef");
+        assert!(matches!(ed2, ExternalDecl::Decl(_)), "second is Decl");
+    }
+
+    #[test]
+    fn function_def_body_return_stmt() {
+        // Verify that `return 0;` inside the body is a Return statement.
+        let src = "int main(void) { return 0; }";
+        let (ed, diags, _sess) = parse_external(src);
+        assert!(diags.is_empty(), "clean parse: {diags:?}");
+        match ed {
+            ExternalDecl::Function(fd) => {
+                assert_eq!(fd.body.items.len(), 1);
+                match &fd.body.items[0] {
+                    rcc_ast::BlockItem::Stmt(s) => {
+                        assert!(
+                            matches!(s.kind, StmtKind::Return(Some(_))),
+                            "expected Return, got {:?}",
+                            s.kind
+                        );
+                    }
+                    other => panic!("expected Stmt, got {other:?}"),
+                }
+            }
+            ExternalDecl::Decl(_) => panic!("expected FunctionDef"),
+        }
     }
 }
