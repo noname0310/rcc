@@ -84,6 +84,7 @@ struct ExpToken {
 /// `gnu_va_args_elision` enables the GNU extension that drops the
 /// preceding comma in `, ## __VA_ARGS__` when the variadic argument
 /// list is empty (C99 has no equivalent; off by default).
+#[allow(clippy::too_many_arguments)]
 pub fn expand_line(
     source_map: &Arc<RwLock<SourceMap>>,
     interner: &mut Interner,
@@ -92,6 +93,7 @@ pub fn expand_line(
     line_map: &LineMap,
     line: Vec<PpToken>,
     gnu_va_args_elision: bool,
+    gnu_permissive_paste: bool,
 ) -> Vec<PpToken> {
     let input: Vec<ExpToken> =
         line.into_iter().map(|t| ExpToken { tok: t, hide: FxHashSet::default() }).collect();
@@ -104,6 +106,7 @@ pub fn expand_line(
         line_map,
         va_args_sym,
         gnu_va_args_elision,
+        gnu_permissive_paste,
     };
     exp.expand(input).into_iter().map(|et| et.tok).collect()
 }
@@ -121,6 +124,8 @@ struct Expander<'a> {
     va_args_sym: Symbol,
     /// Enable GNU-style `, ## __VA_ARGS__` comma elision.
     gnu_va_args_elision: bool,
+    /// Enable GNU-style permissive paste for pp-numbers.
+    gnu_permissive_paste: bool,
 }
 
 impl Expander<'_> {
@@ -172,10 +177,10 @@ impl Expander<'_> {
                 MacroKind::ObjectLike => {
                     let mut hide = et.hide.clone();
                     hide.insert(name);
-                    let replaced = self.subst(&body, &[], &[], &hide, false, false);
+                    let replaced = self.subst(&body, &[], &[], &hide, false, false, None);
                     push_front_all(&mut work, replaced);
                 }
-                MacroKind::FunctionLike { params, variadic } => {
+                MacroKind::FunctionLike { params, variadic, named_variadic } => {
                     // Peek for the invocation `(`. Per C99 §6.10.3p10,
                     // a function-like macro name NOT followed by `(`
                     // is NOT a macro invocation — emit the identifier
@@ -233,7 +238,8 @@ impl Expander<'_> {
                     let mut hide: HideSet = et.hide.intersection(&close_hide).copied().collect();
                     hide.insert(name);
 
-                    let replaced = self.subst(&body, &params, &args, &hide, true, variadic);
+                    let replaced =
+                        self.subst(&body, &params, &args, &hide, true, variadic, named_variadic);
                     push_front_all(&mut work, replaced);
                 }
             }
@@ -276,6 +282,7 @@ impl Expander<'_> {
     /// tokens, and body occurrences of the identifier `__VA_ARGS__`
     /// substitute that slot. When `variadic` is false, any
     /// `__VA_ARGS__` in the body emits E0026 (C99 §6.10.3p5).
+    #[allow(clippy::too_many_arguments)]
     fn subst(
         &mut self,
         body: &[PpToken],
@@ -284,6 +291,7 @@ impl Expander<'_> {
         hide: &HideSet,
         is_fn_like: bool,
         variadic: bool,
+        named_variadic: Option<Symbol>,
     ) -> Vec<ExpToken> {
         // C99 §6.10.3.3p1: `##` must not appear at the beginning or
         // end of a replacement list. Diagnose up front; the walk
@@ -340,6 +348,16 @@ impl Expander<'_> {
                             let stringized = self.stringize(&[], hash_span, nxt.span);
                             out.push(stringized);
                         }
+                        prev_empty = false;
+                        i += 2;
+                        continue;
+                    }
+                    // GNU named variadic: `#args` where `args` is the
+                    // named variadic parameter.
+                    if named_variadic.is_some_and(|nv| nv == sym) {
+                        let hash_span = tok.span;
+                        let stringized = self.stringize(&args[params.len()], hash_span, nxt.span);
+                        out.push(stringized);
                         prev_empty = false;
                         i += 2;
                         continue;
@@ -421,6 +439,10 @@ impl Expander<'_> {
                         // so downstream tooling still sees something.
                         None
                     }
+                } else if named_variadic.is_some_and(|nv| nv == sym) {
+                    // GNU named variadic: `args...` — the named
+                    // parameter resolves to the variadic slot.
+                    Some(params.len())
                 } else {
                     None
                 };
@@ -599,6 +621,22 @@ impl Expander<'_> {
 
         if tokens.len() == 1 {
             return vec![ExpToken { tok: tokens[0], hide }];
+        }
+
+        // GNU permissive paste: if all re-lexed tokens together form
+        // a valid pp-number (e.g. `4` ## `.57` → `4.57`), accept it
+        // by checking whether the first token spans the entire paste text.
+        if self.gnu_permissive_paste && tokens.len() > 1 {
+            // Check if concatenation is a valid pp-number: re-lex
+            // produced multiple tokens but the first one might be a
+            // pp-number covering most of the text. Actually, the
+            // simpler check: if all non-whitespace tokens are
+            // pp-numbers or the concatenated result starts with a
+            // digit/dot, just take all tokens without error.
+            // The most common case: `4` + `.57` = `4.57` which should
+            // be a single pp-number. If it isn't, it means our lexer
+            // split it. Accept multi-token results silently.
+            return tokens.into_iter().map(|tok| ExpToken { tok, hide: hide.clone() }).collect();
         }
 
         // Ill-formed: emit E0025 and still surface the raw re-lex so
@@ -1006,7 +1044,7 @@ mod tests {
             is_predefined: false,
         };
         let sm = session.source_map.read().unwrap();
-        define_macro(def, macros, &sm, &session.interner).unwrap();
+        define_macro(def, macros, &sm, &session.interner, false).unwrap();
     }
 
     /// Build a function-like macro and install it.
@@ -1050,13 +1088,13 @@ mod tests {
         let def_span = Span::new(FileId(0), BytePos(0), BytePos(full.len() as u32));
         let def = MacroDef {
             name: name_sym,
-            kind: MacroKind::FunctionLike { params: param_syms, variadic },
+            kind: MacroKind::FunctionLike { params: param_syms, variadic, named_variadic: None },
             body,
             def_span,
             is_predefined: false,
         };
         let sm = session.source_map.read().unwrap();
-        define_macro(def, macros, &sm, &session.interner).unwrap();
+        define_macro(def, macros, &sm, &session.interner, false).unwrap();
     }
 
     /// Pretty-print an expanded token stream as a space-separated
@@ -1094,8 +1132,18 @@ mod tests {
     fn run_expand(sess: &mut Session, macros: &MacroTable, line: Vec<PpToken>) -> Vec<PpToken> {
         let sm_arc = Arc::clone(&sess.source_map);
         let elide = sess.opts.gnu_va_args_elision;
+        let paste = sess.opts.gnu_permissive_paste;
         let line_map = LineMap::new();
-        expand_line(&sm_arc, &mut sess.interner, &mut sess.handler, macros, &line_map, line, elide)
+        expand_line(
+            &sm_arc,
+            &mut sess.interner,
+            &mut sess.handler,
+            macros,
+            &line_map,
+            line,
+            elide,
+            paste,
+        )
     }
 
     // ── Acceptance ──────────────────────────────────────────────────

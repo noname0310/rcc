@@ -34,6 +34,15 @@ pub enum Directive {
         /// Raw header name text (lexed as `HeaderName`).
         header: String,
     },
+    /// `#include MACRO` — the body does not start with `"` or `<`, so
+    /// the tokens are stored raw for the caller to macro-expand and
+    /// re-parse as a header name (C99 §6.10.2p4, GNU extension).
+    IncludeTokens {
+        /// Full directive span.
+        span: Span,
+        /// Raw body tokens to be macro-expanded.
+        tokens: Vec<PpToken>,
+    },
     /// `#define ...`
     Define(MacroDef),
     /// `#undef NAME`
@@ -148,6 +157,16 @@ pub fn parse_directive(
     src: &str,
     interner: &mut Interner,
 ) -> Result<Directive, Diagnostic> {
+    parse_directive_ext(line, src, interner, false)
+}
+
+/// Extended directive parser that accepts GNU extension flags.
+pub fn parse_directive_ext(
+    line: &[PpToken],
+    src: &str,
+    interner: &mut Interner,
+    gnu_named_variadic: bool,
+) -> Result<Directive, Diagnostic> {
     let hash = line.first().expect("parse_directive called on empty line");
     debug_assert!(
         matches!(hash.kind, PpTokenKind::Punct(Punct::Hash)) && hash.at_line_start,
@@ -171,7 +190,7 @@ pub fn parse_directive(
 
     match name {
         "include" => parse_include(line_span, body, src),
-        "define" => parse_define(line_span, body, src, interner),
+        "define" => parse_define(line_span, body, src, interner, gnu_named_variadic),
         "undef" => parse_undef(line_span, body, src, interner),
         "if" => Ok(make_conditional(line_span, ConditionalKind::If, body.to_vec())),
         "ifdef" => Ok(make_conditional(line_span, ConditionalKind::IfDef, body.to_vec())),
@@ -203,7 +222,10 @@ fn parse_include(span: Span, body: &[PpToken], src: &str) -> Result<Directive, D
     let is_system = match first.kind {
         PpTokenKind::Punct(Punct::Lt) => true,
         PpTokenKind::StringLit { .. } => false,
-        _ => return Err(malformed_include(first.span.to(last.span))),
+        // Not `<` or `"` — the body might be a macro that expands to a
+        // header name (C99 §6.10.2p4). Return the raw tokens for the
+        // caller to expand and re-parse.
+        _ => return Ok(Directive::IncludeTokens { span, tokens: body.to_vec() }),
     };
 
     // Raw substring from the first body token through the last: for
@@ -222,6 +244,7 @@ fn parse_define(
     body: &[PpToken],
     src: &str,
     interner: &mut Interner,
+    gnu_named_variadic: bool,
 ) -> Result<Directive, Diagnostic> {
     let Some(name_tok) = body.first() else {
         return Err(malformed_define(span));
@@ -234,7 +257,7 @@ fn parse_define(
     let rest = &body[1..];
     let (kind, body_tokens) = match rest.first() {
         Some(tok) if is_function_like_lparen(tok) => {
-            parse_function_like_signature(rest, src, interner)?
+            parse_function_like_signature(rest, src, interner, gnu_named_variadic)?
         }
         _ => (MacroKind::ObjectLike, rest.to_vec()),
     };
@@ -264,6 +287,7 @@ fn parse_function_like_signature(
     rest: &[PpToken],
     src: &str,
     interner: &mut Interner,
+    gnu_named_variadic: bool,
 ) -> Result<(MacroKind, Vec<PpToken>), Diagnostic> {
     debug_assert!(
         matches!(rest.first(), Some(t) if is_function_like_lparen(t)),
@@ -274,6 +298,7 @@ fn parse_function_like_signature(
     let mut idx = 1usize;
     let mut params: Vec<Symbol> = Vec::new();
     let mut variadic = false;
+    let mut named_variadic: Option<Symbol> = None;
 
     // Allow empty `()` as a zero-parameter list. Otherwise the list is
     // a non-empty comma-separated sequence, each slot holding either
@@ -293,6 +318,27 @@ fn parse_function_like_signature(
                         }
                         params.push(sym);
                         idx += 1;
+                        // GNU extension: `args...` — identifier immediately
+                        // followed by `...` makes it a named variadic.
+                        if gnu_named_variadic {
+                            if let Some(next) = rest.get(idx) {
+                                if matches!(next.kind, PpTokenKind::Punct(Punct::Ellipsis)) {
+                                    variadic = true;
+                                    named_variadic = Some(sym);
+                                    // Pop from params — it's the variadic name, not a regular param.
+                                    params.pop();
+                                    idx += 1;
+                                    let close = rest
+                                        .get(idx)
+                                        .ok_or_else(|| malformed_define_param_list(lparen_span))?;
+                                    if !matches!(close.kind, PpTokenKind::Punct(Punct::RParen)) {
+                                        return Err(malformed_define(close.span));
+                                    }
+                                    idx += 1;
+                                    break;
+                                }
+                            }
+                        }
                     }
                     PpTokenKind::Punct(Punct::Ellipsis) => {
                         variadic = true;
@@ -328,7 +374,7 @@ fn parse_function_like_signature(
     }
 
     let body_tokens = rest[idx..].to_vec();
-    Ok((MacroKind::FunctionLike { params, variadic }, body_tokens))
+    Ok((MacroKind::FunctionLike { params, variadic, named_variadic }, body_tokens))
 }
 
 fn parse_undef(
@@ -589,7 +635,7 @@ mod tests {
             Directive::Define(def) => {
                 assert_eq!(interner.intern("MAX"), def.name);
                 match def.kind {
-                    MacroKind::FunctionLike { params, variadic } => {
+                    MacroKind::FunctionLike { params, variadic, .. } => {
                         assert_eq!(params.len(), 2, "MAX has two parameters");
                         assert_eq!(params[0], interner.intern("a"));
                         assert_eq!(params[1], interner.intern("b"));
@@ -610,7 +656,7 @@ mod tests {
             Directive::Define(def) => {
                 assert_eq!(interner.intern("F"), def.name);
                 match def.kind {
-                    MacroKind::FunctionLike { params, variadic } => {
+                    MacroKind::FunctionLike { params, variadic, .. } => {
                         assert!(params.is_empty(), "F has no parameters");
                         assert!(!variadic);
                     }
@@ -629,7 +675,7 @@ mod tests {
             Directive::Define(def) => {
                 assert_eq!(interner.intern("V"), def.name);
                 match def.kind {
-                    MacroKind::FunctionLike { params, variadic } => {
+                    MacroKind::FunctionLike { params, variadic, .. } => {
                         assert!(params.is_empty(), "V has no named parameters");
                         assert!(variadic, "V is variadic");
                     }
@@ -647,7 +693,7 @@ mod tests {
             Directive::Define(def) => {
                 assert_eq!(interner.intern("LOG"), def.name);
                 match def.kind {
-                    MacroKind::FunctionLike { params, variadic } => {
+                    MacroKind::FunctionLike { params, variadic, .. } => {
                         assert_eq!(params.len(), 1);
                         assert_eq!(params[0], interner.intern("fmt"));
                         assert!(variadic);
@@ -866,10 +912,14 @@ mod tests {
     // ── Negatives: malformed bodies ─────────────────────────────────
 
     #[test]
-    fn include_without_header_name_is_malformed() {
+    fn include_bareword_yields_include_tokens_for_computed_include() {
         let (d, _) = parse("#include foo\n");
-        let diag = d.expect_err("bareword after #include must fail");
-        assert_eq!(diag.code, Some(rcc_errors::codes::E0013));
+        match d.expect("bareword after #include yields IncludeTokens") {
+            Directive::IncludeTokens { tokens, .. } => {
+                assert_eq!(tokens.len(), 1, "single identifier token expected");
+            }
+            other => panic!("expected IncludeTokens, got {other:?}"),
+        }
     }
 
     #[test]

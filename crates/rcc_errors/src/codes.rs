@@ -71,6 +71,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0003, W0003_DESC),
     (W0004, W0004_DESC),
     (W0005, W0005_DESC),
+    (W0006, W0006_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -390,6 +391,17 @@ const W0004_DESC: &str = "duplicate type qualifier or function specifier";
 /// obsolescent and should be rewritten using prototype syntax.
 pub const W0005: &str = "W0005";
 const W0005_DESC: &str = "K&R function definition is obsolete";
+
+/// Permissive macro redefinition (GNU extension).
+///
+/// With `gnu_permissive_redefinition` enabled, a non-identical
+/// `#define` that preserves the macro's kind (object-like ↔
+/// object-like, or function-like with identical arity and
+/// variadicity) is accepted with a warning instead of the strict
+/// C99 E0022 error. The new definition silently replaces the old
+/// one, matching GCC / Clang behaviour.
+pub const W0006: &str = "W0006";
+const W0006_DESC: &str = "macro redefined with a different body (permissive)";
 
 #[cfg(test)]
 mod tests {

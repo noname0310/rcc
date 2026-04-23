@@ -59,8 +59,22 @@ fn chibicc_test_dir() -> PathBuf {
 /// resolves) and preprocess it end-to-end. Returns the number of
 /// emitted pp-tokens plus the diagnostics the run produced.
 fn preprocess_fixture(path: &Path) -> (usize, Vec<Diagnostic>) {
+    preprocess_fixture_with_opts(path, Options::default())
+}
+
+fn preprocess_fixture_gnu(path: &Path) -> (usize, Vec<Diagnostic>) {
+    let opts = Options {
+        gnu_permissive_redefinition: true,
+        gnu_named_variadic: true,
+        gnu_permissive_paste: true,
+        gnu_va_args_elision: true,
+        ..Options::default()
+    };
+    preprocess_fixture_with_opts(path, opts)
+}
+
+fn preprocess_fixture_with_opts(path: &Path, mut opts: Options) -> (usize, Vec<Diagnostic>) {
     let cap = CaptureEmitter::new();
-    let mut opts = Options::default();
     if let Some(parent) = path.parent() {
         opts.include_paths.push(parent.to_path_buf());
     }
@@ -85,35 +99,30 @@ fn chibicc_typedef_c_preprocesses_cleanly() {
     );
 }
 
-/// Error codes the chibicc `macro.c` baseline is allowed to surface.
+/// Error codes the chibicc `macro.c` baseline is allowed to surface
+/// in strict C99 mode (GNU extensions off).
 ///
-/// These are *not* bugs in the preprocessor per se — every one of
-/// them is the strictly-conforming C99 response to a GCC extension
-/// chibicc happens to use:
+/// These are the strictly-conforming C99 responses to GCC extensions
+/// chibicc happens to use. With GNU extension flags enabled, the
+/// `chibicc_macro_c_gnu_mode_zero_errors` test asserts 0 errors.
 ///
 /// | code  | shape                                              |
 /// |-------|----------------------------------------------------|
 /// | E0022 | "redefined with a different body" — chibicc       |
-/// |       | deliberately re-`#define`s `M1`/`M8`/... across   |
-/// |       | the file; §6.10.3p2 forbids this, but gcc/clang   |
-/// |       | accept it as a warning.                            |
-/// | E0013 | "malformed #include" — triggered by                |
-/// |       | `#include M13` (macro-expanded header name),       |
-/// |       | a §6.10.2p4 form our directive parser has not      |
-/// |       | yet learned.                                       |
-/// | E0014 | "invalid #define" — triggered by the GNU           |
-/// |       | `args...` named-variadic form                      |
-/// |       | (`#define M14(args...) ...`).                      |
+/// |       | deliberately re-`#define`s across the file.        |
+/// | E0014 | "invalid #define" — the GNU `args...`              |
+/// |       | named-variadic form.                               |
 /// | E0025 | "pasting forms an invalid token" — triggered by    |
 /// |       | `CONCAT(4,.57)` and similar pp-number fragment     |
 /// |       | pastes that our paste validator rejects.           |
-const MACRO_C_ALLOWED_ERRORS: &[&str] = &["E0013", "E0014", "E0022", "E0025"];
+const MACRO_C_ALLOWED_ERRORS: &[&str] = &["E0014", "E0022", "E0025"];
 
 /// Upper bound on the total number of error diagnostics `macro.c` is
-/// allowed to produce. The current baseline (captured 2026-04-23 on
-/// a clean workspace) is 34; the ceiling is set equal to that so
-/// any new error (regression) or fix (improvement) surfaces here.
-const MACRO_C_ERROR_CEILING: usize = 34;
+/// allowed to produce in strict C99 mode. E0013 was resolved by
+/// the computed `#include` support (task 04-20b); current baseline
+/// is 32 (22× E0022, 6× E0014, 2× E0025, 2× secondary E0022 from
+/// named-variadic redefs).
+const MACRO_C_ERROR_CEILING: usize = 32;
 
 #[test]
 fn chibicc_macro_c_runs_to_completion_with_bounded_gaps() {
@@ -162,6 +171,23 @@ fn chibicc_include_fixtures_resolve_end_to_end() {
     assert!(
         errors.is_empty(),
         "include1.h / include2.h chain must resolve cleanly, got {:?}",
+        errors.iter().map(|d| (d.code, d.message.clone())).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn chibicc_macro_c_gnu_mode_zero_errors() {
+    let path = chibicc_test_dir().join("macro.c");
+    assert!(path.is_file(), "vendor fetch missing: {}", path.display());
+    let (count, diags) = preprocess_fixture_gnu(&path);
+
+    assert!(count > 0, "macro.c must produce a non-empty pp-token stream");
+
+    let errors: Vec<&Diagnostic> = diags.iter().filter(|d| d.level == Level::Error).collect();
+    assert!(
+        errors.is_empty(),
+        "macro.c with GNU extensions enabled must produce zero errors, got {} errors: {:?}",
+        errors.len(),
         errors.iter().map(|d| (d.code, d.message.clone())).collect::<Vec<_>>(),
     );
 }

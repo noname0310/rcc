@@ -12,7 +12,7 @@ use rcc_data_structures::{FxHashMap, FxHashSet};
 /// slot or (outside a variadic body) emit E0026.
 pub const VA_ARGS_NAME: &str = "__VA_ARGS__";
 use rcc_errors::{
-    codes::{E0022, E0027},
+    codes::{E0022, E0027, W0006},
     Diagnostic, Label, Level,
 };
 use rcc_lexer::PpToken;
@@ -51,6 +51,11 @@ pub enum MacroKind {
         params: Vec<Symbol>,
         /// Whether the parameter list ends with `...`.
         variadic: bool,
+        /// GNU extension: when the variadic `...` was written as
+        /// `IDENT...`, this holds the named parameter symbol so the
+        /// expander can substitute uses of that name with the
+        /// variadic argument slot (instead of `__VA_ARGS__`).
+        named_variadic: Option<Symbol>,
     },
     /// A dynamic built-in whose replacement is synthesised by
     /// [`crate::expand::Expander`] at every use site. The empty `body`
@@ -145,12 +150,18 @@ impl MacroTable {
 /// `#define X 1+2` and `#define X 1 + 2` are correctly distinguished.
 /// `source_map` provides the text for spelling comparison; `interner`
 /// resolves the macro name for diagnostic messages.
+///
+/// `permissive_redefinition` enables the GNU extension: when `true`,
+/// a non-identical redefinition is accepted with a W0006 warning
+/// instead of E0022, and the new definition replaces the old.
+/// This matches gcc/clang's permissive default.
 pub fn define_macro(
     def: MacroDef,
     macros: &mut MacroTable,
     source_map: &SourceMap,
     interner: &Interner,
-) -> Result<(), Diagnostic> {
+    permissive_redefinition: bool,
+) -> Result<Option<Diagnostic>, Diagnostic> {
     if let Some(existing) = macros.get(def.name) {
         if existing.is_predefined {
             return Err(predefined_tamper_diagnostic(
@@ -162,12 +173,17 @@ pub fn define_macro(
             ));
         }
         if definitions_equivalent(existing, &def, source_map) {
-            return Ok(());
+            return Ok(None);
+        }
+        if permissive_redefinition {
+            let warning = permissive_redefinition_warning(existing, &def, interner);
+            macros.define(def);
+            return Ok(Some(warning));
         }
         return Err(redefinition_diagnostic(existing, &def, interner));
     }
     macros.define(def);
-    Ok(())
+    Ok(None)
 }
 
 /// Which directive is tampering with a predefined macro.
@@ -212,8 +228,8 @@ pub fn define_object_like(
     macros: &mut MacroTable,
     source_map: &SourceMap,
     interner: &Interner,
-) -> Result<(), Diagnostic> {
-    define_macro(def, macros, source_map, interner)
+) -> Result<Option<Diagnostic>, Diagnostic> {
+    define_macro(def, macros, source_map, interner, false)
 }
 
 /// Compare two definitions for C99 §6.10.3p1 "identical" status:
@@ -227,6 +243,8 @@ fn definitions_equivalent(a: &MacroDef, b: &MacroDef, source_map: &SourceMap) ->
     bodies_equivalent(&a.body, &b.body, source_map)
 }
 
+/// Check whether two macro kinds are the "same shape" for the GNU
+/// permissive-redefinition extension: object ↔ object, or
 /// Compare two replacement-lists for C99 §6.10.3p1 "identical" status.
 ///
 /// Token kinds, source spellings, and leading-whitespace flags are all
@@ -313,6 +331,29 @@ fn redefinition_diagnostic(
              identical in token count, ordering, spelling, and \
              whitespace separation"
             .into()],
+        help: vec!["use `#undef` before redefining with a different body".into()],
+    }
+}
+
+fn permissive_redefinition_warning(
+    previous: &MacroDef,
+    current: &MacroDef,
+    interner: &Interner,
+) -> Diagnostic {
+    let name = interner.get(current.name);
+    Diagnostic {
+        level: Level::Warning,
+        code: Some(W0006),
+        message: format!("macro `{name}` redefined with a different body (permissive)"),
+        labels: vec![
+            Label { span: current.def_span, message: "new definition here".into(), primary: true },
+            Label {
+                span: previous.def_span,
+                message: "previous definition here".into(),
+                primary: false,
+            },
+        ],
+        notes: vec!["GNU extension: same-kind redefinition accepted as a warning".into()],
         help: vec!["use `#undef` before redefining with a different body".into()],
     }
 }
@@ -525,7 +566,7 @@ mod tests {
         let param_syms = params.iter().map(|p| interner.intern(p)).collect();
         MacroDef {
             name: interner.intern(name_str),
-            kind: MacroKind::FunctionLike { params: param_syms, variadic },
+            kind: MacroKind::FunctionLike { params: param_syms, variadic, named_variadic: None },
             body,
             def_span,
             is_predefined: false,
@@ -546,7 +587,7 @@ mod tests {
             false,
             "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
         );
-        define_macro(a, &mut macros, &sm, &interner).unwrap();
+        define_macro(a, &mut macros, &sm, &interner, false).unwrap();
 
         let b = seed_fn_define(
             &mut sm,
@@ -556,7 +597,7 @@ mod tests {
             false,
             "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
         );
-        define_macro(b, &mut macros, &sm, &interner)
+        define_macro(b, &mut macros, &sm, &interner, false)
             .expect("identical function-like redefinition must be benign");
     }
 
@@ -574,7 +615,7 @@ mod tests {
             false,
             "#define MAX(a,b) ((a)>(b)?(a):(b))\n",
         );
-        define_macro(a, &mut macros, &sm, &interner).unwrap();
+        define_macro(a, &mut macros, &sm, &interner, false).unwrap();
 
         // Rename parameter but keep an equivalent-looking body; the
         // §6.10.3p1 comparison demands identical parameter *names*.
@@ -586,7 +627,7 @@ mod tests {
             false,
             "#define MAX(x,b) ((x)>(b)?(x):(b))\n",
         );
-        let diag = define_macro(b, &mut macros, &sm, &interner)
+        let diag = define_macro(b, &mut macros, &sm, &interner, false)
             .expect_err("parameter-name change must be rejected");
         assert_eq!(diag.code, Some(E0022));
     }
@@ -599,12 +640,12 @@ mod tests {
 
         // Object-like FOO.
         let a = seed_define(&mut sm, &mut interner, "FOO", "#define FOO 42\n");
-        define_macro(a, &mut macros, &sm, &interner).unwrap();
+        define_macro(a, &mut macros, &sm, &interner, false).unwrap();
 
         // Function-like FOO with (allegedly) the same body. Kind
         // mismatch alone must trigger E0022.
         let b = seed_fn_define(&mut sm, &mut interner, "FOO", &[], false, "#define FOO() 42\n");
-        let diag = define_macro(b, &mut macros, &sm, &interner)
+        let diag = define_macro(b, &mut macros, &sm, &interner, false)
             .expect_err("object-like vs function-like mismatch must be rejected");
         assert_eq!(diag.code, Some(E0022));
     }
@@ -616,10 +657,10 @@ mod tests {
         let mut macros = MacroTable::default();
 
         let a = seed_fn_define(&mut sm, &mut interner, "V", &[], false, "#define V() 0\n");
-        define_macro(a, &mut macros, &sm, &interner).unwrap();
+        define_macro(a, &mut macros, &sm, &interner, false).unwrap();
 
         let b = seed_fn_define(&mut sm, &mut interner, "V", &[], true, "#define V(...) 0\n");
-        let diag = define_macro(b, &mut macros, &sm, &interner)
+        let diag = define_macro(b, &mut macros, &sm, &interner, false)
             .expect_err("variadic-ness mismatch must be rejected");
         assert_eq!(diag.code, Some(E0022));
     }

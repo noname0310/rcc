@@ -45,6 +45,9 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         opt_level: cli.opt_level,
         include_gpl_tests: cli.include_gpl_tests,
         gnu_va_args_elision: false,
+        gnu_permissive_redefinition: false,
+        gnu_named_variadic: false,
+        gnu_permissive_paste: false,
     }
 }
 

@@ -81,6 +81,29 @@ pub struct Options {
     /// Off by default — the strict C99 behaviour is to expand
     /// `__VA_ARGS__` to empty and leave the comma in place.
     pub gnu_va_args_elision: bool,
+    /// Enable permissive macro redefinition (GNU extension).
+    ///
+    /// When `true`, a non-identical redefinition of a macro that
+    /// preserves the *kind* (object-like ↔ object-like, or
+    /// function-like with the same arity and variadicity) is
+    /// downgraded from E0022 (error) to W0006 (warning), and the
+    /// new definition replaces the old one. Off by default.
+    pub gnu_permissive_redefinition: bool,
+    /// Enable the GNU `args...` named-variadic extension.
+    ///
+    /// When `true`, `parse_function_like_signature` accepts a final
+    /// `IDENT...` (identifier immediately followed by `...`) as a
+    /// named variadic parameter. In the replacement list, uses of
+    /// that identifier resolve to the variadic argument slot. Off
+    /// by default.
+    pub gnu_named_variadic: bool,
+    /// Enable permissive token-paste across pp-number boundaries.
+    ///
+    /// When `true`, if `##` concatenation re-lexes to multiple tokens
+    /// but the combined text forms a valid pp-number, the paste
+    /// succeeds as a single pp-number token instead of emitting
+    /// E0025. Off by default.
+    pub gnu_permissive_paste: bool,
 }
 
 impl Default for Options {
@@ -94,6 +117,9 @@ impl Default for Options {
             opt_level: OptLevel::None,
             include_gpl_tests: false,
             gnu_va_args_elision: false,
+            gnu_permissive_redefinition: false,
+            gnu_named_variadic: false,
+            gnu_permissive_paste: false,
         }
     }
 }

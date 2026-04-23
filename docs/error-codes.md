@@ -617,3 +617,17 @@ int f(x, y) int x; double y; { return x; }
 ```
 
 Like every warning, W0005 does not count toward `Handler::has_errors`.
+
+## W0006 — macro redefined with a different body (permissive)
+
+When `gnu_permissive_redefinition` is enabled, a non-identical `#define`
+is accepted with a warning instead of the strict C99 E0022 error.
+The new definition silently replaces the old one, matching GCC / Clang
+behaviour.
+
+```c
+#define X 1
+#define X 2   // warning[W0006]: macro redefined with a different body (permissive)
+```
+
+Like every warning, W0006 does not count toward `Handler::has_errors`.

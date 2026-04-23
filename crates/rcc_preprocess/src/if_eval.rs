@@ -90,6 +90,7 @@ pub fn eval_if(
         line_map,
         pre_expansion,
         gnu_va_args_elision,
+        false,
     );
 
     // Step 3: replace any remaining identifier / keyword with `0`.
