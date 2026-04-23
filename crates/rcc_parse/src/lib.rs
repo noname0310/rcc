@@ -21,6 +21,7 @@ mod keywords;
 mod literal;
 mod phase7;
 mod scope;
+mod stmt;
 mod token;
 
 pub use expr::{
@@ -31,6 +32,7 @@ pub use keywords::{classify_ident, Keyword, KEYWORDS};
 pub use literal::{decode_char, decode_float, decode_integer, decode_string};
 pub use phase7::{convert as pp_stream_to_tokens, merge_adjacent_strings, pp_to_token};
 pub use scope::{NameKind, Scope, ScopeStack};
+pub use stmt::{parse_block, parse_block_item, parse_stmt};
 pub use token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
 };

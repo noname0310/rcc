@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 05-13: Expression + block statements
 
 **Phase:** 05-parse    **Depends on:** 05-12    **Milestone:** M1+

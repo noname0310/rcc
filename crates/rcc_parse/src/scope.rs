@@ -32,6 +32,15 @@ impl ScopeStack {
         Self { frames: vec![Scope::default()] }
     }
 
+    /// Number of active scopes (≥ 1; the file scope is never popped).
+    ///
+    /// Exposed so tests and higher-level parser code can assert that
+    /// matched `push`/`pop` pairs around compound statements leave the
+    /// stack at the same depth they started at.
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
     /// Push a new scope.
     pub fn push(&mut self) {
         self.frames.push(Scope::default());
