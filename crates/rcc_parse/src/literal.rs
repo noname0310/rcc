@@ -15,8 +15,9 @@
 //! C99 reference: §6.4.4.1 "Integer constants".
 
 use rcc_errors::{codes, Diagnostic, Level};
+use rcc_lexer::StringEncoding;
 
-use crate::token::{FloatLiteral, FloatSuffix, IntLiteral, IntSuffix};
+use crate::token::{CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix};
 
 /// Decode a `PpNumberKind::Integer` source slice into an [`IntLiteral`].
 ///
@@ -442,6 +443,233 @@ fn hex_digit_value(b: u8) -> Option<u32> {
     }
 }
 
+/// Decode a `PpTokenKind::CharConst` source slice into a [`CharLiteral`].
+///
+/// The input `raw` is the **full** source text including the optional
+/// encoding prefix (`L` / `u` / `U` / `u8`) and the surrounding single
+/// quotes, e.g. `"'a'"`, `"'\\xff'"`, `"L'\\u00e9'"`. The `enc` argument
+/// is the encoding already classified by the lexer; the prefix consumed
+/// here must match it (defensive — a mismatch indicates an internal
+/// invariant violation rather than user error).
+///
+/// Supported escape sequences (C99 §6.4.4.4):
+///
+/// - **Simple escapes** — `\n`, `\t`, `\\`, `\'`, `\"`, `\?`, `\a`,
+///   `\b`, `\f`, `\r`, `\v` (C99 §6.4.4.4p3).
+/// - **Octal escape** `\NNN` — one to three octal digits; stops at the
+///   first non-octal character (§6.4.4.4p4).
+/// - **Hex escape** `\xH+` — one *or more* hex digits; C99 puts no
+///   upper bound on the digit count, though values exceeding the target
+///   char type's range are a §6.4.4.4p9 constraint violation (we decode
+///   the full value and let typeck diagnose the narrowing later).
+/// - **Universal character name** `\uXXXX` / `\UXXXXXXXX` — exactly 4
+///   / 8 hex digits (§6.4.3). The lexer normally rejects malformed UCNs
+///   before we get here; the defensive checks below still refuse them
+///   cleanly so the decoder never produces a bogus value.
+///
+/// Multi-character constants (e.g. `'ab'`) are implementation-defined
+/// per §6.4.4.4p10. `rcc` packs the constituent bytes big-endian
+/// (`'ab'` → `0x6162`) and the caller emits [`codes::W0003`] on the
+/// constant's span. Use [`decode_char_full`] if you need the
+/// multi-character flag alongside the decoded value.
+///
+/// # Errors
+///
+/// Returns a spanless [`Diagnostic`] for:
+///
+/// - An empty body (`''`) — a constraint violation per §6.4.4.4p2.
+/// - A hex escape with no digits (`'\x'`) — [`codes::E0012`].
+/// - An unknown simple escape (`'\q'`) — [`codes::E0005`].
+/// - A malformed universal character name — [`codes::E0005`].
+/// - Malformed prefix / quoting (defensive; the lexer normally
+///   rejects these before decoding runs).
+///
+/// The caller attaches the pp-token span before emitting via
+/// `Session::handler`, matching the pattern used by `decode_integer`
+/// and `decode_float`.
+pub fn decode_char(raw: &str, enc: StringEncoding) -> Result<CharLiteral, Diagnostic> {
+    decode_char_full(raw, enc).map(|(lit, _is_multi)| lit)
+}
+
+/// Identical to [`decode_char`] but also reports whether the constant
+/// contained more than one character value (the trigger for the
+/// implementation-defined [`codes::W0003`] multi-character warning).
+///
+/// Exposed to `phase7::pp_to_token` so the caller can attach the
+/// warning's span without the decoder having to know about `Session`.
+/// The public API (`decode_char`) drops the flag.
+pub(crate) fn decode_char_full(
+    raw: &str,
+    enc: StringEncoding,
+) -> Result<(CharLiteral, bool), Diagnostic> {
+    let bytes = raw.as_bytes();
+    let prefix_len = match enc {
+        StringEncoding::None => 0,
+        // `L`, `u`, `U` are all one byte.
+        StringEncoding::Wide | StringEncoding::Utf16 | StringEncoding::Utf32 => 1,
+        StringEncoding::Utf8 => 2,
+    };
+
+    // Minimum well-formed spelling: prefix + `'X'` (at least one body
+    // character) — i.e. prefix_len + 3. Anything shorter cannot be a
+    // legal character constant and is rejected defensively.
+    if bytes.len() < prefix_len + 3
+        || bytes.get(prefix_len) != Some(&b'\'')
+        || bytes.last() != Some(&b'\'')
+    {
+        return Err(plain_err("malformed character constant"));
+    }
+
+    let body = &bytes[prefix_len + 1..bytes.len() - 1];
+    if body.is_empty() {
+        return Err(plain_err("empty character constant"));
+    }
+
+    // Walk the body collecting one scalar per source character / escape.
+    let mut values: Vec<u32> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let (val, used) = decode_one_char(body, i)?;
+        values.push(val);
+        i += used;
+    }
+
+    // C99 §6.4.4.4p10: a multi-character constant packs its components
+    // in an implementation-defined way. We use the most common
+    // convention (matching gcc/clang for narrow `char` literals): pack
+    // the low 8 bits of each component big-endian into the result so
+    // `'ab'` = (97 << 8) | 98 = 0x6162.
+    let is_multi = values.len() > 1;
+    let value = if is_multi {
+        let mut v: u32 = 0;
+        for &ch in &values {
+            v = (v << 8) | (ch & 0xFF);
+        }
+        v
+    } else {
+        values[0]
+    };
+
+    Ok((CharLiteral { value, encoding: enc }, is_multi))
+}
+
+/// Decode a single character (plain byte or escape) starting at `body[i]`.
+///
+/// Returns `(value, bytes_consumed)`; the caller advances its cursor by
+/// `bytes_consumed` and re-enters for the next component.
+///
+/// Plain (non-backslash) source characters are read as UTF-8 — the whole
+/// rcc source pipeline is UTF-8 (see `rcc_span::SourceFile`), so a
+/// multi-byte rune survives into the body intact and contributes the
+/// Unicode scalar value as the decoded result.
+fn decode_one_char(body: &[u8], i: usize) -> Result<(u32, usize), Diagnostic> {
+    if body[i] != b'\\' {
+        // Non-escape: decode one UTF-8 scalar starting at `i`.
+        let tail = std::str::from_utf8(&body[i..])
+            .map_err(|_| plain_err("non-UTF-8 byte in character constant"))?;
+        // `tail` is non-empty because `body[i]` exists.
+        let ch = tail.chars().next().expect("non-empty slice has a first char");
+        return Ok((ch as u32, ch.len_utf8()));
+    }
+
+    // Escape sequence: `body[i] == b'\\'`. A bare trailing backslash
+    // cannot happen inside a well-formed lexer token (the lexer would
+    // have extended the char constant across it), but refuse it
+    // defensively rather than index-overflow below.
+    let esc = match body.get(i + 1) {
+        Some(&b) => b,
+        None => return Err(plain_err("trailing backslash in character constant")),
+    };
+
+    match esc {
+        b'n' => Ok((0x0a, 2)),
+        b't' => Ok((0x09, 2)),
+        b'\\' => Ok((0x5c, 2)),
+        b'\'' => Ok((0x27, 2)),
+        b'"' => Ok((0x22, 2)),
+        b'?' => Ok((0x3f, 2)),
+        b'a' => Ok((0x07, 2)),
+        b'b' => Ok((0x08, 2)),
+        b'f' => Ok((0x0c, 2)),
+        b'r' => Ok((0x0d, 2)),
+        b'v' => Ok((0x0b, 2)),
+        b'0'..=b'7' => {
+            // Octal escape: one to three octal digits, stopping at the
+            // first non-octal character. §6.4.4.4p4.
+            let mut val: u32 = 0;
+            let mut n = 0usize;
+            while n < 3 {
+                match body.get(i + 1 + n) {
+                    Some(&b) if (b'0'..=b'7').contains(&b) => {
+                        val = val * 8 + u32::from(b - b'0');
+                        n += 1;
+                    }
+                    _ => break,
+                }
+            }
+            Ok((val, 1 + n))
+        }
+        b'x' => {
+            // Hex escape: one *or more* hex digits (§6.4.4.4p5).
+            let start = i + 2;
+            let mut n = 0usize;
+            while let Some(&b) = body.get(start + n) {
+                if hex_digit_value(b).is_some() {
+                    n += 1;
+                } else {
+                    break;
+                }
+            }
+            if n == 0 {
+                return Err(coded_err(codes::E0012, "`\\x` escape has no hex digits"));
+            }
+            let mut val: u32 = 0;
+            for k in 0..n {
+                let d = hex_digit_value(body[start + k]).expect("checked above");
+                // Wrapping: C99 allows arbitrary-length hex escapes; if
+                // the user writes more than eight hex digits the low 32
+                // bits win. Narrowing to the target char type is the
+                // typeck pass's job (§6.4.4.4p9).
+                val = val.wrapping_mul(16).wrapping_add(d);
+            }
+            Ok((val, 2 + n))
+        }
+        b'u' => {
+            // Universal character name `\uXXXX` — exactly 4 hex digits.
+            decode_ucn(body, i, 4)
+        }
+        b'U' => {
+            // Universal character name `\UXXXXXXXX` — exactly 8 hex digits.
+            decode_ucn(body, i, 8)
+        }
+        other => {
+            Err(coded_err(codes::E0005, format!("invalid escape sequence `\\{}`", other as char)))
+        }
+    }
+}
+
+/// Decode a universal character name with the fixed digit count
+/// dictated by its prefix (`\u` → 4, `\U` → 8). §6.4.3.
+///
+/// The lexer's §6.4.3 rule already enforces the digit shape, so any
+/// failure here indicates an internal invariant violation — we still
+/// emit a clean [`codes::E0005`] so the user sees a normal diagnostic
+/// rather than a panic.
+fn decode_ucn(body: &[u8], i: usize, expected: usize) -> Result<(u32, usize), Diagnostic> {
+    let start = i + 2;
+    if start + expected > body.len() {
+        return Err(coded_err(codes::E0005, "malformed universal character name"));
+    }
+    let mut val: u32 = 0;
+    for k in 0..expected {
+        let b = body[start + k];
+        let d = hex_digit_value(b)
+            .ok_or_else(|| coded_err(codes::E0005, "malformed universal character name"))?;
+        val = val * 16 + d;
+    }
+    Ok((val, 2 + expected))
+}
+
 /// Build a spanless error diagnostic without a stable code.
 fn plain_err(msg: impl Into<String>) -> Diagnostic {
     Diagnostic {
@@ -817,5 +1045,181 @@ mod tests {
         // `f` alone — the suffix strip would leave nothing behind.
         let e = ferr("f");
         assert!(e.message.contains("no digits"), "got: {}", e.message);
+    }
+
+    // ── decode_char: happy-path single character ────────────────────
+
+    fn cok(text: &str, enc: StringEncoding) -> CharLiteral {
+        decode_char(text, enc)
+            .unwrap_or_else(|e| panic!("decode_char {text:?} → error {:?}", e.message))
+    }
+
+    fn cerr(text: &str, enc: StringEncoding) -> Diagnostic {
+        decode_char(text, enc)
+            .err()
+            .unwrap_or_else(|| panic!("decode_char {text:?} unexpectedly ok"))
+    }
+
+    #[test]
+    fn plain_ascii_char() {
+        let lit = cok("'a'", StringEncoding::None);
+        assert_eq!(lit.value, 97);
+        assert_eq!(lit.encoding, StringEncoding::None);
+    }
+
+    #[test]
+    fn simple_escape_newline() {
+        assert_eq!(cok("'\\n'", StringEncoding::None).value, 10);
+    }
+
+    #[test]
+    fn simple_escape_tab() {
+        assert_eq!(cok("'\\t'", StringEncoding::None).value, 9);
+    }
+
+    #[test]
+    fn simple_escape_null_zero() {
+        // Task acceptance bullet: `'\0'` decodes to 0.
+        assert_eq!(cok("'\\0'", StringEncoding::None).value, 0);
+    }
+
+    #[test]
+    fn simple_escape_backslash_quote_question() {
+        assert_eq!(cok("'\\\\'", StringEncoding::None).value, 0x5c);
+        assert_eq!(cok("'\\''", StringEncoding::None).value, 0x27);
+        assert_eq!(cok("'\\\"'", StringEncoding::None).value, 0x22);
+        assert_eq!(cok("'\\?'", StringEncoding::None).value, 0x3f);
+    }
+
+    #[test]
+    fn simple_escape_alert_bs_ff_cr_vt() {
+        assert_eq!(cok("'\\a'", StringEncoding::None).value, 7);
+        assert_eq!(cok("'\\b'", StringEncoding::None).value, 8);
+        assert_eq!(cok("'\\f'", StringEncoding::None).value, 12);
+        assert_eq!(cok("'\\r'", StringEncoding::None).value, 13);
+        assert_eq!(cok("'\\v'", StringEncoding::None).value, 11);
+    }
+
+    #[test]
+    fn hex_escape_two_digits() {
+        assert_eq!(cok("'\\xff'", StringEncoding::None).value, 0xff);
+    }
+
+    #[test]
+    fn hex_escape_arbitrary_length() {
+        // C99 §6.4.4.4p5 puts no upper bound on hex-escape digit count.
+        assert_eq!(cok("'\\x00000041'", StringEncoding::None).value, 0x41);
+    }
+
+    #[test]
+    fn octal_escape_three_digits() {
+        // `\123` = 0o123 = 83.
+        assert_eq!(cok("'\\123'", StringEncoding::None).value, 83);
+    }
+
+    #[test]
+    fn octal_escape_stops_at_non_octal() {
+        // `\18` — `1` is octal, `8` is not, so only one digit is consumed.
+        // The remaining `8` is a second component (multi-char).
+        let (lit, is_multi) = decode_char_full("'\\18'", StringEncoding::None).unwrap();
+        assert!(is_multi, "expected multi-character decode");
+        // value = (1 << 8) | '8' = (1 << 8) | 0x38 = 0x138
+        assert_eq!(lit.value, 0x138);
+    }
+
+    #[test]
+    fn ucn_u_four_digits() {
+        // `\u00e9` = é
+        assert_eq!(cok("'\\u00e9'", StringEncoding::None).value, 0xe9);
+    }
+
+    #[test]
+    fn ucn_big_u_eight_digits() {
+        // `\U0001F600` — smiley. (well-formed length test; value
+        // correctness verified against hex.)
+        assert_eq!(cok("'\\U0001F600'", StringEncoding::None).value, 0x1F600);
+    }
+
+    #[test]
+    fn malformed_ucn_big_u_too_few_digits() {
+        // Task test: `'\Uxxxx'` — 4 chars after `\U`, all non-hex, so
+        // even the length check fails first (body is 6 bytes, `\U`
+        // needs 10).
+        let e = cerr("'\\Uxxxx'", StringEncoding::None);
+        assert_eq!(e.code, Some(codes::E0005));
+    }
+
+    #[test]
+    fn hex_escape_with_no_digits_is_rejected() {
+        // `'\x'` — the §6.4.4.4p5 grammar requires ≥ 1 hex digit after
+        // `\x`.
+        let e = cerr("'\\x'", StringEncoding::None);
+        assert_eq!(e.code, Some(codes::E0012));
+    }
+
+    #[test]
+    fn unknown_simple_escape_is_rejected() {
+        // `'\q'` — not in the §6.4.4.4 simple-escape-sequence set.
+        let e = cerr("'\\q'", StringEncoding::None);
+        assert_eq!(e.code, Some(codes::E0005));
+    }
+
+    // ── decode_char: multi-character constants ──────────────────────
+
+    #[test]
+    fn two_char_constant_packs_big_endian() {
+        // `'ab'` = (97 << 8) | 98 = 0x6162. §6.4.4.4p10.
+        let (lit, is_multi) = decode_char_full("'ab'", StringEncoding::None).unwrap();
+        assert!(is_multi);
+        assert_eq!(lit.value, 0x6162);
+        assert_eq!(lit.encoding, StringEncoding::None);
+    }
+
+    // ── decode_char: encoding prefixes ──────────────────────────────
+
+    #[test]
+    fn wide_char_with_hex_escape() {
+        let lit = cok("L'\\xff'", StringEncoding::Wide);
+        assert_eq!(lit.value, 0xff);
+        assert_eq!(lit.encoding, StringEncoding::Wide);
+    }
+
+    #[test]
+    fn u16_prefix_char() {
+        let lit = cok("u'A'", StringEncoding::Utf16);
+        assert_eq!(lit.value, 0x41);
+        assert_eq!(lit.encoding, StringEncoding::Utf16);
+    }
+
+    #[test]
+    fn u32_prefix_char() {
+        let lit = cok("U'A'", StringEncoding::Utf32);
+        assert_eq!(lit.value, 0x41);
+        assert_eq!(lit.encoding, StringEncoding::Utf32);
+    }
+
+    #[test]
+    fn u8_prefix_char() {
+        let lit = cok("u8'A'", StringEncoding::Utf8);
+        assert_eq!(lit.value, 0x41);
+        assert_eq!(lit.encoding, StringEncoding::Utf8);
+    }
+
+    // ── decode_char: malformed input ────────────────────────────────
+
+    #[test]
+    fn empty_body_is_rejected() {
+        let e = cerr("''", StringEncoding::None);
+        assert!(
+            e.message.contains("empty") || e.message.contains("malformed"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn missing_quotes_is_rejected() {
+        // `a` alone — no surrounding `'`.
+        assert!(decode_char("a", StringEncoding::None).is_err());
     }
 }

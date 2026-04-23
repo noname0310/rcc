@@ -56,6 +56,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0040, E0040_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
+    (W0003, W0003_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -269,6 +270,22 @@ const W0001_DESC: &str = "unknown #pragma directive";
 /// `infinity` directly).
 pub const W0002: &str = "W0002";
 const W0002_DESC: &str = "float literal overflow";
+
+/// Multi-character character constant — implementation-defined value.
+///
+/// C99 §6.4.4.4p10: "An integer character constant has type `int`. The
+/// value of an integer character constant containing a single character
+/// that maps to a single-byte execution character is the numerical
+/// value of the representation of the mapped character. The value of
+/// an integer character constant containing more than one character
+/// (e.g. `'ab'`), or containing a character or escape sequence that
+/// does not map to a single-byte execution character, is
+/// implementation-defined." `rcc` packs the constituent bytes
+/// big-endian (so `'ab'` evaluates to `0x6162`) and warns — silently
+/// picking an implementation-defined value is a well-known footgun
+/// that has surprised users of every major C compiler.
+pub const W0003: &str = "W0003";
+const W0003_DESC: &str = "multi-character constant";
 
 #[cfg(test)]
 mod tests {

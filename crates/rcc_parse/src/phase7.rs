@@ -18,7 +18,7 @@ use rcc_session::Session;
 use rcc_span::Span;
 
 use crate::keywords::classify_ident;
-use crate::literal::{decode_float, decode_integer};
+use crate::literal::{decode_char_full, decode_float, decode_integer};
 use crate::token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
 };
@@ -115,10 +115,32 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
             }
         }
         PpTokenKind::CharConst { enc } => {
-            // TODO(05-05): decode the character constant including every
-            // escape sequence family (simple, octal, hex, universal) per
-            // C99 §6.4.4.4.
-            TokenKind::CharLit(CharLiteral { value: 0, encoding: enc })
+            // C99 §6.4.4.4 character-constant decoding. `decode_char_full`
+            // also reports whether the constant contained more than one
+            // character value — §6.4.4.4p10 makes multi-character
+            // constants implementation-defined, so we emit W0003 when
+            // the flag trips, with the pp-token's span attached. On a
+            // hard decode error we still yield a placeholder `CharLit`
+            // (value 0) so downstream parser invariants hold.
+            let text = span_text(session, pp.span);
+            match decode_char_full(&text, enc) {
+                Ok((lit, is_multi)) => {
+                    if is_multi {
+                        let diag = multi_char_warning(pp.span);
+                        session.handler.emit(&diag);
+                    }
+                    TokenKind::CharLit(lit)
+                }
+                Err(mut diag) => {
+                    diag.labels.push(Label {
+                        span: pp.span,
+                        message: String::new(),
+                        primary: true,
+                    });
+                    session.handler.emit(&diag);
+                    TokenKind::CharLit(CharLiteral { value: 0, encoding: enc })
+                }
+            }
         }
         PpTokenKind::StringLit { enc } => {
             // TODO(05-06): decode escape sequences and concatenate adjacent
@@ -161,6 +183,21 @@ fn float_overflow_warning(span: Span) -> Diagnostic {
         level: Level::Warning,
         code: Some(codes::W0002),
         message: "float literal overflow".into(),
+        labels: vec![Label { span, message: String::new(), primary: true }],
+        notes: Vec::new(),
+        help: Vec::new(),
+    }
+}
+
+/// Build a W0003 `multi-character constant` warning carrying `span` as
+/// the primary label. C99 §6.4.4.4p10 makes the value of such a constant
+/// implementation-defined; `rcc` packs the constituent bytes big-endian
+/// and warns the user that relying on the value is unportable.
+fn multi_char_warning(span: Span) -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
+        code: Some(codes::W0003),
+        message: "multi-character constant".into(),
         labels: vec![Label { span, message: String::new(), primary: true }],
         notes: Vec::new(),
         help: Vec::new(),
@@ -406,17 +443,75 @@ mod tests {
     }
 
     #[test]
-    fn char_const_becomes_charlit_stub_with_encoding() {
+    fn char_const_is_decoded_not_stubbed() {
+        // Post-05-05 this must carry the real scalar value of the
+        // decoded character, not the placeholder zero the earlier stub
+        // produced. `L'a'` → 97 (§6.4.4.4p10 "single character" case).
         let (mut sess, fid) = mk_session("L'a'");
         let pp = tok(PpTokenKind::CharConst { enc: StringEncoding::Wide }, fid, 0, 4);
         let t = pp_to_token(&mut sess, pp).expect("char converts");
         match t.kind {
             TokenKind::CharLit(lit) => {
-                assert_eq!(lit.value, 0);
+                assert_eq!(lit.value, 97);
                 assert_eq!(lit.encoding, StringEncoding::Wide);
             }
             other => panic!("expected CharLit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multi_char_constant_emits_w0003() {
+        // `'ab'` — §6.4.4.4p10 implementation-defined. Must warn with
+        // W0003 and carry the span of the whole char-constant pp-token
+        // as a primary label. Value packs the component bytes
+        // big-endian so the warning is advisory, not destructive.
+        let src = "'ab'";
+        let (mut sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp =
+            tok(PpTokenKind::CharConst { enc: StringEncoding::None }, fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("multi-char still converts");
+        match t.kind {
+            TokenKind::CharLit(lit) => {
+                assert_eq!(lit.value, 0x6162, "expected big-endian packed bytes");
+                assert_eq!(lit.encoding, StringEncoding::None);
+            }
+            other => panic!("expected CharLit, got {other:?}"),
+        }
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::W0003));
+        assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+        assert!(diags[0].labels.iter().any(|l| l.primary && l.span == pp.span));
+        // A warning must not bump the handler's error count.
+        assert_eq!(sess.handler.error_count(), 0);
+    }
+
+    #[test]
+    fn malformed_char_const_emits_error_and_recovers_to_zero() {
+        // `'\Uxxxx'` — the lexer normally enforces the §6.4.3 UCN
+        // shape, but if a malformed UCN ever slipped past we must
+        // surface it as a diagnostic and still yield a placeholder
+        // `CharLit` so downstream invariants hold.
+        let src = "'\\Uxxxx'";
+        let (mut sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp =
+            tok(PpTokenKind::CharConst { enc: StringEncoding::None }, fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("char converts even on error");
+        match t.kind {
+            TokenKind::CharLit(lit) => {
+                assert_eq!(lit.value, 0);
+                assert_eq!(lit.encoding, StringEncoding::None);
+            }
+            other => panic!("expected CharLit, got {other:?}"),
+        }
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].level, rcc_errors::Level::Error);
+        assert!(diags[0].labels.iter().any(|l| l.primary && l.span == pp.span));
     }
 
     #[test]
