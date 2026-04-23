@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 05-28: Grammar-production unit tests
 
 **Phase:** 05-parse    **Depends on:** 05-07 .. 05-26    **Milestone:** M2

@@ -15,3 +15,6 @@ rcc_session         = { workspace = true }
 rcc_lexer           = { workspace = true }
 rcc_ast             = { workspace = true }
 rcc_data_structures = { workspace = true }
+
+[dev-dependencies]
+rcc_preprocess      = { workspace = true }
