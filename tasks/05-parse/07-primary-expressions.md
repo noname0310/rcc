@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 05-07: Primary expressions
 
 **Phase:** 05-parse    **Depends on:** 05-03 .. 05-06    **Milestone:** M1+
