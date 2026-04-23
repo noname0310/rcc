@@ -651,6 +651,8 @@ dependencies = [
  "rcc_preprocess",
  "rcc_session",
  "rcc_span",
+ "serde",
+ "toml",
 ]
 
 [[package]]

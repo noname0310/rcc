@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 05-30: c-testsuite parse smoke
 
 **Phase:** 05-parse    **Depends on:** 05-28, 01-01    **Milestone:** M2

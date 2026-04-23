@@ -250,7 +250,12 @@ pub fn merge_adjacent_strings(session: &mut Session, tokens: Vec<Token>) -> Vec<
                         Some(new_enc) => {
                             enc = new_enc;
                             bytes.extend_from_slice(&next.bytes);
-                            span = span.to(tokens[j].span);
+                            // Only merge spans if both are in the same file;
+                            // after preprocessing, adjacent strings may come
+                            // from different files (e.g. via #include).
+                            if span.file == tokens[j].span.file {
+                                span = span.to(tokens[j].span);
+                            }
                             j += 1;
                         }
                         None => {

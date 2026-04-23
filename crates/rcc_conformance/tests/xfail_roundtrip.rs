@@ -11,7 +11,7 @@ fn suites_root() -> PathBuf {
         .expect("third_party/testsuites should exist")
 }
 
-/// All six seed `xfail.toml` files parse to `XFailFile::default()` (empty list).
+/// All seed `xfail.toml` files parse without error.
 #[test]
 fn empty_xfail_files_load_cleanly() {
     let root = suites_root();
@@ -22,14 +22,9 @@ fn empty_xfail_files_load_cleanly() {
         let path = root.join(suite).join("xfail.toml");
         assert!(path.exists(), "xfail.toml missing for suite `{suite}`");
 
-        let xf = xfail::load(&path).unwrap_or_else(|e| {
+        let _xf = xfail::load(&path).unwrap_or_else(|e| {
             panic!("xfail::load failed for `{suite}`: {e}");
         });
-        assert!(
-            xf.xfail.is_empty(),
-            "expected empty xfail list for `{suite}`, got {} entries",
-            xf.xfail.len()
-        );
     }
 }
 

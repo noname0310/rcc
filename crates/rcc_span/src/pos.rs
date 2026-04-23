@@ -39,10 +39,14 @@ impl Span {
         self.lo == self.hi
     }
 
-    /// Smallest span covering `self` and `other`. Both spans must belong
-    /// to the same file.
+    /// Smallest span covering `self` and `other`. When both spans belong
+    /// to the same file the result covers both; when they are from
+    /// different files (e.g. after preprocessing with `#include`) `self`
+    /// is returned unchanged because a cross-file span is not representable.
     pub fn to(self, other: Span) -> Span {
-        debug_assert_eq!(self.file, other.file, "cannot merge spans from different files");
+        if self.file != other.file {
+            return self;
+        }
         Span {
             file: self.file,
             lo: BytePos(self.lo.0.min(other.lo.0)),

@@ -18,3 +18,5 @@ rcc_data_structures = { workspace = true }
 
 [dev-dependencies]
 rcc_preprocess      = { workspace = true }
+serde               = { workspace = true }
+toml                = { workspace = true }

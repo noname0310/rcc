@@ -34,7 +34,7 @@ discovered in that mode.
 <!-- BEGIN autogen -->
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| c-testsuite | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| c-testsuite | 220 | 208 | 12 | 0 | 0 | 100.0 |
 | chibicc | 0 | 0 | 0 | 0 | 0 | 0.0 |
 | gcc-torture | 0 | 0 | 0 | 0 | 0 | 0.0 |
 | tcc-tests2 | 0 | 0 | 0 | 0 | 0 | 0.0 |
