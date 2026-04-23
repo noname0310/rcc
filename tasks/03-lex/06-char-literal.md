@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-06: Character constants
 
 **Phase:** 03-lex    **Depends on:** 03-04    **Milestone:** M1

@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use rcc_errors::{
-    codes::{E0003, E0004, E0005},
+    codes::{E0003, E0004, E0005, E0006, E0007},
     Handler,
 };
 use rcc_span::{BytePos, FileId, Span};
@@ -187,6 +187,36 @@ impl Iterator for Tokenizer<'_> {
                     // need to drop out of the loop cleanly — the next
                     // iteration's `cursor.first()?` will do that.
                     continue;
+                }
+
+                // ── Character constant, optionally prefixed ───────────
+                // C99 §6.4.4.4: `' c-char-sequence '`. C11 adds `u` /
+                // `U` / `u8` encoding prefixes which we accept now for
+                // forward compatibility. Two-char lookahead (three for
+                // `u8'`) disambiguates against identifiers that merely
+                // start with `L`, `u`, or `U`. String-literal prefixes
+                // (same letters + `"`) are recognised in task 03-lex/07.
+                '\'' => {
+                    return Some(self.scan_char_constant(lo, StringEncoding::None));
+                }
+                'L' if self.cursor.second() == Some('\'') => {
+                    self.cursor.bump(); // 'L'
+                    return Some(self.scan_char_constant(lo, StringEncoding::Wide));
+                }
+                'U' if self.cursor.second() == Some('\'') => {
+                    self.cursor.bump(); // 'U'
+                    return Some(self.scan_char_constant(lo, StringEncoding::Utf32));
+                }
+                'u' if self.cursor.second() == Some('8')
+                    && self.cursor.peek_at(2) == Some('\'') =>
+                {
+                    self.cursor.bump(); // 'u'
+                    self.cursor.bump(); // '8'
+                    return Some(self.scan_char_constant(lo, StringEncoding::Utf8));
+                }
+                'u' if self.cursor.second() == Some('\'') => {
+                    self.cursor.bump(); // 'u'
+                    return Some(self.scan_char_constant(lo, StringEncoding::Utf16));
                 }
 
                 // ── Identifier (ASCII start) ──────────────────────────
@@ -403,6 +433,152 @@ impl Tokenizer<'_> {
         self.make_token(PpTokenKind::PpNumber(kind), lo)
     }
 
+    /// Scan a character constant starting at the opening `'` (the
+    /// encoding prefix, if any, has already been consumed by the
+    /// caller). The cursor must be positioned on the `'`.
+    ///
+    /// Produces one [`PpTokenKind::CharConst`] token spanning from
+    /// `lo` (inclusive of any prefix) through either the closing `'`
+    /// or the first physical newline / EOF encountered — whichever
+    /// comes first. In the latter case E0006 is emitted. Unknown
+    /// escape letters emit E0007 per escape but do not truncate the
+    /// token. Byte-value decoding (octal overflow, hex truncation,
+    /// UCN code-point validity) is deferred to phase 05.
+    ///
+    /// C99 §6.4.4.4 grammar (informative):
+    /// ```text
+    /// c-char := any source char except ', \ or newline
+    ///         | escape-sequence
+    /// ```
+    fn scan_char_constant(&mut self, lo: BytePos, enc: StringEncoding) -> PpToken {
+        let opened = self.cursor.bump();
+        debug_assert_eq!(opened, Some('\''), "caller must position cursor on `'`");
+
+        loop {
+            match self.cursor.first() {
+                // Closing quote — done.
+                Some('\'') => {
+                    self.cursor.bump();
+                    return self.make_token(PpTokenKind::CharConst { enc }, lo);
+                }
+
+                // Physical newline — unterminated. The newline itself
+                // stays in the stream so directive boundaries survive.
+                Some('\n') | Some('\r') => {
+                    self.emit_unterminated_char_const(lo);
+                    return self.make_token(PpTokenKind::CharConst { enc }, lo);
+                }
+
+                // EOF — unterminated.
+                None => {
+                    self.emit_unterminated_char_const(lo);
+                    return self.make_token(PpTokenKind::CharConst { enc }, lo);
+                }
+
+                // Backslash: either a UCN (reuse the existing scanner
+                // so splice-transparent offsets are maintained) or a
+                // simple / octal / hex escape.
+                Some('\\') => {
+                    if matches!(self.cursor.second(), Some('u') | Some('U')) {
+                        // Deliberately do NOT call validate_ident_ucn:
+                        // UCN value checking inside a literal is a
+                        // phase-05 concern (§6.4.4.4p9 cross-refs
+                        // §6.4.3 which is itself only required at
+                        // translation phase 5).
+                        let _ = self.scan_ucn();
+                    } else {
+                        self.scan_char_escape();
+                    }
+                }
+
+                // Any other c-char: just advance. Multi-byte code
+                // points pass through as a single `char`.
+                Some(_) => {
+                    self.cursor.bump();
+                }
+            }
+        }
+    }
+
+    fn emit_unterminated_char_const(&mut self, lo: BytePos) {
+        let span = self.span_from(lo);
+        if let Some(h) = self.handler.as_deref_mut() {
+            h.struct_err(span, "unterminated character constant")
+                .code(E0006)
+                .primary(span, "this `'` is never closed before end of line or file")
+                .help(
+                    "insert a matching `'`; to embed a newline character \
+                     inside the constant use the escape `\\n`",
+                )
+                .note("C99 §6.4.4.4 forbids a literal newline inside a character constant")
+                .emit();
+        }
+    }
+
+    /// Scan a non-UCN escape sequence inside a character or string
+    /// literal. The cursor must be positioned on the leading `\`.
+    /// On return the cursor is one past the last consumed byte of the
+    /// escape. Emits E0007 for any unknown escape letter.
+    ///
+    /// Recognised shapes (C99 §6.4.4.4):
+    /// - simple-escape: one of `\' \" \? \\ \a \b \f \n \r \t \v`,
+    /// - octal-escape: `\` followed by 1..=3 octal digits,
+    /// - hex-escape: `\x` followed by one or more hex digits.
+    ///
+    /// Truncation / overflow of the numeric value itself is deferred
+    /// to phase 05; the lexer's only job here is delimiting the run.
+    fn scan_char_escape(&mut self) {
+        let esc_lo = self.pos();
+        let bs = self.cursor.bump();
+        debug_assert_eq!(bs, Some('\\'), "caller must position cursor on `\\`");
+
+        match self.cursor.first() {
+            Some(c) if is_simple_escape(c) => {
+                self.cursor.bump();
+            }
+            Some('0'..='7') => {
+                // Octal: maximal-munch of up to three octal digits.
+                self.cursor.bump();
+                for _ in 0..2 {
+                    if matches!(self.cursor.first(), Some('0'..='7')) {
+                        self.cursor.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Some('x') => {
+                self.cursor.bump();
+                while matches!(self.cursor.first(), Some(c) if c.is_ascii_hexdigit()) {
+                    self.cursor.bump();
+                }
+                // A `\x` with no following hex digit is malformed, but
+                // per C99 §6.4.4.4 the numeric-value diagnostic belongs
+                // to phase 05. The lexer records the run and moves on.
+            }
+            // Unknown escape letter: emit E0007 pointing at `\X`.
+            Some(bad) => {
+                self.cursor.bump();
+                let span = Span::new(self.file, esc_lo, self.pos());
+                if let Some(h) = self.handler.as_deref_mut() {
+                    h.struct_err(span, format!("invalid escape sequence `\\{bad}`"))
+                        .code(E0007)
+                        .primary(span, "this escape is not recognised by C99")
+                        .help(
+                            "valid escapes are `\\' \\\" \\? \\\\ \\a \\b \\f \\n \\r \\t \\v`, \
+                             octal `\\NNN`, hex `\\xHH+`, or universal character names \
+                             `\\uXXXX` / `\\UXXXXXXXX`",
+                        )
+                        .note("C99 §6.4.4.4 enumerates the legal escape sequences")
+                        .emit();
+                }
+            }
+            // EOF right after a `\\` — the outer scanner will observe
+            // EOF on the next loop iteration and emit E0006.
+            None => {}
+        }
+    }
+
     /// Consume the greedy body of an identifier after its first
     /// character has already been consumed. Terminates on the first
     /// non-ident character. Embedded UCNs are scanned and validated
@@ -489,6 +665,13 @@ impl Tokenizer<'_> {
                 .emit();
         }
     }
+}
+
+/// C99 §6.4.4.4 simple-escape-sequence letters (excluding the UCN
+/// forms `\u` / `\U`, which are recognised separately, and excluding
+/// the octal / hex numeric escapes).
+fn is_simple_escape(c: char) -> bool {
+    matches!(c, '\'' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v')
 }
 
 /// ASCII subset of C99 identifier-start characters: underscore and

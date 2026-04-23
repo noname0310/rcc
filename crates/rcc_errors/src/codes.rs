@@ -62,13 +62,13 @@ const E0004_DESC: &str = "unterminated block comment";
 pub const E0005: &str = "E0005";
 const E0005_DESC: &str = "invalid escape sequence";
 
-/// Empty character constant (`''`).
+/// Unterminated character constant (`'...` with no closing `'`).
 pub const E0006: &str = "E0006";
-const E0006_DESC: &str = "empty character constant";
+const E0006_DESC: &str = "unterminated character constant";
 
-/// Multi-character character constant (implementation-defined).
+/// Invalid escape sequence in a string or character literal.
 pub const E0007: &str = "E0007";
-const E0007_DESC: &str = "multi-character character constant";
+const E0007_DESC: &str = "invalid escape sequence";
 
 /// Invalid suffix on numeric literal.
 pub const E0008: &str = "E0008";

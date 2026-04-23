@@ -53,21 +53,28 @@ by C99.
 char *s = "\q";  // error[E0005]: invalid escape sequence '\q'
 ```
 
-## E0006 — empty character constant
+## E0006 — unterminated character constant
 
-A character constant must contain at least one character.
+A `'` was opened but never closed before end of line or end of file.
+C99 §6.4.4.4 forbids a literal newline inside a character constant.
 
 ```c
-char c = '';  // error[E0006]: empty character constant
+char c = 'a  // error[E0006]: unterminated character constant
 ```
 
-## E0007 — multi-character character constant
+## E0007 — invalid escape sequence
 
-More than one character inside a character constant. C99 allows this but
-the value is implementation-defined. `rcc` emits a warning.
+A backslash inside a character or string literal is followed by a
+character that is not a recognised C99 escape. Valid simple escapes are
+`\' \" \? \\ \a \b \f \n \r \t \v`; also accepted are octal `\NNN`,
+hex `\xHH+`, and universal character names `\uXXXX` / `\UXXXXXXXX`.
+
+Note: multi-character character constants (e.g. `'ab'`) are
+implementation-defined per C99 §6.4.4.4p10 and are NOT diagnosed by the
+lexer.
 
 ```c
-int x = 'ab';  // warning[E0007]: multi-character character constant
+char c = '\q';  // error[E0007]: invalid escape sequence '\q'
 ```
 
 ## E0008 — invalid numeric suffix
