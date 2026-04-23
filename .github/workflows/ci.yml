@@ -39,6 +39,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: Fetch test suites (permissive only)
+        run: cargo xtask fetch-testsuites
       - run: cargo test --workspace
 
   test-llvm:
@@ -48,6 +50,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: Fetch test suites (permissive only)
+        run: cargo xtask fetch-testsuites
       - name: Install LLVM 18
         run: |
           wget https://apt.llvm.org/llvm.sh
