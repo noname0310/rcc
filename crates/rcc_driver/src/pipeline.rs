@@ -7,6 +7,7 @@ use rcc_cfg::build_bodies;
 use rcc_codegen_llvm::{codegen, CodegenError};
 use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
+use rcc_lexer::{PpToken, PpTokenKind};
 use rcc_preprocess::preprocess;
 use rcc_session::{EmitKind, Session};
 use rcc_typeck::check;
@@ -38,7 +39,24 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
     if session.opts.emit.contains(&EmitKind::Pp) {
-        eprintln!("-- emit=pp: {} pp-tokens", pp_tokens.len());
+        emit_preprocessed(session, &pp_tokens);
+        // When `--emit=pp` is requested and no later stage is asked
+        // for, the driver stops here: it would be surprising for
+        // `rcc --emit=pp foo.c` to then try to parse / typecheck /
+        // codegen a file whose preprocessing output was the entire
+        // point. Downstream crates (parse / typeck / codegen) also
+        // don't tolerate the full GCC / Clang extension surface
+        // that a preprocessor-only run may well exercise, so running
+        // them past a `--emit=pp` request muddies the exit code.
+        //
+        // Stopping is conditional on no *later* stage being set;
+        // a user who asks for `--emit=pp,obj` still gets the full
+        // pipeline. Task 04-18 (chibicc preprocessor tests) relies
+        // on this short-circuit so a conformance adapter can run
+        // preprocess-only checks.
+        if !has_later_emit_than_pp(&session.opts.emit) {
+            return Ok(());
+        }
     }
 
     // 3. Parse.
@@ -72,4 +90,67 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Write a human-readable rendering of the preprocessed pp-token
+/// stream to stdout, one token per space, newlines inserted between
+/// tokens whose spans cross a source-line boundary. This is not an
+/// exact `cc -E` reproduction — different hosts disagree on spacing
+/// anyway — but it is enough for eyeballing and for the conformance
+/// runner's "preprocess mode" to tell a run that produced output
+/// apart from one that didn't.
+///
+/// The function is deliberately tolerant: synthetic tokens (with
+/// virtual-file spans) contribute their raw spelling; missing
+/// files are silently skipped rather than panicking, because the
+/// token stream is already the preprocessor's best effort and
+/// printing is a best-effort downstream concern.
+fn emit_preprocessed(session: &Session, tokens: &[PpToken]) {
+    let sm = session.source_map.read().unwrap();
+    let mut prev_line: Option<u32> = None;
+    let mut prev_file: Option<rcc_span::FileId> = None;
+    let mut buf = String::new();
+    for tok in tokens {
+        if matches!(tok.kind, PpTokenKind::Whitespace | PpTokenKind::Newline | PpTokenKind::Eof) {
+            continue;
+        }
+        let file = sm.file(tok.span.file);
+        let line = sm.lookup_line_col(tok.span.file, tok.span.lo).line;
+        if let (Some(pf), Some(pl)) = (prev_file, prev_line) {
+            if pf != tok.span.file || line != pl {
+                buf.push('\n');
+            } else {
+                buf.push(' ');
+            }
+        }
+        let lo = tok.span.lo.0 as usize;
+        let hi = tok.span.hi.0 as usize;
+        if hi <= file.src.len() {
+            buf.push_str(&file.src[lo..hi]);
+        }
+        prev_line = Some(line);
+        prev_file = Some(tok.span.file);
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+    print!("{buf}");
+}
+
+/// Whether `emit` contains any stage that runs after preprocessing.
+/// Used by the `--emit=pp` short-circuit: if the user only asked for
+/// `Tokens` and / or `Pp`, we can stop the pipeline after phase 4
+/// without losing information.
+fn has_later_emit_than_pp(emit: &[EmitKind]) -> bool {
+    emit.iter().any(|k| {
+        matches!(
+            k,
+            EmitKind::Ast
+                | EmitKind::Hir
+                | EmitKind::Mir
+                | EmitKind::LlvmIr
+                | EmitKind::Asm
+                | EmitKind::Obj
+        )
+    })
 }

@@ -183,15 +183,65 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> anyhow::Result<std:
     Ok(std::process::Output { status, stdout, stderr })
 }
 
+/// Execution mode for [`ChibiccAdapter`].
+///
+/// The same fixture tree is reused for two distinct M5 / M6 KPIs:
+/// phase-04 (preprocessor) and phase-07 (full compile + link + run).
+/// Rather than duplicating discovery, the adapter carries a mode
+/// field selected at construction.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChibiccMode {
+    /// Full pipeline: compile every fixture (plus `test/common`), link
+    /// with host `cc`, execute, assert exit code 0. This is the
+    /// historical chibicc Makefile behaviour.
+    Compile,
+    /// Preprocess-only (task 04-18): run `rcc --emit=pp -I<testdir>`
+    /// against the preprocessor-focused fixtures
+    /// (`macro.c`, `typedef.c`, and `include.c` if vendored) and
+    /// assert exit code 0. Fixtures outside that set are filtered
+    /// out during discovery so they do not count toward the
+    /// pass / fail / skip totals.
+    Preprocess,
+}
+
 /// `chibicc` adapter. Runs the `chibicc/test/*.c` files the same way chibicc's
 /// Makefile does: compile each test together with `test/common`, link, run,
 /// check exit code == 0.
-pub struct ChibiccAdapter;
+pub struct ChibiccAdapter {
+    /// Which pipeline stage the adapter exercises per test case.
+    pub mode: ChibiccMode,
+}
 
 impl ChibiccAdapter {
+    /// Adapter wired to the full compile + link + run pipeline
+    /// (phase 07 / milestone M6). Equivalent to the unit-variant
+    /// form this type used to carry.
+    pub const fn compile() -> Self {
+        Self { mode: ChibiccMode::Compile }
+    }
+
+    /// Adapter restricted to the preprocessor-only subset
+    /// (phase 04 / task 04-18 / milestone M5). Discovery emits only
+    /// the fixtures whose stem is in [`Self::PREPROCESS_FIXTURES`].
+    pub const fn preprocess() -> Self {
+        Self { mode: ChibiccMode::Preprocess }
+    }
+
+    /// File stems of the chibicc fixtures that exist to exercise
+    /// `#define` / `#include` / conditional compilation without
+    /// requiring the downstream parser / codegen. Kept in lock-step
+    /// with `tasks/04-preprocess/18-chibicc-preprocess-tests.md`.
+    pub const PREPROCESS_FIXTURES: &'static [&'static str] = &["macro", "typedef", "include"];
+
     /// Path to the support file compiled alongside every test.
     fn common_path(root: &Path) -> std::path::PathBuf {
         root.join("test").join("common")
+    }
+}
+
+impl Default for ChibiccAdapter {
+    fn default() -> Self {
+        Self::compile()
     }
 }
 
@@ -214,6 +264,9 @@ impl Adapter for ChibiccAdapter {
             if stem == "common" {
                 continue;
             }
+            if self.mode == ChibiccMode::Preprocess && !Self::PREPROCESS_FIXTURES.contains(&stem) {
+                continue;
+            }
             cases.push(TestCase { id: format!("chibicc::{stem}"), path });
         }
         cases.sort_by(|a, b| a.id.cmp(&b.id));
@@ -221,6 +274,46 @@ impl Adapter for ChibiccAdapter {
     }
 
     fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        match self.mode {
+            ChibiccMode::Compile => self.run_compile(rcc_path, case),
+            ChibiccMode::Preprocess => self.run_preprocess_only(rcc_path, case),
+        }
+    }
+}
+
+impl ChibiccAdapter {
+    /// Preprocess-only execution path.
+    ///
+    /// Invokes `rcc --emit=pp -I<case_dir>` against the fixture and
+    /// treats exit code 0 as a pass. The `-I` flag points at the
+    /// fixture directory so `#include "test.h"` (which every chibicc
+    /// test starts with) resolves against the vendored header. The
+    /// driver short-circuits after phase-4 when `--emit=pp` is the
+    /// only stage requested (see `rcc_driver::pipeline`) and returns
+    /// a non-zero exit code if the preprocessor emitted any error
+    /// diagnostics.
+    fn run_preprocess_only(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let case_dir = case.path.parent().ok_or_else(|| {
+            anyhow::anyhow!("cannot derive directory from {}", case.path.display())
+        })?;
+        let mut cmd = Command::new(rcc_path);
+        cmd.arg("--emit=pp").arg("-I").arg(case_dir).arg(&case.path);
+        match run_with_timeout(&mut cmd, TIMEOUT) {
+            Ok(o) if o.status.success() => Ok(Outcome::Pass),
+            Ok(o) => Ok(Outcome::Fail {
+                reason: format!(
+                    "rcc --emit=pp failed for {} (exit {}): {}",
+                    case.path.display(),
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                ),
+            }),
+            Err(e) => Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") }),
+        }
+    }
+
+    /// Historical compile + link + execute path (milestone M6).
+    fn run_compile(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
         let common =
             Self::common_path(case.path.parent().and_then(|p| p.parent()).ok_or_else(|| {
                 anyhow::anyhow!("cannot derive suite root from {}", case.path.display())

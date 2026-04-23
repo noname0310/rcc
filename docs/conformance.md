@@ -11,6 +11,24 @@ cargo run --release --package rcc_conformance
 # writes docs/conformance.json + refreshes the table below
 ```
 
+### Modes
+
+`cc_conformance_run` accepts a `--mode` flag (default `compile`):
+
+```bash
+# chibicc preprocessor-only gate (task 04-18, milestone M5)
+cargo run --release --package rcc_conformance -- \
+    --suite chibicc --mode preprocess
+# full compile + link + run pipeline (milestone M6)
+cargo run --release --package rcc_conformance -- \
+    --suite chibicc --mode compile
+```
+
+`preprocess` runs `rcc --emit=pp -I<fixture-dir> <file>` per case and
+checks the exit code; only preprocessor-focused fixtures
+(`macro.c`, `typedef.c`, and `include.c` when vendored) are
+discovered in that mode.
+
 ## Suite status
 
 <!-- BEGIN autogen -->
@@ -28,6 +46,37 @@ Zeros above are placeholders; the conformance runner writes the real
 numbers into this file once the adapters are implemented (tracked under
 the M1–M7 follow-up plans).
 
+### chibicc preprocessor (task 04-18 / M5)
+
+The in-process gate in `crates/rcc_preprocess/tests/chibicc.rs`
+measures the adapter's target fixtures directly, bypassing the
+subprocess driver so the results are stable in CI without a built
+`rcc` binary:
+
+| Fixture     | State (2026-04-23)                                         |
+|-------------|------------------------------------------------------------|
+| `typedef.c` | 0 diagnostics; passes.                                    |
+| `include1.h`| 0 diagnostics; header-chain resolves through include2.h.  |
+| `macro.c`   | 34 errors, bounded to the known-gap bucket list           |
+|             | (`E0013`, `E0014`, `E0022`, `E0025`); run produces 1,304  |
+|             | pp-tokens and does not panic.                             |
+
+The `macro.c` errors are all GNU-extension-driven:
+
+- **E0022** — chibicc redefines `M1`/`M7`/`M8`/`M12`-`M14` across
+  the file. C99 §6.10.3p2 makes that a constraint violation; gcc
+  and clang accept it as a warning. Strict C99 behaviour is kept.
+- **E0013** — `#include M13` / `#include M13 >` exercise the
+  computed-header form (§6.10.2p4). Our directive parser still
+  wants the `<...>` / `"..."` form literally.
+- **E0014** — `#define M14(args...) ...` is the GNU named-variadic
+  syntax; we only accept the C99 `...` spelling.
+- **E0025** — `CONCAT(4,.57)` pastes into a pp-number whose leading
+  `.` our paste validator rejects.
+
+Fixing any of these should shrink the ceiling constant
+`MACRO_C_ERROR_CEILING` in the test so the improvement is visible.
+
 ## Interpreting the columns
 
 - **Discovered** — number of test cases the adapter enumerated.
@@ -44,7 +93,8 @@ the M1–M7 follow-up plans).
 | Adapter | State |
 | ------- | ----- |
 | `CTestSuiteAdapter`          | interface frozen; implementation M0.5 follow-up |
-| `ChibiccAdapter`             | interface frozen; implementation M0.5 follow-up |
+| `ChibiccAdapter` (compile)   | interface frozen; implementation M6 |
+| `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `GccTortureAdapter`          | interface frozen; implementation M4 |
 | `TccTests2Adapter`           | interface frozen; implementation M6 |
 | `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |

@@ -12,6 +12,22 @@ use rcc_conformance::adapters::{
 };
 use rcc_conformance::Suite;
 
+/// Per-suite execution mode selected by `--mode`.
+///
+/// Most suites only have one meaningful pipeline stage to exercise
+/// and simply ignore the mode. `chibicc` is dual-purpose: at M5 we
+/// run the preprocessor-focused subset via `--emit=pp`, at M6 we run
+/// the full compile + link + execute pipeline. A CLI flag is
+/// cheaper than two suite names.
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum Mode {
+    /// Full compile + link + run (default).
+    Compile,
+    /// Preprocessor-only (task 04-18): `rcc --emit=pp` + exit-code
+    /// check against the chibicc preprocessor fixtures.
+    Preprocess,
+}
+
 /// Run conformance suites against `rcc` and emit a JSON report.
 #[derive(Parser)]
 #[command(name = "cc_conformance_run")]
@@ -31,25 +47,32 @@ struct Cli {
     /// Include GPL-licensed suites (e.g. gcc-torture).
     #[arg(long)]
     include_gpl: bool,
+
+    /// Which pipeline stage each test should exercise. Defaults to
+    /// the full compile + link + run path. `preprocess` is the
+    /// preprocessor-only gate for task 04-18 / milestone M5.
+    #[arg(long, value_enum, default_value_t = Mode::Compile)]
+    mode: Mode,
 }
 
 /// Known suite names and whether they require `--include-gpl`.
 const GPL_SUITES: &[&str] = &["gcc-torture"];
 
-fn build_suite(name: &str, include_gpl: bool) -> anyhow::Result<Suite> {
+fn build_suite(name: &str, include_gpl: bool, mode: Mode) -> anyhow::Result<Suite> {
     if GPL_SUITES.contains(&name) && !include_gpl {
         bail!("suite `{name}` is GPL-licensed; pass --include-gpl to enable it");
     }
 
     let root = PathBuf::from("third_party/testsuites").join(name);
 
-    let adapter: Box<dyn rcc_conformance::Adapter> = match name {
-        "c-testsuite" => Box::new(CTestSuiteAdapter),
-        "chibicc" => Box::new(ChibiccAdapter),
-        "gcc-torture" => Box::new(GccTortureAdapter),
-        "tcc-tests2" => Box::new(TccTests2Adapter),
-        "llvm-test-suite" => Box::new(LlvmTestSuiteAdapter),
-        "csmith" => Box::new(CsmithDifferentialAdapter),
+    let adapter: Box<dyn rcc_conformance::Adapter> = match (name, mode) {
+        ("c-testsuite", _) => Box::new(CTestSuiteAdapter),
+        ("chibicc", Mode::Compile) => Box::new(ChibiccAdapter::compile()),
+        ("chibicc", Mode::Preprocess) => Box::new(ChibiccAdapter::preprocess()),
+        ("gcc-torture", _) => Box::new(GccTortureAdapter),
+        ("tcc-tests2", _) => Box::new(TccTests2Adapter),
+        ("llvm-test-suite", _) => Box::new(LlvmTestSuiteAdapter),
+        ("csmith", _) => Box::new(CsmithDifferentialAdapter),
         _ => bail!("unknown suite: `{name}`"),
     };
 
@@ -61,7 +84,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut suites = Vec::new();
     for name in &cli.suites {
-        suites.push(build_suite(name, cli.include_gpl)?);
+        suites.push(build_suite(name, cli.include_gpl, cli.mode)?);
     }
 
     let report = rcc_conformance::run_suites(&cli.rcc, &suites);
