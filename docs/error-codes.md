@@ -77,14 +77,14 @@ lexer.
 char c = '\q';  // error[E0007]: invalid escape sequence '\q'
 ```
 
-## E0008 — invalid numeric suffix
+## E0008 — unterminated string literal
 
-An integer or floating-point literal has a suffix that is not a valid
-C99 integer suffix (`u`, `l`, `ul`, `ull`, etc.) or float suffix
-(`f`, `l`).
+A `"` was opened but never closed before end of line or end of file.
+C99 §6.4.5 forbids a literal newline inside a string literal; use line
+splicing (`\<newline>`) or string concatenation at the source level.
 
 ```c
-int x = 42q;  // error[E0008]: invalid numeric suffix 'q'
+char *s = "hello  // error[E0008]: unterminated string literal
 ```
 
 ## E0009 — integer literal overflow

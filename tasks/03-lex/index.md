@@ -14,7 +14,7 @@ Build the full C99 preprocessing-token lexer with fuzz + corpus tests.
 - [x] [04-identifier-universal-char](04-identifier-universal-char.md)
 - [x] [05-pp-number](05-pp-number.md)
 - [x] [06-char-literal](06-char-literal.md)
-- [ ] [07-string-literal](07-string-literal.md)
+- [x] [07-string-literal](07-string-literal.md)
 - [ ] [08-punctuator-table](08-punctuator-table.md)
 - [ ] [09-header-name-context](09-header-name-context.md)
 - [ ] [10-unit-tests-tables](10-unit-tests-tables.md)

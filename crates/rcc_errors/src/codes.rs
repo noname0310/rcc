@@ -70,9 +70,9 @@ const E0006_DESC: &str = "unterminated character constant";
 pub const E0007: &str = "E0007";
 const E0007_DESC: &str = "invalid escape sequence";
 
-/// Invalid suffix on numeric literal.
+/// Unterminated string literal (`"...` with no closing `"`).
 pub const E0008: &str = "E0008";
-const E0008_DESC: &str = "invalid numeric suffix";
+const E0008_DESC: &str = "unterminated string literal";
 
 /// Integer literal overflow.
 pub const E0009: &str = "E0009";

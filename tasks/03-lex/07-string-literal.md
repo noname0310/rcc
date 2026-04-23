@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-07: String literals
 
 **Phase:** 03-lex    **Depends on:** 03-06    **Milestone:** M1

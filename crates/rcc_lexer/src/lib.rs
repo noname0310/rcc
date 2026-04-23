@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use rcc_errors::{
-    codes::{E0003, E0004, E0005, E0006, E0007},
+    codes::{E0003, E0004, E0005, E0006, E0007, E0008},
     Handler,
 };
 use rcc_span::{BytePos, FileId, Span};
@@ -194,8 +194,7 @@ impl Iterator for Tokenizer<'_> {
                 // `U` / `u8` encoding prefixes which we accept now for
                 // forward compatibility. Two-char lookahead (three for
                 // `u8'`) disambiguates against identifiers that merely
-                // start with `L`, `u`, or `U`. String-literal prefixes
-                // (same letters + `"`) are recognised in task 03-lex/07.
+                // start with `L`, `u`, or `U`.
                 '\'' => {
                     return Some(self.scan_char_constant(lo, StringEncoding::None));
                 }
@@ -217,6 +216,34 @@ impl Iterator for Tokenizer<'_> {
                 'u' if self.cursor.second() == Some('\'') => {
                     self.cursor.bump(); // 'u'
                     return Some(self.scan_char_constant(lo, StringEncoding::Utf16));
+                }
+
+                // ── String literal, optionally prefixed ───────────────
+                // C99 §6.4.5: `" s-char-sequence_opt "`. Same encoding
+                // prefixes as character constants (plus C11 `u8`),
+                // same escape alphabet, same prefix-vs-identifier
+                // disambiguation with two-/three-char lookahead.
+                // Adjacent-literal concatenation is a phase-05 (parser)
+                // concern — each pair of quotes yields its own token.
+                '"' => {
+                    return Some(self.scan_string_literal(lo, StringEncoding::None));
+                }
+                'L' if self.cursor.second() == Some('"') => {
+                    self.cursor.bump(); // 'L'
+                    return Some(self.scan_string_literal(lo, StringEncoding::Wide));
+                }
+                'U' if self.cursor.second() == Some('"') => {
+                    self.cursor.bump(); // 'U'
+                    return Some(self.scan_string_literal(lo, StringEncoding::Utf32));
+                }
+                'u' if self.cursor.second() == Some('8') && self.cursor.peek_at(2) == Some('"') => {
+                    self.cursor.bump(); // 'u'
+                    self.cursor.bump(); // '8'
+                    return Some(self.scan_string_literal(lo, StringEncoding::Utf8));
+                }
+                'u' if self.cursor.second() == Some('"') => {
+                    self.cursor.bump(); // 'u'
+                    return Some(self.scan_string_literal(lo, StringEncoding::Utf16));
                 }
 
                 // ── Identifier (ASCII start) ──────────────────────────
@@ -511,6 +538,88 @@ impl Tokenizer<'_> {
                      inside the constant use the escape `\\n`",
                 )
                 .note("C99 §6.4.4.4 forbids a literal newline inside a character constant")
+                .emit();
+        }
+    }
+
+    /// Scan a string literal starting at the opening `"`. The encoding
+    /// prefix (if any) has already been consumed by the caller; the
+    /// cursor must be positioned on the `"`.
+    ///
+    /// Produces one [`PpTokenKind::StringLit`] token spanning from
+    /// `lo` (inclusive of any prefix) through either the closing `"`
+    /// or the first physical newline / EOF encountered — whichever
+    /// comes first. In the latter case E0008 is emitted. Unknown
+    /// escape letters emit E0007 per escape but do not truncate the
+    /// token. Byte-value decoding (octal overflow, hex truncation,
+    /// UCN code-point validity) is deferred to phase 05, as is
+    /// adjacent-literal concatenation (C99 §5.1.1.2 phase 6).
+    ///
+    /// C99 §6.4.5 grammar (informative):
+    /// ```text
+    /// s-char := any source char except ", \ or newline
+    ///         | escape-sequence
+    /// ```
+    fn scan_string_literal(&mut self, lo: BytePos, enc: StringEncoding) -> PpToken {
+        let opened = self.cursor.bump();
+        debug_assert_eq!(opened, Some('"'), "caller must position cursor on `\"`");
+
+        loop {
+            match self.cursor.first() {
+                // Closing quote — done.
+                Some('"') => {
+                    self.cursor.bump();
+                    return self.make_token(PpTokenKind::StringLit { enc }, lo);
+                }
+
+                // Physical newline — unterminated. The newline itself
+                // stays in the stream so directive boundaries survive.
+                Some('\n') | Some('\r') => {
+                    self.emit_unterminated_string_literal(lo);
+                    return self.make_token(PpTokenKind::StringLit { enc }, lo);
+                }
+
+                // EOF — unterminated.
+                None => {
+                    self.emit_unterminated_string_literal(lo);
+                    return self.make_token(PpTokenKind::StringLit { enc }, lo);
+                }
+
+                // Backslash: either a UCN (reuse the existing scanner
+                // so splice-transparent offsets are maintained) or a
+                // simple / octal / hex escape. Same alphabet and same
+                // deferral rules as a character constant — see
+                // `scan_char_constant`.
+                Some('\\') => {
+                    if matches!(self.cursor.second(), Some('u') | Some('U')) {
+                        let _ = self.scan_ucn();
+                    } else {
+                        self.scan_char_escape();
+                    }
+                }
+
+                // Any other s-char: advance. Multi-byte UTF-8 code
+                // points pass through as a single `char`; byte values
+                // are preserved verbatim in the span.
+                Some(_) => {
+                    self.cursor.bump();
+                }
+            }
+        }
+    }
+
+    fn emit_unterminated_string_literal(&mut self, lo: BytePos) {
+        let span = self.span_from(lo);
+        if let Some(h) = self.handler.as_deref_mut() {
+            h.struct_err(span, "unterminated string literal")
+                .code(E0008)
+                .primary(span, "this `\"` is never closed before end of line or file")
+                .help(
+                    "insert a matching `\"`; to embed a newline inside the \
+                     string use the escape `\\n`, or continue the literal \
+                     across a physical line break with backslash-newline",
+                )
+                .note("C99 §6.4.5 forbids a literal newline inside a string literal")
                 .emit();
         }
     }
