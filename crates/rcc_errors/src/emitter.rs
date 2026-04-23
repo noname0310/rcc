@@ -1,13 +1,13 @@
 //! Diagnostic emitters: where rendered diagnostics go.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex, RwLock};
 
 use ariadne::{Color, Config, IndexType, Label as ALabel, Report, ReportKind};
 
 use crate::{Diagnostic, Level};
-use rcc_span::SourceMap;
+use rcc_span::{FileId, SourceMap};
 
 /// Receives fully-built diagnostics and renders them.
 pub trait Emitter: Send {
@@ -43,6 +43,14 @@ impl StderrEmitter {
     fn write_diagnostic<W: Write>(&self, d: &Diagnostic, mut w: W) -> std::io::Result<()> {
         if d.labels.is_empty() {
             return self.write_unspanned(d, &mut w);
+        }
+
+        let unique_file_count = {
+            let seen: HashSet<_> = d.labels.iter().map(|l| l.span.file).collect();
+            seen.len()
+        };
+        if unique_file_count > 1 {
+            return self.write_multi_file(d, w);
         }
 
         let sm = self.sm.read().unwrap();
@@ -102,6 +110,89 @@ impl StderrEmitter {
         builder.finish().write(ariadne::sources(file_sources), &mut w)
     }
 
+    fn write_multi_file<W: Write>(&self, d: &Diagnostic, mut w: W) -> std::io::Result<()> {
+        let sm = self.sm.read().unwrap();
+        let color = self.should_colorize();
+        let config = Config::default().with_color(color).with_index_type(IndexType::Byte);
+
+        let kind = match d.level {
+            Level::Error | Level::Bug => ReportKind::Error,
+            Level::Warning => ReportKind::Warning,
+            Level::Note | Level::Help => ReportKind::Advice,
+        };
+
+        let primary_file = d.labels.iter().find(|l| l.primary).unwrap_or(&d.labels[0]).span.file;
+
+        // Group label indices by file; primary file always first.
+        let mut file_order: Vec<FileId> = vec![primary_file];
+        let mut groups: HashMap<FileId, Vec<usize>> = HashMap::new();
+        let mut seen = HashSet::new();
+        seen.insert(primary_file);
+
+        for (idx, label) in d.labels.iter().enumerate() {
+            if seen.insert(label.span.file) {
+                file_order.push(label.span.file);
+            }
+            groups.entry(label.span.file).or_default().push(idx);
+        }
+
+        for (i, &fid) in file_order.iter().enumerate() {
+            let indices = &groups[&fid];
+            let anchor_idx =
+                indices.iter().copied().find(|&j| d.labels[j].primary).unwrap_or(indices[0]);
+            let anchor = &d.labels[anchor_idx];
+
+            let fname = sm.file(fid).name.display().to_string();
+            let span = (fname, anchor.span.lo.0 as usize..anchor.span.hi.0 as usize);
+
+            let is_primary = fid == primary_file;
+            let (rk, msg): (ReportKind<'_>, &str) = if is_primary {
+                (kind, d.message.as_str())
+            } else {
+                (ReportKind::Advice, "also here")
+            };
+
+            let mut builder = Report::build(rk, span).with_message(msg).with_config(config);
+
+            if is_primary {
+                if let Some(code) = d.code {
+                    builder = builder.with_code(code);
+                }
+            }
+
+            for &idx in indices {
+                let label = &d.labels[idx];
+                let fname = sm.file(label.span.file).name.display().to_string();
+                let sp = (fname, label.span.lo.0 as usize..label.span.hi.0 as usize);
+                let mut al = ALabel::new(sp);
+                if !label.message.is_empty() {
+                    al = al.with_message(&label.message);
+                }
+                al = al.with_color(if label.primary { Color::Red } else { Color::Blue });
+                builder = builder.with_label(al);
+            }
+
+            if is_primary {
+                for note in &d.notes {
+                    builder = builder.with_note(note);
+                }
+                for help in &d.help {
+                    builder = builder.with_help(help);
+                }
+            }
+
+            let sf = sm.file(fid);
+            let source = vec![(sf.name.display().to_string(), sf.src.to_string())];
+            builder.finish().write(ariadne::sources(source), &mut w)?;
+
+            if i + 1 < file_order.len() {
+                writeln!(w)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn write_unspanned<W: Write>(&self, d: &Diagnostic, w: &mut W) -> std::io::Result<()> {
         let tag = match d.level {
             Level::Error => "error",
@@ -158,4 +249,13 @@ impl Emitter for CaptureEmitter {
     fn emit(&mut self, d: &Diagnostic) {
         self.inner.lock().unwrap().push(d.clone());
     }
+}
+
+/// Build `"included from <path>"` note strings for an `#include` chain.
+///
+/// `chain` lists file paths from the innermost included file outward to the
+/// translation unit root. The first element (where the diagnostic originates)
+/// is skipped; each subsequent path produces one note.
+pub fn include_chain_notes(chain: &[impl std::fmt::Display]) -> Vec<String> {
+    chain.iter().skip(1).map(|p| format!("included from {p}")).collect()
 }

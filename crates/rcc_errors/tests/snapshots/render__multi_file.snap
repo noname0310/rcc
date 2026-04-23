@@ -1,0 +1,22 @@
+---
+source: crates/rcc_errors/tests/render.rs
+assertion_line: 102
+expression: output
+---
+[E0002] Error: implicit declaration of function 'foo'
+   ╭─[ main.c:2:21 ]
+   │
+ 2 │ int main() { return foo(); }
+   │                     ─┬─  
+   │                      ╰─── called here
+   │ 
+   │ Note: included from main.c
+───╯
+
+Advice: also here
+   ╭─[ header.h:1:5 ]
+   │
+ 1 │ int foo(void);
+   │     ─┬─  
+   │      ╰─── declared here
+───╯

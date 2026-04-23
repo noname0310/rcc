@@ -15,7 +15,7 @@ mod emitter;
 mod handler;
 
 pub use builder::DiagnosticBuilder;
-pub use emitter::{CaptureEmitter, Emitter, StderrEmitter};
+pub use emitter::{include_chain_notes, CaptureEmitter, Emitter, StderrEmitter};
 pub use handler::Handler;
 
 /// Severity level of a `Diagnostic`.

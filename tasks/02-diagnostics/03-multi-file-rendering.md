@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 02-03: Multi-file diagnostic rendering
 
 **Phase:** 02-diagnostics    **Depends on:** 02-01    **Milestone:** M5 prep
