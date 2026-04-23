@@ -12,13 +12,13 @@
 //! tokens only, and lexical categories that do not survive phase 7 have no
 //! representation in [`TokenKind`].
 
-use rcc_errors::Label;
+use rcc_errors::{codes, Diagnostic, Label, Level};
 use rcc_lexer::{PpNumberKind, PpToken, PpTokenKind};
 use rcc_session::Session;
 use rcc_span::Span;
 
 use crate::keywords::classify_ident;
-use crate::literal::decode_integer;
+use crate::literal::{decode_float, decode_integer};
 use crate::token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
 };
@@ -83,9 +83,36 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
             }
         }
         PpTokenKind::PpNumber(PpNumberKind::Float) => {
-            // TODO(05-04): decode the floating constant (decimal +
-            // hex-float) and its `f`/`l` suffix per C99 §6.4.4.2.
-            TokenKind::FloatLit(FloatLiteral { value: 0.0, suffix: FloatSuffix::None })
+            // C99 §6.4.4.2 floating-constant decoding. `decode_float`
+            // returns a spanless `Diagnostic` on malformed input; on
+            // overflow it returns `Ok` with an infinite value, and we
+            // turn that into a W0002 warning here so the user sees the
+            // pp-token's own span underlined. On a hard decode error
+            // we fall back to a placeholder `0.0` / `None` literal so
+            // downstream parser invariants (every pp-number becomes
+            // an IntLit or a FloatLit) still hold during recovery.
+            let text = span_text(session, pp.span);
+            match decode_float(&text) {
+                Ok(lit) => {
+                    if lit.value.is_infinite() {
+                        // Normal pp-number source text cannot spell
+                        // infinity, so an infinite decode result is
+                        // unambiguously "magnitude ≥ f64::MAX".
+                        let diag = float_overflow_warning(pp.span);
+                        session.handler.emit(&diag);
+                    }
+                    TokenKind::FloatLit(lit)
+                }
+                Err(mut diag) => {
+                    diag.labels.push(Label {
+                        span: pp.span,
+                        message: String::new(),
+                        primary: true,
+                    });
+                    session.handler.emit(&diag);
+                    TokenKind::FloatLit(FloatLiteral { value: 0.0, suffix: FloatSuffix::None })
+                }
+            }
         }
         PpTokenKind::CharConst { enc } => {
             // TODO(05-05): decode the character constant including every
@@ -123,6 +150,21 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
         | PpTokenKind::Unknown => return None,
     };
     Some(Token { kind, span: pp.span })
+}
+
+/// Build a W0002 `float literal overflow` warning carrying `span` as the
+/// primary label. Lives here (rather than inside `decode_float`) because
+/// attaching a span needs a `Span`, and the decoder is deliberately span-
+/// agnostic so it stays trivially unit-testable.
+fn float_overflow_warning(span: Span) -> Diagnostic {
+    Diagnostic {
+        level: Level::Warning,
+        code: Some(codes::W0002),
+        message: "float literal overflow".into(),
+        labels: vec![Label { span, message: String::new(), primary: true }],
+        notes: Vec::new(),
+        help: Vec::new(),
+    }
 }
 
 /// Intern the source slice covered by `span` using the session's interner.
@@ -279,17 +321,88 @@ mod tests {
     }
 
     #[test]
-    fn float_pp_number_becomes_floatlit_stub() {
-        let (mut sess, fid) = mk_session("1.0");
-        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, 3);
+    fn float_pp_number_is_decoded_not_stubbed() {
+        // Post-05-04 this must carry the real value + suffix, not the
+        // placeholder 0.0 that the earlier stub produced.
+        // 3.25 is exactly representable in binary, so an `==` match
+        // is safe here; the task's own example `3.14` trips the
+        // `clippy::approx_constant` lint (≈ π) in test code.
+        let (mut sess, fid) = mk_session("3.25f");
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, 5);
         let t = pp_to_token(&mut sess, pp).expect("float converts");
         match t.kind {
             TokenKind::FloatLit(lit) => {
-                assert_eq!(lit.value, 0.0);
+                assert_eq!(lit.value, 3.25);
+                assert_eq!(lit.suffix, FloatSuffix::F);
+            }
+            other => panic!("expected FloatLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hex_float_pp_number_is_decoded_to_exact_value() {
+        // `0x1.0p3` → 8.0 exactly (acceptance bullet for 05-04).
+        let src = "0x1.0p3";
+        let (mut sess, fid) = mk_session(src);
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("hex float converts");
+        match t.kind {
+            TokenKind::FloatLit(lit) => {
+                assert_eq!(lit.value, 8.0);
                 assert_eq!(lit.suffix, FloatSuffix::None);
             }
             other => panic!("expected FloatLit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn float_overflow_emits_w0002_with_infinity() {
+        // `1e400` overflows double → the decoder returns +∞ and
+        // phase-7 must attach a W0002 warning with the token span.
+        let src = "1e400";
+        let (mut sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("float converts even on overflow");
+        match t.kind {
+            TokenKind::FloatLit(lit) => {
+                assert!(
+                    lit.value.is_infinite() && lit.value > 0.0,
+                    "expected +∞, got {}",
+                    lit.value
+                );
+            }
+            other => panic!("expected FloatLit, got {other:?}"),
+        }
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::W0002));
+        assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+        assert!(diags[0].labels.iter().any(|l| l.primary && l.span == pp.span));
+        // A warning must not bump the handler's error count.
+        assert_eq!(sess.handler.error_count(), 0);
+    }
+
+    #[test]
+    fn malformed_float_emits_error_and_recovers_to_zero() {
+        // `1.0ff` — a double `f` suffix is not a legal float. The
+        // decoder errors; phase-7 surfaces the diagnostic and keeps
+        // a `FloatLit` placeholder so downstream invariants hold.
+        let src = "1.0ff";
+        let (mut sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("float converts even on error");
+        assert!(matches!(
+            t.kind,
+            TokenKind::FloatLit(FloatLiteral { value: 0.0, suffix: FloatSuffix::None })
+        ));
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].level, rcc_errors::Level::Error);
+        assert!(diags[0].labels.iter().any(|l| l.primary && l.span == pp.span));
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0029, E0029_DESC),
     (E0040, E0040_DESC),
     (W0001, W0001_DESC),
+    (W0002, W0002_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -255,6 +256,19 @@ const E0040_DESC: &str = "integer literal too large";
 /// `Handler::has_errors`.
 pub const W0001: &str = "W0001";
 const W0001_DESC: &str = "unknown #pragma directive";
+
+/// Floating constant overflowed `double` and was clamped to `±infinity`.
+///
+/// C99 §6.4.4.2p3 says a floating constant whose value is outside the
+/// range of representable values of its type has undefined behavior;
+/// `rcc` follows the common host-parser convention of converting such
+/// a literal to `±infinity` (IEEE 754) and warning the user rather
+/// than hard-erroring. Emitted by `decode_float` whenever the
+/// post-decode magnitude compares infinite while the source spelling
+/// was a normal pp-number (the source grammar has no way to write
+/// `infinity` directly).
+pub const W0002: &str = "W0002";
+const W0002_DESC: &str = "float literal overflow";
 
 #[cfg(test)]
 mod tests {

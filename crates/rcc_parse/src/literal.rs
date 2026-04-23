@@ -16,7 +16,7 @@
 
 use rcc_errors::{codes, Diagnostic, Level};
 
-use crate::token::{IntLiteral, IntSuffix};
+use crate::token::{FloatLiteral, FloatSuffix, IntLiteral, IntSuffix};
 
 /// Decode a `PpNumberKind::Integer` source slice into an [`IntLiteral`].
 ///
@@ -226,6 +226,222 @@ fn parse_suffix(s: &[u8]) -> Result<IntSuffix, Diagnostic> {
     })
 }
 
+/// Decode a `PpNumberKind::Float` source slice into a [`FloatLiteral`].
+///
+/// Accepts the two C99 §6.4.4.2 floating-constant families:
+///
+/// - **Decimal** floats like `1.0`, `.5e10`, `3.14e-10f`, `2.0L`. The
+///   mantissa/exponent grammar is delegated to [`f64::from_str`], which
+///   accepts exactly the productions the C99 decimal-floating-constant
+///   grammar describes (modulo the suffix, which we strip first).
+/// - **Hex** floats like `0x1.0p0`, `0x1.8p1`, `0x1.0p3`. The binary
+///   exponent `p` / `P` is **required** by the grammar even when the
+///   value would be exact; a spelling like `0x1.0` with no `p` is a
+///   constraint violation and is rejected here.
+///
+/// `long double` (`l` / `L` suffix) is recorded in [`FloatSuffix::L`]
+/// but its *value* is still stored in an `f64` — `rcc` does not model
+/// 80-bit/128-bit extended precision. This is a deliberate fidelity
+/// trade-off: codegen will later widen the stored `f64` to whatever
+/// type the target's `long double` maps to, accepting the precision
+/// loss on the (rare) literals whose extra digits would have survived.
+/// Full `f128` arithmetic is future work.
+///
+/// Overflow (magnitude beyond `f64::MAX`) is **not** an error. The
+/// value is returned as `±infinity` and the caller is expected to emit
+/// [`codes::W0002`] (`float literal overflow`) as a warning attached
+/// to the literal's span. We signal this by returning `Ok` with an
+/// infinite value — normal pp-number source text cannot spell infinity,
+/// so `value.is_infinite()` after a successful decode is an unambiguous
+/// overflow signal.
+///
+/// # Errors
+///
+/// Returns a spanless [`Diagnostic`] for:
+///
+/// - Malformed decimal mantissa / exponent (e.g. `1.0ff`, `1e`).
+/// - Hex float with no digits, no `p` / `P` exponent, or trailing
+///   junk (e.g. `0x1.0`, `0x1p`, `0x1.0p0q`).
+/// - Invalid suffix (more than one of `f`/`F`/`l`/`L`, or a letter
+///   outside that set).
+pub fn decode_float(text: &str) -> Result<FloatLiteral, Diagnostic> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return Err(plain_err("empty floating literal"));
+    }
+
+    // Strip the trailing floating-suffix letter if present. C99
+    // §6.4.4.2 permits exactly one of `f`/`F`/`l`/`L`, so a single
+    // final letter is enough to disambiguate. For hex floats the
+    // last mantissa character before any suffix is always a decimal
+    // exponent digit (because the `p`/`P` exponent is mandatory and
+    // its digit sequence is decimal), so `f`/`F` at the tail cannot
+    // be mistaken for a hex digit.
+    let (mantissa_bytes, suffix) = match bytes.last() {
+        Some(&b'f') | Some(&b'F') => (&bytes[..bytes.len() - 1], FloatSuffix::F),
+        Some(&b'l') | Some(&b'L') => (&bytes[..bytes.len() - 1], FloatSuffix::L),
+        _ => (bytes, FloatSuffix::None),
+    };
+
+    // Reject a bare suffix with no mantissa (`"f"` etc.) up front so
+    // the decimal / hex decoders never see an empty slice.
+    if mantissa_bytes.is_empty() {
+        return Err(plain_err("floating literal has no digits"));
+    }
+
+    let is_hex = mantissa_bytes.len() >= 2
+        && mantissa_bytes[0] == b'0'
+        && matches!(mantissa_bytes[1], b'x' | b'X');
+
+    let value = if is_hex {
+        parse_hex_float(mantissa_bytes)?
+    } else {
+        parse_decimal_float(mantissa_bytes)?
+    };
+
+    Ok(FloatLiteral { value, suffix })
+}
+
+/// Decode a decimal floating constant (minus any stripped suffix).
+///
+/// Defers to `f64::from_str`, whose grammar is a strict superset of
+/// C99 §6.4.4.2 *decimal-floating-constant* (it additionally accepts
+/// `inf`, `nan`, and a leading sign — none of which the lexer's
+/// pp-number FSM will ever produce, so the superset is safe). Overflow
+/// inside `from_str` surfaces as `Ok(f64::INFINITY)` rather than `Err`,
+/// which matches the "overflow → `+∞` + warning" behavior the caller
+/// wants; we propagate it transparently.
+fn parse_decimal_float(bytes: &[u8]) -> Result<f64, Diagnostic> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| plain_err("non-UTF-8 bytes in floating literal"))?;
+    text.parse::<f64>().map_err(|_| plain_err(format!("malformed floating literal `{text}`")))
+}
+
+/// Decode a hex floating constant (`0x` / `0X` prefix already present,
+/// suffix already stripped).
+///
+/// Grammar (C99 §6.4.4.2):
+///
+/// ```text
+/// hexadecimal-floating-constant:
+///     hex-prefix hex-digit-sequence        binary-exponent-part
+///     hex-prefix hex-digit-sequence '.'    binary-exponent-part
+///     hex-prefix hex-digit-sequence? '.' hex-digit-sequence binary-exponent-part
+/// binary-exponent-part:
+///     ('p'|'P') sign? digit-sequence
+/// ```
+///
+/// The binary exponent is **mandatory** — a spelling like `0x1.0` has
+/// no `p` and is rejected here.
+///
+/// We assemble the mantissa as an `f64` directly rather than routing
+/// through `f64::from_str` (stable `from_str` rejects hex floats) or
+/// through `u64`-then-scale (which would lose low bits on long hex
+/// mantissas). Precision is IEEE-754 double: the hex grammar gives at
+/// most ~13 significant hex digits before the 53-bit mantissa runs
+/// out, and we accept that rounding as part of the `f64` choice.
+fn parse_hex_float(bytes: &[u8]) -> Result<f64, Diagnostic> {
+    // The caller already checked the `0x`/`0X` prefix; skip it.
+    let body = &bytes[2..];
+
+    let mut i = 0;
+    let mut mantissa: f64 = 0.0;
+    let mut saw_digit = false;
+
+    // Integer part.
+    while i < body.len() {
+        if let Some(d) = hex_digit_value(body[i]) {
+            mantissa = mantissa * 16.0 + f64::from(d);
+            saw_digit = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Optional fractional part.
+    if i < body.len() && body[i] == b'.' {
+        i += 1;
+        let mut scale: f64 = 1.0 / 16.0;
+        while i < body.len() {
+            if let Some(d) = hex_digit_value(body[i]) {
+                mantissa += f64::from(d) * scale;
+                scale /= 16.0;
+                saw_digit = true;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if !saw_digit {
+        return Err(plain_err("hex floating literal has no digits"));
+    }
+
+    // Binary exponent — mandatory.
+    if i >= body.len() || !matches!(body[i], b'p' | b'P') {
+        return Err(plain_err("hex floating literal requires a `p`/`P` binary exponent"));
+    }
+    i += 1;
+
+    // Optional exponent sign.
+    let exp_sign: i32 = match body.get(i) {
+        Some(&b'+') => {
+            i += 1;
+            1
+        }
+        Some(&b'-') => {
+            i += 1;
+            -1
+        }
+        _ => 1,
+    };
+
+    // Exponent digits (decimal, at least one).
+    let mut exp_val: i64 = 0;
+    let mut saw_exp_digit = false;
+    while i < body.len() && body[i].is_ascii_digit() {
+        exp_val = exp_val.saturating_mul(10).saturating_add(i64::from(body[i] - b'0'));
+        saw_exp_digit = true;
+        i += 1;
+    }
+    if !saw_exp_digit {
+        return Err(plain_err("hex floating literal exponent has no digits"));
+    }
+
+    // Anything still unread is trailing junk (e.g. `0x1.0p0q`).
+    if i != body.len() {
+        return Err(plain_err(format!(
+            "unexpected character `{}` in hex floating literal",
+            body[i] as char
+        )));
+    }
+
+    // `mantissa * 2^exp`. Clamping the exponent into `i32` before
+    // `powi` means extreme spellings produce `±inf` / `0.0` rather
+    // than UB; the caller treats `inf` as overflow (W0002).
+    let signed_exp: i64 = i64::from(exp_sign) * exp_val;
+    let clamped_exp: i32 = if signed_exp > i64::from(i32::MAX) {
+        i32::MAX
+    } else if signed_exp < i64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        signed_exp as i32
+    };
+    Ok(mantissa * 2f64.powi(clamped_exp))
+}
+
+/// Map `0..=9`, `a..=f`, `A..=F` to `0..=15`; anything else is `None`.
+fn hex_digit_value(b: u8) -> Option<u32> {
+    match b {
+        b'0'..=b'9' => Some(u32::from(b - b'0')),
+        b'a'..=b'f' => Some(u32::from(b - b'a') + 10),
+        b'A'..=b'F' => Some(u32::from(b - b'A') + 10),
+        _ => None,
+    }
+}
+
 /// Build a spanless error diagnostic without a stable code.
 fn plain_err(msg: impl Into<String>) -> Diagnostic {
     Diagnostic {
@@ -429,5 +645,177 @@ mod tests {
     #[test]
     fn empty_input_is_rejected() {
         assert!(decode_integer("").is_err());
+    }
+
+    // ── decode_float: happy-path decimal ─────────────────────────────
+
+    fn fok(text: &str) -> FloatLiteral {
+        decode_float(text)
+            .unwrap_or_else(|e| panic!("decode_float {text:?} → error {:?}", e.message))
+    }
+
+    fn ferr(text: &str) -> Diagnostic {
+        decode_float(text).err().unwrap_or_else(|| panic!("decode_float {text:?} unexpectedly ok"))
+    }
+
+    #[test]
+    fn decimal_1_0_has_value_one() {
+        let lit = fok("1.0");
+        assert_eq!(lit.value, 1.0);
+        assert_eq!(lit.suffix, FloatSuffix::None);
+    }
+
+    #[test]
+    fn decimal_dot_5_e10() {
+        let lit = fok(".5e10");
+        assert_eq!(lit.value, 0.5e10);
+        assert_eq!(lit.suffix, FloatSuffix::None);
+    }
+
+    #[test]
+    fn decimal_3_14_e_neg10_with_f_suffix() {
+        let lit = fok("3.14e-10f");
+        assert!((lit.value - 3.14e-10).abs() < 1e-20, "got {}", lit.value);
+        assert_eq!(lit.suffix, FloatSuffix::F);
+    }
+
+    #[test]
+    fn decimal_2_0_with_l_suffix() {
+        // `long double` value is stored as f64 — the task accepts the
+        // lossy cast (see the doc comment on `decode_float`).
+        let lit = fok("2.0L");
+        assert_eq!(lit.value, 2.0);
+        assert_eq!(lit.suffix, FloatSuffix::L);
+    }
+
+    #[test]
+    fn decimal_simple_exponent_form() {
+        // `1e5` has no `.` — this is the `digit-sequence exponent`
+        // decimal-floating-constant form (C99 §6.4.4.2).
+        let lit = fok("1e5");
+        assert_eq!(lit.value, 1e5);
+    }
+
+    // ── decode_float: happy-path hex ────────────────────────────────
+
+    #[test]
+    fn hex_float_1_0_p0_equals_one() {
+        let lit = fok("0x1.0p0");
+        assert_eq!(lit.value, 1.0);
+        assert_eq!(lit.suffix, FloatSuffix::None);
+    }
+
+    #[test]
+    fn hex_float_1_8_p1_equals_three() {
+        // 1.8 hex = 1 + 8/16 = 1.5; × 2^1 = 3.0.
+        let lit = fok("0x1.8p1");
+        assert_eq!(lit.value, 3.0);
+    }
+
+    #[test]
+    fn hex_float_1_0_p3_equals_eight() {
+        // Task acceptance bullet: `0x1.0p3` must evaluate to `8.0`.
+        let lit = fok("0x1.0p3");
+        assert_eq!(lit.value, 8.0);
+    }
+
+    #[test]
+    fn hex_float_uppercase_prefix_and_p_exponent() {
+        // `0X1.0P-1` — uppercase prefix, uppercase exponent, signed exp.
+        let lit = fok("0X1.0P-1");
+        assert_eq!(lit.value, 0.5);
+    }
+
+    #[test]
+    fn hex_float_no_fraction_with_exponent_and_suffix() {
+        // `0x1p3f` — no fraction, `f` suffix.
+        let lit = fok("0x1p3f");
+        assert_eq!(lit.value, 8.0);
+        assert_eq!(lit.suffix, FloatSuffix::F);
+    }
+
+    #[test]
+    fn hex_float_leading_dot_form() {
+        // `0x.8p1` — no integer part, fraction only, × 2^1 = 1.0.
+        let lit = fok("0x.8p1");
+        assert_eq!(lit.value, 1.0);
+    }
+
+    // ── decode_float: overflow → +∞ ─────────────────────────────────
+
+    #[test]
+    fn decimal_overflow_returns_positive_infinity() {
+        // Task acceptance bullet: overflow → +∞. The decoder returns
+        // Ok(+∞) and the caller (phase7) is responsible for emitting
+        // W0002 with the literal's span.
+        let lit = fok("1e400");
+        assert!(lit.value.is_infinite() && lit.value > 0.0, "got {}", lit.value);
+    }
+
+    #[test]
+    fn hex_float_overflow_returns_positive_infinity() {
+        // 2^20000 is far beyond f64::MAX; clamping + powi produces inf.
+        let lit = fok("0x1p20000");
+        assert!(lit.value.is_infinite() && lit.value > 0.0, "got {}", lit.value);
+    }
+
+    // ── decode_float: malformed ─────────────────────────────────────
+
+    #[test]
+    fn double_f_suffix_is_rejected() {
+        // `1.0ff` — after stripping one `f`, the mantissa `1.0f` is
+        // not a valid decimal float.
+        let e = ferr("1.0ff");
+        assert!(
+            e.message.contains("malformed") || e.message.contains("floating"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn hex_float_without_exponent_is_rejected() {
+        // Per C99 §6.4.4.2 the binary exponent is mandatory.
+        let e = ferr("0x1.0");
+        assert!(e.message.contains("exponent"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn hex_float_with_empty_exponent_is_rejected() {
+        let e = ferr("0x1.0p");
+        assert!(e.message.contains("exponent"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn hex_float_with_no_digits_is_rejected() {
+        // `0x.p0` — both integer and fraction parts empty.
+        let e = ferr("0x.p0");
+        assert!(
+            e.message.contains("no digits") || e.message.contains("exponent"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn hex_float_trailing_junk_is_rejected() {
+        let e = ferr("0x1.0p0q");
+        assert!(
+            e.message.contains("unexpected") || e.message.contains("suffix"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn empty_float_is_rejected() {
+        assert!(decode_float("").is_err());
+    }
+
+    #[test]
+    fn bare_suffix_is_rejected() {
+        // `f` alone — the suffix strip would leave nothing behind.
+        let e = ferr("f");
+        assert!(e.message.contains("no digits"), "got: {}", e.message);
     }
 }
