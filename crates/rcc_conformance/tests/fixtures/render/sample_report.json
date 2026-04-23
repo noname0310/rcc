@@ -1,0 +1,21 @@
+{
+  "suites": [
+    {
+      "name": "c-testsuite",
+      "cases": {
+        "c-testsuite::00001": { "status": "pass" },
+        "c-testsuite::00002": { "status": "pass" },
+        "c-testsuite::00003": { "status": "fail", "reason": "exit code 1" },
+        "c-testsuite::00004": { "status": "x_fail", "reason": "bit-fields" },
+        "c-testsuite::00005": { "status": "skip", "reason": "no .expected" }
+      }
+    },
+    {
+      "name": "chibicc",
+      "cases": {
+        "chibicc::arith": { "status": "pass" },
+        "chibicc::control": { "status": "pass" }
+      }
+    }
+  ]
+}

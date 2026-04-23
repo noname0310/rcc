@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod adapters;
+pub mod render;
 pub mod xfail;
 
 /// Outcome of running a single test case.

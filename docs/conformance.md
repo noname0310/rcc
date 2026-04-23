@@ -13,14 +13,16 @@ cargo run --release --package rcc_conformance
 
 ## Suite status
 
-| Suite | License | Discovered | Pass | XFail | Fail | Skip | KPI milestone |
-|-------|---------|-----------:|-----:|------:|-----:|-----:|---------------|
-| c-testsuite       | MIT                             | 0 | 0 | 0 | 0 | 0 | M3 ≥ 40 %, M4 ≥ 70 %, M6 ≥ 95 % |
-| chibicc           | MIT                             | 0 | 0 | 0 | 0 | 0 | M2 stages 1–3, M5 preprocessor |
-| gcc-torture       | GPL-3.0 WITH GCC-exception      | 0 | 0 | 0 | 0 | 0 | M4 smoke start, M6 ≥ 60 % |
-| tcc-tests2        | LGPL-2.1                        | 0 | 0 | 0 | 0 | 0 | M6 mop-up                        |
-| llvm-test-suite   | Apache-2.0 WITH LLVM-exception  | 0 | 0 | 0 | 0 | 0 | M7 quality                       |
-| csmith (diff)     | BSD-2-Clause                    | 0 | 0 | 0 | 0 | 0 | M7 24 h no-regression            |
+<!-- BEGIN autogen -->
+| Suite | Discovered | Pass | XFail | Fail | Skip | % |
+|-------|------------|------|-------|------|------|---|
+| c-testsuite | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| chibicc | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| gcc-torture | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| tcc-tests2 | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| llvm-test-suite | 0 | 0 | 0 | 0 | 0 | 0.0 |
+| csmith | 0 | 0 | 0 | 0 | 0 | 0.0 |
+<!-- END autogen -->
 
 Zeros above are placeholders; the conformance runner writes the real
 numbers into this file once the adapters are implemented (tracked under
