@@ -553,6 +553,90 @@ pub(crate) fn decode_char_full(
     Ok((CharLiteral { value, encoding: enc }, is_multi))
 }
 
+/// Decode a `PpTokenKind::StringLit` source slice into the raw byte
+/// payload of a parser-level [`crate::token::StringLiteral`].
+///
+/// The input `raw` is the **full** source text of the string-literal
+/// pp-token including the optional encoding prefix (`L` / `u` / `U` /
+/// `u8`) and the surrounding double quotes, e.g. `"\"hi\""`, `"L\"a\""`,
+/// `"u8\"\\xff\""`. The `enc` argument is the encoding already classified
+/// by the lexer; it must match the prefix found in `raw` (defensive —
+/// a mismatch indicates an internal invariant violation rather than
+/// user error).
+///
+/// The returned [`Vec<u8>`] contains the decoded bytes of the string
+/// **without** a trailing NUL. C99 §6.4.5p6 adds the terminating `\0`
+/// when the literal is used as an array initializer; that step is
+/// performed by typeck (task 07-xx), not by the parser. Keeping the
+/// NUL out of `bytes` at the parser layer means adjacent-string
+/// concatenation (task 05-06) can just `extend_from_slice` the runs
+/// without first having to strip a sentinel.
+///
+/// The byte walker handles each source character as follows:
+///
+/// - A raw (non-backslash) byte is pushed unchanged. This preserves the
+///   source's UTF-8 encoding verbatim for narrow strings — the common
+///   practice among mainstream C compilers — and yields one byte per
+///   source byte for wide / UTF-N strings. Width conversion (wchar_t,
+///   char16_t, char32_t) is deferred to typeck.
+/// - A backslash-escape is decoded via the same machinery that
+///   `decode_char` uses (simple escapes, octal, hex, UCN) and the
+///   resulting scalar's **low 8 bits** are pushed as a single byte.
+///   For the narrow encoding this matches the escape grammar exactly
+///   (`\xff` → `0xff`); for wide / UTF-N encodings typeck re-widens
+///   the byte later.
+///
+/// # Errors
+///
+/// Propagates any diagnostic produced by the escape decoder
+/// ([`codes::E0005`] for unknown simple escapes or malformed UCNs,
+/// [`codes::E0012`] for `\x` with no digits). Also returns a spanless
+/// diagnostic when the outer quoting is malformed (no leading quote,
+/// no trailing quote, or too short to contain either) — these are
+/// defensive checks; the lexer rejects unterminated strings itself.
+pub fn decode_string(raw: &str, enc: StringEncoding) -> Result<Vec<u8>, Diagnostic> {
+    let bytes = raw.as_bytes();
+    let prefix_len = match enc {
+        StringEncoding::None => 0,
+        StringEncoding::Wide | StringEncoding::Utf16 | StringEncoding::Utf32 => 1,
+        StringEncoding::Utf8 => 2,
+    };
+
+    // Minimum well-formed spelling: prefix + `""` = prefix_len + 2 bytes
+    // (the empty string literal is legal per §6.4.5p1).
+    if bytes.len() < prefix_len + 2
+        || bytes.get(prefix_len) != Some(&b'"')
+        || bytes.last() != Some(&b'"')
+    {
+        return Err(plain_err("malformed string literal"));
+    }
+
+    let body = &bytes[prefix_len + 1..bytes.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] == b'\\' {
+            // Escape sequence. Reuse the char-literal escape decoder
+            // (`decode_one_char`) so simple escapes, octal, hex, and
+            // universal character names follow exactly the same rules
+            // in strings as they do in character constants — that is
+            // exactly how C99 §6.4.4.4 specifies them.
+            let (val, used) = decode_one_char(body, i)?;
+            out.push(val as u8);
+            i += used;
+        } else {
+            // Raw source byte — push verbatim. For narrow strings this
+            // preserves any multibyte UTF-8 the user typed in source
+            // (matching gcc/clang behavior for the default narrow
+            // execution character set). For wide / UTF-N strings the
+            // typeck pass will later re-interpret the byte sequence.
+            out.push(body[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Decode a single character (plain byte or escape) starting at `body[i]`.
 ///
 /// Returns `(value, bytes_consumed)`; the caller advances its cursor by
@@ -1221,5 +1305,91 @@ mod tests {
     fn missing_quotes_is_rejected() {
         // `a` alone — no surrounding `'`.
         assert!(decode_char("a", StringEncoding::None).is_err());
+    }
+
+    // ── decode_string: happy path ────────────────────────────────────
+
+    fn sok(text: &str, enc: StringEncoding) -> Vec<u8> {
+        decode_string(text, enc)
+            .unwrap_or_else(|e| panic!("decode_string {text:?} → error {:?}", e.message))
+    }
+
+    fn serr(text: &str, enc: StringEncoding) -> Diagnostic {
+        decode_string(text, enc)
+            .err()
+            .unwrap_or_else(|| panic!("decode_string {text:?} unexpectedly ok"))
+    }
+
+    #[test]
+    fn plain_ascii_string_decodes_to_bytes() {
+        // No trailing NUL (the task explicitly defers NUL insertion to
+        // typeck when the string is used as an array initializer).
+        assert_eq!(sok("\"abc\"", StringEncoding::None), b"abc".to_vec());
+    }
+
+    #[test]
+    fn empty_string_decodes_to_empty_bytes() {
+        assert_eq!(sok("\"\"", StringEncoding::None), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn string_with_simple_escapes() {
+        // `"\n\t\\"` → 0x0a, 0x09, 0x5c — no trailing NUL.
+        assert_eq!(sok("\"\\n\\t\\\\\"", StringEncoding::None), vec![0x0a, 0x09, 0x5c]);
+    }
+
+    #[test]
+    fn string_with_hex_escape_255() {
+        // Task acceptance bullet: `"\xff"` → byte 255.
+        assert_eq!(sok("\"\\xff\"", StringEncoding::None), vec![0xff]);
+    }
+
+    #[test]
+    fn string_with_embedded_null_escape() {
+        // `"a\0b"` — the embedded `\0` is *part* of the string, not a
+        // terminator. We must preserve the interior zero.
+        assert_eq!(sok("\"a\\0b\"", StringEncoding::None), vec![0x61, 0x00, 0x62]);
+    }
+
+    #[test]
+    fn string_with_l_prefix_decodes() {
+        // `L"a"` decodes to one element, low-8-bits of the scalar = 97.
+        // The encoding is carried separately on the token; the byte
+        // payload is the simple per-scalar truncated form.
+        assert_eq!(sok("L\"a\"", StringEncoding::Wide), vec![97]);
+    }
+
+    #[test]
+    fn string_with_u_prefix_decodes() {
+        assert_eq!(sok("u\"A\"", StringEncoding::Utf16), vec![0x41]);
+    }
+
+    #[test]
+    fn string_with_big_u_prefix_decodes() {
+        assert_eq!(sok("U\"A\"", StringEncoding::Utf32), vec![0x41]);
+    }
+
+    #[test]
+    fn string_with_u8_prefix_decodes() {
+        assert_eq!(sok("u8\"A\"", StringEncoding::Utf8), vec![0x41]);
+    }
+
+    // ── decode_string: malformed ─────────────────────────────────────
+
+    #[test]
+    fn string_without_quotes_is_rejected() {
+        assert!(decode_string("abc", StringEncoding::None).is_err());
+    }
+
+    #[test]
+    fn string_with_unknown_escape_is_rejected() {
+        let e = serr("\"\\q\"", StringEncoding::None);
+        assert_eq!(e.code, Some(codes::E0005));
+    }
+
+    #[test]
+    fn string_with_bad_hex_escape_is_rejected() {
+        let e = serr("\"\\x\"", StringEncoding::None);
+        assert_eq!(e.code, Some(codes::E0012));
     }
 }

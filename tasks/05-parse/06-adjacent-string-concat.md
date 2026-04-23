@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 05-06: Adjacent string-literal concatenation
 
 **Phase:** 05-parse    **Depends on:** 05-05    **Milestone:** M2

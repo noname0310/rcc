@@ -23,8 +23,8 @@ mod scope;
 mod token;
 
 pub use keywords::{classify_ident, Keyword, KEYWORDS};
-pub use literal::{decode_char, decode_float, decode_integer};
-pub use phase7::{convert as pp_stream_to_tokens, pp_to_token};
+pub use literal::{decode_char, decode_float, decode_integer, decode_string};
+pub use phase7::{convert as pp_stream_to_tokens, merge_adjacent_strings, pp_to_token};
 pub use scope::{NameKind, Scope, ScopeStack};
 pub use token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,

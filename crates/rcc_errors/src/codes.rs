@@ -54,6 +54,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0028, E0028_DESC),
     (E0029, E0029_DESC),
     (E0040, E0040_DESC),
+    (E0041, E0041_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -245,6 +246,19 @@ const E0029_DESC: &str = "`#line` argument out of range";
 /// the language-level widest type.
 pub const E0040: &str = "E0040";
 const E0040_DESC: &str = "integer literal too large";
+
+/// Adjacent string literals have incompatible encoding prefixes.
+///
+/// C99 §6.4.5p5 concatenates adjacent string-literal tokens in
+/// translation phase 6. A narrow (unprefixed) literal concatenates
+/// with an `L`-prefixed wide literal — the result is wide — but any
+/// other mix of distinct prefixes (`L` with `u`, `L` with `U`, `u`
+/// with `U`, a bare narrow with `u`/`U`/`u8`) is undefined behavior
+/// and `rcc` rejects it at parse time. The first incompatible token
+/// carries the primary label; the preceding run is shown as
+/// secondary context.
+pub const E0041: &str = "E0041";
+const E0041_DESC: &str = "incompatible string literal encodings";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

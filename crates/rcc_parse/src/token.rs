@@ -99,9 +99,17 @@ pub struct CharLiteral {
 }
 
 /// Parsed string literal.
+///
+/// The `bytes` field carries the decoded payload **without** the
+/// terminating NUL. C99 §6.4.5p6 adds the `\0` when the literal is
+/// used as an array initializer; that step lives in typeck and the
+/// HIR-lowering pipeline, not in the parser. Keeping the NUL out at
+/// the parser layer means adjacent-string concatenation (task 05-06)
+/// is a simple `extend_from_slice` of the contributing runs without
+/// having to strip a sentinel first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StringLiteral {
-    /// Decoded bytes (includes trailing NUL).
+    /// Decoded bytes (no trailing NUL — see type doc).
     pub bytes: Vec<u8>,
     /// Encoding of the resulting string (merged from concatenated parts).
     pub encoding: rcc_lexer::StringEncoding,

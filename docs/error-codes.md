@@ -441,6 +441,28 @@ literal that fits `u128` but still exceeds the language-level widest
 type — that check is performed later, when typeck walks the §6.4.4.1p5
 ladder.
 
+## E0041 — incompatible string literal encodings
+
+Two adjacent string-literal tokens have encoding prefixes that C99
+§6.4.5p5 does not permit to be concatenated. The standard spells out
+exactly one promotion — a narrow (unprefixed) literal and an
+`L`-prefixed wide literal concatenate, in either order, into a wide
+literal — and says every other cross-prefix mix is undefined
+behavior. `rcc` rejects the undefined cases at parse time.
+
+```c
+wchar_t *ok = L"a" "b";       // OK: narrow + wide → wide
+wchar_t *bad = L"a" U"b";     // error[E0041]: incompatible string literal encodings
+char32_t *also = "a" U"b";    // error[E0041]: incompatible string literal encodings
+```
+
+The primary label points at the offending (later) literal; the first
+literal of the current run gets a secondary "previous string literal
+here" label so the user can see exactly where the encoding mismatch
+began. After emitting the diagnostic the parser splits the run at the
+conflict and continues — any subsequent well-formed concatenation
+still merges normally.
+
 ---
 
 ## W0001 — unknown #pragma directive
