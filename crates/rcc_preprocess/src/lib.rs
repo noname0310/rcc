@@ -65,6 +65,15 @@ pub struct Preprocessor<'a> {
     /// per preprocessor instance; this latch is how it tells the
     /// top-level invocation apart from the recursive ones.
     predefined_installed: bool,
+    /// Fatal-abort latch set by the first `#error` encountered during
+    /// preprocessing (task 04-16, C99 §6.10.5). Once true, every
+    /// remaining line in the current translation unit — including
+    /// lines in the `#include`r — is skipped: no tokens are emitted,
+    /// no directive side effects are applied, no further diagnostics
+    /// are produced. The `Handler` already records the E0020 itself,
+    /// so downstream phases can still observe the failure via
+    /// `Handler::has_errors`.
+    halted: bool,
 }
 
 impl<'a> Preprocessor<'a> {
@@ -77,6 +86,7 @@ impl<'a> Preprocessor<'a> {
             pragma_once: FxHashMap::default(),
             line_overrides: LineMap::new(),
             predefined_installed: false,
+            halted: false,
         }
     }
 
@@ -125,6 +135,13 @@ impl<'a> Preprocessor<'a> {
         let mut ls = line_stream::LineStream::new(tokens.into_iter());
         let mut cond = cond_stack::CondStack::new();
         while let Some(line) = ls.next_line() {
+            // `#error` latches [`Self::halted`] as a fatal abort for
+            // the entire preprocessing run (task 04-16, C99 §6.10.5).
+            // Stop eagerly so neither tokens nor additional directive
+            // side effects surface after it.
+            if self.halted {
+                break;
+            }
             if is_directive_line(&line) {
                 // Null directive (`#` alone): no side effect, no output.
                 if line.len() == 1 {
@@ -143,9 +160,16 @@ impl<'a> Preprocessor<'a> {
         // Unterminated `#if` / `#ifdef` / `#ifndef` at end of file.
         // One diagnostic per still-open frame, each labelled at its
         // own opening keyword — helps when several groups were nested.
-        for frame in cond.into_unclosed() {
-            let diag = cond_stack::missing_endif(frame.open_span);
-            self.session.handler.emit(&diag);
+        //
+        // Suppressed when a `#error` has halted the run: §6.10.5
+        // makes `#error` fatal, so piling unrelated E0018 on top
+        // would just be noise about a translation unit that already
+        // failed.
+        if !self.halted {
+            for frame in cond.into_unclosed() {
+                let diag = cond_stack::missing_endif(frame.open_span);
+                self.session.handler.emit(&diag);
+            }
         }
 
         out
@@ -360,12 +384,64 @@ impl<'a> Preprocessor<'a> {
             Ok(directive::Directive::Line { span, line, file }) => {
                 self.apply_line_directive(span, line, file);
             }
-            // Other directives (Include / Error / Pragma) are
-            // parsed-but-not-dispatched here; task 04-16 takes
-            // `#error`/`#pragma`. Conditional variants are routed
-            // above.
+            Ok(directive::Directive::Error { span, message }) => {
+                self.dispatch_error_directive(span, &message);
+            }
+            Ok(directive::Directive::Pragma { span, tokens }) => {
+                self.dispatch_pragma_directive(span, &tokens, src);
+            }
+            // `Include` is still resolved out-of-band (task 04-03);
+            // conditional variants are routed above before ever
+            // reaching `parse_directive`.
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
+        }
+    }
+
+    /// Handle a parsed `#error` directive: emit E0020 with the
+    /// stringified message tokens and latch [`Self::halted`] so the
+    /// translation unit stops producing further output (C99 §6.10.5).
+    ///
+    /// The message is the raw source text between the first and last
+    /// body token as captured by
+    /// [`directive::parse_directive`] — whitespace between tokens is
+    /// preserved, matching GCC/clang's behaviour of surfacing the
+    /// directive's tail verbatim. A bare `#error` (no tokens) still
+    /// fires the diagnostic so the user sees something actionable
+    /// rather than a silent halt.
+    fn dispatch_error_directive(&mut self, span: Span, message: &str) {
+        let diag = error_directive(span, message);
+        self.session.handler.emit(&diag);
+        self.halted = true;
+    }
+
+    /// Handle a parsed `#pragma` directive.
+    ///
+    /// Three cases per C99 §6.10.6:
+    ///
+    /// - **`#pragma once`** — already cached at include time by
+    ///   [`include::detect_pragma_once`]; accepted silently here.
+    /// - **`#pragma STDC ...`** — the C99-reserved family
+    ///   (`FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE`); accepted
+    ///   silently. The implementation may ignore any state-setting
+    ///   per §6.10.6p2, but must not diagnose.
+    /// - Anything else (including a bare `#pragma` with no tokens)
+    ///   is unknown; we warn with W0001 and proceed. Warnings do
+    ///   **not** bump `Handler::has_errors`.
+    fn dispatch_pragma_directive(&mut self, span: Span, tokens: &[PpToken], src: &str) {
+        let first_name = tokens.first().and_then(|tok| match tok.kind {
+            PpTokenKind::Ident => Some(&src[tok.span.lo.0 as usize..tok.span.hi.0 as usize]),
+            _ => None,
+        });
+        match first_name {
+            // Bare `#pragma` (no body) — silently ignored, matching
+            // gcc/clang. Nothing to warn about.
+            None if tokens.is_empty() => {}
+            Some("once") | Some("STDC") => {}
+            _ => {
+                let diag = unknown_pragma(span, tokens, src);
+                self.session.handler.emit(&diag);
+            }
         }
     }
 
@@ -641,6 +717,61 @@ fn line_out_of_range(span: Span) -> rcc_errors::Diagnostic {
         }],
         notes: vec!["C99 §6.10.4p3: the digit sequence shall not specify zero, \
              nor a number greater than 2147483647"
+            .into()],
+        help: vec![],
+    }
+}
+
+/// Build the E0020 diagnostic for `#error <tokens...>` (task 04-16,
+/// C99 §6.10.5p1). `message` is the raw body text as captured by
+/// [`directive::parse_directive`]; it is interpolated verbatim into
+/// the diagnostic so users see the exact wording they wrote.
+fn error_directive(span: Span, message: &str) -> rcc_errors::Diagnostic {
+    use rcc_errors::{codes::E0020, Diagnostic, Label, Level};
+    let trimmed = message.trim();
+    let (header, label) = if trimmed.is_empty() {
+        ("#error directive encountered".to_string(), "`#error` reached".to_string())
+    } else {
+        (format!("#error: {trimmed}"), trimmed.to_string())
+    };
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0020),
+        message: header,
+        labels: vec![Label { span, message: label, primary: true }],
+        notes: vec!["C99 §6.10.5p1: the `#error` directive causes the \
+             implementation to produce a diagnostic message"
+            .into()],
+        help: vec![],
+    }
+}
+
+/// Build the W0001 warning for an unrecognised `#pragma`. Labels the
+/// first body token (the pragma's name) so the user can see which
+/// form was dropped; falls back to the directive span when the
+/// `#pragma` has no body tokens to point at (that edge case currently
+/// dispatches as a silent no-op, but keep the fallback so future
+/// callers can reuse this helper safely).
+fn unknown_pragma(span: Span, tokens: &[PpToken], src: &str) -> rcc_errors::Diagnostic {
+    use rcc_errors::{codes::W0001, Diagnostic, Label, Level};
+    let (label_span, label_msg) = match tokens.first() {
+        Some(tok) => {
+            let text = src.get(tok.span.lo.0 as usize..tok.span.hi.0 as usize).unwrap_or("");
+            if text.is_empty() {
+                (tok.span, "unknown `#pragma`".to_string())
+            } else {
+                (tok.span, format!("unknown pragma `{text}`"))
+            }
+        }
+        None => (span, "empty `#pragma`".to_string()),
+    };
+    Diagnostic {
+        level: Level::Warning,
+        code: Some(W0001),
+        message: "unknown #pragma directive — ignored".into(),
+        labels: vec![Label { span: label_span, message: label_msg, primary: true }],
+        notes: vec!["C99 §6.10.6: an implementation shall ignore any \
+             pragma it does not recognise"
             .into()],
         help: vec![],
     }
@@ -1533,5 +1664,170 @@ dead1
             "dead `#if 1/0` must not evaluate and not emit E0028: {:?}",
             cap.diagnostics()
         );
+    }
+
+    // ── `#error` / `#pragma` (task 04-16) ────────────────────────────
+
+    use rcc_errors::codes::{E0020, W0001};
+    use rcc_errors::Level;
+
+    #[test]
+    fn acceptance_error_directive_emits_e0020_with_stringified_message() {
+        // `#error foo bar` → one E0020 diagnostic carrying the body
+        // text `foo bar` (whitespace between the two tokens is
+        // preserved because parse_directive captures the raw source
+        // slice from the first to the last body token).
+        let (mut sess, id, cap) = seed("#error foo bar\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert!(out.is_empty(), "`#error` halts output, got {out:?}");
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0020 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0020));
+        assert_eq!(diags[0].level, Level::Error);
+        assert!(
+            diags[0].message.contains("foo bar"),
+            "E0020 header must contain the stringified body `foo bar`, got {:?}",
+            diags[0].message
+        );
+        assert!(pp.session.handler.has_errors(), "E0020 must count as an error");
+    }
+
+    #[test]
+    fn acceptance_error_directive_halts_subsequent_processing() {
+        // §6.10.5: `#error` is fatal. A subsequent `#define` must
+        // *not* install a macro, and a subsequent malformed
+        // directive that would ordinarily diagnose must stay silent.
+        let src = "#error stop\n#define AFTER 1\n#define 123\nliteral\n";
+        let (mut sess, id, cap) = seed(src);
+        let sym = sess.interner.intern("AFTER");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert!(out.is_empty(), "no tokens may be emitted after `#error`");
+        assert!(pp.macros.get(sym).is_none(), "`#define` past `#error` must not install a macro");
+
+        let diags = cap.diagnostics();
+        assert_eq!(
+            diags.len(),
+            1,
+            "only the triggering E0020 should surface — later lines are skipped, got {diags:?}"
+        );
+        assert_eq!(diags[0].code, Some(E0020));
+    }
+
+    #[test]
+    fn error_directive_with_no_body_still_emits_e0020() {
+        // Edge case: a bare `#error` (nothing after it) still fires
+        // so the user sees a diagnostic rather than a silent abort.
+        let (mut sess, id, cap) = seed("#error\ntrailing\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert!(out.is_empty(), "halt still engages for an empty `#error`");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(E0020));
+    }
+
+    #[test]
+    fn acceptance_unknown_pragma_emits_w0001_and_compilation_continues() {
+        // `#pragma mystery` → W0001 warning, and the `after` line
+        // that follows still reaches the output stream.
+        let (mut sess, id, cap) = seed("#pragma mystery\nafter\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "after", "unknown pragma must NOT halt");
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one W0001 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(W0001));
+        assert_eq!(diags[0].level, Level::Warning);
+        assert!(
+            !pp.session.handler.has_errors(),
+            "W0001 must NOT count as an error for has_errors"
+        );
+        assert_eq!(pp.session.handler.warning_count(), 1, "W0001 should bump the warning count");
+    }
+
+    #[test]
+    fn acceptance_pragma_stdc_family_is_silently_accepted() {
+        // §6.10.6: `STDC` pragmas are reserved. Every form of
+        // `#pragma STDC ...` is accepted silently — no diagnostic,
+        // and compilation proceeds.
+        let forms = [
+            "#pragma STDC FP_CONTRACT ON\nafter\n",
+            "#pragma STDC FP_CONTRACT OFF\nafter\n",
+            "#pragma STDC FP_CONTRACT DEFAULT\nafter\n",
+            "#pragma STDC FENV_ACCESS ON\nafter\n",
+            "#pragma STDC CX_LIMITED_RANGE OFF\nafter\n",
+        ];
+        for src in forms {
+            let (mut sess, id, cap) = seed(src);
+            let mut pp = Preprocessor::new(&mut sess);
+            let out = pp.run(id);
+            assert_eq!(joined_text(&pp, &out), "after", "src={src:?} must continue");
+            assert!(
+                cap.diagnostics().is_empty(),
+                "`#pragma STDC ...` must be silent, got {:?} for src={src:?}",
+                cap.diagnostics()
+            );
+        }
+    }
+
+    #[test]
+    fn pragma_once_in_top_level_file_is_silent_in_dispatch() {
+        // `#pragma once` at the top of the translation unit is
+        // handled by the include-time detector; the dispatcher must
+        // not diagnose on it. (Only meaningful inside a header, but
+        // must not warn even when it appears standalone.)
+        let (mut sess, id, cap) = seed("#pragma once\nafter\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "after");
+        assert!(cap.diagnostics().is_empty(), "`#pragma once` must be silent in the dispatcher");
+    }
+
+    #[test]
+    fn bare_pragma_with_no_body_is_silent() {
+        // `#pragma` with no tail tokens is the implementation-defined
+        // empty pragma — silently ignored, matching gcc/clang.
+        let (mut sess, id, cap) = seed("#pragma\nafter\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "after");
+        assert!(cap.diagnostics().is_empty(), "bare `#pragma` must not warn");
+    }
+
+    #[test]
+    fn error_after_unterminated_if_suppresses_e0018() {
+        // `#if 1` with no `#endif` normally emits one E0018 at EOF,
+        // but an intervening `#error` halts the run and makes the
+        // unclosed-frame sweep silent — one diagnostic in, one
+        // diagnostic out.
+        let (mut sess, id, cap) = seed("#if 1\n#error boom\nbody\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "only E0020 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0020));
+    }
+
+    #[test]
+    fn dead_branch_error_and_pragma_are_skipped() {
+        // §6.10p5: a `#error` / `#pragma` in a skipped group must
+        // have no side effect — neither the E0020 halt nor the
+        // W0001 warning fires.
+        let src = "#if 0\n#error dead\n#pragma mystery\n#endif\nalive\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "alive");
+        assert!(
+            cap.diagnostics().is_empty(),
+            "dead `#error`/`#pragma` must be silent, got {:?}",
+            cap.diagnostics()
+        );
+        assert!(!pp.halted, "dead `#error` must not latch the halt flag");
     }
 }

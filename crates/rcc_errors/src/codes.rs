@@ -10,6 +10,10 @@
 //!   E0061..E0080  — HIR lowering    (reserved, future)
 //!   E0081..E0100  — codegen         (reserved, future)
 //!
+//! Warning codes use the `WNNNN` spelling and live in their own
+//! namespace; task 04-16 introduces the first, W0001 for unknown
+//! `#pragma` directives.
+//!
 //! The preprocessor block E0001..E0020 was filled during lexer work, so
 //! task 04-03 borrows the first slot of the parser window for the
 //! `#include` resolver. Downstream parser tasks should allocate from
@@ -49,6 +53,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0027, E0027_DESC),
     (E0028, E0028_DESC),
     (E0029, E0029_DESC),
+    (W0001, W0001_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -225,6 +230,18 @@ const E0028_DESC: &str = "invalid #if expression";
 pub const E0029: &str = "E0029";
 const E0029_DESC: &str = "`#line` argument out of range";
 
+// ── Warning block: W0001.. ──────────────────────────────────────────
+
+/// Unknown `#pragma` directive — accepted but ignored.
+///
+/// C99 §6.10.6 allows implementation-defined pragmas; any pragma
+/// `rcc` does not recognise (anything other than `once` or the
+/// standard `STDC *` family) is dropped with a warning rather than
+/// treated as an error. Does **not** count toward
+/// `Handler::has_errors`.
+pub const W0001: &str = "W0001";
+const W0001_DESC: &str = "unknown #pragma directive";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +249,11 @@ mod tests {
     #[test]
     fn all_codes_have_correct_format() {
         for &(code, desc) in ALL_CODES {
-            assert!(code.starts_with('E'), "code {code:?} must start with 'E'");
+            let first = code.chars().next().expect("code is non-empty");
+            assert!(
+                first == 'E' || first == 'W',
+                "code {code:?} must start with 'E' (error) or 'W' (warning)"
+            );
             assert_eq!(code.len(), 5, "code {code:?} must be exactly 5 chars");
             assert!(
                 code[1..].chars().all(|c| c.is_ascii_digit()),
@@ -251,14 +272,26 @@ mod tests {
     }
 
     #[test]
-    fn codes_are_sorted() {
-        for window in ALL_CODES.windows(2) {
-            assert!(
-                window[0].0 < window[1].0,
-                "codes must be sorted: {} should come before {}",
-                window[0].0,
-                window[1].0
-            );
-        }
+    fn codes_are_sorted_within_each_namespace() {
+        // `E` and `W` codes live in disjoint spaces; the registry
+        // lists every `E` first in numeric order, then every `W` in
+        // numeric order. A single byte-wise sort would still hold
+        // because `'E' < 'W'`, but keep the assertion per-namespace
+        // so that introducing another prefix later does not quietly
+        // bend the invariant.
+        let check_sorted = |prefix: char| {
+            let subset: Vec<&str> =
+                ALL_CODES.iter().map(|&(c, _)| c).filter(|c| c.starts_with(prefix)).collect();
+            for pair in subset.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "{prefix} codes must be sorted: {} should come before {}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        };
+        check_sorted('E');
+        check_sorted('W');
     }
 }

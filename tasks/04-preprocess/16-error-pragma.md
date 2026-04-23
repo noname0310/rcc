@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-16: `#error` and unknown `#pragma`
 
 **Phase:** 04-preprocess    **Depends on:** 04-02    **Milestone:** M5
@@ -26,3 +28,18 @@ handled: `once`, `STDC *`).
 
 ## References
 - C99 §6.10.5 (`#error`), §6.10.6 (`#pragma`).
+
+## Notes (agent)
+- Error code: the task scope names E0031, but the existing
+  preprocessor registry already reserves `E0020` with the exact
+  description "#error directive encountered" (see
+  `crates/rcc_errors/src/codes.rs`). Using `E0020` keeps the
+  reserved slot honoured; no new `E` code was needed.
+- Warning codes: the registry previously held only `EXXXX` codes.
+  Task 04-16 introduces a separate `WXXXX` namespace starting at
+  `W0001` for unknown `#pragma`. `ALL_CODES` now spans both
+  prefixes; the `codes_are_sorted` test was split per-namespace.
+- Halt: a new `Preprocessor::halted` latch short-circuits the
+  main `run()` loop (and suppresses the end-of-file E0018 sweep)
+  on the first `#error`, matching GCC/clang's fatal semantics for
+  §6.10.5.

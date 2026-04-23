@@ -1,9 +1,10 @@
 # rcc Error Codes
 
-Every user-facing diagnostic emitted by `rcc` carries a stable error code
-of the form `EXXXX`. This page is the canonical reference. If a code
-appears in compiler output but is missing here, that is a bug — CI will
-catch it via `cargo xtask check-error-codes`.
+Every user-facing diagnostic emitted by `rcc` carries a stable error code.
+Errors use `EXXXX`; non-fatal warnings use `WXXXX`. This page is the
+canonical reference. If a code appears in compiler output but is missing
+here, that is a bug — CI will catch it via
+`cargo xtask check-error-codes`.
 
 ---
 
@@ -220,11 +221,22 @@ A `#` is followed by a token that is not a recognised C99 directive.
 
 ## E0020 — #error directive encountered
 
-The user explicitly triggered a compilation error via `#error`.
+The user explicitly triggered a compilation error via `#error` (C99
+§6.10.5). The body tokens are surfaced verbatim in the diagnostic
+message so the user's reason appears in compiler output. `#error` is
+**fatal**: after emitting E0020 the preprocessor halts for the rest
+of the translation unit — no further tokens reach the parser, no
+later directive side effects apply, and subsequent would-be
+diagnostics (malformed `#define`, missing `#endif`, unknown
+`#pragma`) are suppressed.
 
 ```c
-#error "unsupported platform"  // error[E0020]: #error directive encountered
+#error unsupported platform  // error[E0020]: #error: unsupported platform
 ```
+
+Dead-branch `#error` directives are exempt: §6.10p5 says skipped
+groups execute nothing, so a `#error` inside a `#if 0 ... #endif`
+block is silently dropped, not raised.
 
 ## E0021 — cannot find header
 
@@ -410,3 +422,34 @@ are constraint violations.
 
 A missing or non-numeric argument (`#line`, `#line abc`) is a
 different error — see E0015.
+
+---
+
+## W0001 — unknown #pragma directive
+
+C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
+understand. `rcc` recognises two:
+
+- `#pragma once` — include-once header hint (handled at `#include`
+  time by a raw pre-pass; accepted silently by the directive
+  dispatcher too).
+- `#pragma STDC ...` — the standard reserved family
+  (`FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE`). Every `STDC`
+  form is accepted silently; `rcc` does not currently act on any
+  of them, but §6.10.6p2 explicitly allows that.
+
+Any other pragma — including a bare `#pragma` with a single unknown
+identifier — emits W0001 and is ignored; compilation continues. A
+totally empty `#pragma` (no body tokens) is silently dropped.
+
+```c
+#pragma mystery          // warning[W0001]: unknown pragma `mystery`
+#pragma GCC diagnostic   // warning[W0001]: unknown pragma `GCC`
+
+#pragma once             // accepted silently
+#pragma STDC FP_CONTRACT ON  // accepted silently
+```
+
+W0001 does **not** count as an error for `Handler::has_errors`, so a
+translation unit with only unknown-pragma warnings still compiles
+cleanly.

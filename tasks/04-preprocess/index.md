@@ -23,7 +23,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [13-if-expression-const-eval](13-if-expression-const-eval.md)
 - [x] [14-conditional-stack](14-conditional-stack.md)
 - [x] [15-line-directive](15-line-directive.md)
-- [ ] [16-error-pragma](16-error-pragma.md)
+- [x] [16-error-pragma](16-error-pragma.md)
 - [ ] [17-unit-tests](17-unit-tests.md)
 - [ ] [18-chibicc-preprocess-tests](18-chibicc-preprocess-tests.md)
 - [ ] [19-fuzz-target](19-fuzz-target.md)
