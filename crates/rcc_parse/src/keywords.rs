@@ -1,5 +1,8 @@
 //! C99 keyword table (C99 §6.4.1).
 
+use rcc_data_structures::FxHashMap;
+use std::sync::OnceLock;
+
 /// All C99 keywords.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Keyword {
@@ -119,3 +122,87 @@ pub const KEYWORDS: &[(&str, Keyword)] = &[
     ("_Complex", Keyword::Complex),
     ("_Imaginary", Keyword::Imaginary),
 ];
+
+/// Classify an identifier spelling as a reserved C99 [`Keyword`], or
+/// return `None` for an ordinary identifier.
+///
+/// Uses a process-wide `OnceLock`-backed [`FxHashMap`] built lazily from
+/// [`KEYWORDS`] on the first call, giving amortised O(1) lookup. Keys are
+/// `&'static str` borrowed from the table, so the cache never allocates
+/// per-query.
+///
+/// C99 keywords are case-sensitive (§6.4.1); this function matches the
+/// exact spelling and performs no case folding.
+pub fn classify_ident(s: &str) -> Option<Keyword> {
+    static MAP: OnceLock<FxHashMap<&'static str, Keyword>> = OnceLock::new();
+    let map = MAP.get_or_init(|| KEYWORDS.iter().copied().collect());
+    map.get(s).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_has_all_37_c99_keywords() {
+        // C99 §6.4.1: 37 reserved words (32 from C89 + inline, restrict,
+        // _Bool, _Complex, _Imaginary).
+        assert_eq!(KEYWORDS.len(), 37);
+    }
+
+    #[test]
+    fn every_keyword_round_trips() {
+        for &(spelling, kw) in KEYWORDS {
+            assert_eq!(classify_ident(spelling), Some(kw), "roundtrip for {spelling:?}");
+        }
+    }
+
+    #[test]
+    fn non_keyword_ident_returns_none() {
+        assert_eq!(classify_ident("printf"), None);
+        assert_eq!(classify_ident("main"), None);
+        assert_eq!(classify_ident("x"), None);
+        assert_eq!(classify_ident(""), None);
+        assert_eq!(classify_ident("_my_var"), None);
+    }
+
+    #[test]
+    fn keyword_classification_is_case_sensitive() {
+        // C identifiers are case-sensitive; `Int` / `INT` are not keywords.
+        assert_eq!(classify_ident("Int"), None);
+        assert_eq!(classify_ident("INT"), None);
+        assert_eq!(classify_ident("Return"), None);
+        // Underscore-prefixed C99 keywords must keep exact casing.
+        assert_eq!(classify_ident("_bool"), None);
+        assert_eq!(classify_ident("_BOOL"), None);
+    }
+
+    #[test]
+    fn sizeof_is_a_keyword_not_an_identifier() {
+        // Common confusion: `sizeof` is an operator spelled as a keyword
+        // (C99 §6.4.1, §6.5.3.4), not an ordinary identifier.
+        assert_eq!(classify_ident("sizeof"), Some(Keyword::Sizeof));
+    }
+
+    #[test]
+    fn c99_underscore_capital_keywords_are_classified() {
+        assert_eq!(classify_ident("_Bool"), Some(Keyword::Bool));
+        assert_eq!(classify_ident("_Complex"), Some(Keyword::Complex));
+        assert_eq!(classify_ident("_Imaginary"), Some(Keyword::Imaginary));
+    }
+
+    #[test]
+    fn c99_lowercase_keywords_are_classified() {
+        assert_eq!(classify_ident("inline"), Some(Keyword::Inline));
+        assert_eq!(classify_ident("restrict"), Some(Keyword::Restrict));
+    }
+
+    #[test]
+    fn reserved_ident_lookalikes_are_not_keywords() {
+        // Implementation-reserved names (C99 §7.1.3) that are *not*
+        // themselves C99 keywords must still classify as idents.
+        assert_eq!(classify_ident("__func__"), None);
+        assert_eq!(classify_ident("_Pragma"), None);
+        assert_eq!(classify_ident("_Static_assert"), None);
+    }
+}

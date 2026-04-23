@@ -16,6 +16,7 @@ use rcc_lexer::{PpNumberKind, PpToken, PpTokenKind};
 use rcc_session::Session;
 use rcc_span::Span;
 
+use crate::keywords::classify_ident;
 use crate::token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
 };
@@ -44,12 +45,18 @@ pub fn convert(session: &mut Session, pp: &[PpToken]) -> Vec<Token> {
 pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
     let kind = match pp.kind {
         PpTokenKind::Ident => {
+            // Intern first, then resolve through the interner so that the
+            // keyword match runs against the canonical text (C99 §6.4.1).
+            // All 37 C99 keywords are real reserved words at every position
+            // in the grammar — there is no context-sensitive keyword list
+            // like C++'s `override` / `final`, so a one-shot table lookup
+            // suffices.
             let sym = intern_span(session, pp.span);
-            // TODO(05-02): run keyword classification on `sym` here so that
-            // reserved words become `TokenKind::Keyword(_)` instead of
-            // identifiers. Until that lands every ident — reserved or not —
-            // goes through as `Ident(sym)`.
-            TokenKind::Ident(sym)
+            let text = session.interner.get(sym);
+            match classify_ident(text) {
+                Some(kw) => TokenKind::Keyword(kw),
+                None => TokenKind::Ident(sym),
+            }
         }
         PpTokenKind::PpNumber(PpNumberKind::Integer) => {
             // TODO(05-03): decode the integer literal from the span text,
@@ -162,6 +169,38 @@ mod tests {
         assert_eq!(t.span, pp.span, "span preserved 1:1");
         match t.kind {
             TokenKind::Ident(sym) => assert_eq!(sess.interner.get(sym), "foo"),
+            other => panic!("expected Ident, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_word_ident_becomes_keyword_token() {
+        // `int` is a reserved word (C99 §6.4.1); after phase-7 classification
+        // it must surface as a `Keyword` token, not as `Ident`.
+        let (mut sess, fid) = mk_session("int");
+        let pp = tok(PpTokenKind::Ident, fid, 0, 3);
+        let t = pp_to_token(&mut sess, pp).expect("keyword converts");
+        assert_eq!(t.span, pp.span);
+        assert_eq!(t.kind, TokenKind::Keyword(crate::keywords::Keyword::Int));
+    }
+
+    #[test]
+    fn c99_underscore_keyword_becomes_keyword_token() {
+        // Underscore-capital keywords are the C99 additions that typically
+        // regress first if the map is built case-insensitively.
+        let (mut sess, fid) = mk_session("_Bool");
+        let pp = tok(PpTokenKind::Ident, fid, 0, 5);
+        let t = pp_to_token(&mut sess, pp).expect("keyword converts");
+        assert_eq!(t.kind, TokenKind::Keyword(crate::keywords::Keyword::Bool));
+    }
+
+    #[test]
+    fn non_keyword_ident_stays_ident_after_classification() {
+        let (mut sess, fid) = mk_session("printf");
+        let pp = tok(PpTokenKind::Ident, fid, 0, 6);
+        let t = pp_to_token(&mut sess, pp).expect("ident converts");
+        match t.kind {
+            TokenKind::Ident(sym) => assert_eq!(sess.interner.get(sym), "printf"),
             other => panic!("expected Ident, got {other:?}"),
         }
     }

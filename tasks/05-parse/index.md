@@ -9,7 +9,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 ## Tasks (pick in order)
 
 - [x] [01-phase7-token-conversion](01-phase7-token-conversion.md)
-- [ ] [02-keyword-classification](02-keyword-classification.md)
+- [x] [02-keyword-classification](02-keyword-classification.md)
 - [ ] [03-integer-literal-decoder](03-integer-literal-decoder.md)
 - [ ] [04-float-literal-decoder](04-float-literal-decoder.md)
 - [ ] [05-char-escape-sequences](05-char-escape-sequences.md)
