@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-10: `a ## b` token-paste operator
 
 **Phase:** 04-preprocess    **Depends on:** 04-08    **Milestone:** M5

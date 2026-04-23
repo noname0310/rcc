@@ -8,29 +8,39 @@
 //! macro `M` is expanded, the name `M` is added to the hide set of
 //! every resulting token, so the rescan cannot re-invoke `M` on them.
 //!
-//! Scope of this task (04-09):
+//! Scope as of task 04-10:
 //!
 //! - Object-like and function-like expansion with nested-paren-aware
 //!   argument collection.
 //! - Self-recursion (`#define FOO FOO`) and mutual recursion
 //!   (`#define A B` / `#define B A`) both terminate via hide sets.
-//! - Stringize `#parameter` (this task, 04-09): inside a function-like
+//! - Stringize `#parameter` (task 04-09): inside a function-like
 //!   replacement list, `#` followed by one of the macro's parameter
 //!   names is replaced at substitution time by a single `StringLit`
 //!   whose contents are the actual argument's **raw** token text (i.e.
 //!   before hide-set expansion — C99 §6.10.3.2p2), with internal
 //!   whitespace collapsed to a single space and embedded `"`/`\`
 //!   escaped.
-//! - Token pasting `##` and variadic `__VA_ARGS__` are still future
-//!   tasks (04-10 / 04-11); `##` continues to pass through here.
+//! - Token paste `##` (this task, 04-10): the left and right operand
+//!   spellings are concatenated and re-lexed as a single pp-token;
+//!   parameters named as paste operands are substituted **raw** per
+//!   C99 §6.10.3.1p1. If the concatenation re-lexes to more than one
+//!   token the paste is ill-formed and E0025 is emitted. Empty
+//!   operands (from empty arguments) follow the §6.10.3.3p2 rule —
+//!   the paste yields the other operand unchanged; if both operands
+//!   are empty the paste produces nothing.
+//! - Variadic `__VA_ARGS__` is still a future task (04-11).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use rcc_data_structures::FxHashSet;
-use rcc_errors::{codes::E0024, Diagnostic, Handler, Label, Level};
-use rcc_lexer::{PpToken, PpTokenKind, Punct, StringEncoding};
+use rcc_errors::{
+    codes::{E0024, E0025},
+    Diagnostic, Handler, Label, Level,
+};
+use rcc_lexer::{tokenize, PpToken, PpTokenKind, Punct, StringEncoding};
 use rcc_span::{BytePos, Interner, SourceMap, Span, Symbol};
 
 use crate::macros::{HideSet, MacroKind, MacroTable};
@@ -189,16 +199,24 @@ impl Expander<'_> {
     ///   single `StringLit` synthesised from the **raw** actual
     ///   argument (C99 §6.10.3.2p2 — stringize runs *before* hide-set
     ///   expansion on the argument).
-    /// - **Parameter reference** (identifier is a formal): replaced by
-    ///   the *fully-expanded* actual argument (pre-scan).
+    /// - **Token paste** `##` (task 04-10): pops the already-emitted
+    ///   LHS token, resolves the RHS body token (raw argument if it
+    ///   names a parameter), concatenates their spellings, and
+    ///   re-lexes the combined text. Parameters adjacent to `##` are
+    ///   substituted raw per C99 §6.10.3.1p1; an empty operand makes
+    ///   the paste yield the other operand unchanged (§6.10.3.3p2).
+    ///   Multi-token re-lex → E0025.
+    /// - **Parameter reference** (identifier is a formal, and not
+    ///   adjacent to `##`): replaced by the *fully-expanded* actual
+    ///   argument (pre-scan).
     ///
     /// At the end, union `hide` into every output token's hide set
     /// (the `HSADD(HS, OS)` step).
     ///
     /// `is_fn_like = false` disables the stringize branch entirely so
-    /// that object-like replacement lists preserve `#` and `##` as
-    /// ordinary punctuators. Token pasting `##` is still pass-through
-    /// pending task 04-10.
+    /// that object-like replacement lists preserve `#` as an ordinary
+    /// punctuator. Token paste `##` is handled for both macro forms
+    /// since C99 §6.10.3.3p1 permits it in either.
     fn subst(
         &mut self,
         body: &[PpToken],
@@ -207,7 +225,18 @@ impl Expander<'_> {
         hide: &HideSet,
         is_fn_like: bool,
     ) -> Vec<ExpToken> {
+        // C99 §6.10.3.3p1: `##` must not appear at the beginning or
+        // end of a replacement list. Diagnose up front; the walk
+        // below tolerates the malformed positions (dangling `##`s are
+        // skipped / treated as a paste against an empty operand).
+        self.check_paste_positions(body);
+
         let mut out: Vec<ExpToken> = Vec::with_capacity(body.len());
+        // Tracks whether the *most recently processed slot* contributed
+        // zero tokens to `out`. Used to implement the §6.10.3.3p2
+        // empty-operand rule: a `##` whose LHS slot vanished pastes as
+        // if the LHS were absent, yielding the RHS unchanged.
+        let mut prev_empty = true;
 
         let mut i = 0;
         while i < body.len() {
@@ -231,34 +260,69 @@ impl Expander<'_> {
                     // argument — §6.10.3.2p2.
                     let stringized = self.stringize(&args[idx], hash_span, nxt.span);
                     out.push(stringized);
+                    prev_empty = false;
                     i += 2;
                     continue;
                 }
                 // `#` not followed by a parameter name — C99
                 // §6.10.3.2p1 constraint violation.
                 self.emit_e0024(tok.span, next);
-                // Pass the `#` through as a raw punctuator so
-                // downstream analysis still sees something; the
-                // diagnostic has already been recorded.
                 out.push(ExpToken { tok, hide: FxHashSet::default() });
+                prev_empty = false;
                 i += 1;
                 continue;
             }
 
+            // Token paste `##`. The LHS was pushed in the previous
+            // iteration (raw, because its `next_is_paste` lookahead
+            // saw this `##`); we consume body[i+1] as the RHS here so
+            // the outer loop should NOT revisit it.
+            if tok.kind == PpTokenKind::Punct(Punct::HashHash) {
+                let Some(rhs_body_tok) = body.get(i + 1).copied() else {
+                    // `##` with nothing after it: the positional
+                    // diagnostic already fired above; drop the `##`.
+                    i += 1;
+                    continue;
+                };
+                let rhs_tokens = self.resolve_paste_operand(&rhs_body_tok, params, args);
+                self.apply_paste(&mut out, &mut prev_empty, tok.span, rhs_tokens);
+                i += 2;
+                continue;
+            }
+
+            // Identifier: parameter substitution, with raw-vs-expanded
+            // governed by adjacency to `##` (C99 §6.10.3.1p1). Note we
+            // only need to inspect the *next* token for the paste
+            // lookahead; a parameter preceded by `##` was already
+            // consumed as the RHS inside the paste branch above, so
+            // we never reach here with a "prev is `##`" body position.
             if tok.kind == PpTokenKind::Ident {
                 let sym = self.symbol_of(&tok);
                 if let Some(idx) = params.iter().position(|p| *p == sym) {
-                    // Pre-scan (fully expand) the actual argument
-                    // before splicing it in. The expanded tokens
-                    // inherit HS via HSADD at the end, blocking the
-                    // current macro from re-expanding through them.
-                    let expanded = self.expand(args[idx].clone());
-                    out.extend(expanded);
+                    let next_is_paste = body
+                        .get(i + 1)
+                        .is_some_and(|t| t.kind == PpTokenKind::Punct(Punct::HashHash));
+                    let toks = if next_is_paste {
+                        // Paste-adjacent: splice raw tokens in so
+                        // they can be concatenated verbatim.
+                        args[idx].clone()
+                    } else {
+                        // Pre-scan (fully expand) the actual argument
+                        // before splicing it in. The expanded tokens
+                        // inherit HS via HSADD at the end, blocking
+                        // the current macro from re-expanding through
+                        // them.
+                        self.expand(args[idx].clone())
+                    };
+                    prev_empty = toks.is_empty();
+                    out.extend(toks);
                     i += 1;
                     continue;
                 }
             }
+
             out.push(ExpToken { tok, hide: FxHashSet::default() });
+            prev_empty = false;
             i += 1;
         }
 
@@ -272,6 +336,145 @@ impl Expander<'_> {
         }
 
         out
+    }
+
+    /// Emit E0025 for each `##` that sits at the very beginning or
+    /// end of a replacement list (C99 §6.10.3.3p1). Called once per
+    /// `subst` invocation; the body walk itself then treats the
+    /// malformed `##` as a paste against an empty operand, which
+    /// produces a tolerable output without further diagnostics.
+    fn check_paste_positions(&mut self, body: &[PpToken]) {
+        if let Some(first) = body.first() {
+            if first.kind == PpTokenKind::Punct(Punct::HashHash) {
+                self.emit_e0025_position(first.span, "beginning");
+            }
+        }
+        if body.len() >= 2 {
+            if let Some(last) = body.last() {
+                if last.kind == PpTokenKind::Punct(Punct::HashHash) {
+                    self.emit_e0025_position(last.span, "end");
+                }
+            }
+        }
+    }
+
+    /// Compute the RHS operand token list for a paste.
+    ///
+    /// For a parameter the raw (unexpanded) argument tokens are
+    /// spliced in verbatim; for any other token a singleton list is
+    /// returned. `rhs_body_tok` is the body token immediately after
+    /// the `##`; its own downstream adjacency (e.g. another `##`
+    /// after it) is irrelevant here because successive pastes are
+    /// handled iteratively by the caller.
+    fn resolve_paste_operand(
+        &mut self,
+        rhs_body_tok: &PpToken,
+        params: &[Symbol],
+        args: &[Vec<ExpToken>],
+    ) -> Vec<ExpToken> {
+        if rhs_body_tok.kind == PpTokenKind::Ident {
+            let sym = self.symbol_of(rhs_body_tok);
+            if let Some(idx) = params.iter().position(|p| *p == sym) {
+                return args[idx].clone();
+            }
+        }
+        vec![ExpToken { tok: *rhs_body_tok, hide: FxHashSet::default() }]
+    }
+
+    /// Splice a resolved paste RHS into `out`, popping the previously
+    /// pushed LHS token where appropriate.
+    ///
+    /// Implements the §6.10.3.3p2 empty-operand rule: if either
+    /// operand is empty, the result is the other operand; if both
+    /// are empty, the result is nothing. `prev_empty` is threaded
+    /// through the caller's main loop as its running view of
+    /// "last-slot was empty" for the next paste's lookup.
+    fn apply_paste(
+        &mut self,
+        out: &mut Vec<ExpToken>,
+        prev_empty: &mut bool,
+        hh_span: Span,
+        rhs_tokens: Vec<ExpToken>,
+    ) {
+        let lhs_empty = *prev_empty;
+        let rhs_empty = rhs_tokens.is_empty();
+
+        if lhs_empty && rhs_empty {
+            // Nothing to emit; `prev_empty` stays true.
+            return;
+        }
+        if lhs_empty {
+            out.extend(rhs_tokens);
+            *prev_empty = false;
+            return;
+        }
+        if rhs_empty {
+            // LHS unchanged; `prev_empty` stays false.
+            return;
+        }
+
+        // Both operands contribute tokens. Splice everything but the
+        // first RHS token in verbatim, and paste the LHS-tail with
+        // the RHS-head.
+        let lhs_et = out.pop().expect("lhs_empty=false implies non-empty out");
+        let mut rhs_iter = rhs_tokens.into_iter();
+        let rhs_first = rhs_iter.next().expect("rhs_empty=false implies a first token");
+
+        let pasted = self.paste_two(&lhs_et, &rhs_first, hh_span);
+        out.extend(pasted);
+        out.extend(rhs_iter);
+        *prev_empty = false;
+    }
+
+    /// Concatenate the spellings of `lhs` and `rhs`, register the
+    /// result as a small synthetic source file, and re-lex it.
+    ///
+    /// On a single-token re-lex the returned vector has one element
+    /// whose hide-set is the **intersection** of the two operand hide
+    /// sets (task spec; the classical Prosser formulation). On a
+    /// multi-token re-lex the paste is ill-formed: E0025 is emitted
+    /// with labels on both operands and on the `##` itself, and the
+    /// raw re-lexed tokens are returned so downstream analysis still
+    /// sees something substantive.
+    fn paste_two(&mut self, lhs: &ExpToken, rhs: &ExpToken, hh_span: Span) -> Vec<ExpToken> {
+        let lhs_text = self.token_text(&lhs.tok);
+        let rhs_text = self.token_text(&rhs.tok);
+        let mut combined = String::with_capacity(lhs_text.len() + rhs_text.len());
+        combined.push_str(&lhs_text);
+        combined.push_str(&rhs_text);
+
+        let file_id = {
+            let mut sm = self.source_map.write().unwrap();
+            sm.add_file(PathBuf::from("<paste>"), Arc::from(combined.as_str()))
+        };
+
+        // Horizontal whitespace and newlines should not appear in a
+        // freshly-concatenated paste, but filter defensively to keep
+        // the token count comparison clean.
+        let tokens: Vec<PpToken> = tokenize(file_id, &combined)
+            .filter(|t| {
+                !matches!(t.kind, PpTokenKind::Whitespace | PpTokenKind::Newline | PpTokenKind::Eof)
+            })
+            .collect();
+
+        let hide: HideSet = lhs.hide.intersection(&rhs.hide).copied().collect();
+
+        if tokens.len() == 1 {
+            return vec![ExpToken { tok: tokens[0], hide }];
+        }
+
+        // Ill-formed: emit E0025 and still surface the raw re-lex so
+        // later stages don't silently lose the operand texts.
+        self.emit_e0025_invalid(lhs.tok.span, rhs.tok.span, hh_span);
+        tokens.into_iter().map(|tok| ExpToken { tok, hide: hide.clone() }).collect()
+    }
+
+    /// Read the source bytes covered by `tok`'s span. Used to
+    /// materialise the paste operands' text before re-lexing.
+    fn token_text(&self, tok: &PpToken) -> String {
+        let sm = self.source_map.read().unwrap();
+        let src = &sm.file(tok.span.file).src;
+        src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
     }
 
     /// Render a function-like macro argument's raw token sequence as a
@@ -344,11 +547,49 @@ impl Expander<'_> {
         ExpToken { tok, hide: FxHashSet::default() }
     }
 
+    /// Emit E0025 for a paste whose concatenation re-lexed to more
+    /// than one preprocessing token.
+    fn emit_e0025_invalid(&mut self, lhs_span: Span, rhs_span: Span, hh_span: Span) {
+        let diag = Diagnostic {
+            level: Level::Error,
+            code: Some(E0025),
+            message: "pasting forms an invalid token".into(),
+            labels: vec![
+                Label { span: hh_span, message: "`##` here".into(), primary: true },
+                Label { span: lhs_span, message: "left operand of `##`".into(), primary: false },
+                Label { span: rhs_span, message: "right operand of `##`".into(), primary: false },
+            ],
+            notes: vec!["C99 §6.10.3.3p3: the concatenation of the two operand \
+                 spellings must form a single preprocessing token"
+                .into()],
+            help: vec!["split the operands with whitespace, or use a different \
+                 concatenation strategy"
+                .into()],
+        };
+        self.handler.emit(&diag);
+    }
+
+    /// Emit E0025 for a `##` that appears at the very beginning or
+    /// very end of a replacement list (C99 §6.10.3.3p1).
+    fn emit_e0025_position(&mut self, span: Span, where_: &'static str) {
+        let diag = Diagnostic {
+            level: Level::Error,
+            code: Some(E0025),
+            message: format!("`##` at the {where_} of a replacement list"),
+            labels: vec![Label { span, message: "`##` here".into(), primary: true }],
+            notes: vec!["C99 §6.10.3.3p1: `##` shall not occur at the beginning \
+                 or end of a replacement list for either form of macro \
+                 definition"
+                .into()],
+            help: vec![],
+        };
+        self.handler.emit(&diag);
+    }
+
     /// Emit E0024: `#` in a function-like replacement list not
     /// followed by a parameter name (C99 §6.10.3.2p1).
     fn emit_e0024(&mut self, hash_span: Span, next: Option<PpToken>) {
-        let primary_label =
-            Label { span: hash_span, message: "`#` here".into(), primary: true };
+        let primary_label = Label { span: hash_span, message: "`#` here".into(), primary: true };
         let mut labels = vec![primary_label];
         if let Some(nxt) = next {
             labels.push(Label {
@@ -538,10 +779,8 @@ mod tests {
     /// [`CaptureEmitter`] so tests can inspect diagnostics.
     fn session_with_capture() -> (Session, CaptureEmitter) {
         let cap = CaptureEmitter::new();
-        let sess = Session::with_handler(
-            Options::default(),
-            Handler::with_emitter(Box::new(cap.clone())),
-        );
+        let sess =
+            Session::with_handler(Options::default(), Handler::with_emitter(Box::new(cap.clone())));
         (sess, cap)
     }
 
@@ -895,5 +1134,233 @@ mod tests {
             "object-like body preserves `#` verbatim, got {:?}",
             out[0].kind
         );
+    }
+
+    // ── Token paste `##` (task 04-10) ───────────────────────────────
+
+    /// Render an expanded stream as *concatenated* source text — no
+    /// intervening spaces. Token paste is fundamentally a splice on
+    /// source spellings, so the assertion shape mirrors that.
+    fn concat(sess: &Session, tokens: &[PpToken]) -> String {
+        let sm = sess.source_map.read().unwrap();
+        tokens
+            .iter()
+            .map(|t| {
+                let src = &sm.file(t.span.file).src;
+                src[t.span.lo.0 as usize..t.span.hi.0 as usize].to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn object_like_ident_paste() {
+        // `#define X a##b` / `X` → single token `ab`.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "X", "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "X\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty(), "valid paste must not diagnose");
+        assert_eq!(out.len(), 1, "paste result is a single token: {out:?}");
+        assert_eq!(concat(&sess, &out), "ab");
+        assert!(matches!(out[0].kind, PpTokenKind::Ident));
+    }
+
+    #[test]
+    fn object_like_number_paste() {
+        // `#define X 1##2` / `X` → single pp-number `12`.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "X", "1##2");
+
+        let (_file, line) = tok_line(&mut sess, "call", "X\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty());
+        assert_eq!(out.len(), 1);
+        assert_eq!(concat(&sess, &out), "12");
+        assert!(matches!(out[0].kind, PpTokenKind::PpNumber(_)));
+    }
+
+    #[test]
+    fn function_like_paste_with_param_lhs() {
+        // `#define CAT(x) x##_foo` / `CAT(bar)` → `bar_foo`.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["x"], "x##_foo");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(bar)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(concat(&sess, &out), "bar_foo");
+    }
+
+    #[test]
+    fn function_like_paste_both_params() {
+        // `#define CAT(a,b) a##b` / `CAT(lo,oo)` — `lo` + `oo` = `looo`.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(lo,oo)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(concat(&sess, &out), "looo");
+    }
+
+    #[test]
+    fn classical_loop_paste_followed_by_literal() {
+        // Classical §6.10.3.3 example:
+        //   #define CAT(a,b) a##b
+        //   CAT(lo, op)
+        // → single token `loop`. The task spec cites the
+        // `CAT(lo,oo)p` variant which per spec produces
+        // `[looo][p]` — two tokens, concatenated `looop`; we cover
+        // the clean `loop` form here for readability.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(lo,op)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(concat(&sess, &out), "loop");
+    }
+
+    #[test]
+    fn paste_result_rescans_for_further_expansion() {
+        // The pasted token re-enters the rescan loop — if it names a
+        // macro, that macro expands normally. Here `F##OO` pastes to
+        // `FOO`, which then expands to `1`.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "FOO", "1");
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(F,OO)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(concat(&sess, &out), "1");
+    }
+
+    #[test]
+    fn invalid_paste_emits_e0025_with_operand_labels() {
+        // `#define CAT(a,b) a##b` / `CAT(+, ;)` — combined `"+;"`
+        // re-lexes to two separate punctuators.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(+, ;)\n");
+        let _out = run_expand(&mut sess, &macros, line);
+
+        let diags = cap.diagnostics();
+        let e25: Vec<_> = diags.iter().filter(|d| d.code == Some(E0025)).collect();
+        assert_eq!(e25.len(), 1, "exactly one E0025 expected, got {diags:?}");
+        // Primary label on `##`, secondary labels on both operands.
+        assert!(e25[0].labels.iter().any(|l| l.primary));
+        assert!(
+            e25[0].labels.iter().filter(|l| !l.primary).count() >= 2,
+            "both operand spans must be labelled"
+        );
+    }
+
+    #[test]
+    fn paste_with_empty_left_operand_yields_right() {
+        // §6.10.3.3p2: `CAT(,hello)` → `hello` (left is empty).
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(,hello)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty(), "empty-operand paste is well-formed");
+        assert_eq!(concat(&sess, &out), "hello");
+    }
+
+    #[test]
+    fn paste_with_empty_right_operand_yields_left() {
+        // §6.10.3.3p2: `CAT(hello,)` → `hello` (right is empty).
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(hello,)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty());
+        assert_eq!(concat(&sess, &out), "hello");
+    }
+
+    #[test]
+    fn paste_with_both_operands_empty_yields_nothing() {
+        // §6.10.3.3p2: `CAT(,)` → no tokens.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(,)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert!(cap.diagnostics().is_empty());
+        assert!(out.is_empty(), "both-empty paste emits nothing, got {out:?}");
+    }
+
+    #[test]
+    fn hashhash_at_start_of_body_is_e0025() {
+        // `#define BAD ##x` — `##` at the start of a replacement list.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "BAD", "##x");
+
+        let (_file, line) = tok_line(&mut sess, "call", "BAD\n");
+        let _out = run_expand(&mut sess, &macros, line);
+
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0025)),
+            "expected E0025 for leading `##`, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn hashhash_at_end_of_body_is_e0025() {
+        // `#define BAD x##` — `##` at the end of a replacement list.
+        let (mut sess, cap) = session_with_capture();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "BAD", "x##");
+
+        let (_file, line) = tok_line(&mut sess, "call", "BAD\n");
+        let _out = run_expand(&mut sess, &macros, line);
+
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some(E0025)),
+            "expected E0025 for trailing `##`, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn paste_is_raw_not_preexpanded() {
+        // C99 §6.10.3.1p1: a parameter adjacent to `##` is substituted
+        // **without** first being macro-expanded. If `ONE` would be
+        // pre-expanded to `1`, `CAT(ONE, X)` would paste `1` + `X` =
+        // `1X`; spec demands `ONEX` instead.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_object(&mut sess, &mut macros, "ONE", "1");
+        install_fn(&mut sess, &mut macros, "CAT", &["a", "b"], "a##b");
+
+        let (_file, line) = tok_line(&mut sess, "call", "CAT(ONE,X)\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(concat(&sess, &out), "ONEX");
     }
 }

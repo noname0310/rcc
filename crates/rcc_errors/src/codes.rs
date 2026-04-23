@@ -44,6 +44,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0022, E0022_DESC),
     (E0023, E0023_DESC),
     (E0024, E0024_DESC),
+    (E0025, E0025_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -168,6 +169,17 @@ const E0023_DESC: &str = "duplicate macro parameter name";
 /// name as the next preprocessing token in the replacement list.
 pub const E0024: &str = "E0024";
 const E0024_DESC: &str = "`#` is not followed by a macro parameter";
+
+/// Token-paste operator `##` produced an invalid token.
+///
+/// C99 §6.10.3.3 — the concatenation of the two operand texts must
+/// form a single valid preprocessing token. If the combined text
+/// re-lexes to more than one pp-token the paste is ill-formed. This
+/// code is also used for the C99 §6.10.3.3p1 positional constraint
+/// violation (`##` at the very beginning or end of a replacement
+/// list).
+pub const E0025: &str = "E0025";
+const E0025_DESC: &str = "pasting forms an invalid token";
 
 #[cfg(test)]
 mod tests {

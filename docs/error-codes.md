@@ -248,3 +248,25 @@ violation.
 
 The operator only applies in function-like macros; a `#` inside an
 object-like macro body is preserved as an ordinary punctuator.
+
+## E0025 — pasting forms an invalid token
+
+The token-paste operator `##` concatenates the spellings of its left
+and right operands and the result must be a single preprocessing
+token (C99 §6.10.3.3). When the combined text re-lexes to more than
+one pp-token — e.g. pasting two unrelated punctuators — the paste is
+ill-formed.
+
+```c
+#define BAD(a, b) a##b
+BAD(+, ;)  // error[E0025]: pasting forms an invalid token
+```
+
+The same code is emitted for the §6.10.3.3p1 positional constraint
+violation: `##` shall not appear at the very beginning or the very
+end of a replacement list for either macro form.
+
+```c
+#define LEAD ## x   // error[E0025]: `##` at the beginning of a replacement list
+#define TAIL x ##   // error[E0025]: `##` at the end of a replacement list
+```
