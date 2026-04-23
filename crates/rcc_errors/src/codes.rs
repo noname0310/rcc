@@ -53,6 +53,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0027, E0027_DESC),
     (E0028, E0028_DESC),
     (E0029, E0029_DESC),
+    (E0040, E0040_DESC),
     (W0001, W0001_DESC),
 ];
 
@@ -229,6 +230,19 @@ const E0028_DESC: &str = "invalid #if expression";
 /// bounds are constraint violations and carry this code.
 pub const E0029: &str = "E0029";
 const E0029_DESC: &str = "`#line` argument out of range";
+
+/// Integer literal is too large to fit in the widest representable type.
+///
+/// `rcc` decodes every integer literal into a `u128` before the
+/// typeck pass selects a concrete C type per the C99 §6.4.4.1p5
+/// ladder. When the raw magnitude already overflows `u128` — well
+/// above `unsigned long long` — the value is unrepresentable at any
+/// standard C integer type, so we reject it at decode time rather
+/// than silently wrap. Contrast with lexer code E0009, which covers
+/// the narrower case of a literal that fits `u128` but still exceeds
+/// the language-level widest type.
+pub const E0040: &str = "E0040";
+const E0040_DESC: &str = "integer literal too large";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

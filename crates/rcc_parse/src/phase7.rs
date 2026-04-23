@@ -12,11 +12,13 @@
 //! tokens only, and lexical categories that do not survive phase 7 have no
 //! representation in [`TokenKind`].
 
+use rcc_errors::Label;
 use rcc_lexer::{PpNumberKind, PpToken, PpTokenKind};
 use rcc_session::Session;
 use rcc_span::Span;
 
 use crate::keywords::classify_ident;
+use crate::literal::decode_integer;
 use crate::token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
 };
@@ -59,10 +61,26 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
             }
         }
         PpTokenKind::PpNumber(PpNumberKind::Integer) => {
-            // TODO(05-03): decode the integer literal from the span text,
-            // detect the `u`/`l`/`ll` suffix combination, and diagnose
-            // overflow per C99 §6.4.4.1.
-            TokenKind::IntLit(IntLiteral { value: 0, suffix: IntSuffix::None })
+            // C99 §6.4.4.1 integer-constant decoding. `decode_integer`
+            // returns a spanless `Diagnostic` on error — we attach the
+            // pp-token's own span here so the diagnostic points at the
+            // exact text the user typed. On error we still yield a
+            // placeholder `IntLit` (value 0, no suffix) so downstream
+            // parser invariants ("every pp-number becomes an IntLit or
+            // a FloatLit") hold even when recovery kicks in.
+            let text = span_text(session, pp.span);
+            match decode_integer(&text) {
+                Ok(lit) => TokenKind::IntLit(lit),
+                Err(mut diag) => {
+                    diag.labels.push(Label {
+                        span: pp.span,
+                        message: String::new(),
+                        primary: true,
+                    });
+                    session.handler.emit(&diag);
+                    TokenKind::IntLit(IntLiteral { value: 0, suffix: IntSuffix::None })
+                }
+            }
         }
         PpTokenKind::PpNumber(PpNumberKind::Float) => {
             // TODO(05-04): decode the floating constant (decimal +
@@ -109,12 +127,19 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
 
 /// Intern the source slice covered by `span` using the session's interner.
 fn intern_span(session: &mut Session, span: Span) -> rcc_span::Symbol {
-    let text = {
-        let sm = session.source_map.read().expect("source map poisoned");
-        let file = sm.file(span.file);
-        file.src[span.lo.0 as usize..span.hi.0 as usize].to_owned()
-    };
+    let text = span_text(session, span);
     session.interner.intern(&text)
+}
+
+/// Copy the source slice covered by `span` into an owned `String`.
+///
+/// Lives next to `intern_span` because the source-map lock/unlock pattern
+/// is identical — the reader guard must be dropped before the caller
+/// mutates any other `Session` field (e.g. the interner, the handler).
+fn span_text(session: &Session, span: Span) -> String {
+    let sm = session.source_map.read().expect("source map poisoned");
+    let file = sm.file(span.file);
+    file.src[span.lo.0 as usize..span.hi.0 as usize].to_owned()
 }
 
 #[cfg(test)]
@@ -215,18 +240,42 @@ mod tests {
     }
 
     #[test]
-    fn integer_pp_number_becomes_intlit_stub() {
-        let (mut sess, fid) = mk_session("42");
-        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, 2);
+    fn integer_pp_number_is_decoded_not_stubbed() {
+        // Post-05-03 this must carry the real value + suffix, not the
+        // placeholder zero that the earlier stub produced.
+        let (mut sess, fid) = mk_session("42ULL");
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, 5);
         let t = pp_to_token(&mut sess, pp).expect("int converts");
         match t.kind {
             TokenKind::IntLit(lit) => {
-                // Stub values; real decoding lives in 05-03.
-                assert_eq!(lit.value, 0);
-                assert_eq!(lit.suffix, IntSuffix::None);
+                assert_eq!(lit.value, 42);
+                assert_eq!(lit.suffix, IntSuffix::ULL);
             }
             other => panic!("expected IntLit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn integer_overflow_emits_e0040_and_recovers_to_zero() {
+        // A u128-overflowing literal must surface E0040 and still
+        // produce an `IntLit` token so downstream invariants hold.
+        let src = "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+        let (mut sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("int converts even on error");
+        assert!(matches!(
+            t.kind,
+            TokenKind::IntLit(IntLiteral { value: 0, suffix: IntSuffix::None })
+        ));
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::E0040));
+        // The diagnostic must carry the literal's span as a primary
+        // label — that is the only way the user sees the offending text
+        // underlined in rendered output.
+        assert!(diags[0].labels.iter().any(|l| l.primary && l.span == pp.span));
     }
 
     #[test]

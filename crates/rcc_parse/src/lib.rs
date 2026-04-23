@@ -17,11 +17,13 @@ use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
 mod keywords;
+mod literal;
 mod phase7;
 mod scope;
 mod token;
 
 pub use keywords::{classify_ident, Keyword, KEYWORDS};
+pub use literal::decode_integer;
 pub use phase7::{convert as pp_stream_to_tokens, pp_to_token};
 pub use scope::{NameKind, Scope, ScopeStack};
 pub use token::{

@@ -423,6 +423,24 @@ are constraint violations.
 A missing or non-numeric argument (`#line`, `#line abc`) is a
 different error — see E0015.
 
+## E0040 — integer literal too large
+
+The magnitude of an integer constant exceeds the range of `u128`, the
+widest unsigned type `rcc` uses to hold a decoded literal before the
+typeck pass selects a concrete C type per C99 §6.4.4.1p5. A literal
+this large has no representation at any standard C integer type, so
+the parser rejects it at decode time.
+
+```c
+unsigned long long x =
+    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;  // error[E0040]: integer literal too large
+```
+
+Contrast with lexer code E0009, which covers the narrower case of a
+literal that fits `u128` but still exceeds the language-level widest
+type — that check is performed later, when typeck walks the §6.4.4.1p5
+ladder.
+
 ---
 
 ## W0001 — unknown #pragma directive
