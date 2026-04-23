@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-13: `--emit=tokens` golden snapshots
 
 **Phase:** 03-lex    **Depends on:** 03-10    **Milestone:** M1

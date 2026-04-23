@@ -1,0 +1,3 @@
+# Fixture sources for driver snapshot tests must keep LF line endings
+# so `rcc --emit=tokens` output is byte-for-byte stable across platforms.
+*.c text eol=lf

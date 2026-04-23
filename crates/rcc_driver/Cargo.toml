@@ -28,3 +28,6 @@ rcc_cfg_transform   = { workspace = true }
 rcc_codegen_llvm    = { workspace = true }
 rcc_data_structures = { workspace = true }
 clap               = { workspace = true }
+
+[dev-dependencies]
+insta              = { workspace = true }

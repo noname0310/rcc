@@ -23,6 +23,18 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         .load_file(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
 
+    // 1b. `--emit=tokens`: run the raw lexer against the loaded source
+    //     and print the pretty-printed pp-token stream to stdout. This
+    //     happens BEFORE preprocessing so it reflects phase-03 output
+    //     exclusively; macro expansion / directive handling belong to
+    //     a later `--emit` stage.
+    if session.opts.emit.contains(&EmitKind::Tokens) {
+        let sm = session.source_map.read().unwrap();
+        let src = sm.file(file).src.clone();
+        let out = rcc_lexer::pretty::format_tokens(&src, &sm, file);
+        print!("{out}");
+    }
+
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
     if session.opts.emit.contains(&EmitKind::Pp) {

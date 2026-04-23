@@ -19,6 +19,7 @@ use rcc_span::{BytePos, FileId, Span};
 mod cursor;
 mod kinds;
 mod line_splice;
+pub mod pretty;
 #[cfg(test)]
 mod test_util;
 

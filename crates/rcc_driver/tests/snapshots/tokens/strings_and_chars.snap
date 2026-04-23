@@ -1,0 +1,15 @@
+---
+source: crates/rcc_driver/tests/emit_tokens.rs
+---
+1:1-1:4  CharConst.None  'a'
+1:5-1:9  CharConst.Wide  L'b'
+1:10-1:14  CharConst.Utf16  u'c'
+1:15-1:19  CharConst.Utf32  U'd'
+1:20-1:25  CharConst.Utf8  u8'e'
+1:25-2:1  Newline  \n
+2:1-2:4  StringLit.None  "a"
+2:5-2:9  StringLit.Wide  L"b"
+2:10-2:14  StringLit.Utf16  u"c"
+2:15-2:19  StringLit.Utf32  U"d"
+2:20-2:25  StringLit.Utf8  u8"e"
+2:25-3:1  Newline  \n
