@@ -59,6 +59,7 @@ use rcc_lexer::Punct;
 use rcc_span::{Span, Symbol};
 
 use crate::keywords::Keyword;
+use crate::scope::NameKind;
 use crate::token::TokenKind;
 use crate::Parser;
 
@@ -837,6 +838,48 @@ pub fn parse_type_name(p: &mut Parser<'_>) -> TypeName {
     let declarator = parse_abstract_declarator(p);
     let end = last_consumed_span(p, start);
     TypeName { specs, declarator, span: start.to(end) }
+}
+
+/// Post-declarator hook that generalises the C99 "lexer hack"
+/// (§6.7.7, §6.7.2p2 footnote) across every declaration site.
+///
+/// When a top-level init-declarator has just been parsed, this
+/// function registers the declared name in the *innermost* scope of
+/// the parser's [`ScopeStack`], choosing
+///
+/// - [`NameKind::Typedef`] when `specs.storage == Some(StorageClass::Typedef)`,
+/// - [`NameKind::Ordinary`] otherwise.
+///
+/// The entry is inserted **immediately**, before the parser crosses
+/// the declaration's terminating `;`, so every downstream call into
+/// [`parse_decl_specs`] / [`parse_type_name`] / [`parse_declarator`]
+/// (including the next init-declarator in the same
+/// `init-declarator-list`) consults an up-to-date typedef table.
+/// This is what makes the declaration-specifier slot's "is this
+/// ident a typedef-name?" lookup resolve correctly even inside the
+/// same translation unit that introduced the typedef.
+///
+/// Abstract declarators — parameter declarators that omit the name,
+/// or the trailing declarator of a `type-name` — are a no-op: there
+/// is nothing to register.
+///
+/// The scope push / pop that realises C99 block-local shadowing
+/// lives in [`crate::stmt::parse_block`] and
+/// [`crate::stmt::parse_for_stmt`]; this hook only manipulates the
+/// innermost frame those helpers maintain. A nested block's
+/// `int T;` therefore shadows an outer `typedef int T;` exactly as
+/// §6.2.1 mandates, because the inner declaration lands in a
+/// pushed frame and the outer frame is restored on `}`.
+pub fn declare_declarator_name(p: &mut Parser<'_>, specs: &DeclSpecs, declarator: &Declarator) {
+    let Some((sym, _)) = declarator.name else {
+        return;
+    };
+    let kind = if specs.storage == Some(StorageClass::Typedef) {
+        NameKind::Typedef
+    } else {
+        NameKind::Ordinary
+    };
+    p.scopes.declare(sym, kind);
 }
 
 /// Shared declarator engine. Pointer prefix + atom (ctx-dependent) +
@@ -2092,5 +2135,231 @@ mod tests {
         let (tn, _rem, _diags, _sess) = parse_tn(src);
         assert_eq!(tn.span.lo.0, 0);
         assert_eq!(tn.span.hi.0 as usize, src.len());
+    }
+
+    // ── Typedef-name disambiguation (C99 §6.7.7, task 05-21) ────────
+    //
+    // `declare_declarator_name` is the post-declarator hook that
+    // feeds the parser's scope stack so downstream declaration-
+    // specifier slots pick up freshly-introduced typedef-names. The
+    // tests below drive the helper directly by interleaving
+    // `parse_decl_specs` / `parse_declarator` / `declare_declarator_
+    // name` calls against a single token stream — the declaration-
+    // list parser that would normally orchestrate this is not yet
+    // wired up (task 05-25).
+
+    /// Consume a `;` token at the cursor. Used in the §6.7.7 tests
+    /// where we drive declarations manually and need to step past
+    /// the terminator between them.
+    fn bump_semi(parser: &mut Parser<'_>) {
+        match parser.peek() {
+            Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Semi)) => {
+                parser.bump();
+            }
+            other => panic!("expected `;` at cursor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declare_declarator_name_registers_typedef() {
+        // Canonical acceptance case: `typedef int T; T x;`. After the
+        // `T` declarator is registered, parsing specs over `T x`
+        // must recognise `T` as a TypedefName rather than the
+        // declaration's declarator-ident.
+        let src = "typedef int T ; T x";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+
+        let specs1 = parse_decl_specs(&mut parser).expect("first specs");
+        assert_eq!(specs1.storage, Some(StorageClass::Typedef));
+        assert!(matches!(specs1.type_specs.as_slice(), [TypeSpec::Int]));
+
+        let declarator1 = parse_declarator(&mut parser).expect("T declarator");
+        declare_declarator_name(&mut parser, &specs1, &declarator1);
+        let t_sym = declarator1.name.expect("declarator named `T`").0;
+        assert_eq!(parser.session.interner.get(t_sym), "T");
+        assert!(parser.scopes.is_typedef(t_sym), "T must be a typedef after hook");
+
+        bump_semi(&mut parser);
+
+        // `T x`: T is now a typedef-name, so parse_decl_specs should
+        // consume T as a TypedefName type specifier and stop at `x`.
+        let specs2 = parse_decl_specs(&mut parser).expect("second specs");
+        assert_eq!(specs2.storage, None);
+        match specs2.type_specs.as_slice() {
+            [TypeSpec::TypedefName(sym)] => assert_eq!(parser.session.interner.get(*sym), "T"),
+            other => panic!("expected [TypedefName], got {other:?}"),
+        }
+        let rem = &parser.tokens[parser.cursor];
+        assert!(matches!(rem.kind, TokenKind::Ident(_)), "cursor left on `x`");
+
+        assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn declare_declarator_name_registers_ordinary() {
+        // Non-typedef storage class: `int x;` must register `x` as
+        // Ordinary so a later `x y;` does NOT pick up `x` as a
+        // typedef-name (it isn't one).
+        let src = "int x ; x y";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+
+        let specs1 = parse_decl_specs(&mut parser).expect("first specs");
+        let declarator1 = parse_declarator(&mut parser).expect("x declarator");
+        declare_declarator_name(&mut parser, &specs1, &declarator1);
+        let x_sym = declarator1.name.expect("declarator named `x`").0;
+        assert!(!parser.scopes.is_typedef(x_sym), "x is ordinary, not a typedef");
+        assert_eq!(parser.scopes.lookup(x_sym), Some(NameKind::Ordinary));
+
+        bump_semi(&mut parser);
+
+        // `x y`: parse_decl_specs must NOT swallow `x` as a type —
+        // an ordinary ident in a specifier slot stops the loop.
+        let at_x = parser.cursor;
+        let specs2 = parse_decl_specs(&mut parser).expect("second specs");
+        assert!(specs2.type_specs.is_empty(), "no type consumed");
+        assert_eq!(parser.cursor, at_x, "ordinary ident not consumed");
+
+        assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn inner_ordinary_shadows_outer_typedef() {
+        // C99 §6.2.1 block-scope shadowing. Source analogue:
+        //
+        //     typedef int T;     // outer: T is typedef
+        //     { int T; T x; }    // inner: T is ordinary, shadowing
+        //
+        // At `T x;` inside the block, the parser must NOT treat T
+        // as a type (per the task-21 acceptance: T is shadowed).
+        // After the block closes, outer scope restores T as typedef,
+        // so a trailing `T z;` at file scope again parses as a
+        // declaration with TypedefName(T).
+        let src = "typedef int T ; int T ; T x ; T z";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+
+        // ── outer `typedef int T ;` ──────────────────────────────
+        let outer_specs = parse_decl_specs(&mut parser).expect("outer typedef specs");
+        assert_eq!(outer_specs.storage, Some(StorageClass::Typedef));
+        let outer_decl = parse_declarator(&mut parser).expect("T declarator");
+        declare_declarator_name(&mut parser, &outer_specs, &outer_decl);
+        let t_sym = outer_decl.name.unwrap().0;
+        assert!(parser.scopes.is_typedef(t_sym));
+        bump_semi(&mut parser);
+
+        // ── enter block scope ────────────────────────────────────
+        let start_depth = parser.scopes.depth();
+        parser.scopes.push();
+
+        // Inside the block: `int T ;` — `int` is the base, `T` is
+        // the declarator (the existing specifier-list logic stops
+        // at `T` because the base is already `int`, not because T
+        // is an ident-typedef at this slot).
+        let inner_specs = parse_decl_specs(&mut parser).expect("inner int specs");
+        assert_eq!(inner_specs.storage, None);
+        assert!(matches!(inner_specs.type_specs.as_slice(), [TypeSpec::Int]));
+        let inner_decl = parse_declarator(&mut parser).expect("T declarator inner");
+        declare_declarator_name(&mut parser, &inner_specs, &inner_decl);
+        assert_eq!(parser.scopes.lookup(t_sym), Some(NameKind::Ordinary), "inner T is ordinary");
+        assert!(!parser.scopes.is_typedef(t_sym), "inner T is NOT a typedef");
+        bump_semi(&mut parser);
+
+        // `T x` inside the block: parse_decl_specs must leave the
+        // cursor pinned on `T` — T is now Ordinary in the innermost
+        // frame, which takes precedence over the outer Typedef
+        // binding (C99 §6.2.1p4 inner scope hides outer).
+        let at_t = parser.cursor;
+        let inner_use_specs = parse_decl_specs(&mut parser).expect("specs over shadowed T");
+        assert!(inner_use_specs.type_specs.is_empty(), "shadowed T must not be a type");
+        assert_eq!(parser.cursor, at_t, "cursor did not advance past shadowed T");
+
+        // Step manually past `T x ;` so the outer parse can resume.
+        // parse_decl_specs consumed nothing, so `T` is still there:
+        // the HIR pass would reject this inner line; the parser just
+        // has to make forward progress for the rest of the suite.
+        parser.bump(); // T
+        parser.bump(); // x
+        bump_semi(&mut parser);
+
+        // ── leave block scope ────────────────────────────────────
+        parser.scopes.pop();
+        assert_eq!(parser.scopes.depth(), start_depth, "scope push/pop balanced");
+        assert!(parser.scopes.is_typedef(t_sym), "outer scope restores T as typedef");
+
+        // After the block, `T z` at outer scope parses as a
+        // declaration with TypedefName(T) again.
+        let outer_use_specs = parse_decl_specs(&mut parser).expect("outer use specs");
+        match outer_use_specs.type_specs.as_slice() {
+            [TypeSpec::TypedefName(sym)] => assert_eq!(*sym, t_sym),
+            other => panic!("expected [TypedefName(T)], got {other:?}"),
+        }
+        let rem = &parser.tokens[parser.cursor];
+        assert!(matches!(rem.kind, TokenKind::Ident(_)), "cursor on `z`");
+
+        assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn declare_declarator_name_ignores_abstract_declarator() {
+        // Abstract declarators have no name — the hook is a no-op.
+        // Using a synthesised empty declarator keeps the assertion
+        // crisp without depending on parser behaviour.
+        let src = "int";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+
+        let specs = DeclSpecs { storage: Some(StorageClass::Typedef), ..DeclSpecs::default() };
+        let abstract_decl =
+            Declarator { name: None, derived: Vec::new(), span: rcc_span::DUMMY_SP };
+
+        let before = parser.scopes.depth();
+        declare_declarator_name(&mut parser, &specs, &abstract_decl);
+        assert_eq!(parser.scopes.depth(), before, "hook does not push scopes");
+        // No typedef registered: cursor-unrelated behavioural assertion.
+    }
+
+    #[test]
+    fn declare_then_multiple_use_sites_all_see_typedef() {
+        // Harbison-Steele Table 4-2 row: once `T` is introduced,
+        // every subsequent declaration-specifier slot sees it as a
+        // type. Exercises two downstream uses to confirm the table
+        // entry is persistent across many lookups, not consumed.
+        let src = "typedef unsigned T ; T a ; const T b";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+
+        let s1 = parse_decl_specs(&mut parser).expect("typedef specs");
+        let d1 = parse_declarator(&mut parser).expect("T declarator");
+        declare_declarator_name(&mut parser, &s1, &d1);
+        bump_semi(&mut parser);
+
+        let s2 = parse_decl_specs(&mut parser).expect("first use");
+        assert!(
+            matches!(s2.type_specs.as_slice(), [TypeSpec::TypedefName(_)]),
+            "first use sees T as typedef: {:?}",
+            s2.type_specs
+        );
+        let d2 = parse_declarator(&mut parser).expect("a declarator");
+        declare_declarator_name(&mut parser, &s2, &d2);
+        bump_semi(&mut parser);
+
+        // `const T b`: qualifier before the typedef-name is legal
+        // per C99 §6.7p4 — both belong to the specifier run.
+        let s3 = parse_decl_specs(&mut parser).expect("second use");
+        assert!(s3.quals.const_);
+        assert!(
+            matches!(s3.type_specs.as_slice(), [TypeSpec::TypedefName(_)]),
+            "second use sees T as typedef: {:?}",
+            s3.type_specs
+        );
+
+        assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
     }
 }
