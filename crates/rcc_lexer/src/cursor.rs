@@ -55,4 +55,34 @@ impl<'a> Cursor<'a> {
             self.bump();
         }
     }
+
+    /// Peek the `n`-th character ahead (0-indexed: `peek_at(0)` == `first()`).
+    pub fn peek_at(&self, n: usize) -> Option<char> {
+        self.chars.clone().nth(n)
+    }
+
+    /// Consume the next character if `pred` returns true for it.
+    /// Returns `true` if a character was consumed.
+    pub fn bump_if<F: FnOnce(char) -> bool>(&mut self, pred: F) -> bool {
+        match self.first() {
+            Some(c) if pred(c) => {
+                self.bump();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Consume characters while `pred` holds, returning how many were consumed.
+    pub fn bump_while<F: FnMut(char) -> bool>(&mut self, mut pred: F) -> usize {
+        let mut count = 0;
+        while let Some(c) = self.first() {
+            if !pred(c) {
+                break;
+            }
+            self.bump();
+            count += 1;
+        }
+        count
+    }
 }

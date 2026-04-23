@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-01: Cursor primitives
 
 **Phase:** 03-lex    **Depends on:** —    **Milestone:** M1

@@ -64,6 +64,7 @@ toml        = "0.8"
 # Dev / test
 insta       = "1"
 tempfile    = "3"
+proptest    = "1"
 
 # LLVM backend (optional)
 # Pin to an llvm-18 compatible release; user must install LLVM 18 separately.

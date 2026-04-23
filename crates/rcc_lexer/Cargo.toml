@@ -12,3 +12,6 @@ description = "C preprocessing-token lexer (character stream -> pp-tokens)"
 rcc_span    = { workspace = true }
 rcc_errors  = { workspace = true }
 rcc_session = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
