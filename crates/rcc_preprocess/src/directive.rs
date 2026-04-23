@@ -239,7 +239,13 @@ fn parse_define(
         _ => (MacroKind::ObjectLike, rest.to_vec()),
     };
 
-    Ok(Directive::Define(MacroDef { name, kind, body: body_tokens, def_span: span }))
+    Ok(Directive::Define(MacroDef {
+        name,
+        kind,
+        body: body_tokens,
+        def_span: span,
+        is_predefined: false,
+    }))
 }
 
 /// Parse the parameter list of a function-like `#define`, given the

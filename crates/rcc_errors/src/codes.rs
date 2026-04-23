@@ -46,6 +46,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0024, E0024_DESC),
     (E0025, E0025_DESC),
     (E0026, E0026_DESC),
+    (E0027, E0027_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -192,6 +193,18 @@ const E0025_DESC: &str = "pasting forms an invalid token";
 /// constraint violation.
 pub const E0026: &str = "E0026";
 const E0026_DESC: &str = "`__VA_ARGS__` outside a variadic macro";
+
+/// Attempt to `#define` or `#undef` a predefined macro.
+///
+/// C99 §6.10.8p2: the implementation shall not predefine the macro
+/// `__cplusplus`, nor shall it define it in any standard header; and
+/// the predefined macros listed in §6.10.8p1 — `__DATE__`,
+/// `__FILE__`, `__LINE__`, `__STDC__`, `__STDC_HOSTED__`,
+/// `__STDC_VERSION__`, `__TIME__` — "shall not be the subject of a
+/// `#define` or `#undef` preprocessing directive". Doing so is a
+/// constraint violation.
+pub const E0027: &str = "E0027";
+const E0027_DESC: &str = "cannot redefine or undefine a predefined macro";
 
 #[cfg(test)]
 mod tests {

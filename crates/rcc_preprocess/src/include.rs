@@ -241,6 +241,7 @@ impl Preprocessor<'_> {
                         kind: MacroKind::ObjectLike,
                         body: Vec::new(),
                         def_span: Span::new(new_file, BytePos(0), BytePos(0)),
+                        is_predefined: false,
                     });
                 }
             }
@@ -481,17 +482,20 @@ mod tests {
 
     #[test]
     fn process_include_registers_new_file_in_source_map() {
-        // After a successful include, the loaded header must show up in
-        // the SourceMap so its spans are renderable. We assert the file
-        // count grows by one.
+        // After a successful include, the loaded header must show up
+        // in the SourceMap so its spans are renderable. Since task
+        // 04-12 `run()` also seeds the map with synthetic files for
+        // the C99 §6.10.8 predefined macros (`__STDC__` et al.), we
+        // assert on the presence of the *included* path by name
+        // rather than on the raw file count.
         let tmp = TempDir::new().unwrap();
         write_file(tmp.path(), "util.h", "int x;\n");
         let (mut sess, main_id, _cap) = seed_session(tmp.path(), Vec::new());
-        let before = sess.source_map.read().unwrap().files().count();
         let span = dummy_span(main_id);
         Preprocessor::new(&mut sess).process_include("\"util.h\"", false, span, main_id);
-        let after = sess.source_map.read().unwrap().files().count();
-        assert_eq!(after, before + 1, "included file must be registered in the source map");
+        let expected = tmp.path().join("util.h");
+        let registered = sess.source_map.read().unwrap().files().any(|f| f.name == expected);
+        assert!(registered, "included file {expected:?} must be registered in the source map");
     }
 
     // ── 04-04 include-guard optimisation ────────────────────────────

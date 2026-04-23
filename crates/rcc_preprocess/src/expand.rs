@@ -48,10 +48,10 @@ use rcc_errors::{
     codes::{E0024, E0025, E0026},
     Diagnostic, Handler, Label, Level,
 };
-use rcc_lexer::{tokenize, PpToken, PpTokenKind, Punct, StringEncoding};
+use rcc_lexer::{tokenize, PpNumberKind, PpToken, PpTokenKind, Punct, StringEncoding};
 use rcc_span::{BytePos, Interner, SourceMap, Span, Symbol};
 
-use crate::macros::{HideSet, MacroKind, MacroTable, VA_ARGS_NAME};
+use crate::macros::{BuiltinMacro, HideSet, MacroKind, MacroTable, VA_ARGS_NAME};
 
 /// Token paired with its Prosser hide set. The hide set travels
 /// alongside the raw [`PpToken`] through every expansion step and is
@@ -147,6 +147,16 @@ impl Expander<'_> {
             let body = def.body.clone();
 
             match kind {
+                MacroKind::Builtin(builtin) => {
+                    // Dynamic predefined macros (C99 §6.10.8p1). The
+                    // synthesised replacement (string literal or
+                    // pp-number) cannot name another macro, so
+                    // hide-set bookkeeping is only defensive.
+                    let mut hide = et.hide.clone();
+                    hide.insert(name);
+                    let replaced = self.expand_builtin(builtin, &et, hide);
+                    push_front_all(&mut work, replaced);
+                }
                 MacroKind::ObjectLike => {
                     let mut hide = et.hide.clone();
                     hide.insert(name);
@@ -663,6 +673,68 @@ impl Expander<'_> {
         ExpToken { tok, hide: FxHashSet::default() }
     }
 
+    /// Expand a dynamic predefined macro (C99 §6.10.8p1) at the
+    /// invocation site `origin`.
+    ///
+    /// The returned list always has length one. The synthesised token
+    /// is anchored in a new synthetic source file whose bytes contain
+    /// the rendered spelling, so spans continue to roundtrip through
+    /// `token_text` / `stringize` / `paste_two` the same way ordinary
+    /// tokens do. `hide` is attached verbatim; the caller has already
+    /// pushed the macro's own name into it so a pathological rescan
+    /// cannot re-invoke us.
+    fn expand_builtin(
+        &mut self,
+        builtin: BuiltinMacro,
+        origin: &ExpToken,
+        hide: HideSet,
+    ) -> Vec<ExpToken> {
+        let origin_span = origin.tok.span;
+        let (kind, text) = match builtin {
+            BuiltinMacro::File => {
+                let path_text = {
+                    let sm = self.source_map.read().unwrap();
+                    sm.file(origin_span.file).name.display().to_string()
+                };
+                let mut body = String::with_capacity(path_text.len() + 2);
+                body.push('"');
+                for ch in path_text.chars() {
+                    match ch {
+                        '\\' => body.push_str("\\\\"),
+                        '"' => body.push_str("\\\""),
+                        _ => body.push(ch),
+                    }
+                }
+                body.push('"');
+                (PpTokenKind::StringLit { enc: StringEncoding::None }, body)
+            }
+            BuiltinMacro::Line => {
+                let line_no = {
+                    let sm = self.source_map.read().unwrap();
+                    sm.lookup_line_col(origin_span.file, origin_span.lo).line
+                };
+                (PpTokenKind::PpNumber(PpNumberKind::Integer), line_no.to_string())
+            }
+        };
+        let len = text.len() as u32;
+        let file_id = {
+            let mut sm = self.source_map.write().unwrap();
+            let label = match builtin {
+                BuiltinMacro::File => "<builtin:__FILE__>",
+                BuiltinMacro::Line => "<builtin:__LINE__>",
+            };
+            sm.add_file(PathBuf::from(label), Arc::from(text))
+        };
+        let span = Span::new(file_id, BytePos(0), BytePos(len));
+        let tok = PpToken {
+            kind,
+            span,
+            leading_ws: origin.tok.leading_ws,
+            at_line_start: origin.tok.at_line_start,
+        };
+        vec![ExpToken { tok, hide }]
+    }
+
     /// Emit E0025 for a paste whose concatenation re-lexed to more
     /// than one preprocessing token.
     fn emit_e0025_invalid(&mut self, lhs_span: Span, rhs_span: Span, hh_span: Span) {
@@ -905,7 +977,13 @@ mod tests {
         // Drop `#`, `define`, NAME — keep replacement list.
         toks.drain(..3);
         let def_span = Span::new(file, BytePos(0), BytePos(full.len() as u32));
-        let def = MacroDef { name: name_sym, kind: MacroKind::ObjectLike, body: toks, def_span };
+        let def = MacroDef {
+            name: name_sym,
+            kind: MacroKind::ObjectLike,
+            body: toks,
+            def_span,
+            is_predefined: false,
+        };
         let sm = session.source_map.read().unwrap();
         define_macro(def, macros, &sm, &session.interner).unwrap();
     }
@@ -954,6 +1032,7 @@ mod tests {
             kind: MacroKind::FunctionLike { params: param_syms, variadic },
             body,
             def_span,
+            is_predefined: false,
         };
         let sm = session.source_map.read().unwrap();
         define_macro(def, macros, &sm, &session.interner).unwrap();

@@ -138,8 +138,9 @@ pub struct Preprocessor<'a> {
     pub pragma_once:     FxHashMap<FileId, ()>,
 }
 
-pub struct MacroDef { pub name: Symbol, pub kind: MacroKind, pub body: Vec<PpToken>, pub def_span: Span }
-pub enum MacroKind { ObjectLike, FunctionLike { params: Vec<Symbol>, variadic: bool } }
+pub struct MacroDef { pub name: Symbol, pub kind: MacroKind, pub body: Vec<PpToken>, pub def_span: Span, pub is_predefined: bool }
+pub enum MacroKind { ObjectLike, FunctionLike { params: Vec<Symbol>, variadic: bool }, Builtin(BuiltinMacro) }
+pub enum BuiltinMacro { File, Line }
 pub type HideSet = FxHashSet<Symbol>;
 pub struct MacroTable;
 

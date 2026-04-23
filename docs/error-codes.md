@@ -300,3 +300,26 @@ comma in place (`printf("a", )`). The GNU extension `, ##
 __VA_ARGS__` — which drops the preceding comma when the variadic
 argument list is empty — is gated behind the
 `Options::gnu_va_args_elision` flag and is off by default.
+
+## E0027 — cannot redefine or undefine a predefined macro
+
+C99 §6.10.8p2 makes the predefined macros (`__DATE__`, `__FILE__`,
+`__LINE__`, `__STDC__`, `__STDC_HOSTED__`, `__STDC_VERSION__`,
+`__TIME__`) off-limits to user `#define` and `#undef` — each such
+attempt is a constraint violation. `rcc` seeds its macro table with
+these entries at the start of every translation unit (see
+`Preprocessor::install_predefined`); the table marks them so the
+`#define` / `#undef` paths can diagnose any tampering.
+
+```c
+#define __LINE__ 42   // error[E0027]: cannot redefine predefined macro `__LINE__`
+#undef __STDC__       // error[E0027]: cannot `#undef` predefined macro `__STDC__`
+```
+
+Command-line `-D NAME[=VALUE]` flags install ordinary object-like
+macros *before* the predefined set is seeded, so the predefined
+entries always win on name collisions (`-D __STDC__=0` silently
+loses to the built-in `__STDC__ = 1`). The identifier `__func__` is
+**not** a predefined macro — per C99 §6.4.2.2 it is a predeclared
+identifier materialised by the parser inside every function
+definition — and is therefore not covered by E0027.

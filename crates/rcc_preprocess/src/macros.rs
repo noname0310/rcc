@@ -11,9 +11,34 @@ use rcc_data_structures::{FxHashMap, FxHashSet};
 /// [`rcc_span::Symbol`] to decide whether to substitute the variadic
 /// slot or (outside a variadic body) emit E0026.
 pub const VA_ARGS_NAME: &str = "__VA_ARGS__";
-use rcc_errors::{codes::E0022, Diagnostic, Label, Level};
+use rcc_errors::{
+    codes::{E0022, E0027},
+    Diagnostic, Label, Level,
+};
 use rcc_lexer::PpToken;
 use rcc_span::{Interner, SourceMap, Span, Symbol};
+
+/// Dynamic built-in macros whose replacement depends on the use site
+/// (C99 §6.10.8p1). Static predefined macros (`__STDC__`,
+/// `__STDC_VERSION__`, `__STDC_HOSTED__`, `__DATE__`, `__TIME__`) are
+/// modelled as ordinary [`MacroKind::ObjectLike`] definitions installed
+/// at preprocessor start-up — their replacement lists are frozen at
+/// that moment and thereafter expanded like any user `#define`. Only
+/// use-site-varying ones need a sentinel kind.
+///
+/// `__func__` is explicitly **not** in this enum: it is not a macro at
+/// all but a C99 §6.4.2.2 predeclared identifier, materialised by the
+/// parser (phase 7) when entering each function-definition body. The
+/// preprocessor treats `__func__` as any other identifier.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BuiltinMacro {
+    /// `__FILE__` — expands to a narrow string literal naming the
+    /// current source file (C99 §6.10.8p1).
+    File,
+    /// `__LINE__` — expands to a decimal pp-number giving the current
+    /// presumed physical line number (C99 §6.10.8p1).
+    Line,
+}
 
 /// Object-like vs function-like distinction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +52,10 @@ pub enum MacroKind {
         /// Whether the parameter list ends with `...`.
         variadic: bool,
     },
+    /// A dynamic built-in whose replacement is synthesised by
+    /// [`crate::expand::Expander`] at every use site. The empty `body`
+    /// on such a [`MacroDef`] is ignored by the expander.
+    Builtin(BuiltinMacro),
 }
 
 /// A single macro definition.
@@ -40,6 +69,12 @@ pub struct MacroDef {
     pub body: Vec<PpToken>,
     /// Where it was defined.
     pub def_span: Span,
+    /// True for C99 §6.10.8 predefined macros (and any implementation-
+    /// supplied ones); such entries are protected from user `#define`
+    /// or `#undef` redefinition per §6.10.8p2 — attempting either is
+    /// diagnosed as E0027. CLI `-D` flags and user `#define`s install
+    /// entries with this flag cleared.
+    pub is_predefined: bool,
 }
 
 /// Per-expansion set of macro names that must not be re-expanded; this is
@@ -58,7 +93,9 @@ impl MacroTable {
         self.map.insert(def.name, def);
     }
 
-    /// Remove a definition. Returns whether it existed.
+    /// Remove a definition. Returns whether it existed. Callers that
+    /// must honour the C99 §6.10.8p2 "no `#undef` of a predefined
+    /// macro" rule should go through [`undef_user`] instead.
     pub fn undef(&mut self, name: Symbol) -> bool {
         self.map.remove(&name).is_some()
     }
@@ -115,6 +152,15 @@ pub fn define_macro(
     interner: &Interner,
 ) -> Result<(), Diagnostic> {
     if let Some(existing) = macros.get(def.name) {
+        if existing.is_predefined {
+            return Err(predefined_tamper_diagnostic(
+                existing,
+                def.def_span,
+                def.name,
+                interner,
+                PredefinedOp::Define,
+            ));
+        }
         if definitions_equivalent(existing, &def, source_map) {
             return Ok(());
         }
@@ -122,6 +168,39 @@ pub fn define_macro(
     }
     macros.define(def);
     Ok(())
+}
+
+/// Which directive is tampering with a predefined macro.
+#[derive(Copy, Clone, Debug)]
+enum PredefinedOp {
+    Define,
+    Undef,
+}
+
+/// Remove a user-defined macro, honouring C99 §6.10.8p2: predefined
+/// macros (those with [`MacroDef::is_predefined`] set) may not be the
+/// subject of `#undef` and yield E0027 if attempted. Returns
+/// `Ok(true)` when the entry existed and was removed, `Ok(false)` for
+/// `#undef` of a name that is not currently defined (which is
+/// explicitly legal per §6.10.5p2).
+pub fn undef_user(
+    name: Symbol,
+    directive_span: Span,
+    macros: &mut MacroTable,
+    interner: &Interner,
+) -> Result<bool, Diagnostic> {
+    if let Some(existing) = macros.get(name) {
+        if existing.is_predefined {
+            return Err(predefined_tamper_diagnostic(
+                existing,
+                directive_span,
+                name,
+                interner,
+                PredefinedOp::Undef,
+            ));
+        }
+    }
+    Ok(macros.undef(name))
 }
 
 /// Back-compat alias retained while call sites migrate. Accepts any
@@ -175,6 +254,41 @@ fn bodies_equivalent(a: &[PpToken], b: &[PpToken], source_map: &SourceMap) -> bo
 fn token_text<'a>(tok: &PpToken, source_map: &'a SourceMap) -> &'a str {
     let src = &source_map.file(tok.span.file).src;
     &src[tok.span.lo.0 as usize..tok.span.hi.0 as usize]
+}
+
+fn predefined_tamper_diagnostic(
+    existing: &MacroDef,
+    directive_span: Span,
+    name: Symbol,
+    interner: &Interner,
+    op: PredefinedOp,
+) -> Diagnostic {
+    let name_str = interner.get(name);
+    let (message, primary_label) = match op {
+        PredefinedOp::Define => (
+            format!("cannot redefine predefined macro `{name_str}`"),
+            "redefinition attempted here",
+        ),
+        PredefinedOp::Undef => {
+            (format!("cannot `#undef` predefined macro `{name_str}`"), "`#undef` attempted here")
+        }
+    };
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0027),
+        message,
+        labels: vec![
+            Label { span: directive_span, message: primary_label.into(), primary: true },
+            Label { span: existing.def_span, message: "predefined here".into(), primary: false },
+        ],
+        notes: vec!["C99 §6.10.8p2: the predefined macros listed in §6.10.8 \
+             shall not be the subject of a `#define` or `#undef` \
+             preprocessing directive"
+            .into()],
+        help: vec!["rename your macro so it does not collide with a \
+             predefined identifier"
+            .into()],
+    }
 }
 
 fn redefinition_diagnostic(
@@ -242,7 +356,13 @@ mod tests {
         }
         let file_len = src.len() as u32;
         let def_span = Span::new(id, BytePos(0), BytePos(file_len));
-        MacroDef { name: interner.intern(name_str), kind: MacroKind::ObjectLike, body, def_span }
+        MacroDef {
+            name: interner.intern(name_str),
+            kind: MacroKind::ObjectLike,
+            body,
+            def_span,
+            is_predefined: false,
+        }
     }
 
     #[test]
@@ -408,6 +528,7 @@ mod tests {
             kind: MacroKind::FunctionLike { params: param_syms, variadic },
             body,
             def_span,
+            is_predefined: false,
         }
     }
 
