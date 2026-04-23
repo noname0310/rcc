@@ -18,6 +18,7 @@ use rcc_span::{Span, Symbol};
 
 mod decl;
 mod expr;
+mod init;
 mod keywords;
 mod literal;
 mod phase7;
@@ -33,6 +34,7 @@ pub use expr::{
     parse_assignment_expression, parse_expr_bp, parse_expression, parse_postfix,
     parse_prefix_unary, parse_primary,
 };
+pub use init::parse_initializer;
 pub use keywords::{classify_ident, Keyword, KEYWORDS};
 pub use literal::{decode_char, decode_float, decode_integer, decode_string};
 pub use phase7::{convert as pp_stream_to_tokens, merge_adjacent_strings, pp_to_token};
