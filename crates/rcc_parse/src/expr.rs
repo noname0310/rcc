@@ -1,7 +1,84 @@
 //! Expression parsing (C99 §6.5).
 //!
-//! This task (05-07) only lands `parse_primary` — the leaves of the C99
-//! expression grammar per §6.5.1:
+//! Task 05-07 landed `parse_primary` — the leaves of the expression
+//! grammar. Task 05-08 (this file) adds [`parse_expr_bp`] — a Pratt /
+//! precedence-climbing loop driven by [`infix_bp`] that folds binary
+//! and assignment operators per the C99 §6.5 table on top of those
+//! leaves. The public entry point is [`parse_expression`].
+//!
+//! Non-goals (filed under later tasks):
+//!
+//! - Unary / postfix (`++`, `--`, `*`, `&`, `sizeof`, calls, member
+//!   access, indexing) — task 05-09.
+//! - Cast / `sizeof(type)` — task 05-10.
+//! - Conditional `?:` — task 05-11.
+//! - Comma `,` — task 05-12.
+//!
+//! ## Precedence & associativity (C99 §6.5)
+//!
+//! The table below lists every operator family this task handles,
+//! ordered from tightest-binding at the top to loosest at the bottom.
+//! The two-column form is the Matklad "left_bp / right_bp" encoding
+//! consumed by [`parse_expr_bp`]:
+//!
+//! ```text
+//! family          example            (l_bp, r_bp)   assoc
+//! multiplicative  a*b  a/b  a%b      (21, 22)       left
+//! additive        a+b  a-b           (19, 20)       left
+//! shift           a<<b a>>b          (17, 18)       left
+//! relational      a<b  a<=b a>b a>=b (15, 16)       left
+//! equality        a==b a!=b          (13, 14)       left
+//! bitwise AND     a&b                (11, 12)       left
+//! bitwise XOR     a^b                ( 9, 10)       left
+//! bitwise OR      a|b                ( 7,  8)       left
+//! logical AND     a&&b               ( 5,  6)       left
+//! logical OR      a||b               ( 3,  4)       left
+//! assignment      a=b a+=b ...       ( 2,  1)       right
+//! ```
+//!
+//! Left-associative operators get `(n, n+1)`: after we consume one, we
+//! recurse with `min_bp = n+1`, so a same-family op on the right (which
+//! advertises `l_bp = n`) stops the inner recursion and gets bound to
+//! the outer left-hand side instead — the classic "left-to-right fold"
+//! shape. Right-associative operators (only `=` and its compound
+//! cousins in C99) flip the pair to `(n+1, n)` so the inner recursion
+//! *does* keep consuming same-family ops, producing the right-leaning
+//! `a = (b = c)` tree §6.5.16 mandates.
+//!
+//! The right-hand side of an assignment still allows any binary
+//! operator above it in the table because assignment is the lowest
+//! level: `a = b + c` parses as `a = (b + c)` since `+` (l_bp = 19) is
+//! greater than the right_bp (1) we recurse with.
+//!
+//! ## Deep nesting / stack usage
+//!
+//! `parse_expr_bp` is recursive — each infix operator on the input
+//! costs one Rust stack frame. For the expression grammar this is
+//! fine: a run like `1+2+3+...` of N operators nests N frames, which
+//! comfortably handles the ≥ 32-level acceptance bullet without
+//! approaching the default 8 MiB thread stack. Conversion to an
+//! iterative shunting-yard variant is a follow-up if pathological
+//! inputs ever appear in fuzzing; the iterative shape would need a
+//! heap-allocated operator stack anyway, so the recursive version is
+//! the right default for hand-written C.
+//!
+//! ## §6.5.16 lvalue caveat
+//!
+//! C99 restricts the left-hand side of an assignment to a *unary-
+//! expression* grammatically. A precedence-climbing parser cannot
+//! express that constraint cheaply — by the time we notice the `=` we
+//! have already reduced the LHS through every higher-precedence level.
+//! We therefore accept the syntactic superset and defer the lvalue /
+//! "modifiable lvalue" checks to semantic analysis (HIR lowering and
+//! typeck). Inputs like `(a + b) = c` parse without a parser
+//! diagnostic and will be rejected later with a proper "expression is
+//! not assignable" error attached to the LHS span. This matches what
+//! clang, gcc, and chibicc do.
+//!
+//! ---
+//!
+//! Historical notes retained below — the primary-expression grammar
+//! this module exposes per §6.5.1:
 //!
 //! ```text
 //! primary-expression:
@@ -12,8 +89,8 @@
 //! ```
 //!
 //! Postfix trailers (`a.b`, `a->b`, `a[i]`, `f(args)`, `++`, `--`,
-//! compound literals) belong to task 05-09; binary / ternary / cast /
-//! unary wiring belongs to 05-08..05-11.
+//! compound literals) belong to task 05-09; ternary / cast / unary
+//! wiring belongs to 05-09..05-11.
 //!
 //! ## AST shape trade-off
 //!
@@ -38,28 +115,30 @@
 //!
 //! ## Parenthesised-expression stub
 //!
-//! `( expression )` requires a full expression parser, which does not
-//! exist yet — `parse_expression` lands in tasks 05-08 (Pratt) and
-//! 05-12 (comma). Until then, this module recursively calls
-//! `parse_primary` for the body so the acceptance case `(42)` — and
-//! the nested `(((42)))` — can round-trip now without pulling the rest
-//! of the expression grammar forward. The error recovery is simple:
-//! on a missing inner primary the outer `Paren` arm returns `None`;
-//! on a missing `)` it still returns the inner expression unwrapped
-//! (not wrapped in `Paren`) and diagnoses the unbalanced paren so the
-//! rest of the token stream is not desynchronised. Once task 05-12
-//! lands, the inner call becomes `parse_expression` and this module's
-//! TODO goes away.
+//! `( expression )` is parsed by [`parse_primary`] with its inner
+//! production delegating to [`parse_expr_bp`] (the Pratt loop landed
+//! in 05-08). That covers every binary and assignment operator; the
+//! comma operator (§6.5.17) is still outside the loop and arrives in
+//! task 05-12 — until then a top-level `,` inside parentheses won't
+//! reduce into a `Comma` node, but every `( assignment-expression )`
+//! input — which is what every real expression context below the
+//! comma operator accepts — parses exactly as the standard requires.
+//! The error recovery is simple: on a missing inner expression the
+//! outer `Paren` arm returns `None`; on a missing `)` it still
+//! returns the inner expression unwrapped (not wrapped in `Paren`)
+//! and diagnoses the unbalanced paren so the rest of the token
+//! stream is not desynchronised.
 //!
 //! ## TODO
 //!
-//! - [ ] 05-12 or later: swap the recursive `parse_primary` stub for
-//!   the real top-level expression entry point.
+//! - [ ] 05-12: extend [`parse_expression`] to fold the comma
+//!   operator above the assignment level — that task subsumes the
+//!   current "assignment-expression" top.
 //! - [ ] post-M1: migrate `ExprKind::{Int,Float,Char,String}Lit` to
 //!   carry decoded payloads (`IntLiteral`, `FloatLiteral`,
 //!   `CharLiteral`, `StringLiteral`) instead of `text: Symbol`.
 
-use rcc_ast::{Expr, ExprKind};
+use rcc_ast::{AssignOp, BinOp, Expr, ExprKind};
 use rcc_lexer::Punct;
 use rcc_span::Symbol;
 
@@ -121,8 +200,10 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
             p.bump();
-            // Inner production is stubbed — see module docs.
-            let inner = parse_primary(p)?;
+            // The inner production is `assignment-expression` — the
+            // top of this task's Pratt loop. Task 05-12 will raise
+            // this to the full comma-including expression.
+            let inner = parse_expr_bp(p, 0)?;
             // Consume the closing `)` if present; otherwise diagnose
             // and return the inner expression unwrapped so the caller
             // can keep making progress on the remaining stream.
@@ -149,6 +230,173 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             p.session.handler.struct_err(span, "expected primary expression").emit();
             None
         }
+    }
+}
+
+/// Top-level C99 expression entry point.
+///
+/// Drives a Pratt / precedence-climbing loop starting at the lowest
+/// binding power, so every binary and assignment operator in the
+/// table documented at the module level is accepted. The comma
+/// operator (§6.5.17) is *not* folded here — that's task 05-12 —
+/// so the current shape corresponds to the *assignment-expression*
+/// non-terminal, which is exactly what most C grammar productions
+/// (function arguments, array sizes, initializer expressions, etc.)
+/// spell out anyway.
+///
+/// Returns `None` when no primary expression is available at the
+/// cursor position; in that case a diagnostic has already been
+/// emitted by [`parse_primary`] and the cursor is left where the
+/// error happened so the caller can decide how to recover.
+pub fn parse_expression(p: &mut Parser<'_>) -> Option<Expr> {
+    parse_expr_bp(p, 0)
+}
+
+/// Parse an expression whose top-level operator has a left binding
+/// power of at least `min_bp`. This is the engine behind
+/// [`parse_expression`] and is exposed so later tasks (05-09 unary
+/// prefix, 05-10 cast, 05-11 conditional) can weave additional
+/// grammar layers in without duplicating the precedence table.
+///
+/// The control flow is textbook Matklad-style precedence climbing:
+///
+/// 1. Consume a primary / unary expression as the initial LHS.
+/// 2. Peek at the next token. If it isn't a known infix operator,
+///    or its `l_bp` is strictly below `min_bp`, stop and return the
+///    LHS — the caller reduces it against its own frame.
+/// 3. Otherwise consume the operator, recurse with `min_bp = r_bp`
+///    to collect the RHS, fold into the appropriate
+///    [`ExprKind::Binary`] / [`ExprKind::Assign`] node, and loop.
+///
+/// A failed RHS parse (e.g. garbage after a `+`) aborts the loop
+/// early and returns the LHS already collected — [`parse_primary`]
+/// has emitted a diagnostic at the offending position and the
+/// cursor has been left there, so higher layers can still resync.
+/// We deliberately avoid fabricating a dummy RHS because that would
+/// invent a span and a `NodeId` that no source text backs.
+pub fn parse_expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<Expr> {
+    let mut lhs = parse_primary(p)?;
+    while let Some(op) = peek_infix(p) {
+        let (l_bp, r_bp) = infix_bp(op);
+        if l_bp < min_bp {
+            break;
+        }
+        // Commit to this operator: consume it and recurse on the RHS.
+        p.bump();
+        let Some(rhs) = parse_expr_bp(p, r_bp) else {
+            // `parse_primary` already diagnosed the missing RHS;
+            // returning the partially-built LHS preserves as much of
+            // the user's tree as possible for downstream tasks.
+            break;
+        };
+        let span = lhs.span.to(rhs.span);
+        let id = p.fresh_id();
+        lhs = match op {
+            InfixOp::Binary(bin) => Expr {
+                id,
+                kind: ExprKind::Binary { op: bin, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                span,
+            },
+            InfixOp::Assign(aop) => Expr {
+                id,
+                kind: ExprKind::Assign { op: aop, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                span,
+            },
+        };
+    }
+    Some(lhs)
+}
+
+/// Infix-operator discriminant consumed by [`parse_expr_bp`].
+///
+/// We wrap the two AST flavours (plain binary vs assignment) because
+/// they build into different `ExprKind` variants but share the same
+/// Pratt machinery — keeping the dispatch in the shape of the op
+/// rather than on its precedence number leaves the table readable
+/// and `match`-exhaustive.
+#[derive(Copy, Clone, Debug)]
+enum InfixOp {
+    Binary(BinOp),
+    Assign(AssignOp),
+}
+
+/// Peek at the current token and, if it is a binary or assignment
+/// operator, return the corresponding [`InfixOp`] *without* advancing
+/// the cursor. Returning `None` is the signal to [`parse_expr_bp`]
+/// that the expression has ended (or that the token belongs to a
+/// surrounding construct like `)`, `;`, `,`, `?`, or `:`).
+fn peek_infix(p: &Parser<'_>) -> Option<InfixOp> {
+    let TokenKind::Punct(punct) = p.peek()?.kind else {
+        return None;
+    };
+    Some(match punct {
+        // Arithmetic.
+        Punct::Plus => InfixOp::Binary(BinOp::Add),
+        Punct::Minus => InfixOp::Binary(BinOp::Sub),
+        Punct::Star => InfixOp::Binary(BinOp::Mul),
+        Punct::Slash => InfixOp::Binary(BinOp::Div),
+        Punct::Percent => InfixOp::Binary(BinOp::Rem),
+        // Shifts.
+        Punct::ShlShl => InfixOp::Binary(BinOp::Shl),
+        Punct::ShrShr => InfixOp::Binary(BinOp::Shr),
+        // Relational / equality.
+        Punct::Lt => InfixOp::Binary(BinOp::Lt),
+        Punct::Le => InfixOp::Binary(BinOp::Le),
+        Punct::Gt => InfixOp::Binary(BinOp::Gt),
+        Punct::Ge => InfixOp::Binary(BinOp::Ge),
+        Punct::EqEq => InfixOp::Binary(BinOp::Eq),
+        Punct::BangEq => InfixOp::Binary(BinOp::Ne),
+        // Bitwise.
+        Punct::Amp => InfixOp::Binary(BinOp::BitAnd),
+        Punct::Caret => InfixOp::Binary(BinOp::BitXor),
+        Punct::Pipe => InfixOp::Binary(BinOp::BitOr),
+        // Logical.
+        Punct::AmpAmp => InfixOp::Binary(BinOp::LogAnd),
+        Punct::PipePipe => InfixOp::Binary(BinOp::LogOr),
+        // Assignments (right-associative family, §6.5.16).
+        Punct::Eq => InfixOp::Assign(AssignOp::Eq),
+        Punct::PlusEq => InfixOp::Assign(AssignOp::AddEq),
+        Punct::MinusEq => InfixOp::Assign(AssignOp::SubEq),
+        Punct::StarEq => InfixOp::Assign(AssignOp::MulEq),
+        Punct::SlashEq => InfixOp::Assign(AssignOp::DivEq),
+        Punct::PercentEq => InfixOp::Assign(AssignOp::RemEq),
+        Punct::ShlEq => InfixOp::Assign(AssignOp::ShlEq),
+        Punct::ShrEq => InfixOp::Assign(AssignOp::ShrEq),
+        Punct::AmpEq => InfixOp::Assign(AssignOp::AndEq),
+        Punct::CaretEq => InfixOp::Assign(AssignOp::XorEq),
+        Punct::PipeEq => InfixOp::Assign(AssignOp::OrEq),
+        // Everything else — including `,`, `?`, `:`, and all brackets
+        // / delimiters — is NOT an infix operator at this layer.
+        _ => return None,
+    })
+}
+
+/// Binding-power table for every C99 §6.5 infix operator handled by
+/// this task. See the module-level docs for the full associativity
+/// rationale and the Matklad `(l_bp, r_bp)` encoding.
+///
+/// All numbers are even/odd pairs so the difference between a left-
+/// associative `(n, n+1)` and a right-associative `(n+1, n)` is the
+/// *single* bit that flips recursion behaviour — this is what makes
+/// `a = b = c` parse as `a = (b = c)` while `a + b + c` parses as
+/// `(a + b) + c`.
+fn infix_bp(op: InfixOp) -> (u8, u8) {
+    match op {
+        // Level 1: assignment — right-associative, lowest in §6.5.
+        InfixOp::Assign(_) => (2, 1),
+        // Level 2 … 10: binary operators in ascending C99 precedence.
+        InfixOp::Binary(bin) => match bin {
+            BinOp::LogOr => (3, 4),
+            BinOp::LogAnd => (5, 6),
+            BinOp::BitOr => (7, 8),
+            BinOp::BitXor => (9, 10),
+            BinOp::BitAnd => (11, 12),
+            BinOp::Eq | BinOp::Ne => (13, 14),
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (15, 16),
+            BinOp::Shl | BinOp::Shr => (17, 18),
+            BinOp::Add | BinOp::Sub => (19, 20),
+            BinOp::Mul | BinOp::Div | BinOp::Rem => (21, 22),
+        },
     }
 }
 
@@ -453,5 +701,414 @@ mod tests {
         let e2 = parse_primary(&mut parser).expect("b parses");
         assert_ne!(e1.id, e2.id, "NodeIds must be unique per node");
         assert!(e1.id.0 < e2.id.0, "NodeIds must be monotonically increasing");
+    }
+
+    // ── 05-08 Pratt precedence / associativity ──────────────────────
+
+    /// Build a pp-token stream for `src` where every character is an
+    /// identifier, a punctuator, or a single-digit integer. This is
+    /// just enough surface area to write expression Pratt tests
+    /// without replicating the lexer — it keeps the acceptance tests
+    /// readable in source form rather than as long arrays of
+    /// `PpTokenKind` literals.
+    fn lex_ascii(fid: FileId, src: &str) -> Vec<PpToken> {
+        let mut out = Vec::new();
+        let bytes = src.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let lo = i as u32;
+            let b = bytes[i];
+            // Skip ASCII whitespace — not emitted into the stream.
+            if b == b' ' || b == b'\t' || b == b'\n' {
+                i += 1;
+                continue;
+            }
+            // Single-letter identifier.
+            if b.is_ascii_alphabetic() || b == b'_' {
+                i += 1;
+                out.push(pp(PpTokenKind::Ident, fid, lo, i as u32));
+                continue;
+            }
+            // Single-digit integer.
+            if b.is_ascii_digit() {
+                i += 1;
+                out.push(pp(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, lo, i as u32));
+                continue;
+            }
+            // Two- and three-char punctuators, longest match first.
+            let rest = &bytes[i..];
+            let (punct, len) = if rest.starts_with(b"<<=") {
+                (Punct::ShlEq, 3)
+            } else if rest.starts_with(b">>=") {
+                (Punct::ShrEq, 3)
+            } else if rest.starts_with(b"<<") {
+                (Punct::ShlShl, 2)
+            } else if rest.starts_with(b">>") {
+                (Punct::ShrShr, 2)
+            } else if rest.starts_with(b"<=") {
+                (Punct::Le, 2)
+            } else if rest.starts_with(b">=") {
+                (Punct::Ge, 2)
+            } else if rest.starts_with(b"==") {
+                (Punct::EqEq, 2)
+            } else if rest.starts_with(b"!=") {
+                (Punct::BangEq, 2)
+            } else if rest.starts_with(b"&&") {
+                (Punct::AmpAmp, 2)
+            } else if rest.starts_with(b"||") {
+                (Punct::PipePipe, 2)
+            } else if rest.starts_with(b"+=") {
+                (Punct::PlusEq, 2)
+            } else if rest.starts_with(b"-=") {
+                (Punct::MinusEq, 2)
+            } else if rest.starts_with(b"*=") {
+                (Punct::StarEq, 2)
+            } else if rest.starts_with(b"/=") {
+                (Punct::SlashEq, 2)
+            } else if rest.starts_with(b"%=") {
+                (Punct::PercentEq, 2)
+            } else if rest.starts_with(b"&=") {
+                (Punct::AmpEq, 2)
+            } else if rest.starts_with(b"^=") {
+                (Punct::CaretEq, 2)
+            } else if rest.starts_with(b"|=") {
+                (Punct::PipeEq, 2)
+            } else {
+                let single = match b {
+                    b'+' => Punct::Plus,
+                    b'-' => Punct::Minus,
+                    b'*' => Punct::Star,
+                    b'/' => Punct::Slash,
+                    b'%' => Punct::Percent,
+                    b'<' => Punct::Lt,
+                    b'>' => Punct::Gt,
+                    b'&' => Punct::Amp,
+                    b'^' => Punct::Caret,
+                    b'|' => Punct::Pipe,
+                    b'=' => Punct::Eq,
+                    b'(' => Punct::LParen,
+                    b')' => Punct::RParen,
+                    b',' => Punct::Comma,
+                    other => panic!("lex_ascii: unsupported byte {:?}", other as char),
+                };
+                (single, 1)
+            };
+            i += len;
+            out.push(pp(PpTokenKind::Punct(punct), fid, lo, i as u32));
+        }
+        out
+    }
+
+    /// Helper: feed `src` through the mini-lexer and parse it as a
+    /// top-level expression. Panics on parse failure because these
+    /// tests all feed well-formed input.
+    fn parse_expr_str(src: &str) -> (Expr, rcc_errors::CaptureEmitter) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let pps = lex_ascii(fid, src);
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_expression(&mut parser).expect("expression parses");
+        assert_eq!(
+            parser.cursor,
+            parser.tokens.len(),
+            "Pratt parser must consume every token of {src:?}",
+        );
+        (e, cap)
+    }
+
+    /// Assert that `e` is `Binary { op, lhs = <Ident lsym>, rhs = <Ident rsym> }`.
+    fn assert_bin_ident(
+        e: &Expr,
+        expected_op: BinOp,
+        lsym: &str,
+        rsym: &str,
+        interner: &rcc_span::Interner,
+    ) {
+        match &e.kind {
+            ExprKind::Binary { op, lhs, rhs } => {
+                assert_eq!(*op, expected_op, "op mismatch");
+                match &lhs.kind {
+                    ExprKind::Ident(s) => assert_eq!(interner.get(*s), lsym),
+                    other => panic!("lhs must be Ident({lsym}), got {other:?}"),
+                }
+                match &rhs.kind {
+                    ExprKind::Ident(s) => assert_eq!(interner.get(*s), rsym),
+                    other => panic!("rhs must be Ident({rsym}), got {other:?}"),
+                }
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiplicative_binds_tighter_than_additive() {
+        // Acceptance: `a + b * c` parses as `a + (b * c)` per C99
+        // §6.5.5/§6.5.6.
+        let src = "a + b * c";
+        let (e, cap) = parse_expr_str(src);
+        assert!(cap.diagnostics().is_empty(), "valid expr must be diag-free");
+        match e.kind {
+            ExprKind::Binary { op: BinOp::Add, lhs, rhs } => {
+                match lhs.kind {
+                    ExprKind::Ident(_) => {}
+                    other => panic!("expected `a` on lhs, got {other:?}"),
+                }
+                match rhs.kind {
+                    ExprKind::Binary { op: BinOp::Mul, lhs: inner_l, rhs: inner_r } => {
+                        assert!(matches!(inner_l.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_r.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("expected `b * c` on rhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `+`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assignment_is_right_associative() {
+        // Acceptance: `a = b = c` parses as `a = (b = c)` per §6.5.16.
+        let (e, _cap) = parse_expr_str("a = b = c");
+        match e.kind {
+            ExprKind::Assign { op: AssignOp::Eq, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)), "outer lhs must be `a`");
+                match rhs.kind {
+                    ExprKind::Assign { op: AssignOp::Eq, lhs: inner_l, rhs: inner_r } => {
+                        assert!(matches!(inner_l.kind, ExprKind::Ident(_)));
+                        assert!(matches!(inner_r.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("inner rhs must be `b = c`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level assignment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn equality_is_left_associative() {
+        // Acceptance: `a == b != c` parses as `(a == b) != c`.
+        let (e, _cap) = parse_expr_str("a == b != c");
+        match e.kind {
+            ExprKind::Binary { op: BinOp::Ne, lhs, rhs } => {
+                match lhs.kind {
+                    ExprKind::Binary { op: BinOp::Eq, lhs: ll, rhs: lr } => {
+                        assert!(matches!(ll.kind, ExprKind::Ident(_)));
+                        assert!(matches!(lr.kind, ExprKind::Ident(_)));
+                    }
+                    other => panic!("outer lhs must be `a == b`, got {other:?}"),
+                }
+                assert!(matches!(rhs.kind, ExprKind::Ident(_)), "outer rhs must be `c`");
+            }
+            other => panic!("expected top-level `!=`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_precedence_shift_additive_multiplicative() {
+        // `a + b << c * d` parses as `(a + b) << (c * d)` because
+        // `*` > `+` > `<<` in C99 §6.5 precedence.
+        let (e, _cap) = parse_expr_str("a + b << c * d");
+        match e.kind {
+            ExprKind::Binary { op: BinOp::Shl, lhs, rhs } => {
+                match lhs.kind {
+                    ExprKind::Binary { op: BinOp::Add, .. } => {}
+                    other => panic!("shl-lhs must be `a + b`, got {other:?}"),
+                }
+                match rhs.kind {
+                    ExprKind::Binary { op: BinOp::Mul, .. } => {}
+                    other => panic!("shl-rhs must be `c * d`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `<<`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assignment_rhs_folds_arithmetic_inside_it() {
+        // §6.5.16: the RHS of `=` is itself an assignment-expression
+        // — which means every tighter operator (arithmetic, shifts,
+        // etc.) reduces inside it. `a = b + c * d` must tree as
+        // `a = (b + (c * d))`.
+        let (e, _cap) = parse_expr_str("a = b + c * d");
+        match e.kind {
+            ExprKind::Assign { op: AssignOp::Eq, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)));
+                match rhs.kind {
+                    ExprKind::Binary { op: BinOp::Add, lhs: add_l, rhs: add_r } => {
+                        assert!(matches!(add_l.kind, ExprKind::Ident(_)));
+                        match add_r.kind {
+                            ExprKind::Binary { op: BinOp::Mul, .. } => {}
+                            other => panic!("inner rhs must be `c * d`, got {other:?}"),
+                        }
+                    }
+                    other => panic!("rhs must be `b + (c*d)`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `=`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_assignment_eg_plus_eq_is_right_associative() {
+        // `a += b *= c` parses as `a += (b *= c)` — the whole
+        // assignment family shares the same right-associative slot.
+        let (e, _cap) = parse_expr_str("a += b *= c");
+        match e.kind {
+            ExprKind::Assign { op: AssignOp::AddEq, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)));
+                match rhs.kind {
+                    ExprKind::Assign { op: AssignOp::MulEq, .. } => {}
+                    other => panic!("inner rhs must be `b *= c`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `+=`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logical_and_beats_logical_or() {
+        // `a || b && c` parses as `a || (b && c)` (§6.5.13 vs §6.5.14).
+        let (e, _cap) = parse_expr_str("a || b && c");
+        match e.kind {
+            ExprKind::Binary { op: BinOp::LogOr, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)));
+                match rhs.kind {
+                    ExprKind::Binary { op: BinOp::LogAnd, .. } => {}
+                    other => panic!("inner rhs must be `b && c`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `||`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bitwise_precedence_matches_c99() {
+        // C99 orders bitwise from tightest to loosest: `&` > `^` > `|`.
+        // `a | b ^ c & d` therefore parses as `a | (b ^ (c & d))`.
+        let (e, _cap) = parse_expr_str("a | b ^ c & d");
+        match e.kind {
+            ExprKind::Binary { op: BinOp::BitOr, lhs, rhs } => {
+                assert!(matches!(lhs.kind, ExprKind::Ident(_)));
+                match rhs.kind {
+                    ExprKind::Binary { op: BinOp::BitXor, lhs: xor_l, rhs: xor_r } => {
+                        assert!(matches!(xor_l.kind, ExprKind::Ident(_)));
+                        match xor_r.kind {
+                            ExprKind::Binary { op: BinOp::BitAnd, .. } => {}
+                            other => panic!("inner must be `c & d`, got {other:?}"),
+                        }
+                    }
+                    other => panic!("rhs must be `b ^ (c & d)`, got {other:?}"),
+                }
+            }
+            other => panic!("expected top-level `|`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paren_delegates_to_full_expression_parser() {
+        // Regression against the old primary-only stub: the inner
+        // production must now reduce a full assignment expression,
+        // so `(a + b)` yields a `Paren` wrapping a `Binary(Add, …)`.
+        let (e, _cap) = parse_expr_str("(a + b)");
+        match e.kind {
+            ExprKind::Paren(inner) => match inner.kind {
+                ExprKind::Binary { op: BinOp::Add, .. } => {}
+                other => panic!("inner must be `a + b`, got {other:?}"),
+            },
+            other => panic!("expected Paren, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn left_associative_chain_32_deep_does_not_stack_overflow() {
+        // Deep nesting acceptance: a 64-long `1 + 1 + 1 + ...` chain
+        // must parse without blowing the default Rust stack. Each
+        // `+` adds exactly one recursive Pratt frame, so 64 frames is
+        // still well below `RUST_MIN_STACK`.
+        let n = 64;
+        let src: String =
+            std::iter::once("1".to_owned()).chain((0..n).map(|_| " + 1".to_owned())).collect();
+        let (e, _cap) = parse_expr_str(&src);
+        // Count the left-leaning Add spine — for N trailing `+ 1`s
+        // we must have exactly N Add nodes, the leftmost of which
+        // wraps an `IntLit`.
+        let mut depth = 0;
+        let mut cur = e;
+        while let ExprKind::Binary { op: BinOp::Add, lhs, .. } = cur.kind {
+            depth += 1;
+            cur = *lhs;
+        }
+        assert_eq!(depth, n, "expected {n} left-leaning Add nodes, got {depth}");
+        assert!(matches!(cur.kind, ExprKind::IntLit { .. }));
+    }
+
+    #[test]
+    fn paren_nesting_32_deep_does_not_stack_overflow() {
+        // `((((...((a))...))))` with 40 parens on each side — each
+        // paren layer is one primary recursion + one Pratt frame, so
+        // 40 layers stays well under the default stack.
+        let depth = 40;
+        let mut src = String::new();
+        for _ in 0..depth {
+            src.push('(');
+        }
+        src.push('a');
+        for _ in 0..depth {
+            src.push(')');
+        }
+        let (mut e, _cap) = parse_expr_str(&src);
+        for _ in 0..depth {
+            match e.kind {
+                ExprKind::Paren(inner) => e = *inner,
+                other => panic!("expected Paren wrapper, got {other:?}"),
+            }
+        }
+        assert!(matches!(e.kind, ExprKind::Ident(_)));
+    }
+
+    #[test]
+    fn right_associative_assignment_chain_is_deeply_nested() {
+        // `a = a = a = ... = a` (32 `=`s) — right-associative so the
+        // AST leans rightward; each `=` adds one Pratt frame.
+        let n = 32;
+        let mut src = String::new();
+        for _ in 0..n {
+            src.push_str("a = ");
+        }
+        src.push('a');
+        let (mut e, _cap) = parse_expr_str(&src);
+        let mut seen = 0;
+        while let ExprKind::Assign { op: AssignOp::Eq, rhs, .. } = e.kind {
+            seen += 1;
+            e = *rhs;
+        }
+        assert_eq!(seen, n, "expected {n} right-leaning `=` nodes, got {seen}");
+        assert!(matches!(e.kind, ExprKind::Ident(_)));
+    }
+
+    #[test]
+    fn binary_span_covers_full_operand_range() {
+        // The folded node's span must stretch from the LHS start to
+        // the RHS end so that later diagnostics can underline the
+        // whole sub-expression cleanly.
+        let src = "a + b";
+        let (e, _cap) = parse_expr_str(src);
+        assert_eq!(e.span.lo.0, 0, "span must start at `a`");
+        assert_eq!(e.span.hi.0, 5, "span must end at the end of `b`");
+    }
+
+    /// Suppress `unused` for the ident-lookup helper above: it's
+    /// currently only exercised by this follow-up test. Keeping it
+    /// as a helper instead of inlining makes the downstream unary /
+    /// postfix tests easier to add without rewriting everything.
+    #[test]
+    fn ident_helper_smoke() {
+        let (mut sess, fid, _cap) = mk_session("a - b");
+        let pps = lex_ascii(fid, "a - b");
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_expression(&mut parser).expect("a - b parses");
+        let interner = &parser.session.interner;
+        assert_bin_ident(&e, BinOp::Sub, "a", "b", interner);
     }
 }
