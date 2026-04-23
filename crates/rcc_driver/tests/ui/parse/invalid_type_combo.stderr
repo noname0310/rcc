@@ -1,0 +1,5 @@
+[E0061] Error: cannot combine `long` with `short`
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/invalid_type_combo.c:1:7 ]
+   │
+ 1 │ short long x;
+───╯

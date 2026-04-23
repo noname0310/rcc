@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 05-29: Parser UI tests
 
 **Phase:** 05-parse    **Depends on:** 05-27    **Milestone:** M2

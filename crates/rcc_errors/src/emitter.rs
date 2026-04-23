@@ -41,7 +41,7 @@ impl StderrEmitter {
     }
 
     fn write_diagnostic<W: Write>(&self, d: &Diagnostic, mut w: W) -> std::io::Result<()> {
-        if d.labels.is_empty() {
+        if d.labels.is_empty() || d.labels.iter().any(|l| l.span.file == rcc_span::FileId::DUMMY) {
             return self.write_unspanned(d, &mut w);
         }
 

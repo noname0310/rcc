@@ -1,0 +1,5 @@
+Error: expected `=` after designator chain
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/missing_eq_designator.c:1:16 ]
+   │
+ 1 │ int a[] = {[0] 42};
+───╯

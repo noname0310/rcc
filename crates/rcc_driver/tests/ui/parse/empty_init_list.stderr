@@ -1,0 +1,7 @@
+Error: empty initializer list is invalid in C99
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/empty_init_list.c:1:9 ]
+   │
+ 1 │ int x = {};
+   │         │  
+   │         ╰── expected at least one initializer inside `{`
+───╯

@@ -70,6 +70,12 @@ pub fn parse(session: &mut Session, tokens: Vec<PpToken>) -> Option<TranslationU
                             .emit();
                     }
                     parser.recover_to_sync();
+                    // If recover_to_sync didn't advance (e.g. stuck on
+                    // a stray `}` at file scope), force-skip one token
+                    // to guarantee progress and prevent infinite loops.
+                    if parser.cursor == before {
+                        parser.bump();
+                    }
                 }
             }
         }

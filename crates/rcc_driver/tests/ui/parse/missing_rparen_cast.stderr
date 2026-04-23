@@ -1,0 +1,17 @@
+[E0062] Error: abstract declarator cannot contain a name
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/missing_rparen_cast.c:1:14 ]
+   │
+ 1 │ int x = (int y;
+───╯
+Error: expected `)` after type name in cast / compound literal
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/missing_rparen_cast.c:1:15 ]
+   │
+ 1 │ int x = (int y;
+   │         ┬     ─  
+   │         ╰──────── type name begins here
+───╯
+Error: expected primary expression
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/missing_rparen_cast.c:1:15 ]
+   │
+ 1 │ int x = (int y;
+───╯

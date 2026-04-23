@@ -1,0 +1,10 @@
+Error: expected primary expression
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/double_error_recovery.c:2:13 ]
+   │
+ 2 │     int x = ;
+───╯
+Error: expected primary expression
+   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/double_error_recovery.c:3:13 ]
+   │
+ 3 │     int y = ;
+───╯

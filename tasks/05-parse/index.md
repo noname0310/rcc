@@ -37,7 +37,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [26-kr-declarations](26-kr-declarations.md)
 - [x] [27-error-recovery](27-error-recovery.md)
 - [x] [28-unit-tests-grammar](28-unit-tests-grammar.md)
-- [ ] [29-ui-tests](29-ui-tests.md)
+- [x] [29-ui-tests](29-ui-tests.md)
 - [ ] [30-ctestsuite-parse-smoke](30-ctestsuite-parse-smoke.md)
 
 ## Downstream

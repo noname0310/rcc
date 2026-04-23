@@ -423,21 +423,21 @@ fn s6_7_8_deeply_nested_init() {
 fn s6_7_8_missing_comma_in_init_list() {
     // Missing comma between elements — should produce an error but recover.
     let errs = parse_err("int a[2] = {1 2};");
-    assert!(errs.len() >= 1, "should detect missing comma or unexpected token");
+    assert!(!errs.is_empty(), "should detect missing comma or unexpected token");
 }
 
 #[test]
 fn s6_7_8_missing_rbracket_in_designator() {
     // [expr without closing ] — should produce error diagnostic.
     let errs = parse_err("int a[2] = { [0 = 1 };");
-    assert!(errs.len() >= 1, "should detect missing `]`");
+    assert!(!errs.is_empty(), "should detect missing `]`");
 }
 
 #[test]
 fn s6_7_8_designator_dot_no_ident() {
     // `.` not followed by an identifier — diagnostic expected.
     let errs = parse_err("struct S { int x; }; struct S s = { . = 1 };");
-    assert!(errs.len() >= 1, "should detect missing ident after `.`");
+    assert!(!errs.is_empty(), "should detect missing ident after `.`");
 }
 
 #[test]
