@@ -39,6 +39,7 @@ use rcc_lexer::{PpToken, PpTokenKind, Punct};
 use rcc_span::{BytePos, Interner, SourceMap, Span};
 
 use crate::expand::expand_line;
+use crate::line_map::LineMap;
 use crate::macros::MacroTable;
 
 /// Evaluate the controlling expression of a `#if` or `#elif`
@@ -64,6 +65,7 @@ pub fn eval_if(
     interner: &mut Interner,
     handler: &mut Handler,
     macros: &MacroTable,
+    line_map: &LineMap,
     gnu_va_args_elision: bool,
 ) -> Result<i128, Diagnostic> {
     // Span used for diagnostics pointing at "the whole expression"
@@ -80,8 +82,15 @@ pub fn eval_if(
     let pre_expansion = resolve_defined(tokens, source_map, macros, interner, zero_one)?;
 
     // Step 2: run the ordinary macro-expansion pipeline.
-    let expanded =
-        expand_line(source_map, interner, handler, macros, pre_expansion, gnu_va_args_elision);
+    let expanded = expand_line(
+        source_map,
+        interner,
+        handler,
+        macros,
+        line_map,
+        pre_expansion,
+        gnu_va_args_elision,
+    );
 
     // Step 3: replace any remaining identifier / keyword with `0`.
     let numeric = identifiers_to_zero(expanded, zero_one);
@@ -883,7 +892,8 @@ mod tests {
         macros: &MacroTable,
     ) -> Result<i128, Diagnostic> {
         let sm_arc = Arc::clone(&sess.source_map);
-        eval_if(tokens, &sm_arc, &mut sess.interner, &mut sess.handler, macros, false)
+        let line_map = LineMap::new();
+        eval_if(tokens, &sm_arc, &mut sess.interner, &mut sess.handler, macros, &line_map, false)
     }
 
     // ── Literal arithmetic ────────────────────────────────────────

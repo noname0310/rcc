@@ -51,6 +51,7 @@ use rcc_errors::{
 use rcc_lexer::{tokenize, PpNumberKind, PpToken, PpTokenKind, Punct, StringEncoding};
 use rcc_span::{BytePos, Interner, SourceMap, Span, Symbol};
 
+use crate::line_map::LineMap;
 use crate::macros::{BuiltinMacro, HideSet, MacroKind, MacroTable, VA_ARGS_NAME};
 
 /// Token paired with its Prosser hide set. The hide set travels
@@ -88,14 +89,22 @@ pub fn expand_line(
     interner: &mut Interner,
     handler: &mut Handler,
     macros: &MacroTable,
+    line_map: &LineMap,
     line: Vec<PpToken>,
     gnu_va_args_elision: bool,
 ) -> Vec<PpToken> {
     let input: Vec<ExpToken> =
         line.into_iter().map(|t| ExpToken { tok: t, hide: FxHashSet::default() }).collect();
     let va_args_sym = interner.intern(VA_ARGS_NAME);
-    let mut exp =
-        Expander { source_map, interner, handler, macros, va_args_sym, gnu_va_args_elision };
+    let mut exp = Expander {
+        source_map,
+        interner,
+        handler,
+        macros,
+        line_map,
+        va_args_sym,
+        gnu_va_args_elision,
+    };
     exp.expand(input).into_iter().map(|et| et.tok).collect()
 }
 
@@ -104,6 +113,9 @@ struct Expander<'a> {
     interner: &'a mut Interner,
     handler: &'a mut Handler,
     macros: &'a MacroTable,
+    /// `#line` overrides consulted by `__FILE__` / `__LINE__`
+    /// expansion (task 04-15).
+    line_map: &'a LineMap,
     /// Interned symbol for `__VA_ARGS__` — compared against body
     /// identifiers to detect the variadic pseudo-parameter.
     va_args_sym: Symbol,
@@ -694,7 +706,12 @@ impl Expander<'_> {
             BuiltinMacro::File => {
                 let path_text = {
                     let sm = self.source_map.read().unwrap();
-                    sm.file(origin_span.file).name.display().to_string()
+                    // Task 04-15: `#line N "name"` overrides the
+                    // reported file name. The effective file is the
+                    // origin's real file unless a `#line` override
+                    // is active at this physical line.
+                    let eff = self.line_map.effective_file(&sm, origin_span.file, origin_span.lo);
+                    sm.file(eff).name.display().to_string()
                 };
                 let mut body = String::with_capacity(path_text.len() + 2);
                 body.push('"');
@@ -711,7 +728,11 @@ impl Expander<'_> {
             BuiltinMacro::Line => {
                 let line_no = {
                     let sm = self.source_map.read().unwrap();
-                    sm.lookup_line_col(origin_span.file, origin_span.lo).line
+                    // Task 04-15: `#line N` renumbers subsequent
+                    // physical lines. `effective_line` falls through
+                    // to the physical line when no override is
+                    // active.
+                    self.line_map.effective_line(&sm, origin_span.file, origin_span.lo)
                 };
                 (PpTokenKind::PpNumber(PpNumberKind::Integer), line_no.to_string())
             }
@@ -1073,7 +1094,8 @@ mod tests {
     fn run_expand(sess: &mut Session, macros: &MacroTable, line: Vec<PpToken>) -> Vec<PpToken> {
         let sm_arc = Arc::clone(&sess.source_map);
         let elide = sess.opts.gnu_va_args_elision;
-        expand_line(&sm_arc, &mut sess.interner, &mut sess.handler, macros, line, elide)
+        let line_map = LineMap::new();
+        expand_line(&sm_arc, &mut sess.interner, &mut sess.handler, macros, &line_map, line, elide)
     }
 
     // ── Acceptance ──────────────────────────────────────────────────

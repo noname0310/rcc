@@ -48,6 +48,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0026, E0026_DESC),
     (E0027, E0027_DESC),
     (E0028, E0028_DESC),
+    (E0029, E0029_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -215,6 +216,14 @@ const E0027_DESC: &str = "cannot redefine or undefine a predefined macro";
 /// and malformed integer literals.
 pub const E0028: &str = "E0028";
 const E0028_DESC: &str = "invalid #if expression";
+
+/// `#line` argument out of range.
+///
+/// C99 §6.10.4p3: the digit sequence of a `#line` directive "shall
+/// not specify zero, nor a number greater than 2147483647". Both
+/// bounds are constraint violations and carry this code.
+pub const E0029: &str = "E0029";
+const E0029_DESC: &str = "`#line` argument out of range";
 
 #[cfg(test)]
 mod tests {

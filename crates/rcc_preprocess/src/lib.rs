@@ -22,6 +22,7 @@ pub mod expand;
 pub mod guard;
 pub mod if_eval;
 pub mod include;
+pub mod line_map;
 pub mod line_stream;
 pub mod macros;
 
@@ -31,6 +32,7 @@ pub use expand::expand_line;
 pub use guard::detect_guard;
 pub use if_eval::eval_if;
 pub use include::{detect_pragma_once, resolve_header, strip_header_delimiters};
+pub use line_map::{LineMap, LineOverride};
 pub use line_stream::LineStream;
 pub use macros::{
     define_macro, define_object_like, undef_user, BuiltinMacro, HideSet, MacroDef, MacroKind,
@@ -53,6 +55,10 @@ pub struct Preprocessor<'a> {
     pub include_guards: FxHashMap<FileId, Symbol>,
     /// Files that should be processed at most once (`#pragma once`).
     pub pragma_once: FxHashMap<FileId, ()>,
+    /// Per-file `#line` overrides that retarget `__FILE__` /
+    /// `__LINE__` expansion (task 04-15). The lexer is unchanged; the
+    /// built-in expander consults this map when computing values.
+    pub line_overrides: LineMap,
     /// Set once [`Self::install_cli_defines`] + [`Self::install_predefined`]
     /// have seeded the macro table. `run()` is re-entered for every
     /// `#include`d file and must install those entries *exactly* once
@@ -69,6 +75,7 @@ impl<'a> Preprocessor<'a> {
             macros: MacroTable::default(),
             include_guards: FxHashMap::default(),
             pragma_once: FxHashMap::default(),
+            line_overrides: LineMap::new(),
             predefined_installed: false,
         }
     }
@@ -172,6 +179,7 @@ impl<'a> Preprocessor<'a> {
             &mut self.session.interner,
             &mut self.session.handler,
             &self.macros,
+            &self.line_overrides,
             line,
             gnu_va_args_elision,
         )
@@ -349,13 +357,69 @@ impl<'a> Preprocessor<'a> {
                     self.session.handler.emit(&diag);
                 }
             }
-            // Other directives (Include / Line / Error / Pragma) are
-            // parsed-but-not-dispatched here; later tasks (04-15
-            // #line, 04-16 #error/pragma) take them. Conditional
-            // variants are routed above.
+            Ok(directive::Directive::Line { span, line, file }) => {
+                self.apply_line_directive(span, line, file);
+            }
+            // Other directives (Include / Error / Pragma) are
+            // parsed-but-not-dispatched here; task 04-16 takes
+            // `#error`/`#pragma`. Conditional variants are routed
+            // above.
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
         }
+    }
+
+    /// Install a `#line` override driven by a [`directive::Directive::Line`].
+    ///
+    /// The physical line of the `#line` directive itself is extracted
+    /// from `span.lo` via the source map; the override takes effect
+    /// on the *following* physical line (§6.10.4p2). When `file` is
+    /// `Some`, a virtual [`rcc_span::SourceFile`] is synthesised so
+    /// `__FILE__` has a concrete id to dereference even if the named
+    /// file does not exist in the `SourceMap`; when `file` is `None`
+    /// the directive inherits the most recent override's file id
+    /// (or the real file if none is active).
+    ///
+    /// `#line 0` and `#line N` for `N > 2147483647` are rejected with
+    /// E0029 per §6.10.4p3 and no override is installed.
+    fn apply_line_directive(&mut self, span: Span, line: u32, file: Option<String>) {
+        // §6.10.4p3: `0 < N <= 2147483647`. `u32::parse` already
+        // capped at 4294967295, so we only have to guard the low and
+        // high ends; `line as i64` keeps the check straightforward.
+        if line == 0 || line > 2_147_483_647 {
+            let diag = line_out_of_range(span);
+            self.session.handler.emit(&diag);
+            return;
+        }
+
+        let directive_file = span.file;
+        let directive_phys_line = {
+            let sm = self.session.source_map.read().unwrap();
+            sm.lookup_line_col(directive_file, span.lo).line
+        };
+        let start = directive_phys_line.saturating_add(1);
+
+        let file_id = match file {
+            Some(name) => {
+                // §6.10.4p4 / plan §15: drop into a virtual file with
+                // empty contents if the override name doesn't
+                // correspond to a real source file. Matching against
+                // the existing `SourceMap` is intentionally *not*
+                // attempted — `#line` names are usually generator-
+                // relative paths that happen to collide with real
+                // ones only by accident. Keeping every override in
+                // its own virtual file makes `__FILE__` round-trip
+                // the exact spelling the directive requested.
+                let mut sm = self.session.source_map.write().unwrap();
+                sm.add_file(PathBuf::from(name), Arc::from(""))
+            }
+            None => self.line_overrides.inherited_file(directive_file, start),
+        };
+
+        self.line_overrides.push(
+            directive_file,
+            LineOverride { start_physical_line: start, logical_line: line, file_id },
+        );
     }
 
     /// Drive [`CondStack`] for a conditional-control directive. Called
@@ -491,6 +555,7 @@ impl<'a> Preprocessor<'a> {
             &mut self.session.interner,
             &mut self.session.handler,
             &self.macros,
+            &self.line_overrides,
             gnu_va_args_elision,
         ) {
             Ok(v) => Some(v),
@@ -559,6 +624,26 @@ fn needs_elif_eval(cond: &cond_stack::CondStack) -> bool {
     // the top frame's `taken` / `else_seen` flags; expose them via
     // a tiny accessor-less peek.
     cond.top_needs_eval().unwrap_or(false)
+}
+
+/// Build the E0029 diagnostic for a `#line` argument outside the
+/// §6.10.4p3 permitted range (`1..=2_147_483_647`).
+fn line_out_of_range(span: Span) -> rcc_errors::Diagnostic {
+    use rcc_errors::{codes::E0029, Diagnostic, Label, Level};
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0029),
+        message: "`#line` argument out of range".into(),
+        labels: vec![Label {
+            span,
+            message: "must be between 1 and 2147483647".into(),
+            primary: true,
+        }],
+        notes: vec!["C99 §6.10.4p3: the digit sequence shall not specify zero, \
+             nor a number greater than 2147483647"
+            .into()],
+        help: vec![],
+    }
 }
 
 /// Render the host's current UTC wall-clock time as the two strings
@@ -1329,6 +1414,109 @@ dead1
             diags.iter().any(|d| d.code == Some(E0015)),
             "bare `#ifdef` must carry E0015, got {diags:?}"
         );
+    }
+
+    // ── `#line` directive (task 04-15) ──────────────────────────────
+
+    use rcc_errors::codes::{E0015, E0029};
+
+    #[test]
+    fn acceptance_line_directive_overrides_line_number() {
+        // `#line 100` on physical line 1 ⇒ the next physical line
+        // (where `__LINE__` sits) is renumbered to 100. §6.10.4p2.
+        let (mut sess, id, cap) = seed("#line 100\n__LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "100");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn acceptance_line_directive_increments_per_newline() {
+        // After `#line 100`, __LINE__ on the next line is 100, the one
+        // after that is 101: the physical-line step is preserved.
+        let (mut sess, id, cap) = seed("#line 100\n__LINE__\n__LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "100101");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn acceptance_line_directive_overrides_file_name() {
+        // `#line 100 "foo.c"` renumbers the following physical line
+        // as 100 in "foo.c". The `__FILE__` on line 2 expands to
+        // `"foo.c"` and the `__LINE__` on line 3 is 101 (100 + the
+        // one-newline physical step from line 2 to line 3).
+        let (mut sess, id, cap) = seed_at("real.c", "#line 100 \"foo.c\"\n__FILE__\n__LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"foo.c\"101");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn acceptance_line_directive_first_next_line_matches_override() {
+        // Minimal shape from the task's Acceptance line: `#line 100
+        // "foo.c"` → the next `__LINE__` is 100 and the next
+        // `__FILE__` is `"foo.c"`. Both tokens sit on physical line 2.
+        let (mut sess, id, cap) = seed_at("real.c", "#line 100 \"foo.c\"\n__LINE__ __FILE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "100\"foo.c\"");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn line_directive_without_filename_inherits_previous_override() {
+        // `#line 100 "foo.c"` installs foo.c; a later `#line 50` with
+        // no filename must keep `__FILE__` pointing at foo.c and only
+        // renumber — §6.10.4p3.
+        //
+        // Layout:
+        //   line 1  #line 100 "foo.c"
+        //   line 2  __FILE__         → "foo.c"
+        //   line 3  #line 50         (override start=4, file inherited = foo.c)
+        //   line 4  __FILE__         → "foo.c"
+        //   line 5  __LINE__         → 50 + (5 - 4) = 51
+        let (mut sess, id, cap) =
+            seed("#line 100 \"foo.c\"\n__FILE__\n#line 50\n__FILE__\n__LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"foo.c\"\"foo.c\"51");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn line_directive_zero_is_rejected_with_e0029() {
+        // C99 §6.10.4p3: the digit sequence "shall not specify zero".
+        let (mut sess, id, cap) = seed("#line 0\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0029 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0029));
+    }
+
+    #[test]
+    fn line_directive_non_numeric_is_rejected_with_e0015() {
+        let (mut sess, id, cap) = seed("#line abc\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        pp.run(id);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "exactly one E0015 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0015));
+    }
+
+    #[test]
+    fn line_directive_synthesises_virtual_file_for_unknown_name() {
+        // The override file does not exist on disk; `__FILE__` must
+        // still render as a string literal naming "generated.c".
+        let (mut sess, id, cap) = seed("#line 1 \"generated.c\"\n__FILE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"generated.c\"");
+        assert!(cap.diagnostics().is_empty());
     }
 
     #[test]

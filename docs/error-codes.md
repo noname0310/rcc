@@ -396,3 +396,17 @@ Identifiers that survive macro expansion are **not** an error —
 The `defined` operator sees raw spellings before expansion, which
 is how `#if defined FOO` can distinguish an undefined `FOO` from
 one `#define FOO 0`'d to zero.
+
+## E0029 — `#line` argument out of range
+
+C99 §6.10.4p3: the digit sequence of a `#line` directive "shall not
+specify zero, nor a number greater than 2147483647". Both bounds
+are constraint violations.
+
+```c
+#line 0                        // error[E0029]: `#line` argument out of range
+#line 2147483648               // error[E0029]: `#line` argument out of range
+```
+
+A missing or non-numeric argument (`#line`, `#line abc`) is a
+different error — see E0015.
