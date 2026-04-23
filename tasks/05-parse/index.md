@@ -26,7 +26,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [16-statements-switch-case](16-statements-switch-case.md)
 - [x] [17-statements-jumps](17-statements-jumps.md)
 - [x] [18-declarations-decl-specs](18-declarations-decl-specs.md)
-- [ ] [19-declarator-tree](19-declarator-tree.md)
+- [~] [19-declarator-tree](19-declarator-tree.md)
 - [ ] [20-abstract-declarator](20-abstract-declarator.md)
 - [ ] [21-typedef-name-hack](21-typedef-name-hack.md)
 - [ ] [22-struct-union-fields](22-struct-union-fields.md)

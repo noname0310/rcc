@@ -25,7 +25,7 @@ mod scope;
 mod stmt;
 mod token;
 
-pub use decl::parse_decl_specs;
+pub use decl::{parse_decl_specs, parse_declarator};
 pub use expr::{
     parse_assignment_expression, parse_expr_bp, parse_expression, parse_postfix,
     parse_prefix_unary, parse_primary,

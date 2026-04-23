@@ -50,7 +50,10 @@
 //! `typedef struct S { ... } S` fixture in this task without pulling
 //! in field-list / enumerator-list parsing.
 
-use rcc_ast::{DeclSpecs, EnumSpec, RecordKind, RecordSpec, StorageClass, TypeSpec};
+use rcc_ast::{
+    ArrayDeclarator, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Expr, FunctionDeclarator,
+    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeQuals, TypeSpec,
+};
 use rcc_errors::codes;
 use rcc_lexer::Punct;
 use rcc_span::{Span, Symbol};
@@ -720,6 +723,442 @@ fn skip_brace_body(p: &mut Parser<'_>) -> Span {
 const _SYMBOL_IS_LIVE: fn(Symbol) -> Symbol = |s| s;
 
 // ─────────────────────────────────────────────────────────────────────
+//  Declarator (C99 §6.7.5)
+// ─────────────────────────────────────────────────────────────────────
+//
+// The declarator syntax encodes a nested chain of derivations applied
+// to an identifier:
+//
+//     declarator        ::= pointer? direct-declarator
+//     direct-declarator ::= IDENT
+//                         | `(` declarator `)`
+//                         | direct-declarator `[` array-stuff `]`
+//                         | direct-declarator `(` param-list? `)`
+//                         | direct-declarator `(` id-list? `)`   (K&R)
+//     pointer           ::= `*` type-qualifier-list? pointer?
+//
+// C99 §6.7.5p4 defines the *type* of an identifier by reading its
+// declarator inside-out: start at the identifier, then at each step
+// wrap with whatever construct the next surrounding level names.
+// Suffixes (`[N]`, `(args)`) of a direct-declarator apply before any
+// leading pointer of the same declarator (suffixes bind tighter than
+// prefix `*`), and a nested `( declarator )` contributes its entire
+// chain as one inner atom.
+//
+// We store the resulting chain OUTER-TO-INNER — i.e. the first element
+// is the operation that describes the identifier's own shape ("array
+// of 3", "pointer to"), the last is the innermost wrap around the
+// element type. For `int (*fp[3])(int, int)` the chain is therefore
+//
+//     [Array(3), Pointer, Function(int, int)]
+//
+// matching the task 05-19 acceptance spec. Array suffixes from a
+// single direct-declarator are accumulated in source order because
+// `a[10][20]` reads as "a is array of 10 of array of 20 of …" —
+// `[10]` is the outer layer (applied first to the ident `a`), `[20]`
+// is inner. Leading pointers of the same declarator, in contrast,
+// reverse on the way in: `* *const p[3]` makes `p` an array-of-3 of
+// const-pointer-to-pointer-to-T, so the `* *const` prefix folds into
+// the chain *after* the direct-declarator's own suffixes and in
+// rightmost-first order.
+
+/// Parse a C99 *declarator* (§6.7.5), including leading pointer
+/// modifiers, the identifier (or nested `(declarator)`), and any
+/// trailing array / function suffixes.
+///
+/// The returned [`Declarator::derived`] chain is outer-to-inner as
+/// described above. Abstract declarators (identifier omitted) are
+/// out of scope for this task — task 05-20 adds them — but the
+/// parameter-list path already tolerates a missing name so that
+/// prototype parameters like `int f(int, char)` work without
+/// recursing into full abstract-declarator territory.
+pub fn parse_declarator(p: &mut Parser<'_>) -> Option<Declarator> {
+    let start = p.cur_span();
+    let pointer_prefix = parse_pointer_prefix(p);
+    let (name, mut chain) = parse_direct_declarator(p)?;
+    // Pointer prefix modifiers wrap the *whole* direct-declarator from
+    // the outside in the source but fold INSIDE of its suffixes in the
+    // inside-out type, so they append after the direct-declarator's
+    // chain. Within the prefix run itself, the rightmost `*` is the
+    // closest to the direct-declarator and therefore applies first:
+    // reverse the source order when stitching.
+    chain.extend(pointer_prefix.into_iter().rev());
+    let end = last_consumed_span(p, start);
+    Some(Declarator { name, derived: chain, span: start.to(end) })
+}
+
+/// Consume zero or more `*` pointer tokens together with any
+/// intervening *type-qualifier-list*s and return them in **source
+/// order** — leftmost `*` first. The caller is responsible for
+/// folding them into the final chain in the right direction (see
+/// [`parse_declarator`]).
+fn parse_pointer_prefix(p: &mut Parser<'_>) -> Vec<DerivedDeclarator> {
+    let mut out = Vec::new();
+    while matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Star))) {
+        p.bump();
+        let quals = parse_type_qualifier_list(p);
+        out.push(DerivedDeclarator::Pointer(quals));
+    }
+    out
+}
+
+/// Consume a *type-qualifier-list* (C99 §6.7.3): a possibly-empty run
+/// of `const` / `volatile` / `restrict`. Duplicate qualifiers are
+/// accepted but warned (W0004), matching the specifier-list policy
+/// in [`parse_decl_specs`].
+fn parse_type_qualifier_list(p: &mut Parser<'_>) -> TypeQuals {
+    let mut quals = TypeQuals::default();
+    while let Some(tok) = p.peek() {
+        let span = tok.span;
+        let slot: &mut bool = match &tok.kind {
+            TokenKind::Keyword(Keyword::Const) => &mut quals.const_,
+            TokenKind::Keyword(Keyword::Volatile) => &mut quals.volatile,
+            TokenKind::Keyword(Keyword::Restrict) => &mut quals.restrict,
+            _ => break,
+        };
+        let name = match tok.kind {
+            TokenKind::Keyword(Keyword::Const) => "const",
+            TokenKind::Keyword(Keyword::Volatile) => "volatile",
+            TokenKind::Keyword(Keyword::Restrict) => "restrict",
+            _ => unreachable!(),
+        };
+        if *slot {
+            p.session
+                .handler
+                .struct_warn(span, format!("duplicate `{name}` type qualifier"))
+                .code(codes::W0004)
+                .emit();
+        } else {
+            *slot = true;
+        }
+        p.bump();
+    }
+    quals
+}
+
+/// Result of parsing a direct-declarator: the optional identifier
+/// (name + its span) and the chain of suffix derivations collected on
+/// the way out, in outer-to-inner order.
+type DirectDecl = (Option<(Symbol, Span)>, Vec<DerivedDeclarator>);
+
+/// Parse a *direct-declarator*: the identifier atom (or a nested
+/// `( declarator )`) followed by any number of `[...]` / `(...)`
+/// suffixes.
+///
+/// Returns `(name, chain)` where `chain` is outer-to-inner starting
+/// from whatever operation the direct-declarator's outermost suffix
+/// contributes. A missing atom (neither `IDENT` nor `(` present) is
+/// reported as an error and `None` is returned so the outer declarator
+/// parser can bail. Parameter declarators that may legally lack a
+/// name go through [`parse_param_declarator`] instead.
+fn parse_direct_declarator(p: &mut Parser<'_>) -> Option<DirectDecl> {
+    let (name, mut chain) = match p.peek() {
+        Some(tok) => match tok.kind {
+            TokenKind::Ident(sym) => {
+                let span = tok.span;
+                p.bump();
+                (Some((sym, span)), Vec::new())
+            }
+            TokenKind::Punct(Punct::LParen) => {
+                p.bump();
+                let inner = parse_declarator(p)?;
+                expect_rparen(p, "declarator");
+                (inner.name, inner.derived)
+            }
+            _ => {
+                let sp = tok.span;
+                p.session.handler.struct_err(sp, "expected identifier or `(` in declarator").emit();
+                return None;
+            }
+        },
+        None => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected declarator but found end of input")
+                .emit();
+            return None;
+        }
+    };
+    parse_declarator_suffixes(p, &mut chain);
+    Some((name, chain))
+}
+
+/// Run the trailing `[...]` / `(...)` suffix loop of a direct-
+/// declarator, appending one [`DerivedDeclarator`] per suffix to
+/// `chain`. Each suffix is outer to everything already in the chain
+/// from a previous suffix (so `a[10][20]` ends up as
+/// `[Array(10), Array(20)]`, the outer `[10]` wrapping the already-
+/// present inner chain).
+fn parse_declarator_suffixes(p: &mut Parser<'_>, chain: &mut Vec<DerivedDeclarator>) {
+    while let Some(tok) = p.peek() {
+        match tok.kind {
+            TokenKind::Punct(Punct::LBracket) => {
+                let arr = parse_array_suffix(p);
+                chain.push(DerivedDeclarator::Array(arr));
+            }
+            TokenKind::Punct(Punct::LParen) => {
+                let func = parse_function_suffix(p);
+                chain.push(DerivedDeclarator::Function(func));
+            }
+            _ => break,
+        }
+    }
+}
+
+/// Parse a `[...]` array-declarator suffix — cursor must be on `[`.
+/// Accepts all C99 forms:
+///
+/// - `[ ]`                         — incomplete / unknown size
+/// - `[ N ]`                       — fixed or VLA runtime size
+/// - `[ * ]`                       — VLA of unspecified size (prototype
+///   scope only; §6.7.5.2p1)
+/// - `[ static qual-list? N ]`     — `static` in array-parameter decl
+/// - `[ qual-list static N ]`
+/// - `[ qual-list N? ]`
+///
+/// `static` and the type-qualifier-list can appear in either order
+/// (§6.7.5.2p1); the loop below accepts any interleaving because later
+/// passes (05-20 abstract declarator, HIR lowering) re-validate shape.
+fn parse_array_suffix(p: &mut Parser<'_>) -> ArrayDeclarator {
+    p.bump(); // `[`
+
+    let mut quals = TypeQuals::default();
+    let mut has_static = false;
+    while let Some(tok) = p.peek() {
+        let span = tok.span;
+        match &tok.kind {
+            TokenKind::Keyword(Keyword::Static) => {
+                if has_static {
+                    p.session
+                        .handler
+                        .struct_warn(span, "duplicate `static` in array declarator")
+                        .code(codes::W0004)
+                        .emit();
+                }
+                has_static = true;
+                p.bump();
+            }
+            TokenKind::Keyword(Keyword::Const)
+            | TokenKind::Keyword(Keyword::Volatile)
+            | TokenKind::Keyword(Keyword::Restrict) => {
+                // Fold into the qualifier set; use the shared helper so
+                // duplicate-warning behaviour stays in one place.
+                let one = parse_type_qualifier_list(p);
+                quals.const_ |= one.const_;
+                quals.volatile |= one.volatile;
+                quals.restrict |= one.restrict;
+            }
+            _ => break,
+        }
+    }
+
+    let mut star = false;
+    let mut size: Option<Expr> = None;
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RBracket)) => {
+            // Empty `[]` — nothing to consume.
+        }
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Star)) => {
+            // `[*]` is VLA-unspecified only when the `*` is the sole
+            // thing inside the brackets. Otherwise it's the start of
+            // an expression like `[*p]`.
+            let after = p.tokens.get(p.cursor + 1);
+            if matches!(after.map(|t| &t.kind), Some(TokenKind::Punct(Punct::RBracket))) {
+                star = true;
+                p.bump();
+            } else {
+                size = crate::expr::parse_assignment_expression(p);
+            }
+        }
+        Some(_) => {
+            size = crate::expr::parse_assignment_expression(p);
+        }
+        None => {}
+    }
+
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RBracket)) => {
+            p.bump();
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `]` to close array declarator")
+                .emit();
+        }
+    }
+
+    ArrayDeclarator { quals, has_static, star, size }
+}
+
+/// Parse a `(...)` function-declarator suffix — cursor must be on
+/// `(`. Distinguishes three shapes permitted by C99 §6.7.5.3p1:
+///
+/// - `()`                       — empty, unspecified parameters
+/// - `(void)`                   — explicit zero-parameter prototype
+/// - `(param , ... , param)`    — prototype, optionally variadic
+///
+/// The K&R identifier-list path is recognised but left empty: a
+/// full implementation lands in task 05-26 which also needs to
+/// disambiguate "unknown ident" vs "typedef-name" at this spot.
+fn parse_function_suffix(p: &mut Parser<'_>) -> FunctionDeclarator {
+    p.bump(); // `(`
+
+    let mut params: Vec<ParamDecl> = Vec::new();
+    let mut is_void = false;
+    let mut variadic = false;
+    let kr_names: Vec<(Symbol, Span)> = Vec::new();
+
+    // `()` — empty parameter list.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+        p.bump();
+        return FunctionDeclarator { params, is_void, variadic, kr_names };
+    }
+
+    // `(void)` — single `void` immediately followed by `)`.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Keyword(Keyword::Void))) {
+        let next = p.tokens.get(p.cursor + 1);
+        if matches!(next.map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+            p.bump();
+            p.bump();
+            is_void = true;
+            return FunctionDeclarator { params, is_void, variadic, kr_names };
+        }
+    }
+
+    loop {
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Ellipsis))) {
+            p.bump();
+            variadic = true;
+            break;
+        }
+        let start = p.cur_span();
+        let specs = parse_decl_specs(p).unwrap_or_default();
+        let declarator = parse_param_declarator(p);
+        let end = last_consumed_span(p, start);
+        params.push(ParamDecl { specs, declarator, span: start.to(end) });
+
+        match p.peek().map(|t| &t.kind) {
+            Some(TokenKind::Punct(Punct::Comma)) => {
+                p.bump();
+                continue;
+            }
+            _ => break,
+        }
+    }
+
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RParen)) => {
+            p.bump();
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `)` to close parameter list")
+                .emit();
+        }
+    }
+
+    FunctionDeclarator { params, is_void, variadic, kr_names }
+}
+
+/// Parse a parameter declarator — the same shape as
+/// [`parse_declarator`] but with the atom slot optional, because a
+/// prototype parameter may omit the identifier entirely (e.g.
+/// `int f(int, char)`). When neither an `IDENT` nor a nested
+/// `( declarator )` is available we return a declarator with
+/// `name = None` and an empty chain; any leading pointer prefix still
+/// folds in normally so `int f(int *, int *const)` continues to work.
+fn parse_param_declarator(p: &mut Parser<'_>) -> Declarator {
+    let start = p.cur_span();
+    let pointer_prefix = parse_pointer_prefix(p);
+
+    let mut name: Option<(Symbol, Span)> = None;
+    let mut chain: Vec<DerivedDeclarator> = Vec::new();
+    if let Some(tok) = p.peek() {
+        match tok.kind {
+            TokenKind::Ident(sym) => {
+                let span = tok.span;
+                p.bump();
+                name = Some((sym, span));
+            }
+            TokenKind::Punct(Punct::LParen) => {
+                // A `(` at the atom position of a parameter declarator
+                // could begin either a nested declarator (concrete,
+                // e.g. `int (*pf)(int)`) or an abstract function-
+                // suffix (`int (int)` — a function-pointer-less
+                // parameter whose type is "function of int"). We only
+                // recurse into a nested declarator when the lookahead
+                // past the `(` looks like the start of another
+                // declarator; otherwise we fall through to the suffix
+                // loop, where the `(` is read as a function suffix.
+                // Full abstract-declarator disambiguation lands in
+                // task 05-20.
+                let looks_nested = looks_like_declarator_start(p, p.cursor + 1);
+                if looks_nested {
+                    p.bump();
+                    if let Some(inner) = parse_declarator(p) {
+                        name = inner.name;
+                        chain = inner.derived;
+                    }
+                    expect_rparen(p, "declarator");
+                }
+            }
+            _ => {}
+        }
+    }
+    parse_declarator_suffixes(p, &mut chain);
+    chain.extend(pointer_prefix.into_iter().rev());
+    let end = last_consumed_span(p, start);
+    Declarator { name, derived: chain, span: start.to(end) }
+}
+
+/// Cheap one-token lookahead to decide whether a `(` inside a
+/// parameter's atom slot starts a nested concrete declarator
+/// (`(*pf)(int)`) or a function suffix on an abstract parameter
+/// (`int(int)`). We treat leading `*` or another `(` — both of which
+/// cannot start a *parameter-declaration* on their own — as hints of
+/// a nested declarator; anything else (a keyword / type-specifier)
+/// is interpreted as the start of a parameter list. This heuristic
+/// is good enough for the subset handled by this task; task 05-20
+/// refines it with full abstract-declarator lookahead.
+fn looks_like_declarator_start(p: &Parser<'_>, at: usize) -> bool {
+    match p.tokens.get(at).map(|t| &t.kind) {
+        Some(TokenKind::Punct(Punct::Star)) => true,
+        Some(TokenKind::Punct(Punct::LParen)) => true,
+        Some(TokenKind::Ident(sym)) => !p.scopes.is_typedef(*sym),
+        _ => false,
+    }
+}
+
+/// Consume a `)` if present, or emit a "expected `)`" diagnostic
+/// pointing at the current cursor position otherwise. Shared between
+/// the nested-declarator and parameter-list call sites so the error
+/// message stays in one place.
+fn expect_rparen(p: &mut Parser<'_>, ctx: &str) {
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RParen)) => {
+            p.bump();
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), format!("expected `)` in {ctx}")).emit();
+        }
+    }
+}
+
+/// Span of the token that was most recently consumed, if any; falls
+/// back to `start` when the parser has not advanced. Used so every
+/// declarator span covers the full run of tokens the parser actually
+/// took without needing to thread an "end" return through every
+/// helper.
+fn last_consumed_span(p: &Parser<'_>, start: Span) -> Span {
+    if p.cursor == 0 {
+        return start;
+    }
+    p.tokens.get(p.cursor - 1).map(|t| t.span).unwrap_or(start)
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  Tests
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1019,5 +1458,396 @@ mod tests {
         let mut parser = Parser::new(&mut sess, tokens);
         let _ = parse_decl_specs(&mut parser).expect("parser returns specs");
         assert_eq!(codes_of(&cap.diagnostics()), vec!["E0061"]);
+    }
+
+    // ── Declarator (C99 §6.7.5) ─────────────────────────────────────
+
+    use rcc_ast::ExprKind;
+
+    /// Parse a declarator from a source slice that contains JUST the
+    /// declarator (no leading declaration specifiers). Returns the
+    /// declarator, the remaining unconsumed token count, and the
+    /// captured diagnostics — the trio every declarator test wants.
+    fn parse_decl(src: &str) -> (Declarator, usize, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let total = tokens.len();
+        let mut parser = Parser::new(&mut sess, tokens);
+        let d = parse_declarator(&mut parser).expect("declarator parses");
+        let remaining = total.saturating_sub(parser.cursor);
+        (d, remaining, cap.diagnostics(), sess)
+    }
+
+    fn assert_name(d: &Declarator, sess: &Session, expected: &str) {
+        let (sym, _) = d.name.as_ref().expect("declarator has a name");
+        assert_eq!(sess.interner.get(*sym), expected);
+    }
+
+    fn int_lit_text(e: &Expr, sess: &Session) -> String {
+        match &e.kind {
+            ExprKind::IntLit { text } => sess.interner.get(*text).to_string(),
+            other => panic!("expected IntLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_ident_is_empty_chain() {
+        // `int x` — the declarator is just `x`. The derivation chain
+        // is empty because there are no pointer / array / function
+        // decorations in the source.
+        let (d, rem, diags, sess) = parse_decl("x");
+        assert_name(&d, &sess, "x");
+        assert!(d.derived.is_empty(), "no derivations: {:?}", d.derived);
+        assert_eq!(rem, 0, "whole input consumed");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn pointer_to_ident_parses() {
+        let (d, _rem, diags, sess) = parse_decl("*p");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(q)] => {
+                assert!(!q.const_ && !q.volatile && !q.restrict);
+            }
+            other => panic!("expected [Pointer], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn pointer_with_qualifier_parses() {
+        // `*const p` — a `const`-qualified pointer. The qualifier sits
+        // on the pointer itself, not on the pointee (§6.7.5.1p1).
+        let (d, _rem, diags, sess) = parse_decl("*const p");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(q)] => {
+                assert!(q.const_ && !q.volatile && !q.restrict);
+            }
+            other => panic!("expected [Pointer(const)], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn pointer_volatile_parses() {
+        let (d, _rem, diags, sess) = parse_decl("*volatile p");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(q)] => {
+                assert!(!q.const_ && q.volatile && !q.restrict);
+            }
+            other => panic!("expected [Pointer(volatile)], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn nested_pointers_reverse_in_chain() {
+        // `* *const p`: reading inside-out from `p`, the nearest token
+        // to `p` is the `*const` (rightmost pointer), so that layer
+        // wraps `p` first — `p` becomes a const-pointer-to-X. The
+        // outer, leftmost `*` then wraps that, giving X = pointer to
+        // T. So p is "const pointer to pointer to T": the directly-
+        // outer layer of p is the const pointer, and the innermost
+        // layer (the pointed-to-pointer) is the plain `*`. In the
+        // outer-to-inner chain representation the const-qualified
+        // pointer comes FIRST.
+        let (d, _rem, diags, sess) = parse_decl("* *const p");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(outer), DerivedDeclarator::Pointer(inner)] => {
+                assert!(outer.const_, "outer pointer is `const` (wraps p directly)");
+                assert!(!inner.const_, "inner pointer has no qualifier");
+            }
+            other => panic!("expected two Pointers, got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn two_dim_array_parses() {
+        // `arr[10][20]` — two array layers, outer-to-inner.
+        let (d, _rem, diags, sess) = parse_decl("arr[10][20]");
+        assert_name(&d, &sess, "arr");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(a10), DerivedDeclarator::Array(a20)] => {
+                assert!(!a10.has_static && !a10.star);
+                assert!(!a20.has_static && !a20.star);
+                let s10 = a10.size.as_ref().expect("size present");
+                let s20 = a20.size.as_ref().expect("size present");
+                assert_eq!(int_lit_text(s10, &sess), "10");
+                assert_eq!(int_lit_text(s20, &sess), "20");
+            }
+            other => panic!("expected two Array derivations, got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn array_incomplete_size_parses() {
+        // `arr[]` — size omitted (§6.7.5.2p1, legal on a declaration
+        // that will be completed by an initializer or at a later
+        // definition).
+        let (d, _rem, diags, _sess) = parse_decl("arr[]");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(a)] => {
+                assert!(a.size.is_none());
+                assert!(!a.has_static);
+                assert!(!a.star);
+            }
+            other => panic!("expected single Array, got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn array_star_vla_parses() {
+        // `arr[*]` — VLA of unspecified size, legal only in a function
+        // prototype scope (§6.7.5.2p1). The declarator parser accepts
+        // the form; the context check is a later task.
+        let (d, _rem, diags, _sess) = parse_decl("arr[*]");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(a)] => {
+                assert!(a.star);
+                assert!(a.size.is_none());
+                assert!(!a.has_static);
+            }
+            other => panic!("expected single Array(*), got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn array_static_qualified_parses() {
+        // `arr[static const 10]` — both `static` and a qualifier list
+        // inside the brackets (§6.7.5.2p1, array-parameter form).
+        let (d, _rem, diags, sess) = parse_decl("arr[static const 10]");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(a)] => {
+                assert!(a.has_static);
+                assert!(a.quals.const_);
+                let s = a.size.as_ref().expect("size present");
+                assert_eq!(int_lit_text(s, &sess), "10");
+            }
+            other => panic!("expected Array[static const N], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn function_with_prototype_params_parses() {
+        // `f(int, char)` — two abstract (un-named) parameters. The
+        // declarator itself names `f`; the parameters carry just
+        // specifiers with an empty declarator each.
+        let (d, _rem, diags, sess) = parse_decl("f(int, char)");
+        assert_name(&d, &sess, "f");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert!(!fd.is_void);
+                assert!(!fd.variadic);
+                assert!(fd.kr_names.is_empty());
+                assert_eq!(fd.params.len(), 2);
+                let (a, b) = (&fd.params[0], &fd.params[1]);
+                assert!(matches!(a.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(matches!(b.specs.type_specs.as_slice(), [TypeSpec::Char]));
+                assert!(a.declarator.name.is_none(), "abstract param");
+                assert!(b.declarator.name.is_none(), "abstract param");
+            }
+            other => panic!("expected Function(int, char), got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn function_void_prototype_parses() {
+        // `f(void)` — explicit zero-parameter prototype. `is_void` is
+        // set; the params vec remains empty.
+        let (d, _rem, diags, _sess) = parse_decl("f(void)");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert!(fd.is_void);
+                assert!(fd.params.is_empty());
+                assert!(!fd.variadic);
+            }
+            other => panic!("expected Function(void), got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn function_variadic_prototype_parses() {
+        // `f(int, ...)` — trailing `...` sets `variadic`.
+        let (d, _rem, diags, _sess) = parse_decl("f(int, ...)");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert!(fd.variadic);
+                assert_eq!(fd.params.len(), 1);
+            }
+            other => panic!("expected Function(int, ...), got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn function_empty_params_parses() {
+        // `f()` — empty parameter list, NOT the same as `(void)`:
+        // this is an unspecified-arguments prototype in C99 §6.7.5.3p14.
+        let (d, _rem, diags, _sess) = parse_decl("f()");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert!(!fd.is_void);
+                assert!(fd.params.is_empty());
+                assert!(!fd.variadic);
+            }
+            other => panic!("expected Function(), got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn nested_pointer_to_function_parses() {
+        // `(*fp)(int)` — fp is a pointer to function. The `*` lives
+        // inside parens, so the `(int)` suffix applies to the whole
+        // parenthesised declarator rather than to `fp` directly.
+        // Chain (outer-to-inner): Pointer, then Function.
+        let (d, _rem, diags, sess) = parse_decl("(*fp)(int)");
+        assert_name(&d, &sess, "fp");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(_), DerivedDeclarator::Function(fd)] => {
+                assert_eq!(fd.params.len(), 1);
+                assert!(matches!(fd.params[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+            }
+            other => panic!("expected [Pointer, Function], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn array_of_pointers_to_functions_parses() {
+        // The canonical task-19 acceptance case. `(*fp[3])(int, int)`
+        // — fp is an array of 3 of pointers to functions taking
+        // `(int, int)` and returning the base type. Chain must be
+        // exactly [Array(3), Pointer, Function(int, int)].
+        let (d, _rem, diags, sess) = parse_decl("(*fp[3])(int, int)");
+        assert_name(&d, &sess, "fp");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(arr), DerivedDeclarator::Pointer(_), DerivedDeclarator::Function(fd)] =>
+            {
+                let s = arr.size.as_ref().expect("array size present");
+                assert_eq!(int_lit_text(s, &sess), "3");
+                assert!(!arr.has_static && !arr.star);
+                assert_eq!(fd.params.len(), 2);
+                assert!(matches!(fd.params[0].specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(matches!(fd.params[1].specs.type_specs.as_slice(), [TypeSpec::Int]));
+            }
+            other => panic!("expected [Array(3), Pointer, Function], got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn array_of_pointers_parses() {
+        // `*p[3]`: postfix `[]` binds tighter than prefix `*`. p is
+        // therefore an array-of-3 of pointers, not a pointer to an
+        // array. Chain: [Array(3), Pointer].
+        let (d, _rem, diags, sess) = parse_decl("*p[3]");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Array(arr), DerivedDeclarator::Pointer(_)] => {
+                let s = arr.size.as_ref().expect("size present");
+                assert_eq!(int_lit_text(s, &sess), "3");
+            }
+            other => panic!("expected [Array, Pointer], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn pointer_to_array_parses() {
+        // `(*p)[3]`: p is a POINTER to array of 3. Parens force the
+        // outer ordering. Chain: [Pointer, Array(3)].
+        let (d, _rem, diags, sess) = parse_decl("(*p)[3]");
+        assert_name(&d, &sess, "p");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Pointer(_), DerivedDeclarator::Array(arr)] => {
+                let s = arr.size.as_ref().expect("size present");
+                assert_eq!(int_lit_text(s, &sess), "3");
+            }
+            other => panic!("expected [Pointer, Array], got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn function_with_named_params_parses() {
+        // `f(int x, char y)` — parameters carry names. Each parameter
+        // declarator has a name slot populated.
+        let (d, _rem, diags, sess) = parse_decl("f(int x, char y)");
+        assert_name(&d, &sess, "f");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert_eq!(fd.params.len(), 2);
+                let (xs, _) = fd.params[0].declarator.name.as_ref().expect("x");
+                let (ys, _) = fd.params[1].declarator.name.as_ref().expect("y");
+                assert_eq!(sess.interner.get(*xs), "x");
+                assert_eq!(sess.interner.get(*ys), "y");
+            }
+            other => panic!("expected Function with two named params, got {other:?}"),
+        }
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn function_with_pointer_param_parses() {
+        // `f(int *p)` — pointer parameter. The parameter declarator
+        // chain has the [Pointer] layer attached to its own name.
+        let (d, _rem, diags, _sess) = parse_decl("f(int *p)");
+        match d.derived.as_slice() {
+            [DerivedDeclarator::Function(fd)] => {
+                assert_eq!(fd.params.len(), 1);
+                let pd = &fd.params[0].declarator;
+                assert!(pd.name.is_some());
+                assert!(matches!(pd.derived.as_slice(), [DerivedDeclarator::Pointer(_)]));
+            }
+            other => panic!("expected Function([Pointer p]), got {other:?}"),
+        }
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn declarator_span_covers_all_consumed_tokens() {
+        // The declarator's span must extend from the first consumed
+        // token to the last — regression guard against helpers that
+        // only track the name's span.
+        let src = "(*fp[3])(int, int)";
+        let (d, _rem, _diags, _sess) = parse_decl(src);
+        assert_eq!(d.span.lo.0, 0);
+        assert_eq!(d.span.hi.0 as usize, src.len());
+    }
+
+    #[test]
+    fn duplicate_pointer_qualifier_warns_w0004() {
+        // `*const const p` — repeated qualifier inside the same
+        // qualifier list warns W0004, consistent with the specifier-
+        // list rule (C99 §6.7.3p4).
+        let (_d, _rem, diags, _sess) = parse_decl("*const const p");
+        assert_eq!(codes_of(&diags), vec!["W0004"], "{diags:?}");
+    }
+
+    #[test]
+    fn missing_name_errors() {
+        // `*` on its own is not a valid concrete declarator — the
+        // name is mandatory in this task (abstract declarators live
+        // in task 05-20).
+        let src = "*";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let d = parse_declarator(&mut parser);
+        assert!(d.is_none(), "missing name should bail");
+        let diags = cap.diagnostics();
+        assert!(!diags.is_empty(), "expected a diagnostic");
     }
 }
