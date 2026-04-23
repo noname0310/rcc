@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 05-16: `switch`, `case`, `default`
 
 **Phase:** 05-parse    **Depends on:** 05-13    **Milestone:** M3
