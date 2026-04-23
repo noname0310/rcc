@@ -186,17 +186,10 @@ fn parse_init_list(p: &mut Parser<'_>) -> Vec<(Vec<Designator>, Initializer)> {
 fn parse_designator_chain(p: &mut Parser<'_>) -> Vec<Designator> {
     let mut chain: Vec<Designator> = Vec::new();
 
-    loop {
-        // Extract just the punctuator + span so we can bump and emit
-        // diagnostics without fighting the borrow checker over the
-        // peeked token's kind field (which is not `Copy`).
-        let Some((punct, op_span)) = p.peek().and_then(|t| match t.kind {
-            TokenKind::Punct(pu) => Some((pu, t.span)),
-            _ => None,
-        }) else {
-            break;
-        };
-
+    while let Some((punct, op_span)) = p.peek().and_then(|t| match t.kind {
+        TokenKind::Punct(pu) => Some((pu, t.span)),
+        _ => None,
+    }) {
         match punct {
             Punct::Dot => {
                 p.bump();

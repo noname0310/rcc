@@ -1,5 +1,5 @@
 [W0005] Warning: K&R function definition is obsolete
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/kr_warning.c:1:5 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/kr_warning.c:1:5 ]
    │
  1 │ int add(a, b)
    │ 

@@ -38,9 +38,18 @@ fn normalize_paths(s: &str) -> String {
     s.replace('\\', "/")
 }
 
+/// Strip the absolute workspace-root prefix so that diagnostic paths become
+/// relative (e.g. `crates/rcc_driver/tests/…`). This makes `.stderr` fixtures
+/// portable across machines.
+fn strip_workspace_root(s: &str, workspace_root: &Path) -> String {
+    let root = normalize_paths(&workspace_root.display().to_string());
+    let prefix = if root.ends_with('/') { root } else { format!("{root}/") };
+    s.replace(&prefix, "")
+}
+
 /// Run the rcc pipeline (lex → preprocess → parse) on `src_path`, returning
 /// the rendered diagnostic output with colours stripped.
-fn compile_and_capture(src_path: &Path) -> String {
+fn compile_and_capture(src_path: &Path, workspace_root: &Path) -> String {
     let sm = Arc::new(RwLock::new(rcc_span::SourceMap::new()));
     let capture = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(capture.clone()));
@@ -71,7 +80,8 @@ fn compile_and_capture(src_path: &Path) -> String {
         rendered.push_str(&emitter.render_to_string(d));
     }
 
-    normalize_paths(&strip_ansi(&rendered))
+    let output = normalize_paths(&strip_ansi(&rendered));
+    strip_workspace_root(&output, workspace_root)
 }
 
 /// Discover all `.c` fixture files under `dir`.
@@ -93,8 +103,9 @@ fn discover_fixtures(dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn ui_parse() {
-    let fixture_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("ui").join("parse");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let fixture_dir = manifest_dir.join("tests").join("ui").join("parse");
 
     let fixtures = discover_fixtures(&fixture_dir);
     assert!(!fixtures.is_empty(), "no .c fixtures found in {}", fixture_dir.display());
@@ -105,7 +116,7 @@ fn ui_parse() {
     for c_file in &fixtures {
         eprintln!("[ui] processing: {}", c_file.display());
         let stderr_file = c_file.with_extension("stderr");
-        let actual = compile_and_capture(c_file);
+        let actual = compile_and_capture(c_file, workspace_root);
 
         if update {
             std::fs::write(&stderr_file, &actual)
@@ -114,7 +125,7 @@ fn ui_parse() {
         }
 
         let expected = match std::fs::read_to_string(&stderr_file) {
-            Ok(s) => normalize_paths(&s),
+            Ok(s) => strip_workspace_root(&normalize_paths(&s), workspace_root),
             Err(e) => {
                 failures.push(format!(
                     "{}: missing .stderr file (run with UPDATE_EXPECT=1 to create)\n  error: {e}",

@@ -1,5 +1,5 @@
 Error: expected identifier or `(` in declarator
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/bad_declarator.c:1:8 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/bad_declarator.c:1:8 ]
    │
  1 │ int ***;
 ───╯

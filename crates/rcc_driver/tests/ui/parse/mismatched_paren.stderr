@@ -1,5 +1,5 @@
 Error: expected `)` to close parenthesised expression
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/mismatched_paren.c:1:15 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/mismatched_paren.c:1:15 ]
    │
  1 │ int x = (1 + 2;
    │         ┬     ─  

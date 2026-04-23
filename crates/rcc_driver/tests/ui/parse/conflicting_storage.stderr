@@ -1,5 +1,5 @@
 [E0060] Error: cannot combine `extern` with previous storage-class specifier
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/conflicting_storage.c:1:8 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/conflicting_storage.c:1:8 ]
    │
  1 │ static extern int x;
 ───╯

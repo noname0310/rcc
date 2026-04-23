@@ -1,5 +1,5 @@
 Error: expected `,` or `}` in initializer list
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/missing_comma_init.c:1:14 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/missing_comma_init.c:1:14 ]
    │
  1 │ int a[] = {1 2};
    │           ┬  ─  

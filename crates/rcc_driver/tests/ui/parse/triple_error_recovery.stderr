@@ -1,15 +1,15 @@
 Error: expected primary expression
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:2:13 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:2:13 ]
    │
  2 │     int a = ;
 ───╯
 Error: expected primary expression
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:3:13 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:3:13 ]
    │
  3 │     int b = ;
 ───╯
 Error: expected primary expression
-   ╭─[ D:/noname/kookmin/4-1/rc/crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:4:13 ]
+   ╭─[ crates/rcc_driver/tests/ui/parse/triple_error_recovery.c:4:13 ]
    │
  4 │     int c = ;
 ───╯
