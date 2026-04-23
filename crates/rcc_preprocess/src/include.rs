@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use rcc_errors::{codes::E0021, Diagnostic, Label, Level};
-use rcc_lexer::PpToken;
+use rcc_lexer::{PpToken, PpTokenKind, Punct};
 use rcc_span::{BytePos, FileId, Span};
 
 use crate::guard::detect_guard;
@@ -66,6 +66,36 @@ pub fn resolve_header(
     None
 }
 
+/// Return `true` if `tokens` (a header's full pp-token stream, as
+/// produced by `rcc_lexer::tokenize`) contains a `#pragma once`
+/// directive anywhere in the file.
+///
+/// Unlike the `#ifndef` header-guard shape, `#pragma once` carries no
+/// "covers the whole file" requirement: a single occurrence at any
+/// position marks the file as include-once. The match criterion is a
+/// `#` token that starts a logical line, followed immediately by the
+/// identifiers `pragma` then `once`; trailing tokens on the same line
+/// are permitted and ignored (matching clang/gcc behaviour).
+pub fn detect_pragma_once(tokens: &[PpToken], src: &str) -> bool {
+    for window in tokens.windows(3) {
+        let (hash, pragma, once) = (&window[0], &window[1], &window[2]);
+        if !(matches!(hash.kind, PpTokenKind::Punct(Punct::Hash)) && hash.at_line_start) {
+            continue;
+        }
+        if pragma.kind != PpTokenKind::Ident || once.kind != PpTokenKind::Ident {
+            continue;
+        }
+        if slice_text(pragma, src) == "pragma" && slice_text(once, src) == "once" {
+            return true;
+        }
+    }
+    false
+}
+
+fn slice_text<'a>(tok: &PpToken, src: &'a str) -> &'a str {
+    &src[tok.span.lo.0 as usize..tok.span.hi.0 as usize]
+}
+
 /// Strip the surrounding `<...>` or `"..."` delimiters from a raw
 /// `Directive::Include::header` value. Returns the inner filename; if no
 /// recognisable delimiter pair is present, returns the input unchanged.
@@ -104,8 +134,8 @@ impl Preprocessor<'_> {
     /// Recursion currently calls back into [`Preprocessor::run`], which
     /// is still a pass-through tokeniser in the overall M5 schedule
     /// (tasks 04-06..04-14 populate the directive loop itself).
-    /// Include-guard caching (04-04) short-circuits repeated
-    /// inclusions here; `#pragma once` (04-05) layers on top later.
+    /// Include-guard caching (04-04) and `#pragma once` caching
+    /// (04-05) both short-circuit repeated inclusions here.
     pub fn process_include(
         &mut self,
         header: &str,
@@ -155,6 +185,16 @@ impl Preprocessor<'_> {
             },
         };
 
+        // `#pragma once` fast path: a previous inclusion marked this
+        // file as include-once, so any further inclusion is an
+        // unconditional no-op. Checked ahead of the `#ifndef` guard
+        // fast path because the pragma is cheaper — no macro-table
+        // lookup — and semantically non-overridable (there is no
+        // `#undef` for it).
+        if self.pragma_once.contains_key(&new_file) {
+            return Vec::new();
+        }
+
         // Include-guard fast path: if a previous inclusion of the
         // same file detected a `#ifndef X / #define X / ... / #endif`
         // guard *and* `X` is still defined, the body would expand to
@@ -167,22 +207,34 @@ impl Preprocessor<'_> {
 
         let tokens = self.run(new_file);
 
-        // First-inclusion fingerprinting: try to recognise the idiomatic
-        // guard pattern. If found, cache it and stub-define the guard
-        // symbol in the macro table so the next inclusion hits the
-        // skip branch above. Task 04-06 will replace the stub with a
-        // real `#define NAME` expansion of the guard directive; until
-        // then the stub is what keeps the optimisation self-contained.
-        if !self.include_guards.contains_key(&new_file) {
+        // First-inclusion fingerprinting: scan for both the
+        // `#pragma once` marker and the canonical `#ifndef` guard
+        // shape. The two are deliberately independent — headers in
+        // the wild commonly use `#pragma once` *and* a traditional
+        // `#ifndef` guard for portability — and either, alone, is
+        // sufficient to short-circuit the next inclusion. The source
+        // buffer is cloned once and reused by both detectors.
+        let need_pragma_scan = !self.pragma_once.contains_key(&new_file);
+        let need_guard_scan = !self.include_guards.contains_key(&new_file);
+        if need_pragma_scan || need_guard_scan {
             let src = self.session.source_map.read().unwrap().file(new_file).src.clone();
-            if let Some(guard) = detect_guard(&tokens, &src, &mut self.session.interner) {
-                self.include_guards.insert(new_file, guard);
-                self.macros.define(MacroDef {
-                    name: guard,
-                    kind: MacroKind::ObjectLike,
-                    body: Vec::new(),
-                    def_span: Span::new(new_file, BytePos(0), BytePos(0)),
-                });
+            if need_pragma_scan && detect_pragma_once(&tokens, &src) {
+                self.pragma_once.insert(new_file, ());
+            }
+            if need_guard_scan {
+                if let Some(guard) = detect_guard(&tokens, &src, &mut self.session.interner) {
+                    self.include_guards.insert(new_file, guard);
+                    // Stub-define the guard symbol in the macro table so
+                    // the next inclusion hits the skip branch above.
+                    // Task 04-06 will replace the stub with a real
+                    // `#define NAME` expansion of the guard directive.
+                    self.macros.define(MacroDef {
+                        name: guard,
+                        kind: MacroKind::ObjectLike,
+                        body: Vec::new(),
+                        def_span: Span::new(new_file, BytePos(0), BytePos(0)),
+                    });
+                }
             }
         }
 
@@ -456,17 +508,163 @@ mod tests {
         assert!(cap.diagnostics().is_empty(), "skipping must not produce diagnostics");
     }
 
+    // ── 04-05 `#pragma once` ────────────────────────────────────────
+
+    #[test]
+    fn pragma_once_header_skipped_on_repeat_include() {
+        // Acceptance: a header marked `#pragma once`, included twice,
+        // contributes tokens the first time and zero tokens the second
+        // time. Verified via token count so the assertion mirrors the
+        // `--emit=pp` byte-count check named in the task spec.
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "once.h", "#pragma once\nint once_marker;\n");
+        let (mut sess, main_id, cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let first = pp.process_include("\"once.h\"", false, span, main_id);
+        assert!(!first.is_empty(), "first inclusion must deliver the header tokens");
+        assert_eq!(pp.pragma_once.len(), 1, "`#pragma once` must be cached on first inclusion");
+
+        let second = pp.process_include("\"once.h\"", false, span, main_id);
+        assert!(
+            second.is_empty(),
+            "repeat include of a `#pragma once` header must contribute no tokens"
+        );
+        assert!(cap.diagnostics().is_empty(), "skipping must not produce diagnostics");
+    }
+
+    #[test]
+    fn pragma_once_skipped_across_two_caller_files() {
+        // Fixture per task spec: header is included from two different
+        // caller files; the second inclusion is elided regardless of
+        // which file issued it.
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "once.h", "#pragma once\nint once_marker;\n");
+        let sibling_path = write_file(tmp.path(), "sibling.c", "");
+        let (mut sess, main_id, cap) = seed_session(tmp.path(), Vec::new());
+        let sibling_id =
+            sess.source_map.write().unwrap().load_file(&sibling_path).expect("load sibling.c");
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let first = pp.process_include("\"once.h\"", false, dummy_span(main_id), main_id);
+        assert!(!first.is_empty(), "first caller sees the header tokens");
+
+        let second = pp.process_include("\"once.h\"", false, dummy_span(sibling_id), sibling_id);
+        assert!(
+            second.is_empty(),
+            "a different caller including the same `#pragma once` header must skip"
+        );
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pragma_once_coexists_with_ifndef_guard() {
+        // Acceptance: `#pragma once` and an explicit `#ifndef` guard
+        // in the same file must not conflict. The file has both; the
+        // second inclusion is still a no-op. Our `#pragma once` sits
+        // before the `#ifndef`, which disqualifies the canonical
+        // guard shape — exercising the independence of the two
+        // caches.
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "combo.h",
+            "#pragma once\n#ifndef COMBO_H\n#define COMBO_H\nint combo;\n#endif\n",
+        );
+        let (mut sess, main_id, cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let first = pp.process_include("\"combo.h\"", false, span, main_id);
+        assert!(!first.is_empty());
+        assert_eq!(pp.pragma_once.len(), 1, "`#pragma once` must be cached");
+
+        let second = pp.process_include("\"combo.h\"", false, span, main_id);
+        assert!(
+            second.is_empty(),
+            "combined `#pragma once` + `#ifndef` header must still skip on re-include"
+        );
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pragma_once_and_guard_caches_both_populated_when_both_shapes_match() {
+        // When the `#pragma once` sits *inside* the `#ifndef` guard,
+        // both detectors fire. The pragma cache must win the fast
+        // path because it short-circuits unconditionally.
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "both.h",
+            "#ifndef BOTH_H\n#define BOTH_H\n#pragma once\nint both;\n#endif\n",
+        );
+        let (mut sess, main_id, _cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let _ = pp.process_include("\"both.h\"", false, span, main_id);
+        assert_eq!(pp.pragma_once.len(), 1, "pragma-once cache populated");
+        assert_eq!(pp.include_guards.len(), 1, "include-guard cache populated");
+    }
+
+    #[test]
+    fn header_without_pragma_once_is_not_cached() {
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "plain.h", "int plain_marker;\n");
+        let (mut sess, main_id, _cap) = seed_session(tmp.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let mut pp = Preprocessor::new(&mut sess);
+
+        let _ = pp.process_include("\"plain.h\"", false, span, main_id);
+        assert!(pp.pragma_once.is_empty(), "only files with `#pragma once` should be cached");
+    }
+
+    // ── detect_pragma_once (unit) ───────────────────────────────────
+
+    #[test]
+    fn detect_pragma_once_matches_canonical_form() {
+        let src = "#pragma once\nint x;\n";
+        let toks: Vec<PpToken> = rcc_lexer::tokenize(FileId(0), src).collect();
+        assert!(detect_pragma_once(&toks, src));
+    }
+
+    #[test]
+    fn detect_pragma_once_anywhere_in_file() {
+        // Mid-file occurrence still qualifies — unlike `#ifndef`
+        // guards, `#pragma once` has no positional requirement.
+        let src = "int x;\n#pragma once\nint y;\n";
+        let toks: Vec<PpToken> = rcc_lexer::tokenize(FileId(0), src).collect();
+        assert!(detect_pragma_once(&toks, src));
+    }
+
+    #[test]
+    fn detect_pragma_once_rejects_other_pragmas() {
+        let src = "#pragma pack(1)\nint x;\n";
+        let toks: Vec<PpToken> = rcc_lexer::tokenize(FileId(0), src).collect();
+        assert!(!detect_pragma_once(&toks, src));
+    }
+
+    #[test]
+    fn detect_pragma_once_requires_hash_at_line_start() {
+        // `x # pragma once` puts `#` mid-line — not a directive.
+        let src = "x # pragma once\n";
+        let toks: Vec<PpToken> = rcc_lexer::tokenize(FileId(0), src).collect();
+        assert!(!detect_pragma_once(&toks, src));
+    }
+
+    #[test]
+    fn detect_pragma_once_empty_file_is_false() {
+        assert!(!detect_pragma_once(&[], ""));
+    }
+
     #[test]
     fn unguarded_header_is_processed_fully_each_time() {
         // `bad.h` has a stray declaration before `#ifndef` — the
         // guard pattern does NOT match, so the file must be processed
         // in full on every inclusion.
         let tmp = TempDir::new().unwrap();
-        write_file(
-            tmp.path(),
-            "bad.h",
-            "int stray;\n#ifndef BAD_H\n#define BAD_H\n#endif\n",
-        );
+        write_file(tmp.path(), "bad.h", "int stray;\n#ifndef BAD_H\n#define BAD_H\n#endif\n");
         let (mut sess, main_id, _cap) = seed_session(tmp.path(), Vec::new());
         let span = dummy_span(main_id);
         let mut pp = Preprocessor::new(&mut sess);

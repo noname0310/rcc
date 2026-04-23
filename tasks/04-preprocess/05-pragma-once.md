@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-05: `#pragma once`
 
 **Phase:** 04-preprocess    **Depends on:** 04-03    **Milestone:** M5
