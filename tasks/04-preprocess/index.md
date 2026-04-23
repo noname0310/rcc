@@ -15,7 +15,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [05-pragma-once](05-pragma-once.md)
 - [x] [06-define-object-like](06-define-object-like.md)
 - [x] [07-define-function-like](07-define-function-like.md)
-- [ ] [08-hide-set-expansion](08-hide-set-expansion.md)
+- [x] [08-hide-set-expansion](08-hide-set-expansion.md)
 - [ ] [09-stringize-hash](09-stringize-hash.md)
 - [ ] [10-paste-hashhash](10-paste-hashhash.md)
 - [ ] [11-variadic-va-args](11-variadic-va-args.md)

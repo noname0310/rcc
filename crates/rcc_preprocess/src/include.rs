@@ -214,15 +214,23 @@ impl Preprocessor<'_> {
         // `#ifndef` guard for portability — and either, alone, is
         // sufficient to short-circuit the next inclusion. The source
         // buffer is cloned once and reused by both detectors.
+        //
+        // Detection runs against a *raw* re-tokenisation of the file,
+        // not against `tokens`: since task 04-08 macro-expands and
+        // consumes directive lines inside `run`, the returned stream
+        // no longer contains `#pragma` / `#ifndef` punctuator shapes.
+        // The detectors inspect directive shape, so they must see the
+        // pre-expansion token stream.
         let need_pragma_scan = !self.pragma_once.contains_key(&new_file);
         let need_guard_scan = !self.include_guards.contains_key(&new_file);
         if need_pragma_scan || need_guard_scan {
             let src = self.session.source_map.read().unwrap().file(new_file).src.clone();
-            if need_pragma_scan && detect_pragma_once(&tokens, &src) {
+            let raw: Vec<PpToken> = rcc_lexer::tokenize(new_file, &src).collect();
+            if need_pragma_scan && detect_pragma_once(&raw, &src) {
                 self.pragma_once.insert(new_file, ());
             }
             if need_guard_scan {
-                if let Some(guard) = detect_guard(&tokens, &src, &mut self.session.interner) {
+                if let Some(guard) = detect_guard(&raw, &src, &mut self.session.interner) {
                     self.include_guards.insert(new_file, guard);
                     // Stub-define the guard symbol in the macro table so
                     // the next inclusion hits the skip branch above.

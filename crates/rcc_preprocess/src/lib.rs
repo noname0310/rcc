@@ -7,18 +7,22 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::sync::Arc;
+
 use rcc_data_structures::FxHashMap;
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
 use rcc_session::Session;
 use rcc_span::{FileId, Symbol};
 
 pub mod directive;
+pub mod expand;
 pub mod guard;
 pub mod include;
 pub mod line_stream;
 pub mod macros;
 
 pub use directive::{parse_directive, ConditionalKind, Directive};
+pub use expand::expand_line;
 pub use guard::detect_guard;
 pub use include::{detect_pragma_once, resolve_header, strip_header_delimiters};
 pub use line_stream::LineStream;
@@ -55,32 +59,58 @@ impl<'a> Preprocessor<'a> {
 
     /// Run preprocessing and return the expanded token stream.
     ///
-    /// Current scope (task 04-06): directive-side-effect pass.
-    /// `#define` / `#undef` update [`Self::macros`] in place; every
-    /// other directive variant is parsed and then skipped (full
-    /// dispatch arrives with tasks 04-08 / 04-13 / 04-14). Output
-    /// tokens are still the raw `rcc_lexer` stream — macro expansion
-    /// is task 04-08, and until then directive lines flow through to
-    /// the caller verbatim so that ancillary scanners (include-guard
-    /// detection, `#pragma once` detection, ...) see the original
-    /// shape of the file.
+    /// Directive lines apply their side effects (`#define` / `#undef`
+    /// populate [`Self::macros`]; other directive variants are parsed
+    /// and then skipped pending later tasks 04-13 / 04-14 / 04-15 /
+    /// 04-16). Non-directive lines are fed through Prosser's
+    /// hide-set macro expander (task 04-08), and the rescanned tokens
+    /// are concatenated into the returned stream. Newline separators
+    /// are consumed by [`line_stream::LineStream`] and not re-emitted.
     pub fn run(&mut self, root: FileId) -> Vec<PpToken> {
         let src = self.session.source_map.read().unwrap().file(root).src.clone();
         let tokens: Vec<PpToken> = rcc_lexer::tokenize(root, &src).collect();
 
-        let mut ls = line_stream::LineStream::new(tokens.iter().cloned());
+        let mut out: Vec<PpToken> = Vec::new();
+        let mut ls = line_stream::LineStream::new(tokens.into_iter());
         while let Some(line) = ls.next_line() {
-            if !is_directive_line(&line) {
+            if is_directive_line(&line) {
+                // Null directive (`#` alone): no side effect, no output.
+                if line.len() == 1 {
+                    continue;
+                }
+                self.dispatch_directive(&line, &src);
                 continue;
             }
-            // Null directive (`#` alone): has no side effect; fall through.
-            if line.len() == 1 {
-                continue;
-            }
-            self.dispatch_directive(&line, &src);
+            // Non-directive: run Prosser expansion.
+            let expanded = self.expand_tokens(line);
+            out.extend(expanded);
         }
 
-        tokens
+        out
+    }
+
+    /// Entry point for expanding a single pre-tokenised token into its
+    /// post-macro pp-token sequence. Convenience wrapper around
+    /// [`expand::expand_line`]; typically used by tests and by
+    /// follow-up tasks (e.g. 04-13 `#if` expression evaluation) which
+    /// expand individual identifiers before constant folding. For
+    /// function-like invocations spanning multiple tokens, callers
+    /// should use [`Self::expand_tokens`] with the full `name ( args
+    /// )` slice instead.
+    pub fn expand_one(&mut self, token: PpToken) -> Vec<PpToken> {
+        self.expand_tokens(vec![token])
+    }
+
+    /// Expand a full logical line (or any sub-sequence) by running
+    /// Prosser's algorithm over it. Returns the rescanned, fully
+    /// expanded pp-token vector.
+    pub fn expand_tokens(&mut self, line: Vec<PpToken>) -> Vec<PpToken> {
+        // Clone the source-map Arc so `source_map` is borrowed
+        // independently of `self.session`, leaving `self.session.interner`
+        // free to be borrowed mutably alongside.
+        let sm_arc = Arc::clone(&self.session.source_map);
+        let sm = sm_arc.read().unwrap();
+        expand::expand_line(&sm, &mut self.session.interner, &self.macros, line)
     }
 
     /// Parse one logical `#`-line and apply its side effects.
@@ -331,5 +361,69 @@ mod run_tests {
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1, "exactly one E0022 expected, got {diags:?}");
         assert_eq!(diags[0].code, Some(E0022));
+    }
+
+    // ── End-to-end expansion (task 04-08) ───────────────────────────
+
+    /// Collapse expanded pp-tokens to their concatenated source text
+    /// (no inter-token separator). Useful for acceptance assertions.
+    fn joined_text(pp: &Preprocessor<'_>, tokens: &[PpToken]) -> String {
+        let sm = pp.session.source_map.read().unwrap();
+        tokens
+            .iter()
+            .map(|t| {
+                let src = &sm.file(t.span.file).src;
+                src[t.span.lo.0 as usize..t.span.hi.0 as usize].to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn run_expands_object_like_macro_in_body() {
+        // `#define PI 314` followed by a use `PI` → output is `314`.
+        let (mut sess, id, cap) = seed("#define PI 314\nPI\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "314");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn run_blocks_self_recursion_with_hide_set() {
+        // Acceptance (§): `#define FOO FOO` / `FOO` → literal `FOO`.
+        let (mut sess, id, cap) = seed("#define FOO FOO\nFOO\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "FOO");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn run_blocks_mutual_recursion_with_hide_set() {
+        // Acceptance: `#define A B / #define B A / A` terminates with `A`.
+        let (mut sess, id, cap) = seed("#define A B\n#define B A\nA\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "A");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn run_expands_function_like_max_invocation() {
+        let (mut sess, id, cap) = seed("#define MAX(a,b) ((a)>(b)?(a):(b))\nMAX(1, 2)\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "((1)>(2)?(1):(2))");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn run_nested_paren_arg_collects_as_one() {
+        // Acceptance: `F((a, b))` → one argument, `(a, b)` substituted for `x`.
+        let (mut sess, id, cap) = seed("#define F(x) x\nF((a, b))\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "(a,b)");
+        assert!(cap.diagnostics().is_empty());
     }
 }
