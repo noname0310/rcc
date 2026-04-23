@@ -43,6 +43,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0021, E0021_DESC),
     (E0022, E0022_DESC),
     (E0023, E0023_DESC),
+    (E0024, E0024_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -159,6 +160,14 @@ const E0022_DESC: &str = "macro redefined with a different body";
 /// the same parameter list is a constraint violation.
 pub const E0023: &str = "E0023";
 const E0023_DESC: &str = "duplicate macro parameter name";
+
+/// Stringize operator `#` not followed by a parameter name.
+///
+/// C99 §6.10.3.2p1: each `#` preprocessing token in the replacement
+/// list for a function-like macro shall be followed by a parameter
+/// name as the next preprocessing token in the replacement list.
+pub const E0024: &str = "E0024";
+const E0024_DESC: &str = "`#` is not followed by a macro parameter";
 
 #[cfg(test)]
 mod tests {

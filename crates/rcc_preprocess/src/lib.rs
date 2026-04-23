@@ -107,10 +107,17 @@ impl<'a> Preprocessor<'a> {
     pub fn expand_tokens(&mut self, line: Vec<PpToken>) -> Vec<PpToken> {
         // Clone the source-map Arc so `source_map` is borrowed
         // independently of `self.session`, leaving `self.session.interner`
-        // free to be borrowed mutably alongside.
+        // and `self.session.handler` free to be borrowed mutably
+        // alongside. The expander itself takes the lock (read for
+        // text lookup, brief write for the stringize scratch file).
         let sm_arc = Arc::clone(&self.session.source_map);
-        let sm = sm_arc.read().unwrap();
-        expand::expand_line(&sm, &mut self.session.interner, &self.macros, line)
+        expand::expand_line(
+            &sm_arc,
+            &mut self.session.interner,
+            &mut self.session.handler,
+            &self.macros,
+            line,
+        )
     }
 
     /// Parse one logical `#`-line and apply its side effects.

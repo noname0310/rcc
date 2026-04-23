@@ -233,3 +233,18 @@ unambiguous.
 ```c
 #define FOO(a, a) a  // error[E0023]: duplicate macro parameter name `a`
 ```
+
+## E0024 — `#` is not followed by a macro parameter
+
+Inside a function-like macro replacement list, the stringize operator
+`#` must be immediately followed by the name of one of the macro's
+parameters. C99 §6.10.3.2p1 makes any other form a constraint
+violation.
+
+```c
+#define BAD(x) #y    // error[E0024]: `#` is not followed by a macro parameter
+#define ALSO(x) #    // error[E0024]: `#` is not followed by a macro parameter
+```
+
+The operator only applies in function-like macros; a `#` inside an
+object-like macro body is preserved as an ordinary punctuator.
