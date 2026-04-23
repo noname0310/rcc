@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 01-13: CI: wire conformance into CI commit gates
 
 **Phase:** 01-test-infra    **Depends on:** 01-10 .. 01-12    **Milestone:** M0.5
