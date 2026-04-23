@@ -1038,6 +1038,71 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
     // Parse the first declarator.
     let declarator = parse_declarator(p)?;
 
+    // K&R-style function definition: the declarator has an identifier
+    // list (kr_names) instead of prototype parameters. Parse the
+    // declaration-list between `)` and `{`, emit W0005, and validate.
+    let has_kr_names = declarator
+        .derived
+        .last()
+        .is_some_and(|d| matches!(d, DerivedDeclarator::Function(fd) if !fd.kr_names.is_empty()));
+    if has_kr_names {
+        // Emit obsolescence warning.
+        p.session
+            .handler
+            .struct_warn(declarator.span, "K&R function definition is obsolete")
+            .code(codes::W0005)
+            .help("rewrite using prototype syntax")
+            .emit();
+
+        // Collect the identifier list for validation.
+        let kr_name_set: rcc_data_structures::FxHashSet<Symbol> =
+            if let Some(DerivedDeclarator::Function(fd)) = declarator.derived.last() {
+                fd.kr_names.iter().map(|(s, _)| *s).collect()
+            } else {
+                Default::default()
+            };
+
+        // Parse K&R declaration list (declarations before `{`).
+        let mut kr_decls = Vec::new();
+        while !matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace)) | None) {
+            if let Some(decl) = parse_declaration(p) {
+                // Validate: every name in this declaration must appear
+                // in the identifier list.
+                for init in &decl.inits {
+                    if let Some((sym, span)) = init.declarator.name {
+                        if !kr_name_set.contains(&sym) {
+                            let name = p.session.interner.get(sym).to_owned();
+                            p.session
+                                .handler
+                                .struct_err(
+                                    span,
+                                    format!("parameter `{name}` not found in identifier list"),
+                                )
+                                .code(codes::E0063)
+                                .emit();
+                        }
+                    }
+                }
+                kr_decls.push(decl);
+            } else {
+                break;
+            }
+        }
+
+        declare_declarator_name(p, &specs, &declarator);
+        let body = crate::stmt::parse_block(p)?;
+        let end = body.span;
+        let id = p.fresh_id();
+        return Some(ExternalDecl::Function(FunctionDef {
+            id,
+            span: start.to(end),
+            specs,
+            declarator,
+            kr_decls,
+            body,
+        }));
+    }
+
     // Disambiguate: `{` → function definition.
     if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
         declare_declarator_name(p, &specs, &declarator);
@@ -1663,9 +1728,10 @@ fn parse_array_suffix(p: &mut Parser<'_>) -> ArrayDeclarator {
 /// - `(void)`                   — explicit zero-parameter prototype
 /// - `(param , ... , param)`    — prototype, optionally variadic
 ///
-/// The K&R identifier-list path is recognised but left empty: a
-/// full implementation lands in task 05-26 which also needs to
-/// disambiguate "unknown ident" vs "typedef-name" at this spot.
+/// K&R identifier-list style is also recognised here: when the
+/// first token after `(` is a plain identifier (not a typedef-name)
+/// followed by `,` or `)`, the list is parsed as an identifier-list
+/// (C99 §6.7.5.3p1 "identifier-list") and stored in `kr_names`.
 fn parse_function_suffix(p: &mut Parser<'_>) -> FunctionDeclarator {
     p.bump(); // `(`
 
@@ -1688,6 +1754,24 @@ fn parse_function_suffix(p: &mut Parser<'_>) -> FunctionDeclarator {
             p.bump();
             is_void = true;
             return FunctionDeclarator { params, is_void, variadic, kr_names };
+        }
+    }
+
+    // K&R identifier-list: `(x, y, z)` — plain idents separated by
+    // commas, none of which is a known typedef-name.
+    if let Some(tok) = p.peek() {
+        if let TokenKind::Ident(sym) = tok.kind {
+            let is_typedef = p.scopes.lookup(sym) == Some(NameKind::Typedef);
+            if !is_typedef {
+                if let Some(next) = p.tokens.get(p.cursor + 1) {
+                    if matches!(
+                        next.kind,
+                        TokenKind::Punct(Punct::Comma) | TokenKind::Punct(Punct::RParen)
+                    ) {
+                        return parse_kr_identifier_list(p);
+                    }
+                }
+            }
         }
     }
 
@@ -1725,6 +1809,42 @@ fn parse_function_suffix(p: &mut Parser<'_>) -> FunctionDeclarator {
     }
 
     FunctionDeclarator { params, is_void, variadic, kr_names }
+}
+
+/// Parse a K&R identifier list: `ident, ident, ..., ident )`.
+/// Cursor is on the first identifier. Returns a `FunctionDeclarator`
+/// with `kr_names` populated.
+fn parse_kr_identifier_list(p: &mut Parser<'_>) -> FunctionDeclarator {
+    let mut kr_names: Vec<(Symbol, Span)> = Vec::new();
+    loop {
+        match p.peek() {
+            Some(tok) if matches!(tok.kind, TokenKind::Ident(_)) => {
+                if let TokenKind::Ident(sym) = tok.kind {
+                    let span = tok.span;
+                    p.bump();
+                    kr_names.push((sym, span));
+                }
+            }
+            _ => break,
+        }
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Comma))) {
+            p.bump();
+        } else {
+            break;
+        }
+    }
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RParen)) => {
+            p.bump();
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `)` to close parameter list")
+                .emit();
+        }
+    }
+    FunctionDeclarator { params: Vec::new(), is_void: false, variadic: false, kr_names }
 }
 
 /// Parse a parameter declarator — the shared engine is
@@ -3216,5 +3336,73 @@ mod tests {
             }
             ExternalDecl::Decl(_) => panic!("expected FunctionDef"),
         }
+    }
+
+    // ── K&R-style function definitions (§6.9.1p6) ──────────────────
+
+    #[test]
+    fn kr_function_def_parses_with_w0005() {
+        // `int f(x, y) int x; double y; { return x; }` → FunctionDef
+        // with kr_decls populated and W0005 warning emitted.
+        let src = "int f(x, y) int x; double y; { return x; }";
+        let (ed, diags, sess) = parse_external(src);
+        let warning_codes: Vec<_> = diags
+            .iter()
+            .filter(|d| d.level == rcc_errors::Level::Warning)
+            .filter_map(|d| d.code)
+            .collect();
+        assert_eq!(warning_codes, vec!["W0005"], "expected W0005: {diags:?}");
+        // Check the help text.
+        let w = diags.iter().find(|d| d.code == Some("W0005")).unwrap();
+        assert!(
+            w.help.iter().any(|h| h.contains("prototype")),
+            "help should mention prototype syntax: {w:?}"
+        );
+        match ed {
+            ExternalDecl::Function(fd) => {
+                let (sym, _) = fd.declarator.name.expect("function has a name");
+                assert_eq!(sess.interner.get(sym), "f");
+                // kr_decls should have 2 declarations (int x; double y;).
+                assert_eq!(fd.kr_decls.len(), 2, "expected 2 K&R decls, got {:?}", fd.kr_decls);
+                assert_eq!(fd.body.items.len(), 1, "body has one item");
+            }
+            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+        }
+    }
+
+    #[test]
+    fn kr_function_def_single_param() {
+        // Single K&R parameter.
+        let src = "int g(n) int n; { return n; }";
+        let (ed, diags, sess) = parse_external(src);
+        assert!(diags.iter().any(|d| d.code == Some("W0005")), "expected W0005: {diags:?}");
+        // No errors (only warning).
+        assert!(
+            !diags.iter().any(|d| d.level == rcc_errors::Level::Error),
+            "expected no errors: {diags:?}"
+        );
+        match ed {
+            ExternalDecl::Function(fd) => {
+                let (sym, _) = fd.declarator.name.expect("function has a name");
+                assert_eq!(sess.interner.get(sym), "g");
+                assert_eq!(fd.kr_decls.len(), 1);
+            }
+            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+        }
+    }
+
+    #[test]
+    fn kr_unknown_param_emits_e0063() {
+        // K&R decl referencing a name NOT in the identifier list → E0063.
+        let src = "int f(x) int z; { return 0; }";
+        let (ed, diags, _sess) = parse_external(src);
+        let error_codes: Vec<_> = diags
+            .iter()
+            .filter(|d| d.level == rcc_errors::Level::Error)
+            .filter_map(|d| d.code)
+            .collect();
+        assert_eq!(error_codes, vec!["E0063"], "expected E0063: {diags:?}");
+        // Should still produce a FunctionDef (recovery).
+        assert!(matches!(ed, ExternalDecl::Function(_)));
     }
 }

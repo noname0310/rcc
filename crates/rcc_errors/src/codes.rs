@@ -64,10 +64,12 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0060, E0060_DESC),
     (E0061, E0061_DESC),
     (E0062, E0062_DESC),
+    (E0063, E0063_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
     (W0004, W0004_DESC),
+    (W0005, W0005_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -306,6 +308,16 @@ const E0061_DESC: &str = "invalid combination of type specifiers";
 pub const E0062: &str = "E0062";
 const E0062_DESC: &str = "abstract declarator cannot contain a name";
 
+/// K&R declaration list references a name not in the identifier list.
+///
+/// C99 §6.9.1p6: each identifier in the declaration list of a K&R-
+/// style function definition must match one of the identifiers in
+/// the function declarator's identifier list. A declaration that
+/// names a parameter not present in the list is a constraint
+/// violation.
+pub const E0063: &str = "E0063";
+const E0063_DESC: &str = "K&R declaration names unknown parameter";
+
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
 /// Unknown `#pragma` directive — accepted but ignored.
@@ -359,6 +371,15 @@ const W0003_DESC: &str = "multi-character constant";
 /// output.
 pub const W0004: &str = "W0004";
 const W0004_DESC: &str = "duplicate type qualifier or function specifier";
+
+/// K&R-style (old-style) function definition.
+///
+/// C99 §6.9.1p6 still permits old-style (K&R) function definitions
+/// where the parameter types are declared between the declarator's
+/// closing `)` and the opening `{` of the body. This style is
+/// obsolescent and should be rewritten using prototype syntax.
+pub const W0005: &str = "W0005";
+const W0005_DESC: &str = "K&R function definition is obsolete";
 
 #[cfg(test)]
 mod tests {

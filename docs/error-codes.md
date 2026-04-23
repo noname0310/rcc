@@ -571,3 +571,35 @@ inline inline void f();  // warning[W0004]: duplicate `inline` function specifie
 ```
 
 Like every warning, W0004 does not count toward `Handler::has_errors`.
+
+---
+
+## E0063 — K&R declaration names unknown parameter
+
+In an old-style (K&R) function definition the declaration-list between
+the closing `)` and the opening `{` may only declare names that appear
+in the identifier-list of the function declarator. Naming a parameter
+that was never listed is a constraint violation (C99 §6.9.1p6):
+
+```c
+int f(x, y)
+    int x;
+    int z;   // error[E0063]: K&R declaration names unknown parameter `z`
+{ return x; }
+```
+
+---
+
+## W0005 — K&R function definition is obsolete
+
+C99 §6.11.7 marks the use of function definitions with an
+identifier-list (K&R style) as an obsolescent feature. rcc emits a
+warning whenever it encounters one:
+
+```c
+int f(x, y) int x; double y; { return x; }
+//          ^^^^^^^^^^^^^^^ warning[W0005]: K&R function definition is obsolete
+//                          help: rewrite using prototype syntax
+```
+
+Like every warning, W0005 does not count toward `Handler::has_errors`.

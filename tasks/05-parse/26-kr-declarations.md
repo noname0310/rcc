@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 05-26: K&R-style function definitions
 
 **Phase:** 05-parse    **Depends on:** 05-25    **Milestone:** M6
