@@ -68,6 +68,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0063, E0063_DESC),
     (E0070, E0070_DESC),
     (E0071, E0071_DESC),
+    (E0072, E0072_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -350,6 +351,18 @@ const E0070_DESC: &str = "conflicting redeclaration";
 /// any exist within edit-distance 3.
 pub const E0071: &str = "E0071";
 const E0071_DESC: &str = "undeclared identifier";
+
+/// Tag kind mismatch: a tag was previously declared with a different
+/// kind (e.g. `struct S` then `union S`).
+///
+/// C99 §6.7.2.3p1: each declaration of a structure, union, or
+/// enumerated type that does not include a tag declares a distinct
+/// type. Each declaration of a structure, union, or enumerated type
+/// that **does** include a tag must agree on the kind of the tag.
+/// Using `struct S` where `S` was previously declared as `union S`
+/// (or vice versa, or struct/enum mismatch) is a constraint violation.
+pub const E0072: &str = "E0072";
+const E0072_DESC: &str = "tag kind mismatch";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

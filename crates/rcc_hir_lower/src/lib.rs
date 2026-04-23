@@ -178,6 +178,104 @@ pub fn resolve_expr_ident(
     None
 }
 
+/// The kind of a tag: struct, union, or enum.
+///
+/// Used by [`resolve_tag`] to verify that a tag reference uses the same
+/// keyword as the original declaration (C99 §6.7.2.3).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TagKind {
+    /// `struct`
+    Struct,
+    /// `union`
+    Union,
+    /// `enum`
+    Enum,
+}
+
+impl TagKind {
+    /// Human-readable keyword for diagnostics.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            TagKind::Struct => "struct",
+            TagKind::Union => "union",
+            TagKind::Enum => "enum",
+        }
+    }
+}
+
+impl From<RecordKind> for TagKind {
+    fn from(kind: RecordKind) -> Self {
+        match kind {
+            RecordKind::Struct => TagKind::Struct,
+            RecordKind::Union => TagKind::Union,
+        }
+    }
+}
+
+/// Resolve a struct/union/enum tag reference.
+///
+/// Looks up `tag` in `resolver.tags`. If found, checks that the stored
+/// definition has the same `TagKind` as `expected_kind`. On mismatch,
+/// emits `E0072` and returns `None`.
+///
+/// If the tag is not yet in the table (forward declaration), creates a
+/// new incomplete `Def` of the appropriate kind, registers it, and
+/// returns the fresh `DefId`.
+pub fn resolve_tag(
+    tag: Symbol,
+    tag_span: Span,
+    expected_kind: TagKind,
+    crate_: &mut HirCrate,
+    tcx: &TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<DefId> {
+    if let Some(&existing_id) = resolver.tags.get(&tag) {
+        // Check kind matches.
+        let def = &crate_.defs[existing_id];
+        let actual_kind = match &def.kind {
+            DefKind::Record { kind, .. } => TagKind::from(*kind),
+            DefKind::Enum { .. } => TagKind::Enum,
+            _ => {
+                // Should not happen — tags table only has Record/Enum.
+                return Some(existing_id);
+            }
+        };
+        if actual_kind != expected_kind {
+            let tag_str = session.interner.get(tag);
+            session
+                .handler
+                .struct_err(
+                    tag_span,
+                    format!(
+                        "use of `{tag_str}` as `{}` but previously declared as `{}`",
+                        expected_kind.keyword(),
+                        actual_kind.keyword(),
+                    ),
+                )
+                .code(rcc_errors::codes::E0072)
+                .emit();
+            return None;
+        }
+        Some(existing_id)
+    } else {
+        // Forward declaration — create an incomplete def.
+        let kind = match expected_kind {
+            TagKind::Struct => {
+                DefKind::Record { kind: RecordKind::Struct, layout: None, fields: Vec::new() }
+            }
+            TagKind::Union => {
+                DefKind::Record { kind: RecordKind::Union, layout: None, fields: Vec::new() }
+            }
+            TagKind::Enum => DefKind::Enum { repr: tcx.int, variants: Vec::new() },
+        };
+        let id = crate_.defs.push(Def { id: DefId(0), name: tag, span: tag_span, kind });
+        crate_.defs[id].id = id;
+        resolver.tags.insert(tag, id);
+        Some(id)
+    }
+}
+
 /// Levenshtein edit distance between two strings.
 fn edit_distance(a: &str, b: &str) -> u32 {
     let a_bytes = a.as_bytes();
@@ -854,6 +952,192 @@ mod tests {
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("abc", ""), 3);
         assert_eq!(edit_distance("count", "conut"), 2);
+    }
+
+    // ── Tag namespace resolution (task 06-03) tests ──────────────────
+
+    #[test]
+    fn resolve_tag_forward_decl_creates_def() {
+        // `struct A;` — forward declaration should create an incomplete def.
+        let (mut sess, _cap) = Session::for_test();
+        let a = sym(&mut sess, "A");
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let result =
+            resolve_tag(a, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(result.is_some());
+        let id = result.unwrap();
+        assert_eq!(crate_.defs.len(), 1);
+        assert!(matches!(crate_.defs[id].kind, DefKind::Record { kind: RecordKind::Struct, .. }));
+        assert!(resolver.tags.contains_key(&a));
+    }
+
+    #[test]
+    fn resolve_tag_repeated_forward_returns_same_id() {
+        // `struct A; struct A;` — second forward decl returns same DefId.
+        let (mut sess, _cap) = Session::for_test();
+        let a = sym(&mut sess, "A");
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let id1 =
+            resolve_tag(a, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+        let id2 =
+            resolve_tag(a, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert_eq!(id1, id2);
+        assert_eq!(crate_.defs.len(), 1, "should not create a second def");
+    }
+
+    #[test]
+    fn resolve_tag_mutual_recursion() {
+        // `struct A; struct B { A *a; };`
+        // Forward-declare A, then define B which references A via resolve_tag.
+        let (mut sess, _cap) = Session::for_test();
+        let a_sym = sym(&mut sess, "A");
+        let b_sym = sym(&mut sess, "B");
+
+        // Step 1: assign_def_ids for `struct B { ... }` (defines B).
+        let ast = TranslationUnit { decls: vec![make_struct(b_sym)], span: DUMMY_SP };
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        assign_def_ids(&ast, &tcx, &mut sess, &mut crate_, &mut resolver);
+
+        // B should be in tags.
+        assert!(resolver.tags.contains_key(&b_sym));
+
+        // Step 2: resolve_tag for A (forward reference — not yet defined).
+        let a_id = resolve_tag(
+            a_sym,
+            DUMMY_SP,
+            TagKind::Struct,
+            &mut crate_,
+            &tcx,
+            &mut resolver,
+            &mut sess,
+        );
+        assert!(a_id.is_some(), "forward reference to A should create a def");
+
+        // Step 3: resolve_tag for A again (should return same id).
+        let a_id2 = resolve_tag(
+            a_sym,
+            DUMMY_SP,
+            TagKind::Struct,
+            &mut crate_,
+            &tcx,
+            &mut resolver,
+            &mut sess,
+        );
+        assert_eq!(a_id, a_id2, "repeated resolution should return same DefId");
+
+        // Both A and B should now be in tags.
+        assert_eq!(resolver.tags.len(), 2);
+    }
+
+    #[test]
+    fn resolve_tag_kind_mismatch_struct_then_union() {
+        // `struct S { int x; }; union S;` → E0072
+        let (mut sess, cap) = Session::for_test();
+        let s = sym(&mut sess, "S");
+
+        // Define `struct S`.
+        let ast = TranslationUnit { decls: vec![make_struct(s)], span: DUMMY_SP };
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        assign_def_ids(&ast, &tcx, &mut sess, &mut crate_, &mut resolver);
+
+        // Now try `union S` — should fail with E0072.
+        let result =
+            resolve_tag(s, DUMMY_SP, TagKind::Union, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(result.is_none(), "kind mismatch should return None");
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0072"));
+        assert!(diags[0].message.contains("union"));
+        assert!(diags[0].message.contains("struct"));
+    }
+
+    #[test]
+    fn resolve_tag_kind_mismatch_struct_then_enum() {
+        // `struct S { int x; }; enum S;` → E0072
+        let (mut sess, cap) = Session::for_test();
+        let s = sym(&mut sess, "S");
+
+        let ast = TranslationUnit { decls: vec![make_struct(s)], span: DUMMY_SP };
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        assign_def_ids(&ast, &tcx, &mut sess, &mut crate_, &mut resolver);
+
+        let result =
+            resolve_tag(s, DUMMY_SP, TagKind::Enum, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(result.is_none());
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0072"));
+        assert!(diags[0].message.contains("enum"));
+        assert!(diags[0].message.contains("struct"));
+    }
+
+    #[test]
+    fn resolve_tag_enum_forward_and_match() {
+        // `enum E;` then `enum E` again — should return same DefId.
+        let (mut sess, _cap) = Session::for_test();
+        let e = sym(&mut sess, "E");
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let id1 =
+            resolve_tag(e, DUMMY_SP, TagKind::Enum, &mut crate_, &tcx, &mut resolver, &mut sess);
+        let id2 =
+            resolve_tag(e, DUMMY_SP, TagKind::Enum, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert_eq!(id1, id2);
+        assert!(matches!(crate_.defs[id1.unwrap()].kind, DefKind::Enum { .. }));
+    }
+
+    #[test]
+    fn resolve_tag_union_forward_then_struct_mismatch() {
+        // `union U;` then `struct U;` → E0072
+        let (mut sess, cap) = Session::for_test();
+        let u = sym(&mut sess, "U");
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        // Forward-declare as union.
+        let id =
+            resolve_tag(u, DUMMY_SP, TagKind::Union, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(id.is_some());
+
+        // Try to use as struct — mismatch.
+        let result =
+            resolve_tag(u, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(result.is_none());
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0072"));
+    }
+
+    #[test]
+    fn resolve_tag_does_not_pollute_ordinary_namespace() {
+        // Tag resolution should only touch resolver.tags, not resolver.ordinary.
+        let (mut sess, _cap) = Session::for_test();
+        let s = sym(&mut sess, "S");
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        resolve_tag(s, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+        assert!(resolver.ordinary.is_empty(), "tags should not appear in ordinary namespace");
+        assert_eq!(resolver.tags.len(), 1);
     }
 
     #[test]

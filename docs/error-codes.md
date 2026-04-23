@@ -565,6 +565,17 @@ int main(void) {
 }
 ```
 
+## E0072 — tag kind mismatch
+
+A struct, union, or enum tag was previously declared with a different
+kind. C99 §6.7.2.3 requires that every use of a particular tag agrees
+on whether it names a struct, union, or enum.
+
+```c
+struct S { int x; };
+union S;             // error[E0072]: use of `S` as `union` but previously declared as `struct`
+```
+
 ---
 
 ## W0001 — unknown #pragma directive

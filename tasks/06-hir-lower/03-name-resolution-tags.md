@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 06-03: Tag namespace resolution
 
 **Phase:** 06-hir-lower    **Depends on:** 06-01    **Milestone:** M4
