@@ -11,7 +11,7 @@
 #![warn(missing_docs)]
 
 use rcc_errors::{
-    codes::{E0003, E0004},
+    codes::{E0003, E0004, E0005},
     Handler,
 };
 use rcc_span::{BytePos, FileId, Span};
@@ -189,9 +189,28 @@ impl Iterator for Tokenizer<'_> {
                     continue;
                 }
 
+                // ── Identifier (ASCII start) ──────────────────────────
+                c if is_ident_start_ascii(c) => {
+                    self.cursor.bump();
+                    self.scan_ident_body();
+                    return Some(self.make_token(PpTokenKind::Ident, lo));
+                }
+
+                // ── Identifier (UCN start) ────────────────────────────
+                // `\uXXXX` / `\UXXXXXXXX` can legally start a C99
+                // identifier (C99 §6.4.2.1). We scan the UCN, validate
+                // the code point, and then continue the identifier
+                // body loop as usual.
+                '\\' if matches!(self.cursor.second(), Some('u' | 'U')) => {
+                    let u = self.scan_ucn();
+                    self.validate_ident_ucn(&u);
+                    self.scan_ident_body();
+                    return Some(self.make_token(PpTokenKind::Ident, lo));
+                }
+
                 // ── Fallback: single-char Unknown. ────────────────────
-                // Real recognisers (ident, pp-number, punct, literals)
-                // land in tasks 03-lex/04..08.
+                // Real recognisers (pp-number, punct, literals) land
+                // in tasks 03-lex/05..08.
                 _ => {
                     self.cursor.bump();
                     return Some(self.make_token(PpTokenKind::Unknown, lo));
@@ -258,4 +277,141 @@ impl Tokenizer<'_> {
 /// form feed. `\n` / `\r` are handled separately as newlines.
 fn is_horizontal_ws(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\x0B' | '\x0C')
+}
+
+/// Outcome of [`Tokenizer::scan_ucn`]: the literal bytes consumed, the
+/// span they cover, and the decoded code point (if 4/8 hex digits were
+/// actually read). A `None` code means the UCN was truncated by
+/// non-hex input or EOF.
+struct ScannedUcn {
+    /// Source-text bytes consumed, always starting with `\u` or `\U`.
+    bytes: String,
+    /// Span of those bytes in the original source.
+    span: Span,
+    /// Decoded code point, or `None` if fewer than the required
+    /// 4 / 8 hex digits were read.
+    code: Option<u32>,
+}
+
+impl Tokenizer<'_> {
+    /// Consume the greedy body of an identifier after its first
+    /// character has already been consumed. Terminates on the first
+    /// non-ident character. Embedded UCNs are scanned and validated
+    /// inline; they count as part of the identifier even if they are
+    /// ill-formed (the error-recovery strategy is to diagnose but not
+    /// truncate the token).
+    fn scan_ident_body(&mut self) {
+        loop {
+            match self.cursor.first() {
+                Some(c) if is_ident_continue_ascii(c) => {
+                    self.cursor.bump();
+                }
+                Some('\\') if matches!(self.cursor.second(), Some('u' | 'U')) => {
+                    let u = self.scan_ucn();
+                    self.validate_ident_ucn(&u);
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Scan a single `\uXXXX` or `\UXXXXXXXX` escape. The cursor must
+    /// be positioned on the leading backslash; on return it is past
+    /// whatever hex digits were consumed. No diagnostic is emitted
+    /// here — [`validate_ident_ucn`] is the caller's responsibility.
+    ///
+    /// [`validate_ident_ucn`]: Self::validate_ident_ucn
+    fn scan_ucn(&mut self) -> ScannedUcn {
+        let lo = self.pos();
+        let mut bytes = String::new();
+        let bs = self.cursor.bump().expect("UCN scan called without `\\`");
+        bytes.push(bs);
+        let u_or_big_u = self.cursor.bump().expect("UCN scan called without `u`/`U`");
+        bytes.push(u_or_big_u);
+        let need = if u_or_big_u == 'u' { 4 } else { 8 };
+
+        let mut code: u32 = 0;
+        let mut got = 0;
+        while got < need {
+            match self.cursor.first().and_then(|c| c.to_digit(16)) {
+                Some(d) => {
+                    let ch = self.cursor.bump().unwrap();
+                    bytes.push(ch);
+                    code = (code << 4) | d;
+                    got += 1;
+                }
+                None => break,
+            }
+        }
+
+        let span = self.span_from(lo);
+        let code = if got == need { Some(code) } else { None };
+        ScannedUcn { bytes, span, code }
+    }
+
+    /// Emit E0005 if a scanned UCN is ill-formed (wrong digit count)
+    /// or if its code point is disallowed for the identifier position
+    /// by C99 §6.4.3 (constraint list) and §6.4.2.1 (Annex D).
+    fn validate_ident_ucn(&mut self, u: &ScannedUcn) {
+        match u.code {
+            None => self.emit_ucn_error(u, "malformed universal character name"),
+            Some(cp) if !is_allowed_ucn_in_ident(cp) => {
+                self.emit_ucn_error(u, "universal character name not allowed in identifier")
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn emit_ucn_error(&mut self, u: &ScannedUcn, message: &str) {
+        if let Some(h) = self.handler.as_deref_mut() {
+            h.struct_err(u.span, message)
+                .code(E0005)
+                .primary(u.span, "this is not a well-formed universal character name")
+                .help(format!(
+                    "universal character names must be `\\uXXXX` with 4 hex digits or \
+                     `\\UXXXXXXXX` with 8 hex digits; got `{}`",
+                    u.bytes
+                ))
+                .note(
+                    "C99 §6.4.3 constrains UCN code points (no surrogates, no \
+                     short-identifier < 0x00A0 except 0x24/0x40/0x60); identifiers \
+                     further restrict them to Annex D ranges",
+                )
+                .emit();
+        }
+    }
+}
+
+/// ASCII subset of C99 identifier-start characters: underscore and
+/// letters. UCN starts are handled by the caller.
+fn is_ident_start_ascii(c: char) -> bool {
+    c == '_' || c.is_ascii_alphabetic()
+}
+
+/// ASCII subset of C99 identifier-continue characters: underscore,
+/// letters, and digits. UCN continuations are handled by the caller.
+fn is_ident_continue_ascii(c: char) -> bool {
+    c == '_' || c.is_ascii_alphanumeric()
+}
+
+/// Whether a UCN-decoded Unicode code point is permitted inside a C99
+/// identifier.
+///
+/// This is the intersection of two rules:
+/// - C99 §6.4.3 constraint list: no surrogates (D800..=DFFF), and no
+///   short identifier < 0x00A0 except the three exceptions 0x0024
+///   (`$`), 0x0040 (`@`), 0x0060 (`` ` ``).
+/// - C99 §6.4.2.1 identifier rule: each UCN in an identifier must
+///   designate a character in one of the Annex D ranges — which
+///   *excludes* the three §6.4.3 exceptions.
+///
+/// For the purposes of the lexer we approximate Annex D by the
+/// conservative rule "code point ≥ 0x00A0 and not a surrogate and
+/// within Unicode scalar range". This correctly rejects `\u0024` /
+/// `\u0040` / `\u0060` in identifier position, as well as all control
+/// characters below U+00A0, while accepting the letter-like ranges
+/// used in practice. A tighter Annex-D whitelist is deferred to a
+/// future identifier-body hardening task.
+fn is_allowed_ucn_in_ident(cp: u32) -> bool {
+    (0x00A0..=0x10_FFFF).contains(&cp) && !(0xD800..=0xDFFF).contains(&cp)
 }

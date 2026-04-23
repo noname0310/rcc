@@ -129,46 +129,43 @@ fn backslash_not_followed_by_newline_is_literal() {
 
 #[test]
 fn tokenizer_splice_span_covers_physical_range() {
+    // Post task 03-lex/04 `abcdef` (with a physical splice in the middle)
+    // is recognised as a single identifier; the splice is invisible
+    // to the consumer. The Ident's physical span must still cover the
+    // full byte range of `abc\\\ndef`.
     let src = "abc\\\ndef";
     let file = FileId(0);
     let tokens: Vec<_> = rcc_lexer::tokenize(file, src).collect();
 
-    // Current stub emits one Unknown token per logical char.
-    // The splice is invisible, so we get 6 tokens (a, b, c, d, e, f).
-    assert_eq!(tokens.len(), 6, "expected 6 logical chars, got {}", tokens.len());
-
-    // Token 'd' crosses the splice: its span must start at the
-    // backslash (byte 3) and end after 'd' (byte 6).
-    let d_tok = &tokens[3];
-    assert_eq!(d_tok.span.lo.0, 3, "d token lo");
-    assert_eq!(d_tok.span.hi.0, 6, "d token hi");
-
-    // Full physical range of all tokens: [0, 8).
-    let first_lo = tokens.first().unwrap().span.lo.0;
-    let last_hi = tokens.last().unwrap().span.hi.0;
-    assert_eq!(first_lo, 0);
-    assert_eq!(last_hi, src.len() as u32);
+    assert_eq!(tokens.len(), 1, "expected a single Ident token, got {tokens:?}");
+    let tok = tokens[0];
+    assert_eq!(tok.kind, rcc_lexer::PpTokenKind::Ident);
+    assert_eq!(tok.span.lo.0, 0);
+    assert_eq!(tok.span.hi.0, src.len() as u32, "ident span must cover physical bytes");
 }
 
 #[test]
 fn tokenizer_directive_splice_smoke() {
+    // `#define FOO \\\n bar` ⇒ after phase-2 splicing the logical text
+    // is `#define FOO  bar`. Identifier tokens must see `define`, `FOO`,
+    // and `bar` with physical spans anchored in the pre-splice source.
     let src = "#define FOO \\\n bar";
     let file = FileId(0);
     let tokens: Vec<_> = rcc_lexer::tokenize(file, src).collect();
 
-    // Collect logical characters from spans.
-    let logical: String = tokens
+    // Each identifier token's *logical* text is recovered by stripping
+    // backslash-newline pairs from the physical slice (phase-2 splicing
+    // is invisible at the span level).
+    let idents: Vec<String> = tokens
         .iter()
-        .filter_map(|t| {
-            let lo = t.span.lo.0 as usize;
-            let hi = t.span.hi.0 as usize;
-            // For splice-crossing tokens the slice may contain \\\n,
-            // so just take the last char (the actual logical char).
-            src.get(lo..hi).and_then(|s| s.chars().rfind(|&c| c != '\\' && c != '\n' && c != '\r'))
+        .filter(|t| t.kind == rcc_lexer::PpTokenKind::Ident)
+        .map(|t| {
+            let s = &src[t.span.lo.0 as usize..t.span.hi.0 as usize];
+            s.replace("\\\r\n", "").replace("\\\n", "")
         })
         .collect();
 
-    // After splicing: "#define FOO  bar" (the \\\n removed, space preserved).
-    assert!(logical.contains("FOO"), "directive name present: {logical}");
-    assert!(logical.contains("bar"), "macro body present: {logical}");
+    assert!(idents.iter().any(|s| s == "define"), "expected `define`, got {idents:?}");
+    assert!(idents.iter().any(|s| s == "FOO"), "expected `FOO`, got {idents:?}");
+    assert!(idents.iter().any(|s| s == "bar"), "expected `bar`, got {idents:?}");
 }
