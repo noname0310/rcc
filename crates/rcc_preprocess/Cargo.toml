@@ -14,3 +14,6 @@ rcc_errors           = { workspace = true }
 rcc_session          = { workspace = true }
 rcc_lexer            = { workspace = true }
 rcc_data_structures  = { workspace = true }
+
+[dev-dependencies]
+tempfile             = { workspace = true }

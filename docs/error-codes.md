@@ -197,3 +197,14 @@ The user explicitly triggered a compilation error via `#error`.
 ```c
 #error "unsupported platform"  // error[E0020]: #error directive encountered
 ```
+
+## E0021 — cannot find header
+
+A `#include` directive names a header that was not found in any of the
+configured search directories. Per C99 §6.10.2, the `"..."` form
+searches the current file's directory first and then the command-line
+include paths (`-I`); the `<...>` form searches only the include paths.
+
+```c
+#include <missing.h>  // error[E0021]: cannot find header `missing.h`
+```

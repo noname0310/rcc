@@ -9,6 +9,12 @@
 //!   E0041..E0060  — type-checking   (reserved, future)
 //!   E0061..E0080  — HIR lowering    (reserved, future)
 //!   E0081..E0100  — codegen         (reserved, future)
+//!
+//! The preprocessor block E0001..E0020 was filled during lexer work, so
+//! task 04-03 borrows the first slot of the parser window for the
+//! `#include` resolver. Downstream parser tasks should allocate from
+//! E0022 onward; see the `## Notes (agent)` in
+//! `tasks/04-preprocess/03-include-search-path.md`.
 
 /// Collects every registered error code for programmatic iteration.
 ///
@@ -34,6 +40,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0018, E0018_DESC),
     (E0019, E0019_DESC),
     (E0020, E0020_DESC),
+    (E0021, E0021_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -125,6 +132,14 @@ const E0019_DESC: &str = "unknown preprocessor directive";
 /// `#error` directive encountered.
 pub const E0020: &str = "E0020";
 const E0020_DESC: &str = "#error directive encountered";
+
+/// `#include` header could not be located in any search path.
+///
+/// For the `"..."` form the current source file's directory is
+/// searched first, then `Session::opts.include_paths`; for the
+/// `<...>` form only `include_paths` is consulted (C99 §6.10.2).
+pub const E0021: &str = "E0021";
+const E0021_DESC: &str = "cannot find header";
 
 #[cfg(test)]
 mod tests {
