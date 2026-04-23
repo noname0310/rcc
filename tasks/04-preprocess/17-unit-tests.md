@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-17: Preprocessor unit test matrix
 
 **Phase:** 04-preprocess    **Depends on:** 04-06 .. 04-14    **Milestone:** M5
