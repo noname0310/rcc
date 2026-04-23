@@ -19,6 +19,8 @@ use rcc_span::{BytePos, FileId, Span};
 mod cursor;
 mod kinds;
 mod line_splice;
+#[cfg(test)]
+mod test_util;
 
 pub use cursor::Cursor;
 use kinds::Punct as P;

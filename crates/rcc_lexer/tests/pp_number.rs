@@ -26,6 +26,8 @@
 use rcc_lexer::{PpNumberKind, PpTokenKind, Tokenizer};
 use rcc_span::FileId;
 
+mod common;
+
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
 }
@@ -221,6 +223,79 @@ fn span_partition_over_mixed_pp_numbers() {
 }
 
 // ── Sanity: no panics on weird inputs ───────────────────────────────
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+//
+// Positive rows: `(src, expected_kind)` — the whole `src` must lex to
+// exactly one `PpNumber(_)` whose kind matches. Negative rows:
+// grammar-adjacent inputs that must NOT be recognised as a pp-number.
+
+#[test]
+fn table() {
+    // Positive: Integer / Float shapes from every branch of C99 §6.4.8.
+    let positive: &[(&str, PpNumberKind)] = &[
+        ("42", PpNumberKind::Integer),
+        ("0", PpNumberKind::Integer),
+        ("0123", PpNumberKind::Integer),
+        ("0xFF", PpNumberKind::Integer),
+        ("0xFFULL", PpNumberKind::Integer),
+        ("0xdeadbeefULL", PpNumberKind::Integer),
+        // Sign-absorbed `e`/`E` inside a hex prefix stays Integer-shaped.
+        ("0x1e+2", PpNumberKind::Integer),
+        (".42", PpNumberKind::Float),
+        ("3.", PpNumberKind::Float),
+        ("3.14", PpNumberKind::Float),
+        ("3.14f", PpNumberKind::Float),
+        ("3.14e-10f", PpNumberKind::Float),
+        ("0e+1", PpNumberKind::Float),
+        ("1E2", PpNumberKind::Float),
+        ("0x1.0p0", PpNumberKind::Float),
+        ("0x1p-2", PpNumberKind::Float),
+        ("0x1p+2f", PpNumberKind::Float),
+    ];
+
+    for &(src, want) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(v.len(), 1, "positive src={src:?}: expected one non-ws token, got {v:?}");
+        assert_eq!(
+            v[0].0,
+            PpTokenKind::PpNumber(want),
+            "positive src={src:?}: expected PpNumber({want:?}), got {:?}",
+            v[0].0,
+        );
+        assert_eq!(v[0].1, src, "positive src={src:?}: span slice must equal whole input");
+    }
+
+    // Negative: inputs that must NOT lex as a (single) pp-number. We
+    // assert the lexer does not emit a `PpNumber` as the first token.
+    // These are shape-level grammar refusals, not diagnostic-bearing
+    // errors — the pp-number recogniser has no diagnostics of its own.
+    //   ".x"   — bare `.` + non-digit must stay punctuator, not `.digit`.
+    //   "..."  — ellipsis punctuator, not a pp-number.
+    //   "abc"  — leading non-digit, non-dot byte cannot start one.
+    //   "+1"   — `+` is a punctuator; the digit starts a fresh token.
+    let negative: &[&str] = &[".x", "...", "abc", "+1"];
+
+    for &src in negative {
+        let v = common::lex_all(src);
+        let first_non_ws = v
+            .iter()
+            .find(|(k, _)| !matches!(k, PpTokenKind::Whitespace | PpTokenKind::Newline))
+            .expect("at least one non-ws token");
+        match negative_first_is_not_ppnum(src, first_non_ws.0) {
+            Ok(()) => {}
+            Err(msg) => panic!("{msg}"),
+        }
+    }
+}
+
+fn negative_first_is_not_ppnum(src: &str, k: PpTokenKind) -> Result<(), String> {
+    if matches!(k, PpTokenKind::PpNumber(_)) {
+        Err(format!("negative src={src:?}: first non-ws token unexpectedly PpNumber"))
+    } else {
+        Ok(())
+    }
+}
 
 #[test]
 fn pp_number_recogniser_tolerates_invalid_sequences() {

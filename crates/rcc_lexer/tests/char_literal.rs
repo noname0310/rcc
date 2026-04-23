@@ -24,6 +24,8 @@ use rcc_lexer::{PpTokenKind, StringEncoding, Tokenizer};
 use rcc_session::Session;
 use rcc_span::FileId;
 
+mod common;
+
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
 }
@@ -319,4 +321,62 @@ fn char_const_followed_by_identifier() {
     assert_eq!(toks[1].kind, PpTokenKind::Ident);
     assert_eq!(toks[1].span.lo.0, 4);
     assert_eq!(toks[1].span.hi.0, 7);
+}
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+
+#[test]
+fn table() {
+    // Positive: `(src, expected_encoding)` — `src` must lex to exactly
+    // one `CharConst { enc }` spelling the whole `src`.
+    let positive: &[(&str, StringEncoding)] = &[
+        ("'a'", StringEncoding::None),
+        ("'ab'", StringEncoding::None), // multi-char, impl-defined but legal.
+        (r"'\''", StringEncoding::None),
+        (r"'\\'", StringEncoding::None),
+        (r"'\n'", StringEncoding::None),
+        (r"'\xff'", StringEncoding::None),
+        (r"'\101'", StringEncoding::None),
+        (r"'\0'", StringEncoding::None),
+        (r"'\u0041'", StringEncoding::None),
+        (r"'\U0001F600'", StringEncoding::None),
+        ("L'x'", StringEncoding::Wide),
+        ("u'x'", StringEncoding::Utf16),
+        ("U'x'", StringEncoding::Utf32),
+        ("u8'x'", StringEncoding::Utf8),
+    ];
+
+    for &(src, enc) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(v.len(), 1, "positive src={src:?}: expected one non-ws token, got {v:?}");
+        assert_eq!(
+            v[0].0,
+            PpTokenKind::CharConst { enc },
+            "positive src={src:?}: expected CharConst {{ enc: {enc:?} }}, got {:?}",
+            v[0].0,
+        );
+        assert_eq!(v[0].1, src, "positive src={src:?}: span slice must equal whole input");
+        assert!(
+            common::diag_codes(src).is_empty(),
+            "positive src={src:?}: unexpected diagnostics {:?}",
+            common::diag_codes(src),
+        );
+    }
+
+    // Negative: each row must emit the named diagnostic code.
+    let negative: &[(&str, &str)] = &[
+        // Unterminated at EOF — no closing `'`.
+        ("'a", E0006),
+        // Unterminated at newline — closing `'` missing before `\n`.
+        ("'a\nrest", E0006),
+        // Unknown escape letter inside a well-terminated constant.
+        (r"'\q'", E0007),
+        // Wide constant unterminated at EOF — prefix-bearing variant.
+        ("L'x", E0006),
+    ];
+
+    for &(src, code) in negative {
+        let codes = common::diag_codes(src);
+        assert!(codes.contains(&code), "negative src={src:?}: expected {code}, got {codes:?}");
+    }
 }

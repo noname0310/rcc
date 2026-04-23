@@ -26,6 +26,8 @@ use rcc_lexer::{PpTokenKind, StringEncoding, Tokenizer};
 use rcc_session::Session;
 use rcc_span::FileId;
 
+mod common;
+
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
 }
@@ -316,5 +318,68 @@ fn two_narrow_strings_separated_by_whitespace_emit_two_tokens() {
     assert_eq!(toks.len(), 2);
     for t in &toks {
         assert!(matches!(t.kind, PpTokenKind::StringLit { enc: StringEncoding::None }));
+    }
+}
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+
+#[test]
+fn table() {
+    // Positive: `(src, expected_encoding)` — `src` must lex to exactly
+    // one `StringLit { enc }` whose slice re-spells the whole `src`
+    // and whose encoding matches `enc`.
+    let positive: &[(&str, StringEncoding)] = &[
+        (r#""""#, StringEncoding::None),
+        (r#""hello""#, StringEncoding::None),
+        (r#""x\ty""#, StringEncoding::None),
+        (r#""\n""#, StringEncoding::None),
+        (r#""\xdeadbeef""#, StringEncoding::None),
+        (r#""\101""#, StringEncoding::None),
+        (r#""\u0041""#, StringEncoding::None),
+        (r#""\U0001F600""#, StringEncoding::None),
+        // Encoding prefixes (all four).
+        (r#"L"x""#, StringEncoding::Wide),
+        (r#"u"x""#, StringEncoding::Utf16),
+        (r#"U"x""#, StringEncoding::Utf32),
+        (r#"u8"x""#, StringEncoding::Utf8),
+        // UTF-8 bytes are passed through verbatim (spelling = src).
+        ("\"κόσμε\"", StringEncoding::None),
+    ];
+
+    for &(src, enc) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(v.len(), 1, "positive src={src:?}: expected one non-ws token, got {v:?}");
+        assert_eq!(
+            v[0].0,
+            PpTokenKind::StringLit { enc },
+            "positive src={src:?}: expected StringLit {{ enc: {enc:?} }}, got {:?}",
+            v[0].0,
+        );
+        assert_eq!(v[0].1, src, "positive src={src:?}: span slice must equal whole input");
+        assert!(
+            common::diag_codes(src).is_empty(),
+            "positive src={src:?}: unexpected diagnostics {:?}",
+            common::diag_codes(src),
+        );
+    }
+
+    // Negative: each row must emit the named diagnostic code. The
+    // token is still produced (recovery); we only care the diagnostic
+    // surfaces so the preprocessor can see the error.
+    let negative: &[(&str, &str)] = &[
+        // Unterminated at EOF — no closing `"`.
+        (r#""hi"#, E0008),
+        // Unterminated at newline — literal `"` followed by `\n`.
+        ("\"hi\nrest", E0008),
+        // Unknown escape letter inside a well-terminated literal.
+        (r#""\q""#, E0007),
+        // Combined: unknown-escape on an unterminated literal still
+        // yields both diagnostics — we only assert E0008 presence.
+        ("\"\\q\n", E0008),
+    ];
+
+    for &(src, code) in negative {
+        let codes = common::diag_codes(src);
+        assert!(codes.contains(&code), "negative src={src:?}: expected {code}, got {codes:?}");
     }
 }

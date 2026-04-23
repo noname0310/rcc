@@ -13,6 +13,8 @@ use rcc_lexer::{PpTokenKind, Tokenizer};
 use rcc_session::Session;
 use rcc_span::FileId;
 
+mod common;
+
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
 }
@@ -143,4 +145,74 @@ fn disallowed_control_ucn_below_a0_emits_e0005() {
     let src = r"\u007F";
     let d = diags(src);
     assert!(d.iter().any(|d| d.code == Some(E0005)), "expected E0005, got {d:?}");
+}
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+//
+// ≥ 10 positive rows, each a `(src, expected_spelling)` pair whose lone
+// non-whitespace token must be an `Ident` that re-spells `src`; ≥ 3
+// negative rows, each a `(src, expected_code)` pair whose diagnostic
+// stream must contain `expected_code`.
+
+#[test]
+fn table() {
+    // Positive: each row lexes to exactly one `Ident` spanning the
+    // whole source. The second column is the spelled slice we expect
+    // back from `common::lex_all`; keeping it explicit makes the
+    // table readable as a spec of the identifier grammar.
+    let positive: &[(&str, &str)] = &[
+        // ASCII-only forms.
+        ("foo", "foo"),
+        ("x", "x"),
+        ("_under", "_under"),
+        ("__x", "__x"),
+        ("x42_7", "x42_7"),
+        ("a1b2c3", "a1b2c3"),
+        ("TheQuickBrownFox", "TheQuickBrownFox"),
+        ("SCREAMING_SNAKE", "SCREAMING_SNAKE"),
+        ("_0", "_0"),
+        // UCN-bearing forms — the span covers the raw bytes including
+        // the backslash-u escape.
+        (r"a\u00e9b", r"a\u00e9b"),
+        (r"\u00e9bauche", r"\u00e9bauche"),
+        (r"\U0001F600x", r"\U0001F600x"),
+    ];
+
+    for &(src, expected) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(v.len(), 1, "positive src={src:?}: expected one non-ws token, got {v:?}");
+        assert_eq!(
+            v[0].0,
+            PpTokenKind::Ident,
+            "positive src={src:?}: expected Ident, got {:?}",
+            v[0].0
+        );
+        assert_eq!(v[0].1, expected, "positive src={src:?}: span slice mismatch");
+        assert!(
+            common::diag_codes(src).is_empty(),
+            "positive src={src:?}: unexpected diagnostics {:?}",
+            common::diag_codes(src),
+        );
+    }
+
+    // Negative: each row must trigger the named diagnostic code at
+    // least once. The token is still produced so lex recovery stays
+    // forward-moving.
+    let negative: &[(&str, &str)] = &[
+        // Malformed short UCN (2 hex digits instead of 4).
+        (r"\u12", E0005),
+        // Malformed long UCN (7 hex digits instead of 8).
+        (r"\U0001F60", E0005),
+        // `\u0024` → `$` is not in Annex D.
+        (r"\u0024", E0005),
+        // UTF-16 high-surrogate is banned by §6.4.3 constraint list.
+        (r"\uD800", E0005),
+        // `\u007F` (DEL) is < 0xA0 with no §6.4.3 exception.
+        (r"\u007F", E0005),
+    ];
+
+    for &(src, code) in negative {
+        let codes = common::diag_codes(src);
+        assert!(codes.contains(&code), "negative src={src:?}: expected {code}, got {codes:?}");
+    }
 }

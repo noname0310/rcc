@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 03-10: Table-driven unit tests per token kind
 
 **Phase:** 03-lex    **Depends on:** 03-03 .. 03-08    **Milestone:** M1

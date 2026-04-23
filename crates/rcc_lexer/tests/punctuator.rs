@@ -17,6 +17,8 @@ use rcc_lexer::{PpTokenKind, Punct, Tokenizer};
 use rcc_session::Session;
 use rcc_span::FileId;
 
+mod common;
+
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
 }
@@ -413,4 +415,74 @@ fn expression_with_mixed_tokens() {
     let kinds: Vec<_> = toks.iter().map(|t| t.kind).collect();
     assert_eq!(kinds, expected_kinds, "in {src:?}");
     assert!(diags(src).is_empty());
+}
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+//
+// Rather than enumerate all 47 punctuators again (see
+// `every_punct_variant_round_trips_in_isolation` for that) the table
+// exercises the max-munch and disambiguation edges that the lexer is
+// most likely to regress on, plus three stray-byte negative cases.
+
+#[test]
+fn table() {
+    // Positive: `(src, expected_punct)` — `src` must lex to exactly one
+    // `Punct(_)` spelling the whole `src`.
+    let positive: &[(&str, Punct)] = &[
+        // 3-char max-munch.
+        ("<<=", Punct::ShlEq),
+        (">>=", Punct::ShrEq),
+        ("...", Punct::Ellipsis),
+        // 2-char forms sharing a 1-char prefix.
+        ("->", Punct::Arrow),
+        ("++", Punct::PlusPlus),
+        ("--", Punct::MinusMinus),
+        ("<<", Punct::ShlShl),
+        (">>", Punct::ShrShr),
+        ("<=", Punct::Le),
+        (">=", Punct::Ge),
+        ("==", Punct::EqEq),
+        ("!=", Punct::BangEq),
+        ("&&", Punct::AmpAmp),
+        ("||", Punct::PipePipe),
+        ("+=", Punct::PlusEq),
+        ("-=", Punct::MinusEq),
+        ("##", Punct::HashHash),
+        // 1-char forms of the same leading bytes.
+        ("<", Punct::Lt),
+        (">", Punct::Gt),
+        ("=", Punct::Eq),
+        ("!", Punct::Bang),
+        ("&", Punct::Amp),
+        ("|", Punct::Pipe),
+        ("#", Punct::Hash),
+        (".", Punct::Dot),
+    ];
+
+    for &(src, want) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(v.len(), 1, "positive src={src:?}: expected one non-ws token, got {v:?}");
+        assert_eq!(
+            v[0].0,
+            PpTokenKind::Punct(want),
+            "positive src={src:?}: expected {want:?}, got {:?}",
+            v[0].0,
+        );
+        assert_eq!(v[0].1, src, "positive src={src:?}: span slice must equal whole input");
+        assert!(
+            common::diag_codes(src).is_empty(),
+            "positive src={src:?}: unexpected diagnostics {:?}",
+            common::diag_codes(src),
+        );
+    }
+
+    // Negative: bytes that cannot start any punctuator must land as
+    // `Unknown` + E0001. The lexer still emits a token so recovery
+    // makes forward progress.
+    let negative: &[(&str, &str)] = &[("@", E0001), ("`", E0001), ("\\z", E0001), ("$", E0001)];
+
+    for &(src, code) in negative {
+        let codes = common::diag_codes(src);
+        assert!(codes.contains(&code), "negative src={src:?}: expected {code}, got {codes:?}");
+    }
 }

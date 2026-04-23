@@ -13,6 +13,8 @@ use rcc_lexer::{PpTokenKind, Tokenizer};
 use rcc_session::Session;
 use rcc_span::FileId;
 
+mod common;
+
 /// Collect all tokens produced by the (default-configured) tokenizer.
 fn tokenize(src: &str) -> Vec<rcc_lexer::PpToken> {
     Tokenizer::new(FileId(0), src).collect()
@@ -211,4 +213,74 @@ fn newline_always_emitted_even_in_default_mode() {
 
     let nl_count = tokens.iter().filter(|t| t.kind == PpTokenKind::Newline).count();
     assert_eq!(nl_count, 1, "expected one Newline, got {tokens:?}");
+}
+
+// ── Consolidated `table()` per task 03-lex/10 ───────────────────────
+//
+// The "comments" category covers whitespace collapse, the Newline
+// token, `//` line comments, and `/* … */` block comments. We check
+// positive cases against the *number* of non-whitespace tokens the
+// lexer emits (trivia is category-internal), and negative cases
+// against diagnostic codes.
+
+#[test]
+fn table() {
+    // Positive: `(src, expected_non_ws_token_count)`. Each row proves
+    // that the category-internal trivia is correctly collapsed so the
+    // non-trivia token count matches what the C99 translation phases
+    // §5.1.1.2 would leave behind.
+    let positive: &[(&str, usize)] = &[
+        // Horizontal whitespace collapse.
+        ("a  b", 2),
+        ("\ta\tb\t", 2),
+        // Line comment: comment body eaten, newline preserved (counted
+        // separately — filtered out by `non_trivia`).
+        ("// comment\nfoo", 1),
+        ("//xyz\n", 0),
+        ("//xyz", 0),
+        // Block comment: reduces to one space; `b` is the sole survivor.
+        ("/* a */ b /* c */", 1),
+        // Block comment spanning newlines emits no Newline.
+        ("/* a\nb */x", 1),
+        // Back-to-back block comments are both collapsed.
+        ("/*a*//*b*/x", 1),
+        // Line comment followed by another line.
+        ("//one\n//two\nz", 1),
+        // Empty source lexes to zero tokens.
+        ("", 0),
+        // Pure whitespace lexes to zero non-trivia tokens.
+        ("   \t\t  ", 0),
+        // Bare newline is itself trivia from `non_trivia`'s POV.
+        ("\n", 0),
+    ];
+
+    for &(src, want_len) in positive {
+        let v = common::non_trivia(common::lex_all(src));
+        assert_eq!(
+            v.len(),
+            want_len,
+            "positive src={src:?}: expected {want_len} non-trivia tokens, got {v:?}",
+        );
+        assert!(
+            common::diag_codes(src).is_empty(),
+            "positive src={src:?}: unexpected diagnostics {:?}",
+            common::diag_codes(src),
+        );
+    }
+
+    // Negative: the only diagnostics emitted by the trivia scanner are
+    // E0003 (nested `/*`) and E0004 (unterminated `/*`).
+    let negative: &[(&str, &str)] = &[
+        ("/* never closed", E0004),
+        ("/* outer /* inner */ tail", E0003),
+        // Unterminated *and* nested: both fire; we assert E0004 here.
+        ("/* a /* b", E0004),
+        // Unterminated block spanning a newline: still E0004.
+        ("/* a\nb", E0004),
+    ];
+
+    for &(src, code) in negative {
+        let codes = common::diag_codes(src);
+        assert!(codes.contains(&code), "negative src={src:?}: expected {code}, got {codes:?}");
+    }
 }
