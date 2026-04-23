@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-23
+
 # 04-01: Tokenise by logical line
 
 **Phase:** 04-preprocess    **Depends on:** 03-03    **Milestone:** M1+

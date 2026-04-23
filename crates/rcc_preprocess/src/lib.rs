@@ -13,9 +13,11 @@ use rcc_session::Session;
 use rcc_span::{FileId, Symbol};
 
 pub mod directive;
+pub mod line_stream;
 pub mod macros;
 
 pub use directive::Directive;
+pub use line_stream::LineStream;
 pub use macros::{HideSet, MacroDef, MacroKind, MacroTable};
 
 /// Entry point: preprocess the file `root` in `session` and return the
