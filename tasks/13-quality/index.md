@@ -12,6 +12,9 @@ Post-M6 polish: optimisation levels, diagnostic audit, benchmarks, tagged releas
 - [ ] [02-diagnostic-quality-sweep](02-diagnostic-quality-sweep.md)
 - [ ] [03-bench-harness](03-bench-harness.md)
 - [ ] [04-release-process](04-release-process.md)
+- [ ] [05-diagnostic-pragmas](05-diagnostic-pragmas.md)
+- [ ] [06-restrict-noalias](06-restrict-noalias.md)
+- [ ] [07-warning-categories](07-warning-categories.md)
 
 ## Downstream
 

@@ -21,6 +21,7 @@ declarator-flattened HIR. This is where the C 이름 공간 분리 (ordinary
 | 10 | [`10-expression-lowering.md`](10-expression-lowering.md) | AST Expr → HIR Expr (no types yet). |
 | 11 | [`11-init-lowering.md`](11-init-lowering.md) | Flatten initializer lists. |
 | 12 | [`12-unit-tests.md`](12-unit-tests.md) | Declarator round-trip table. |
+| 13 | [`13-inline-linkage.md`](13-inline-linkage.md) | C99 `inline` function linkage. |
 
 ## Exit criteria
 

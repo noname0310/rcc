@@ -15,6 +15,12 @@ single driver.
 | 04 | [`04-insta-snapshot-harness.md`](04-insta-snapshot-harness.md) | Shared snapshot helper. |
 | 05 | [`05-e2e-runner.md`](05-e2e-runner.md) | Build + run programs in tests. |
 | 06 | [`06-differential-cc.md`](06-differential-cc.md) | Compare against host `cc`. |
+| 07 | [`07-standard-stop-flags.md`](07-standard-stop-flags.md) | `-c`, `-S`, `-E` stop flags. |
+| 08 | [`08-target-cli-wiring.md`](08-target-cli-wiring.md) | `--target=<triple>` CLI flag. |
+| 09 | [`09-warning-control.md`](09-warning-control.md) | `-Wall`, `-Werror`, `-Wno-*` flags. |
+| 10 | [`10-linker-flags.md`](10-linker-flags.md) | `-l`, `-L`, `-Wl,`, `-shared`, `-static`. |
+| 11 | [`11-multi-file.md`](11-multi-file.md) | Multiple `.c` input files. |
+| 12 | [`12-misc-cli-flags.md`](12-misc-cli-flags.md) | `-v`, `-std=c99`, `-f` flag handling. |
 
 ## Exit criteria
 

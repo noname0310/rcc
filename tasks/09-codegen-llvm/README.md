@@ -25,6 +25,9 @@ active for developers without an LLVM install.
 | 14 | [`14-mem2reg-verify.md`](14-mem2reg-verify.md) | Run `opt -mem2reg` in tests. |
 | 15 | [`15-llvm-ir-snapshot.md`](15-llvm-ir-snapshot.md) | `--emit=llvm-ir` snapshots. |
 | 16 | [`16-filecheck-tests.md`](16-filecheck-tests.md) | LLVM-style `// CHECK:` tests. |
+| 17 | [`17-debug-info-dwarf.md`](17-debug-info-dwarf.md) | DWARF debug metadata via DIBuilder. |
+| 18 | [`18-volatile-access.md`](18-volatile-access.md) | `volatile` load/store codegen. |
+| 19 | [`19-bitfield-access-codegen.md`](19-bitfield-access-codegen.md) | Bitfield read/write shift-mask sequences. |
 
 ## Exit criteria
 

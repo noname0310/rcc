@@ -19,6 +19,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [ ] [09-const-eval-extended](09-const-eval-extended.md)
 - [ ] [10-init-constness](10-init-constness.md)
 - [ ] [11-unit-tests-truth-tables](11-unit-tests-truth-tables.md)
+- [ ] [12-complex-arithmetic](12-complex-arithmetic.md)
 
 ## Downstream
 

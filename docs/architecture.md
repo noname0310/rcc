@@ -65,6 +65,60 @@ This document is the code-facing version of the high-level plan at
 | `rcc_conformance`      | — (tests/ harness)         | External test-suite scoring |
 | `xtask`               | — (project tooling)        | Vendoring + maintenance tasks |
 
+### Planned additions
+
+| New crate / module     | Responsibility |
+| ---------------------- | -------------- |
+| `rcc_target`           | `TargetInfo`, `DataModel`, triple parsing, type sizes per target |
+| `lib/rcc/include/`     | Compiler-provided freestanding C headers (`stddef.h`, `stdarg.h`, …) |
+
+## Target abstraction
+
+`rcc` supports cross-compilation via a `TargetInfo` struct (phase 15)
+that parameterises all target-dependent values:
+
+| Property | LP64 (Linux x86-64) | LLP64 (Windows x64) | ILP32 (32-bit) |
+| -------- | ------------------- | -------------------- | -------------- |
+| `sizeof(int)` | 4 | 4 | 4 |
+| `sizeof(long)` | **8** | **4** | 4 |
+| `sizeof(long long)` | 8 | 8 | 8 |
+| `sizeof(void *)` | 8 | 8 | **4** |
+| `sizeof(long double)` | 16 (80-bit) | 8 (64-bit) | 12 (80-bit) |
+
+`TargetInfo` feeds into: `LayoutCx` (codegen type sizes), predefined
+macros (`__LP64__`, `_WIN32`, …), `va_list` representation, and
+freestanding header generation (`limits.h`, `stdint.h`).
+
+## Compiler-provided headers & builtins
+
+A C99 freestanding implementation must ship these headers (phase 15):
+
+- `stddef.h` — `size_t`, `ptrdiff_t`, `NULL`, `offsetof`
+- `stdarg.h` — `va_list`, `va_start`, `va_end`, `va_arg`, `va_copy`
+- `stdint.h` — exact/least/fast width integer types
+- `stdbool.h` — `bool`, `true`, `false`
+- `limits.h` — `INT_MAX`, `CHAR_BIT`, …
+- `float.h` — `FLT_EPSILON`, `DBL_MAX`, …
+- `iso646.h` — alternative operator tokens
+
+These live under `lib/rcc/include/` and are auto-prepended to the
+include search path. Values are generated from `TargetInfo`.
+
+Built-in functions (`__builtin_va_start`, `__builtin_offsetof`,
+`__builtin_expect`, etc.) are recognised in name resolution and
+lowered directly to LLVM intrinsics or compile-time constants.
+
+## Language extensions (phase 14)
+
+Beyond strict C99, `rcc` supports commonly-required extensions gated
+behind flags or accepted unconditionally when harmless:
+
+- `__attribute__((packed/aligned/noreturn/unused/visibility/…))`
+- `_Pragma(string-literal)` (C99 §6.10.9)
+- `__has_include` / `__COUNTER__`
+- GNU named variadic macros, permissive paste/redef (via `-f` flags)
+- GCC inline assembly `__asm__(…)` (stretch goal)
+
 ## Key invariants
 
 1. **Each stage owns one data type.** A crate *produces* one representation

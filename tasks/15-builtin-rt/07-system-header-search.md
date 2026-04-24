@@ -1,0 +1,38 @@
+# 15-07: System header search path discovery
+
+**Phase:** 15-builtin-rt    **Depends on:** 15-02    **Milestone:** M6
+
+## Goal
+Automatically discover and configure default system include paths
+so that `#include <stdio.h>` works without manual `-I` flags.
+Implement `--sysroot` to override the root directory.
+
+## Scope
+- In: platform-specific search:
+  - Linux: `/usr/include`, `/usr/local/include`,
+    `/usr/include/<triple>`.
+  - macOS: Xcode.app or CommandLineTools SDK paths via
+    `xcrun --show-sdk-path`.
+  - Windows: MSVC include dirs via `vswhere` / registry, or
+    MinGW include dirs.
+  `--sysroot <dir>` flag to prefix system paths.
+  Search order: compiler-provided headers (from 15-02) first,
+  then system headers.
+- Out: C++ header search, framework search paths.
+
+## Deliverables
+- System include path discovery module.
+- `--sysroot` CLI flag.
+- `-isystem <dir>` CLI flag for additional system include dirs.
+- Test: on current host, `#include <stdio.h>` resolves.
+
+## Acceptance
+- On Linux, `rcc hello.c` (where hello.c includes `<stdio.h>`)
+  finds the system `stdio.h` without explicit `-I`.
+- `--sysroot /custom/root` prepends the custom root to system
+  include paths.
+- Compiler-provided headers take priority over system headers.
+
+## References
+- GCC directory search order documentation.
+- Clang `InitHeaderSearch.cpp`.

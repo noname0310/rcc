@@ -1,0 +1,27 @@
+# 15-builtin-rt
+
+**Goal of the phase.** Provide the compiler runtime that real C
+programs need: a target abstraction layer, freestanding standard
+headers (`stddef.h`, `stdarg.h`, `stdint.h`, etc.), builtin
+function implementations, and system header search path discovery.
+
+## Tasks
+
+| # | File | Summary |
+|---|------|---------|
+| 01 | [`01-target-info.md`](01-target-info.md) | `TargetInfo` struct and triple parsing. |
+| 02 | [`02-stddef-header.md`](02-stddef-header.md) | Ship `stddef.h` (size_t, NULL, offsetof). |
+| 03 | [`03-stdarg-header.md`](03-stdarg-header.md) | Ship `stdarg.h` (va_list, va_start, etc.). |
+| 04 | [`04-remaining-freestanding.md`](04-remaining-freestanding.md) | Ship stdint.h, stdbool.h, limits.h, float.h, iso646.h. |
+| 05 | [`05-builtin-va-functions.md`](05-builtin-va-functions.md) | `__builtin_va_*` → LLVM intrinsics. |
+| 06 | [`06-builtin-common.md`](06-builtin-common.md) | offsetof, expect, unreachable, bswap, etc. |
+| 07 | [`07-system-header-search.md`](07-system-header-search.md) | System include path discovery + `--sysroot`. |
+| 08 | [`08-unit-tests.md`](08-unit-tests.md) | Integration tests for headers + builtins. |
+
+## Exit criteria
+
+- `#include <stdint.h>` resolves to the compiler-provided header
+  and `int32_t` is usable.
+- A variadic function using `va_start`/`va_arg` compiles and runs.
+- `__builtin_offsetof(struct S, field)` evaluates at compile time.
+- On Linux, `#include <stdio.h>` resolves via system header search.

@@ -14,6 +14,12 @@
 - [ ] [04-insta-snapshot-harness](04-insta-snapshot-harness.md)
 - [ ] [05-e2e-runner](05-e2e-runner.md)
 - [ ] [06-differential-cc](06-differential-cc.md)
+- [ ] [07-standard-stop-flags](07-standard-stop-flags.md)
+- [ ] [08-target-cli-wiring](08-target-cli-wiring.md)
+- [ ] [09-warning-control](09-warning-control.md)
+- [ ] [10-linker-flags](10-linker-flags.md)
+- [ ] [11-multi-file](11-multi-file.md)
+- [ ] [12-misc-cli-flags](12-misc-cli-flags.md)
 
 ## Downstream
 

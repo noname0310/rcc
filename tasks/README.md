@@ -29,7 +29,9 @@ tasks/
 ├── 10-driver/                ← `rcc` binary, --emit, UI/snapshot/E2E
 ├── 11-conformance/           ← milestone-indexed KPI targets per suite
 ├── 12-fuzz-differential/     ← cargo-fuzz corpora + csmith nightly
-└── 13-quality/               ← opt levels, diag polish, bench, release
+├── 13-quality/               ← opt levels, diag polish, bench, release
+├── 14-lang-extensions/       ← _Pragma, __attribute__, __has_include, asm, -U, -M
+└── 15-builtin-rt/            ← TargetInfo, freestanding headers, __builtin_*, sysroot
 ```
 
 ## Phase dependency graph
@@ -49,6 +51,8 @@ flowchart LR
     conf [11-conformance]
     fuzz [12-fuzz-differential]
     qual [13-quality]
+    ext  [14-lang-extensions]
+    brt  [15-builtin-rt]
 
     infra --> diag
     infra --> lex
@@ -69,6 +73,11 @@ flowchart LR
     cg --> fuzz
     cg --> qual
     drv --> qual
+    parse --> ext
+    pp --> ext
+    cg --> brt
+    ext --> brt
+    brt --> conf
 ```
 
 ## Task file format

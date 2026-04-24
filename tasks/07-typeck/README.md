@@ -20,6 +20,7 @@ evaluate constant expressions where the standard requires.
 | 09 | [`09-const-eval-extended.md`](09-const-eval-extended.md) | Floats, pointers-to-addr-constants. |
 | 10 | [`10-init-constness.md`](10-init-constness.md) | Global init must be a `const-expr`. |
 | 11 | [`11-unit-tests-truth-tables.md`](11-unit-tests-truth-tables.md) | Per-rule truth tables. |
+| 12 | [`12-complex-arithmetic.md`](12-complex-arithmetic.md) | `_Complex` type arithmetic. |
 
 ## Exit criteria
 
