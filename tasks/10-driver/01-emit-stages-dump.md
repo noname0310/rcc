@@ -8,9 +8,12 @@ the relevant crate. When multiple emit kinds are requested, write each
 to `<output>.<stage>` (or stdout when single + no output).
 
 ## Scope
-- In: pipeline branch per stage; `pretty` submodules on lexer /
-  parser / cfg / codegen already exist; HIR pretty-printer added
-  here if missing.
+- In: pipeline branch per stage; `pretty` submodules on lexer
+  (`rcc_lexer::pretty`, task 03-13) and cfg (`rcc_cfg::pretty`,
+  task 08-14) already exist. **AST pretty-printer
+  (`rcc_ast::pretty`) does NOT have a prior task — implement it
+  here** (or as a preceding sub-task) so `--emit=ast` can work.
+  HIR pretty-printer also added here if missing.
 - Out: machine-readable JSON dumps (future task).
 
 ## Deliverables
