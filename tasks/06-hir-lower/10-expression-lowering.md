@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-25
+
 # 06-10: Expression lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-02    **Milestone:** M2

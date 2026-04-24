@@ -46,6 +46,10 @@ pub struct Resolver {
     pub tags: FxHashMap<Symbol, DefId>,
     /// Labels are strictly per-function; populated then flushed per body.
     pub labels: FxHashMap<Symbol, rcc_hir::HirStmtId>,
+    /// Interned string literals (content symbol -> generated `Global`
+    /// `DefId`). Used by [`lower_expr`] so that repeated identical
+    /// string literals reuse the same internally-linked global.
+    pub strings: FxHashMap<Symbol, DefId>,
 }
 
 /// A binding visible in a particular scope.
@@ -461,12 +465,9 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
 ///   condition / step / body because C99 §6.8.5p5 gives the init
 ///   declaration the same scope as the loop body.
 ///
-/// Expression lowering is delegated to [`lower_expr_stub`], which only
-/// handles the shapes needed to build and test the statement skeleton
-/// (integer literals, parenthesised wrappers, identifiers, and simple
-/// binary / unary recursion). The full expression lowering lands in
-/// task 06-10 and will replace the stub without changing the shape of
-/// the statement tree.
+/// Expression lowering is delegated to [`lower_expr`] (task 06-10),
+/// which covers every AST expression variant and handles string-
+/// literal interning into `resolver.strings`.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_stmt(
     stmt: &Stmt,
@@ -481,7 +482,7 @@ pub fn lower_stmt(
         StmtKind::Null => HirStmtKind::Null,
         StmtKind::Expr(None) => HirStmtKind::Null,
         StmtKind::Expr(Some(e)) => {
-            let id = lower_expr_stub(e, body, scope, resolver, tcx, session);
+            let id = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Expr(id)
         }
         StmtKind::Compound(block) => {
@@ -489,7 +490,7 @@ pub fn lower_stmt(
             HirStmtKind::Block(ids)
         }
         StmtKind::If { cond, then_branch, else_branch } => {
-            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let cond_id = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
             let then_id = lower_stmt(then_branch, body, scope, crate_, tcx, resolver, session);
             let else_id = else_branch
                 .as_deref()
@@ -497,13 +498,13 @@ pub fn lower_stmt(
             HirStmtKind::If { cond: cond_id, then_branch: then_id, else_branch: else_id }
         }
         StmtKind::While { cond, body: body_stmt } => {
-            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let cond_id = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::While { cond: cond_id, body: body_id }
         }
         StmtKind::DoWhile { body: body_stmt, cond } => {
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
-            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let cond_id = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::DoWhile { body: body_id, cond: cond_id }
         }
         StmtKind::For { init, cond, step, body: body_stmt } => {
@@ -520,15 +521,15 @@ pub fn lower_stmt(
                 }
             });
             let cond_id =
-                cond.as_ref().map(|e| lower_expr_stub(e, body, scope, resolver, tcx, session));
+                cond.as_ref().map(|e| lower_expr(e, body, scope, crate_, tcx, resolver, session));
             let step_id =
-                step.as_ref().map(|e| lower_expr_stub(e, body, scope, resolver, tcx, session));
+                step.as_ref().map(|e| lower_expr(e, body, scope, crate_, tcx, resolver, session));
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             scope.pop_scope();
             HirStmtKind::For { init: init_id, cond: cond_id, step: step_id, body: body_id }
         }
         StmtKind::Switch { cond, body: body_stmt } => {
-            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let cond_id = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             // Case/default collection into `cases` runs as a separate
             // pass in task 06-10 / typeck; keep it empty here so the
@@ -557,7 +558,7 @@ pub fn lower_stmt(
         StmtKind::Continue => HirStmtKind::Continue,
         StmtKind::Return(None) => HirStmtKind::Return(None),
         StmtKind::Return(Some(e)) => {
-            let id = lower_expr_stub(e, body, scope, resolver, tcx, session);
+            let id = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Return(Some(id))
         }
     };
@@ -648,7 +649,7 @@ fn lower_block_decl(
         // cover the single-expression case needed for statement tests.
         let init_expr = match &init_decl.init {
             Some(rcc_ast::Initializer::Expr(e)) => {
-                Some(lower_expr_stub(e, body, scope, resolver, tcx, session))
+                Some(lower_expr(e, body, scope, _crate, tcx, resolver, session))
             }
             Some(rcc_ast::Initializer::List(_)) => None,
             None => None,
@@ -738,35 +739,61 @@ fn lower_block_specs_to_base_ty(
     lower_declspecs_to_base_ty(specs, tcx, session)
 }
 
-/// Minimal expression lowering: enough for statement-lowering tests.
+/// Lower an AST expression into an `HirExprId` in `body.exprs`.
 ///
-/// Full expression lowering (with type inference, implicit conversions,
-/// operator semantics, lvalue/rvalue classification, etc.) lives in
-/// task 06-10. For task 06-09 we only need to produce syntactically
-/// valid [`HirExpr`] nodes so statements that contain expressions
-/// (`if (x)`, `return n`, `for (... ; i < n; ++i)`, …) have something
-/// to point at. Every expression produced here is tagged with
-/// `tcx.error` as its type — the typeck pass runs after HIR lowering
-/// and will replace the placeholder on its own pass.
+/// Task 06-10: maps every [`rcc_ast::ExprKind`] variant to a
+/// [`HirExprKind`] entry, resolving identifiers against `scope` +
+/// `resolver.ordinary`. Types are left as placeholders (`tcx.error`)
+/// and value categories as `RValue`; the typeck phase (phase 07)
+/// fills in real types, lvalue/rvalue classification, and any
+/// implicit `Convert` nodes.
 ///
-/// Handled shapes:
+/// ## Lowering rules
 ///
-/// - Integer literals (using the same decoder as array sizes).
-/// - Parenthesised expressions (recurse through `Paren`).
-/// - Identifiers (resolved against `scope` + `resolver.ordinary`).
-/// - Unary and binary operators (recursive); the operator itself is
-///   translated into the HIR equivalent but without typeck.
-/// - Assignment, comma, conditional (recursive).
-/// - Calls (recursive into callee + args).
-/// - Member / arrow / index (recursive).
-/// - Casts, sizeof, compound literals fall back to an `Error` sentinel
-///   placeholder — task 06-10 replaces them.
-fn lower_expr_stub(
+/// | AST shape                         | HIR shape                                            |
+/// |-----------------------------------|------------------------------------------------------|
+/// | `IntLit`                          | `IntConst`                                           |
+/// | `FloatLit`                        | `FloatConst`                                         |
+/// | `CharLit`                         | `IntConst` (first character's code point)            |
+/// | `StringLit "s"`                   | `StringRef(def_id)` pointing at a synthesised global |
+/// | `Ident`                           | `LocalRef` / `DefRef` via [`resolve_expr_ident`]     |
+/// | `Paren(e)`                        | no-op: the inner expression's id is returned          |
+/// | `Binary { op, .. }`               | `Binary { op, .. }`                                  |
+/// | `Unary { Plus/Neg/Bit/Log/… }`    | `Unary { op, .. }`                                   |
+/// | `Unary { AddrOf }`                | `AddressOf`                                          |
+/// | `Unary { Deref }`                 | `Deref`                                              |
+/// | `Unary { Pre/PostInc/Dec }`       | `Unary { PreInc/PreDec/PostInc/PostDec }`            |
+/// | `Cond`                            | `Cond`                                               |
+/// | `Assign { =, .. }`                | `Assign { lhs, rhs }`                                |
+/// | `Assign { += / -= / …, .. }`      | `Assign { lhs, Binary { op, lhs, rhs } }` (desugared)|
+/// | `Comma`                           | `Comma`                                              |
+/// | `Call`                            | `Call`                                               |
+/// | `Member { a.b }`                  | `Field { base, field_index: 0 }` (index filled later)|
+/// | `Arrow  { a->b }`                 | `Field { base: Deref(a), field_index: 0 }`           |
+/// | `Index`                           | `Index`                                              |
+/// | `Cast`                            | `Cast { operand, to: error }` (type filled later)    |
+/// | `SizeofExpr` / `SizeofType`       | `IntConst(0)` (folded in typeck)                     |
+/// | `CompoundLiteral`                 | `IntConst(0)` placeholder — full lowering in M3       |
+///
+/// The returned id is always the id of the last node pushed for this
+/// expression, so `body.exprs[id].span == expr.span` except for the
+/// `Paren` passthrough, where the inner expression's span is kept
+/// verbatim.
+///
+/// String literal interning: each distinct `StringLit` creates a
+/// `DefKind::Global` with `linkage: Internal` and an
+/// `array-of-char` type sized to the raw byte count (quotes stripped,
+/// escape-decoded character count + 1 for the trailing NUL). The
+/// generated `DefId` is memoised in `resolver.strings` so that
+/// repeated identical literals reuse the same global.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_expr(
     expr: &rcc_ast::Expr,
     body: &mut Body,
     scope: &ScopeStack,
-    resolver: &Resolver,
+    crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
     session: &mut Session,
 ) -> HirExprId {
     let kind: HirExprKind = match &expr.kind {
@@ -774,33 +801,42 @@ fn lower_expr_stub(
             let value = eval_const_expr_as_u64(expr, &session.interner).unwrap_or(0);
             HirExprKind::IntConst(i128::from(value))
         }
-        rcc_ast::ExprKind::FloatLit { .. } => HirExprKind::FloatConst(0.0),
-        rcc_ast::ExprKind::CharLit { .. } => HirExprKind::IntConst(0),
-        rcc_ast::ExprKind::StringLit { .. } => {
-            // Strings turn into a `StringRef(DefId)` after a string-
-            // interning pass — not yet wired up. Placeholder: integer 0.
-            HirExprKind::IntConst(0)
+        rcc_ast::ExprKind::FloatLit { text } => {
+            let s = session.interner.get(*text);
+            // Strip the common float suffixes before parsing.
+            let trimmed = s.trim_end_matches(['f', 'F', 'l', 'L']);
+            let value = trimmed.parse::<f64>().unwrap_or(0.0);
+            HirExprKind::FloatConst(value)
+        }
+        rcc_ast::ExprKind::CharLit { text } => {
+            // The token text is the full source slice, e.g. `'a'`,
+            // `'\n'`, `L'\x41'`. We only need the first character's
+            // numeric value for the HIR; typeck promotes it to `int`.
+            let s = session.interner.get(*text);
+            let value = decode_first_char_value(s).unwrap_or(0);
+            HirExprKind::IntConst(i128::from(value))
+        }
+        rcc_ast::ExprKind::StringLit { text } => {
+            let def_id = intern_string_literal(*text, expr.span, crate_, tcx, resolver, session);
+            HirExprKind::StringRef(def_id)
         }
         rcc_ast::ExprKind::Paren(inner) => {
-            // Dereference one layer; re-enter `lower_expr_stub` so the
-            // wrapped expression's id becomes *this* expression's id.
-            let inner_id = lower_expr_stub(inner, body, scope, resolver, tcx, session);
-            // Copy the wrapped expression's recorded shape verbatim so
-            // callers don't see an extra redundant node. Because we're
-            // returning early, exit before the body.push below.
-            return inner_id;
+            // Reuse the wrapped expression's id so the node count in
+            // HIR matches the number of AST nodes with semantic shape.
+            // Parentheses are a grouping syntax — not a value shape.
+            return lower_expr(inner, body, scope, crate_, tcx, resolver, session);
         }
         rcc_ast::ExprKind::Ident(sym) => {
             resolve_expr_ident(*sym, expr.span, scope, resolver, session)
                 .unwrap_or(HirExprKind::IntConst(0))
         }
         rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
-            let lhs_id = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
-            let rhs_id = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
+            let lhs_id = lower_expr(lhs, body, scope, crate_, tcx, resolver, session);
+            let rhs_id = lower_expr(rhs, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Binary { op: ast_binop_to_hir(*op), lhs: lhs_id, rhs: rhs_id }
         }
         rcc_ast::ExprKind::Unary { op, operand } => {
-            let op_id = lower_expr_stub(operand, body, scope, resolver, tcx, session);
+            let op_id = lower_expr(operand, body, scope, crate_, tcx, resolver, session);
             match ast_unop_to_hir(*op) {
                 Some(hop) => HirExprKind::Unary { op: hop, operand: op_id },
                 None => {
@@ -815,46 +851,79 @@ fn lower_expr_stub(
             }
         }
         rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
-            let c = lower_expr_stub(cond, body, scope, resolver, tcx, session);
-            let t = lower_expr_stub(then_expr, body, scope, resolver, tcx, session);
-            let e = lower_expr_stub(else_expr, body, scope, resolver, tcx, session);
+            let c = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
+            let t = lower_expr(then_expr, body, scope, crate_, tcx, resolver, session);
+            let e = lower_expr(else_expr, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Cond { cond: c, then_expr: t, else_expr: e }
         }
-        rcc_ast::ExprKind::Assign { op: _, lhs, rhs } => {
-            let l = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
-            let r = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
-            HirExprKind::Assign { lhs: l, rhs: r }
+        rcc_ast::ExprKind::Assign { op, lhs, rhs } => {
+            let l = lower_expr(lhs, body, scope, crate_, tcx, resolver, session);
+            let r = lower_expr(rhs, body, scope, crate_, tcx, resolver, session);
+            match assign_op_to_binop(*op) {
+                // Simple `a = b`.
+                None => HirExprKind::Assign { lhs: l, rhs: r },
+                // Compound `a op= b` desugars to `a = a op b`. We push
+                // a fresh `Binary` node so the HIR carries the
+                // arithmetic explicitly; the LHS is referenced twice
+                // by id (there is no side-effect duplication because
+                // `lower_expr` already evaluated it once into `l`).
+                Some(binop) => {
+                    let rhs_expr = HirExpr {
+                        id: HirExprId(0),
+                        ty: tcx.error,
+                        value_cat: ValueCat::RValue,
+                        span: expr.span,
+                        kind: HirExprKind::Binary { op: binop, lhs: l, rhs: r },
+                    };
+                    let binop_id = body.exprs.push(rhs_expr);
+                    body.exprs[binop_id].id = binop_id;
+                    HirExprKind::Assign { lhs: l, rhs: binop_id }
+                }
+            }
         }
         rcc_ast::ExprKind::Comma { lhs, rhs } => {
-            let l = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
-            let r = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
+            let l = lower_expr(lhs, body, scope, crate_, tcx, resolver, session);
+            let r = lower_expr(rhs, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Comma { lhs: l, rhs: r }
         }
         rcc_ast::ExprKind::Call { callee, args } => {
-            let callee_id = lower_expr_stub(callee, body, scope, resolver, tcx, session);
+            let callee_id = lower_expr(callee, body, scope, crate_, tcx, resolver, session);
             let arg_ids: Vec<HirExprId> = args
                 .iter()
-                .map(|a| lower_expr_stub(a, body, scope, resolver, tcx, session))
+                .map(|a| lower_expr(a, body, scope, crate_, tcx, resolver, session))
                 .collect();
             HirExprKind::Call { callee: callee_id, args: arg_ids }
         }
         rcc_ast::ExprKind::Member { base, field: _ } => {
-            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
-            // Field-index resolution is a typeck job; placeholder 0.
+            let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
+            // Field-index resolution happens in typeck; placeholder 0.
             HirExprKind::Field { base: base_id, field_index: 0 }
         }
         rcc_ast::ExprKind::Arrow { base, field: _ } => {
-            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
-            // `a->b` desugars to `(*a).b`; task 06-10 emits the Deref.
-            HirExprKind::Field { base: base_id, field_index: 0 }
+            // `a->b` lowers to `(*a).b`. Emit the Deref as its own
+            // HIR node so the indirection is explicit.
+            let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
+            let deref_expr = HirExpr {
+                id: HirExprId(0),
+                ty: tcx.error,
+                value_cat: ValueCat::LValue,
+                span: base.span,
+                kind: HirExprKind::Deref(base_id),
+            };
+            let deref_id = body.exprs.push(deref_expr);
+            body.exprs[deref_id].id = deref_id;
+            HirExprKind::Field { base: deref_id, field_index: 0 }
         }
         rcc_ast::ExprKind::Index { base, index } => {
-            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
-            let index_id = lower_expr_stub(index, body, scope, resolver, tcx, session);
+            let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
+            let index_id = lower_expr(index, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Index { base: base_id, index: index_id }
         }
         rcc_ast::ExprKind::Cast { ty: _, expr: inner } => {
-            let inner_id = lower_expr_stub(inner, body, scope, resolver, tcx, session);
+            let inner_id = lower_expr(inner, body, scope, crate_, tcx, resolver, session);
+            // Target type is resolved in typeck: at HIR-lower time we
+            // still have `type-name` -> `Ty` machinery only inside
+            // declarators. Keep the placeholder; typeck will overwrite.
             HirExprKind::Cast { operand: inner_id, to: tcx.error }
         }
         rcc_ast::ExprKind::SizeofExpr(_) | rcc_ast::ExprKind::SizeofType(_) => {
@@ -864,7 +933,9 @@ fn lower_expr_stub(
         }
         rcc_ast::ExprKind::CompoundLiteral { .. } => {
             // C99 compound literals materialise a temporary object.
-            // Full handling is deferred; placeholder for now.
+            // Full handling (initialiser-list lowering, generation of
+            // a synthetic local) is deferred to task 06-11 +
+            // M3-typeck; placeholder for now.
             HirExprKind::IntConst(0)
         }
     };
@@ -878,6 +949,195 @@ fn lower_expr_stub(
     });
     body.exprs[expr_id].id = expr_id;
     expr_id
+}
+
+/// Intern a string literal into the global table.
+///
+/// Looks up the (already deduplicated) `Symbol` of the literal's
+/// source text in `resolver.strings`. If present, returns the cached
+/// `DefId`. Otherwise creates a new `DefKind::Global` with
+/// `linkage: Internal` and an `array-of-char` type whose length is
+/// the decoded string length plus one (for the trailing NUL required
+/// by C99 §6.4.5p6).
+///
+/// The type is interned as `char[N]` via `TyCtxt::intern` so string
+/// literals with identical text share the same type id.
+fn intern_string_literal(
+    text: Symbol,
+    span: Span,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> DefId {
+    if let Some(&existing) = resolver.strings.get(&text) {
+        return existing;
+    }
+
+    // Decode the literal's content length. Handles simple escape
+    // sequences (`\n`, `\t`, `\\`, `\"`, `\0`, octal, hex) at a
+    // coarse grain: every escape counts as one character. The value
+    // used by codegen will be recomputed from the final decoded byte
+    // buffer; this length is enough to build a well-formed
+    // `array-of-char` type for typeck.
+    let s = session.interner.get(text);
+    let content = strip_string_literal_quotes(s);
+    let len = string_content_char_count(content) + 1; // +1 for NUL
+
+    let char_ty = tcx.char_;
+    let array_ty =
+        tcx.intern(Ty::Array { elem: Qual::plain(char_ty), len: Some(len as u64), is_vla: false });
+
+    // Create a synthetic anonymous global for this literal. The
+    // name is the interned string itself so diagnostics can surface
+    // something sensible; codegen emits it as an internal-linkage
+    // constant (C99 §6.4.5p5 "static storage duration").
+    let def_id = crate_.defs.push(Def {
+        id: DefId(0),
+        name: text,
+        span,
+        kind: DefKind::Global { ty: array_ty, linkage: Linkage::Internal },
+    });
+    crate_.defs[def_id].id = def_id;
+    resolver.strings.insert(text, def_id);
+    def_id
+}
+
+/// Strip the surrounding quotes and any encoding prefix (`L`, `u`,
+/// `U`, `u8`) from a C string literal's source text. Returns the
+/// slice between the quotes or `""` if the input is malformed.
+fn strip_string_literal_quotes(s: &str) -> &str {
+    // Drop any encoding prefix before the opening quote.
+    let after_prefix = s.strip_prefix("u8").or_else(|| s.strip_prefix('u')).unwrap_or(s);
+    let after_prefix = after_prefix
+        .strip_prefix('L')
+        .or_else(|| after_prefix.strip_prefix('U'))
+        .unwrap_or(after_prefix);
+    // Remove the surrounding `"..."`.
+    let inner = after_prefix.strip_prefix('"').unwrap_or(after_prefix);
+    inner.strip_suffix('"').unwrap_or(inner)
+}
+
+/// Count logical characters in the (quote-stripped) body of a C
+/// string literal. Each `\x`-prefixed escape counts as one character
+/// regardless of how many digits follow; a bare `\` followed by any
+/// non-digit also counts as one character. Multi-byte UTF-8 sequences
+/// are counted per-byte, which matches how codegen lays them out in
+/// a `char[]`.
+fn string_content_char_count(content: &str) -> usize {
+    let bytes = content.as_bytes();
+    let mut i = 0usize;
+    let mut count = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            // Single-char escape. Skip the escape character and the
+            // next byte; octal / hex escapes with multiple digits are
+            // still only one logical char.
+            i += 2;
+            // Octal escape: up to three digits total.
+            if i > 1 && bytes[i - 1].is_ascii_digit() && bytes[i - 1] < b'8' {
+                let mut consumed = 1;
+                while consumed < 3
+                    && i < bytes.len()
+                    && bytes[i].is_ascii_digit()
+                    && bytes[i] < b'8'
+                {
+                    i += 1;
+                    consumed += 1;
+                }
+            } else if i > 1 && (bytes[i - 1] == b'x' || bytes[i - 1] == b'X') {
+                // Hex escape: consume further hex digits.
+                while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                    i += 1;
+                }
+            }
+        } else {
+            i += 1;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// Decode the numeric value of the first character in a C char
+/// constant's source text (e.g. `'a'` → 97, `'\n'` → 10, `'\x41'`
+/// → 65). Ignores multi-character constants beyond the first char.
+///
+/// Returns `None` if the input does not look like a char literal;
+/// the caller then substitutes 0 so later passes keep working.
+fn decode_first_char_value(s: &str) -> Option<i32> {
+    // Drop any encoding prefix.
+    let after_prefix = s
+        .strip_prefix('L')
+        .or_else(|| s.strip_prefix('u'))
+        .or_else(|| s.strip_prefix('U'))
+        .unwrap_or(s);
+    let inner = after_prefix.strip_prefix('\'')?;
+    let bytes = inner.as_bytes();
+    if bytes.is_empty() {
+        return Some(0);
+    }
+    if bytes[0] != b'\\' {
+        return Some(bytes[0] as i32);
+    }
+    // Escape sequence.
+    let next = *bytes.get(1)?;
+    Some(match next {
+        b'n' => 10,
+        b't' => 9,
+        b'r' => 13,
+        b'0' => 0,
+        b'\\' => b'\\' as i32,
+        b'\'' => b'\'' as i32,
+        b'"' => b'"' as i32,
+        b'a' => 7,
+        b'b' => 8,
+        b'f' => 12,
+        b'v' => 11,
+        b'?' => b'?' as i32,
+        b'x' | b'X' => {
+            // Hex escape: read up to 2 hex digits for a char.
+            let mut val: i32 = 0;
+            let mut j = 2;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() && j - 2 < 2 {
+                let d = (bytes[j] as char).to_digit(16)? as i32;
+                val = (val << 4) | d;
+                j += 1;
+            }
+            val
+        }
+        d if d.is_ascii_digit() => {
+            // Octal escape: up to 3 octal digits.
+            let mut val: i32 = (d - b'0') as i32;
+            let mut j = 2;
+            while j < bytes.len() && bytes[j].is_ascii_digit() && bytes[j] < b'8' && j - 1 < 3 {
+                val = (val << 3) | (bytes[j] - b'0') as i32;
+                j += 1;
+            }
+            val
+        }
+        _ => next as i32,
+    })
+}
+
+/// Map an AST compound-assignment op to its arithmetic binary
+/// operator. Returns `None` for `=` (plain assignment, no desugar).
+fn assign_op_to_binop(op: rcc_ast::AssignOp) -> Option<rcc_hir::rcc_hir_binop::BinOp> {
+    use rcc_ast::AssignOp as A;
+    use rcc_hir::rcc_hir_binop::BinOp as H;
+    Some(match op {
+        A::Eq => return None,
+        A::AddEq => H::Add,
+        A::SubEq => H::Sub,
+        A::MulEq => H::Mul,
+        A::DivEq => H::Div,
+        A::RemEq => H::Rem,
+        A::ShlEq => H::Shl,
+        A::ShrEq => H::Shr,
+        A::AndEq => H::BitAnd,
+        A::XorEq => H::BitXor,
+        A::OrEq => H::BitOr,
+    })
 }
 
 /// Translate an [`rcc_ast::BinOp`] to the matching [`rcc_hir_binop::BinOp`].
@@ -4470,5 +4730,725 @@ mod tests {
             diags.iter().any(|d| d.code == Some("E0071")),
             "expected E0071 for outer `x` after inner scope popped, got {diags:?}"
         );
+    }
+
+    // ── Expression lowering (task 06-10) tests ─────────────────────────
+
+    /// Helper: lower a single expression in an empty body and return
+    /// its `(Body, HirExprId, HirCrate, Resolver)`.
+    fn lower_single_expr(sess: &mut Session, e: Expr) -> (Body, HirExprId, HirCrate, Resolver) {
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, sess);
+        (body, id, crate_, resolver)
+    }
+
+    /// Helper: build a `StringLit` expression from the raw source text
+    /// (quotes included). Example: `string_lit(&mut sess, "\"hi\"")`.
+    fn string_lit(sess: &mut Session, raw: &str) -> Expr {
+        let s = sym(sess, raw);
+        Expr { id: NodeId(0), kind: ExprKind::StringLit { text: s }, span: DUMMY_SP }
+    }
+
+    /// Helper: build a `CharLit` expression from the raw source text
+    /// (quotes included). Example: `char_lit(&mut sess, "'a'")`.
+    fn char_lit(sess: &mut Session, raw: &str) -> Expr {
+        let s = sym(sess, raw);
+        Expr { id: NodeId(0), kind: ExprKind::CharLit { text: s }, span: DUMMY_SP }
+    }
+
+    /// Helper: build a `FloatLit` expression.
+    fn float_lit(sess: &mut Session, raw: &str) -> Expr {
+        let s = sym(sess, raw);
+        Expr { id: NodeId(0), kind: ExprKind::FloatLit { text: s }, span: DUMMY_SP }
+    }
+
+    #[test]
+    fn expr_int_literal_lowers_to_int_const() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = int_lit("42", &mut sess);
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+    }
+
+    #[test]
+    fn expr_float_literal_lowers_to_float_const() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = float_lit(&mut sess, "2.5");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::FloatConst(v) => assert!((v - 2.5).abs() < 1e-9),
+            ref other => panic!("expected FloatConst, got {other:?}"),
+        }
+
+        // Float suffix should be stripped.
+        let e = float_lit(&mut sess, "1.5f");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::FloatConst(v) => assert!((v - 1.5).abs() < 1e-9),
+            ref other => panic!("expected FloatConst, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_char_literal_decodes_value() {
+        let (mut sess, _cap) = Session::for_test();
+        // 'a' = 97
+        let e = char_lit(&mut sess, "'a'");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(97)));
+
+        // '\n' = 10
+        let e = char_lit(&mut sess, "'\\n'");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(10)));
+
+        // '\x41' = 65
+        let e = char_lit(&mut sess, "'\\x41'");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(65)));
+
+        // '\0' = 0
+        let e = char_lit(&mut sess, "'\\0'");
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+    }
+
+    /// Acceptance: `"hi"` → `HirExprKind::StringRef(def_id)` referring
+    /// to a new `DefKind::Global { ty: [char; 3], linkage: Internal }`.
+    #[test]
+    fn expr_string_literal_creates_global_of_correct_length() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = string_lit(&mut sess, "\"hi\"");
+        let (body, id, crate_, resolver) = lower_single_expr(&mut sess, e);
+
+        let def_id = match body.exprs[id].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+
+        // Exactly one global was created.
+        assert_eq!(crate_.defs.len(), 1);
+        match &crate_.defs[def_id].kind {
+            DefKind::Global { linkage, .. } => {
+                assert_eq!(*linkage, Linkage::Internal, "string literal linkage");
+            }
+            other => panic!("expected DefKind::Global, got {other:?}"),
+        }
+
+        // Resolver cache populated.
+        assert_eq!(resolver.strings.len(), 1);
+        // (Type shape verified in expr_string_literal_type_is_array_of_char_with_nul.)
+    }
+
+    #[test]
+    fn expr_string_literal_type_is_array_of_char_with_nul() {
+        // Lower a string inside a real session so we can inspect TyCtxt.
+        let (mut sess, _cap) = Session::for_test();
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+
+        let e = string_lit(&mut sess, "\"hi\"");
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+
+        let def_id = match body.exprs[id].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+
+        match &crate_.defs[def_id].kind {
+            DefKind::Global { ty, linkage: Linkage::Internal } => match tcx.get(*ty) {
+                Ty::Array { elem, len, is_vla } => {
+                    assert_eq!(elem.ty, tcx.char_, "element should be char");
+                    assert_eq!(*len, Some(3), "\"hi\" is 2 chars + NUL = 3");
+                    assert!(!is_vla);
+                }
+                other => panic!("expected Array type, got {other:?}"),
+            },
+            other => panic!("expected Global Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_string_literal_dedup_reuses_def_id() {
+        // Two occurrences of the same literal should reuse one global.
+        let (mut sess, _cap) = Session::for_test();
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+
+        let e1 = string_lit(&mut sess, "\"hi\"");
+        let e2 = string_lit(&mut sess, "\"hi\"");
+        let id1 =
+            lower_expr(&e1, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        let id2 =
+            lower_expr(&e2, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        let d1 = match body.exprs[id1].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+        let d2 = match body.exprs[id2].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+        assert_eq!(d1, d2);
+        assert_eq!(crate_.defs.len(), 1, "both literals share one global");
+        assert_eq!(resolver.strings.len(), 1);
+    }
+
+    #[test]
+    fn expr_string_literal_distinct_strings_get_distinct_globals() {
+        let (mut sess, _cap) = Session::for_test();
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+
+        let e1 = string_lit(&mut sess, "\"a\"");
+        let e2 = string_lit(&mut sess, "\"bb\"");
+        let id1 =
+            lower_expr(&e1, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        let id2 =
+            lower_expr(&e2, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        let d1 = match body.exprs[id1].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+        let d2 = match body.exprs[id2].kind {
+            HirExprKind::StringRef(d) => d,
+            ref other => panic!("expected StringRef, got {other:?}"),
+        };
+        assert_ne!(d1, d2);
+        assert_eq!(crate_.defs.len(), 2);
+
+        // Each has its own [char; N] type with correct length.
+        match tcx.get(match &crate_.defs[d1].kind {
+            DefKind::Global { ty, .. } => *ty,
+            _ => unreachable!(),
+        }) {
+            Ty::Array { len: Some(2), .. } => {}
+            other => panic!("expected [char; 2] for \"a\", got {other:?}"),
+        }
+        match tcx.get(match &crate_.defs[d2].kind {
+            DefKind::Global { ty, .. } => *ty,
+            _ => unreachable!(),
+        }) {
+            Ty::Array { len: Some(3), .. } => {}
+            other => panic!("expected [char; 3] for \"bb\", got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_paren_returns_inner_id_without_extra_node() {
+        let (mut sess, _cap) = Session::for_test();
+        let inner = int_lit("7", &mut sess);
+        let paren = Expr { id: NodeId(0), kind: ExprKind::Paren(Box::new(inner)), span: DUMMY_SP };
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, paren);
+        // Paren doesn't add a wrapper — the id is the inner int-const node.
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(7)));
+        // Exactly one HIR expression node was created, not two.
+        assert_eq!(body.exprs.len(), 1);
+    }
+
+    #[test]
+    fn expr_binary_all_arith_cmp_log_bit_ops_lower() {
+        // Sweep every BinOp variant; each must produce HirExprKind::Binary.
+        let ops: &[(rcc_ast::BinOp, rcc_hir::rcc_hir_binop::BinOp)] = &[
+            (rcc_ast::BinOp::Add, rcc_hir::rcc_hir_binop::BinOp::Add),
+            (rcc_ast::BinOp::Sub, rcc_hir::rcc_hir_binop::BinOp::Sub),
+            (rcc_ast::BinOp::Mul, rcc_hir::rcc_hir_binop::BinOp::Mul),
+            (rcc_ast::BinOp::Div, rcc_hir::rcc_hir_binop::BinOp::Div),
+            (rcc_ast::BinOp::Rem, rcc_hir::rcc_hir_binop::BinOp::Rem),
+            (rcc_ast::BinOp::Shl, rcc_hir::rcc_hir_binop::BinOp::Shl),
+            (rcc_ast::BinOp::Shr, rcc_hir::rcc_hir_binop::BinOp::Shr),
+            (rcc_ast::BinOp::Lt, rcc_hir::rcc_hir_binop::BinOp::Lt),
+            (rcc_ast::BinOp::Le, rcc_hir::rcc_hir_binop::BinOp::Le),
+            (rcc_ast::BinOp::Gt, rcc_hir::rcc_hir_binop::BinOp::Gt),
+            (rcc_ast::BinOp::Ge, rcc_hir::rcc_hir_binop::BinOp::Ge),
+            (rcc_ast::BinOp::Eq, rcc_hir::rcc_hir_binop::BinOp::Eq),
+            (rcc_ast::BinOp::Ne, rcc_hir::rcc_hir_binop::BinOp::Ne),
+            (rcc_ast::BinOp::BitAnd, rcc_hir::rcc_hir_binop::BinOp::BitAnd),
+            (rcc_ast::BinOp::BitXor, rcc_hir::rcc_hir_binop::BinOp::BitXor),
+            (rcc_ast::BinOp::BitOr, rcc_hir::rcc_hir_binop::BinOp::BitOr),
+            (rcc_ast::BinOp::LogAnd, rcc_hir::rcc_hir_binop::BinOp::LogAnd),
+            (rcc_ast::BinOp::LogOr, rcc_hir::rcc_hir_binop::BinOp::LogOr),
+        ];
+        for (ast_op, hir_op) in ops {
+            let (mut sess, _cap) = Session::for_test();
+            let e = binop(*ast_op, int_lit("1", &mut sess), int_lit("2", &mut sess));
+            let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+            match body.exprs[id].kind {
+                HirExprKind::Binary { op, .. } => assert_eq!(op, *hir_op, "ast op {ast_op:?}"),
+                ref other => panic!("expected Binary for {ast_op:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn expr_unary_all_ops_lower() {
+        // Regular UnOps.
+        let (mut sess, _cap) = Session::for_test();
+        for (ast_op, hir_op) in [
+            (rcc_ast::UnOp::Plus, rcc_hir::rcc_hir_binop::UnOp::Plus),
+            (rcc_ast::UnOp::Neg, rcc_hir::rcc_hir_binop::UnOp::Neg),
+            (rcc_ast::UnOp::BitNot, rcc_hir::rcc_hir_binop::UnOp::BitNot),
+            (rcc_ast::UnOp::LogNot, rcc_hir::rcc_hir_binop::UnOp::LogNot),
+            (rcc_ast::UnOp::PreInc, rcc_hir::rcc_hir_binop::UnOp::PreInc),
+            (rcc_ast::UnOp::PreDec, rcc_hir::rcc_hir_binop::UnOp::PreDec),
+            (rcc_ast::UnOp::PostInc, rcc_hir::rcc_hir_binop::UnOp::PostInc),
+            (rcc_ast::UnOp::PostDec, rcc_hir::rcc_hir_binop::UnOp::PostDec),
+        ] {
+            let e = Expr {
+                id: NodeId(0),
+                kind: ExprKind::Unary { op: ast_op, operand: Box::new(int_lit("3", &mut sess)) },
+                span: DUMMY_SP,
+            };
+            let mut body = Body::default();
+            let mut scope = ScopeStack::new();
+            scope.push_scope();
+            let mut crate_ = HirCrate::default();
+            let mut tcx = TyCtxt::new();
+            let mut resolver = Resolver::default();
+            let id =
+                lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+            match body.exprs[id].kind {
+                HirExprKind::Unary { op, .. } => assert_eq!(op, hir_op),
+                ref other => panic!("expected Unary for {ast_op:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn expr_unary_addr_of_and_deref_have_dedicated_variants() {
+        let (mut sess, _cap) = Session::for_test();
+
+        let addr = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Unary {
+                op: rcc_ast::UnOp::AddrOf,
+                operand: Box::new(int_lit("1", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, addr);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::AddressOf(_)));
+
+        let deref = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Unary {
+                op: rcc_ast::UnOp::Deref,
+                operand: Box::new(int_lit("1", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, deref);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::Deref(_)));
+    }
+
+    #[test]
+    fn expr_conditional_ternary() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Cond {
+                cond: Box::new(int_lit("1", &mut sess)),
+                then_expr: Box::new(int_lit("2", &mut sess)),
+                else_expr: Box::new(int_lit("3", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Cond { cond, then_expr, else_expr } => {
+                assert!(matches!(body.exprs[cond].kind, HirExprKind::IntConst(1)));
+                assert!(matches!(body.exprs[then_expr].kind, HirExprKind::IntConst(2)));
+                assert!(matches!(body.exprs[else_expr].kind, HirExprKind::IntConst(3)));
+            }
+            ref other => panic!("expected Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_comma_preserves_lhs_and_rhs() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Comma {
+                lhs: Box::new(int_lit("10", &mut sess)),
+                rhs: Box::new(int_lit("20", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Comma { lhs, rhs } => {
+                assert!(matches!(body.exprs[lhs].kind, HirExprKind::IntConst(10)));
+                assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(20)));
+            }
+            ref other => panic!("expected Comma, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_simple_assign_lowers_to_assign() {
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut tcx = TyCtxt::new();
+        let local = body.locals.push(LocalDecl {
+            name: Some(x),
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        scope.insert(x, Binding::Local(local));
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Assign {
+                op: rcc_ast::AssignOp::Eq,
+                lhs: Box::new(ident_expr(&mut sess, "x")),
+                rhs: Box::new(int_lit("5", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        match body.exprs[id].kind {
+            HirExprKind::Assign { lhs, rhs } => {
+                assert!(matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(_)));
+                assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(5)));
+            }
+            ref other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_compound_assign_desugars_to_assign_with_binop_rhs() {
+        // `x += 1` → `x = x + 1`.
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut tcx = TyCtxt::new();
+        let local = body.locals.push(LocalDecl {
+            name: Some(x),
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        scope.insert(x, Binding::Local(local));
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Assign {
+                op: rcc_ast::AssignOp::AddEq,
+                lhs: Box::new(ident_expr(&mut sess, "x")),
+                rhs: Box::new(int_lit("1", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        match &body.exprs[id].kind {
+            HirExprKind::Assign { lhs, rhs } => {
+                assert!(matches!(body.exprs[*lhs].kind, HirExprKind::LocalRef(_)));
+                match &body.exprs[*rhs].kind {
+                    HirExprKind::Binary { op, lhs: bl, rhs: br } => {
+                        assert_eq!(*op, rcc_hir::rcc_hir_binop::BinOp::Add);
+                        assert!(matches!(body.exprs[*bl].kind, HirExprKind::LocalRef(_)));
+                        assert!(matches!(body.exprs[*br].kind, HirExprKind::IntConst(1)));
+                    }
+                    other => panic!("expected Binary inside Assign rhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_call_lowers_callee_and_args() {
+        let (mut sess, _cap) = Session::for_test();
+        let f = sym(&mut sess, "f");
+
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        // Register `f` as a file-scope global so the callee resolves.
+        let f_def = crate_.defs.push(Def {
+            id: DefId(0),
+            name: f,
+            span: DUMMY_SP,
+            kind: DefKind::Function {
+                ty: tcx.int,
+                has_body: false,
+                is_static: false,
+                is_inline: false,
+                variadic: false,
+            },
+        });
+        crate_.defs[f_def].id = f_def;
+        resolver.ordinary.insert(f, f_def);
+
+        let call = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Call {
+                callee: Box::new(ident_expr(&mut sess, "f")),
+                args: vec![int_lit("1", &mut sess), int_lit("2", &mut sess)],
+            },
+            span: DUMMY_SP,
+        };
+        let id =
+            lower_expr(&call, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        match &body.exprs[id].kind {
+            HirExprKind::Call { callee, args } => {
+                assert!(matches!(body.exprs[*callee].kind, HirExprKind::DefRef(_)));
+                assert_eq!(args.len(), 2);
+                assert!(matches!(body.exprs[args[0]].kind, HirExprKind::IntConst(1)));
+                assert!(matches!(body.exprs[args[1]].kind, HirExprKind::IntConst(2)));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_member_dot_lowers_to_field() {
+        let (mut sess, _cap) = Session::for_test();
+        let field = sym(&mut sess, "x");
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Member { base: Box::new(int_lit("0", &mut sess)), field },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Field { base, field_index } => {
+                assert_eq!(field_index, 0);
+                assert!(matches!(body.exprs[base].kind, HirExprKind::IntConst(0)));
+            }
+            ref other => panic!("expected Field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_arrow_lowers_to_field_over_deref() {
+        // `p->x` → Field { base: Deref(p), field_index: 0 }.
+        let (mut sess, _cap) = Session::for_test();
+        let field = sym(&mut sess, "x");
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Arrow { base: Box::new(int_lit("0", &mut sess)), field },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Field { base, field_index } => {
+                assert_eq!(field_index, 0);
+                // The base should itself be a Deref node.
+                match body.exprs[base].kind {
+                    HirExprKind::Deref(inner) => {
+                        assert!(matches!(body.exprs[inner].kind, HirExprKind::IntConst(0)));
+                    }
+                    ref other => panic!("expected Deref under Field, got {other:?}"),
+                }
+            }
+            ref other => panic!("expected Field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_index_lowers_base_and_index() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Index {
+                base: Box::new(int_lit("100", &mut sess)),
+                index: Box::new(int_lit("2", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Index { base, index } => {
+                assert!(matches!(body.exprs[base].kind, HirExprKind::IntConst(100)));
+                assert!(matches!(body.exprs[index].kind, HirExprKind::IntConst(2)));
+            }
+            ref other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_cast_wraps_operand() {
+        // Just need a type-name; typeck resolves it later.
+        let (mut sess, _cap) = Session::for_test();
+        let ty_name = rcc_ast::TypeName {
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            span: DUMMY_SP,
+        };
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Cast { ty: ty_name, expr: Box::new(int_lit("1", &mut sess)) },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::Cast { operand, .. } => {
+                assert!(matches!(body.exprs[operand].kind, HirExprKind::IntConst(1)));
+            }
+            ref other => panic!("expected Cast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_sizeof_expr_and_type_lower_to_int_const() {
+        let (mut sess, _cap) = Session::for_test();
+
+        let se = Expr {
+            id: NodeId(0),
+            kind: ExprKind::SizeofExpr(Box::new(int_lit("1", &mut sess))),
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, se);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+
+        let ty_name = rcc_ast::TypeName {
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            span: DUMMY_SP,
+        };
+        let st = Expr { id: NodeId(0), kind: ExprKind::SizeofType(ty_name), span: DUMMY_SP };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, st);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+    }
+
+    #[test]
+    fn expr_compound_literal_placeholder() {
+        let (mut sess, _cap) = Session::for_test();
+        let ty_name = rcc_ast::TypeName {
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            span: DUMMY_SP,
+        };
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::CompoundLiteral {
+                ty: ty_name,
+                init: Box::new(rcc_ast::Initializer::Expr(int_lit("0", &mut sess))),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        // Placeholder per the task spec.
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+    }
+
+    #[test]
+    fn expr_ident_resolves_to_local_or_def_ref() {
+        // Local.
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut tcx = TyCtxt::new();
+        let local = body.locals.push(LocalDecl {
+            name: Some(x),
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        scope.insert(x, Binding::Local(local));
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+
+        let e = ident_expr(&mut sess, "x");
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::LocalRef(_)));
+
+        // Global def.
+        let (mut sess, _cap) = Session::for_test();
+        let g = sym(&mut sess, "g");
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let g_def = crate_.defs.push(Def {
+            id: DefId(0),
+            name: g,
+            span: DUMMY_SP,
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+        });
+        crate_.defs[g_def].id = g_def;
+        resolver.ordinary.insert(g, g_def);
+
+        let e = ident_expr(&mut sess, "g");
+        let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+        match body.exprs[id].kind {
+            HirExprKind::DefRef(d) => assert_eq!(d, g_def),
+            ref other => panic!("expected DefRef, got {other:?}"),
+        }
+    }
+
+    /// Task deliverable: "assert AST → HIR node count is preserved".
+    ///
+    /// For a tree with no `Paren` wrappers and no compound-assign
+    /// desugaring (which adds a synthetic Binary node) the count of
+    /// HIR expression nodes equals the count of AST expression nodes.
+    #[test]
+    fn expr_tree_node_count_is_preserved() {
+        let (mut sess, _cap) = Session::for_test();
+
+        // AST: (1 + 2) * 3  — without Paren wrapper, 4 AST expr nodes.
+        // Shape: Binary { Mul, Binary { Add, IntLit 1, IntLit 2 }, IntLit 3 }
+        let ast = binop(
+            rcc_ast::BinOp::Mul,
+            binop(rcc_ast::BinOp::Add, int_lit("1", &mut sess), int_lit("2", &mut sess)),
+            int_lit("3", &mut sess),
+        );
+        // Count AST nodes recursively.
+        fn count_ast(e: &Expr) -> usize {
+            match &e.kind {
+                ExprKind::IntLit { .. }
+                | ExprKind::FloatLit { .. }
+                | ExprKind::CharLit { .. }
+                | ExprKind::StringLit { .. }
+                | ExprKind::Ident(_) => 1,
+                ExprKind::Binary { lhs, rhs, .. } => 1 + count_ast(lhs) + count_ast(rhs),
+                ExprKind::Unary { operand, .. } => 1 + count_ast(operand),
+                ExprKind::Paren(inner) => count_ast(inner),
+                _ => 1,
+            }
+        }
+        let n_ast = count_ast(&ast);
+        let (body, _id, _c, _r) = lower_single_expr(&mut sess, ast);
+        assert_eq!(body.exprs.len(), n_ast, "one HIR expr node per AST expr node");
+        assert_eq!(n_ast, 5); // Binary + Binary + 3 literals
     }
 }
