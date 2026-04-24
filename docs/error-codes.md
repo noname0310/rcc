@@ -634,6 +634,41 @@ int g()(int);        // error[E0076]: function cannot return function type
 
 ---
 
+## E0077 — invalid bit-field width
+
+C99 §6.7.2.1p4 constrains bit-field widths inside a `struct` or
+`union`: the width shall be a non-negative integer constant expression
+whose value does not exceed the width of the underlying integer
+type. A width of zero is legal only for an **anonymous** bit-field
+(used as an alignment separator that forces the next field onto a new
+storage unit); a named bit-field must have a positive width.
+
+`rcc` rejects the following at lowering time:
+
+- **Non-constant width** — the width expression did not reduce to an
+  integer literal (most constant folds beyond literals will land in a
+  later typeck task).
+- **Negative width** — e.g. `int x : -1;`.
+- **Width exceeding the underlying type** — e.g. `int x : 64;` against
+  a 32-bit `int`.
+- **Named zero-width bit-field** — e.g. `int x : 0;`. Only the
+  anonymous form `int : 0;` is permitted as a separator.
+
+```c
+struct bad {
+    int a : -1;      // error[E0077]: bit-field width cannot be negative
+    int b : 64;      // error[E0077]: bit-field width 64 exceeds width of underlying type
+    int c : 0;       // error[E0077]: named bit-field must have a non-zero width
+};
+
+struct ok {
+    int : 0;         // legal: anonymous separator — forces alignment
+    int flag : 1;    // legal: 1 ≤ 32 (int width)
+};
+```
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

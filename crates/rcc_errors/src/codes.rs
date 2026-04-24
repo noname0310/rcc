@@ -73,6 +73,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0074, E0074_DESC),
     (E0075, E0075_DESC),
     (E0076, E0076_DESC),
+    (E0077, E0077_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -408,6 +409,18 @@ const E0075_DESC: &str = "typedef cycle detected";
 /// declarator token.
 pub const E0076: &str = "E0076";
 const E0076_DESC: &str = "illegal declarator form";
+
+/// Invalid bit-field width.
+///
+/// C99 §6.7.2.1 constrains bit-field widths: the width shall be a
+/// non-negative integer constant expression, and shall not exceed the
+/// width of the underlying integer type. A width of zero is allowed
+/// only for an anonymous bit-field (declarator-less separator that
+/// forces alignment to the next storage unit). `rcc` rejects negative
+/// widths, widths larger than the type's bit-width, and zero widths on
+/// named bit-fields with this code.
+pub const E0077: &str = "E0077";
+const E0077_DESC: &str = "invalid bit-field width";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

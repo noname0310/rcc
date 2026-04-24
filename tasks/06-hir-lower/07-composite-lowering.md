@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 06-07: Composite (struct / union) lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-03, 06-06    **Milestone:** M4

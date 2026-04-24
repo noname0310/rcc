@@ -12,14 +12,14 @@
 #![warn(missing_docs)]
 
 use rcc_ast::{
-    BlockItem, Declarator, DerivedDeclarator, ExternalDecl, Stmt, StmtKind, StorageClass,
-    TranslationUnit, TypeSpec,
+    BlockItem, Declarator, DerivedDeclarator, ExternalDecl, RecordSpec, Stmt, StmtKind,
+    StorageClass, TranslationUnit, TypeSpec,
 };
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
-use rcc_hir::ty::{Qual, Ty};
+use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
-    Def, DefId, DefKind, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt, TyId,
+    Def, DefId, DefKind, Field, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt, TyId,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -856,6 +856,285 @@ fn eval_const_expr_as_u64(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -
         rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_u64(inner, interner),
         _ => None,
     }
+}
+
+/// Return the width in bits of an integer type for bit-field validation.
+///
+/// The numbers follow the rcc target-independent defaults used by
+/// `rcc_typeck` / `rcc_codegen_llvm` (LP64-ish): `_Bool` is 1 bit,
+/// `char` 8, `short` 16, `int` 32, `long` / `long long` 64. Returns
+/// `None` when the type is not an integer (bit-fields shall have an
+/// integer type per C99 §6.7.2.1p5).
+fn int_type_bit_width(ty: TyId, tcx: &TyCtxt) -> Option<u32> {
+    match tcx.get(ty) {
+        Ty::Int { rank, .. } => Some(match rank {
+            IntRank::Bool => 1,
+            IntRank::Char => 8,
+            IntRank::Short => 16,
+            IntRank::Int => 32,
+            IntRank::Long => 64,
+            IntRank::LongLong => 64,
+        }),
+        _ => None,
+    }
+}
+
+/// Constant-evaluate a bit-field width expression to a signed integer.
+///
+/// Accepts integer literals, parenthesised expressions, and a unary
+/// minus in front of a literal so that `-1` (a common "bad width" case)
+/// can be detected and diagnosed instead of silently underflowing.
+/// Returns `None` when the expression is not a recognised constant.
+fn eval_bit_width(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<i64> {
+    match &expr.kind {
+        rcc_ast::ExprKind::IntLit { .. } => {
+            eval_const_expr_as_u64(expr, interner).and_then(|u| i64::try_from(u).ok())
+        }
+        rcc_ast::ExprKind::Paren(inner) => eval_bit_width(inner, interner),
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
+            let inner = eval_bit_width(operand, interner)?;
+            inner.checked_neg()
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
+            eval_bit_width(operand, interner)
+        }
+        _ => None,
+    }
+}
+
+/// Materialise a `struct` / `union` specifier (with fields) into a
+/// `DefKind::Record` value.
+///
+/// Field lowering:
+/// - Shared `DeclSpecs` are lowered once per `FieldDecl` group to a
+///   base `TyId` via [`lower_declspecs_to_base_ty`] (plus typedef
+///   expansion).
+/// - Each `FieldDeclarator` is folded over the base with
+///   [`apply_declarator`] in `DeclScope::Block` (fields require
+///   complete types — no incomplete arrays like `int x[];`).
+/// - Anonymous fields (declarator `None`) fall into two cases:
+///   - With a `bit_width` → anonymous bit-field (padding separator).
+///     The field is emitted with `name = None` so name lookup skips it.
+///   - Without a `bit_width` → anonymous `struct`/`union` member
+///     (C99 §6.7.2.1p13 / GNU/C11 anonymous-member convention, used
+///     widely in kernel-style code). Its fields are *flattened* into
+///     the enclosing record's field list so that `parent.inner_field`
+///     is accessible as `parent.inner_field` from the outside.
+/// - Bit-field widths are validated per C99 §6.7.2.1p4: the width must
+///   be a non-negative integer constant expression and shall not
+///   exceed the width of the underlying type. Named zero-width
+///   bit-fields are rejected (only anonymous zero-width bit-fields are
+///   the legal "alignment separator" form). Violations emit `E0077`
+///   and the offending bit-field is dropped from the field list.
+pub fn lower_record(
+    spec: &RecordSpec,
+    tcx: &mut TyCtxt,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> DefKind {
+    let kind = match spec.kind {
+        rcc_ast::RecordKind::Struct => RecordKind::Struct,
+        rcc_ast::RecordKind::Union => RecordKind::Union,
+    };
+
+    let mut out_fields: Vec<Field> = Vec::new();
+
+    let Some(field_decls) = spec.fields.as_ref() else {
+        // Bare tag reference; nothing to lower. Caller shouldn't normally
+        // pass a non-defining spec, but stay defensive.
+        return DefKind::Record { kind, layout: None, fields: Vec::new() };
+    };
+
+    for fd in field_decls {
+        // Lower shared specifiers once per field-decl group.
+        let base = lower_field_specs_to_base_ty(&fd.specs, tcx, resolver, crate_, session);
+
+        for fdd in &fd.declarators {
+            match (&fdd.declarator, &fdd.bit_width) {
+                // ── Anonymous bit-field: `int : 0;` separator. ──────
+                (None, Some(width_expr)) => {
+                    let (ok_width, bit_width) = validate_bit_width(
+                        base, width_expr, fd.span, /*is_named=*/ false, tcx, session,
+                    );
+                    if ok_width {
+                        out_fields.push(Field {
+                            name: None,
+                            ty: base,
+                            offset: None,
+                            bit_width,
+                            span: fd.span,
+                        });
+                    }
+                }
+                // ── Anonymous struct/union member — flatten. ────────
+                (None, None) => {
+                    // The only way to get here legally is that the field
+                    // specifier described an anonymous record (no tag,
+                    // defined inline). Flatten its fields into the
+                    // parent so both `outer.a` and `outer.b` resolve.
+                    if let Some(inner_spec) = find_anon_record_in_specs(&fd.specs) {
+                        if let DefKind::Record { fields: inner_fields, .. } =
+                            lower_record(inner_spec, tcx, resolver, crate_, session)
+                        {
+                            out_fields.extend(inner_fields);
+                        }
+                    }
+                    // Any other shape (e.g. `int;` with no declarator) is
+                    // a malformed field declaration; the parser already
+                    // rejects it, so we silently drop here.
+                }
+                // ── Named field (with or without bit-width). ────────
+                (Some(decl), bw) => {
+                    let ty = apply_declarator(base, decl, DeclScope::Block, tcx, session);
+                    let name = decl.name.map(|(n, _)| n);
+                    let bit_width = if let Some(width_expr) = bw {
+                        let (ok, bw_val) = validate_bit_width(
+                            ty,
+                            width_expr,
+                            fd.span,
+                            /*is_named=*/ name.is_some(),
+                            tcx,
+                            session,
+                        );
+                        if !ok {
+                            continue;
+                        }
+                        bw_val
+                    } else {
+                        None
+                    };
+                    out_fields.push(Field { name, ty, offset: None, bit_width, span: decl.span });
+                }
+            }
+        }
+    }
+
+    DefKind::Record { kind, layout: None, fields: out_fields }
+}
+
+/// Return the inline anonymous `RecordSpec` inside a field's
+/// `DeclSpecs`, if any.
+fn find_anon_record_in_specs(specs: &rcc_ast::DeclSpecs) -> Option<&RecordSpec> {
+    for ts in &specs.type_specs {
+        if let TypeSpec::Record(rs) = ts {
+            if rs.tag.is_none() && rs.fields.is_some() {
+                return Some(rs);
+            }
+        }
+    }
+    None
+}
+
+/// Lower a field's `DeclSpecs` to a base `TyId`.
+///
+/// Mirrors [`lower_declspecs_to_base_ty`] but additionally resolves
+/// `TypedefName` references (so `typedef int T; struct S { T x; };`
+/// ends up with `x: int`) and recognises inline anonymous record
+/// specs (returning `tcx.error` for those — they're handled at the
+/// declarator level by flattening).
+fn lower_field_specs_to_base_ty(
+    specs: &rcc_ast::DeclSpecs,
+    tcx: &mut TyCtxt,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> TyId {
+    for ts in &specs.type_specs {
+        match ts {
+            TypeSpec::TypedefName(sym) => {
+                let mut expanding = FxHashSet::default();
+                return lower_typedef_name(
+                    *sym,
+                    specs.span,
+                    &mut expanding,
+                    resolver,
+                    crate_,
+                    tcx,
+                    session,
+                );
+            }
+            TypeSpec::Record(_) | TypeSpec::Enum(_) => {
+                // Anonymous inline records are flattened at the
+                // field-declarator layer; named record/enum tag
+                // references would need full lookup wiring which a
+                // later task handles. Return `error` for these cases;
+                // the declarator-layer flattening logic will override
+                // for the anonymous case.
+                return tcx.error;
+            }
+            _ => {}
+        }
+    }
+    lower_declspecs_to_base_ty(specs, tcx, session)
+}
+
+/// Validate a bit-field width expression against the field type.
+///
+/// Returns `(ok, bit_width)`:
+/// - `ok == false` means the field should be dropped (width was
+///   invalid; a diagnostic has been emitted).
+/// - `bit_width == Some(n)` is the accepted bit-field width for the
+///   `Field` record; `None` means the expression failed to evaluate
+///   to an integer constant (diagnostic already emitted).
+fn validate_bit_width(
+    field_ty: TyId,
+    width_expr: &rcc_ast::Expr,
+    span: Span,
+    is_named: bool,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> (bool, Option<u32>) {
+    let value = match eval_bit_width(width_expr, &session.interner) {
+        Some(v) => v,
+        None => {
+            session
+                .handler
+                .struct_err(span, "bit-field width is not an integer constant".to_string())
+                .code(rcc_errors::codes::E0077)
+                .emit();
+            return (false, None);
+        }
+    };
+    if value < 0 {
+        session
+            .handler
+            .struct_err(span, format!("bit-field width cannot be negative (got {value})"))
+            .code(rcc_errors::codes::E0077)
+            .emit();
+        return (false, None);
+    }
+    // A zero-width bit-field is only legal on an *anonymous* bit-field
+    // (C99 §6.7.2.1p4): it forces the next field to be laid out on the
+    // next storage-unit boundary. A named zero-width bit-field is a
+    // constraint violation.
+    if value == 0 && is_named {
+        session
+            .handler
+            .struct_err(span, "named bit-field must have a non-zero width".to_string())
+            .code(rcc_errors::codes::E0077)
+            .emit();
+        return (false, None);
+    }
+    // Type width check. If the field's type is not a plain integer we
+    // skip the upper-bound check (error sentinel or typedef chain that
+    // didn't resolve); the base diagnostic would already have fired.
+    if let Some(type_bits) = int_type_bit_width(field_ty, tcx) {
+        if value > i64::from(type_bits) {
+            session
+                .handler
+                .struct_err(
+                    span,
+                    format!(
+                        "bit-field width {value} exceeds width of underlying type ({type_bits} bits)"
+                    ),
+                )
+                .code(rcc_errors::codes::E0077)
+                .emit();
+            return (false, None);
+        }
+    }
+    (true, Some(value as u32))
 }
 
 /// First-pass: walk the AST top-level and assign a `DefId` to every
@@ -2439,5 +2718,392 @@ mod tests {
             proto: true,
         });
         assert_eq!(result, expected, "array parameter should be adjusted to pointer");
+    }
+
+    // ── Composite lowering (task 06-07) tests ──────────────────────────
+
+    use rcc_ast::{FieldDecl, FieldDeclarator};
+
+    /// Helper: build a `FieldDecl` from a single type spec list and a
+    /// vector of `(name, derived, bit_width)` tuples.
+    fn field_decl(
+        type_specs: Vec<TypeSpec>,
+        decls: Vec<(Option<Symbol>, Vec<DerivedDeclarator>, Option<Expr>)>,
+    ) -> FieldDecl {
+        FieldDecl {
+            specs: DeclSpecs { type_specs, ..DeclSpecs::default() },
+            declarators: decls
+                .into_iter()
+                .map(|(name, derived, bit_width)| FieldDeclarator {
+                    declarator: name.map(|n| Declarator {
+                        name: Some((n, DUMMY_SP)),
+                        derived,
+                        span: DUMMY_SP,
+                    }),
+                    bit_width,
+                })
+                .collect(),
+            span: DUMMY_SP,
+        }
+    }
+
+    /// Helper: build a named field with a given type spec, no derivations.
+    fn named_field(name: Symbol, type_specs: Vec<TypeSpec>) -> FieldDecl {
+        field_decl(type_specs, vec![(Some(name), Vec::new(), None)])
+    }
+
+    /// Helper: int literal constant expression with given text.
+    fn int_lit(text: &str, sess: &mut Session) -> Expr {
+        let s = sym(sess, text);
+        Expr { id: NodeId(0), kind: ExprKind::IntLit { text: s }, span: DUMMY_SP }
+    }
+
+    /// Helper: unary `-n` constant expression.
+    fn neg_lit(text: &str, sess: &mut Session) -> Expr {
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::Unary {
+                op: rcc_ast::UnOp::Neg,
+                operand: Box::new(int_lit(text, sess)),
+            },
+            span: DUMMY_SP,
+        }
+    }
+
+    /// Helper: build a `RecordSpec` from a list of field decls.
+    fn record_spec(
+        kind: rcc_ast::RecordKind,
+        tag: Option<Symbol>,
+        fields: Option<Vec<FieldDecl>>,
+    ) -> RecordSpec {
+        RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP }
+    }
+
+    #[test]
+    fn record_lower_simple_two_fields() {
+        // struct S { int a; int b; }
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+        let b = sym(&mut sess, "b");
+        let spec = record_spec(
+            rcc_ast::RecordKind::Struct,
+            None,
+            Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Int])]),
+        );
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        match kind {
+            DefKind::Record { kind: RecordKind::Struct, fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, Some(a));
+                assert_eq!(fields[0].ty, tcx.int);
+                assert_eq!(fields[0].bit_width, None);
+                assert_eq!(fields[1].name, Some(b));
+                assert_eq!(fields[1].ty, tcx.int);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn record_lower_shared_specs_multiple_declarators() {
+        // struct S { int a, b; } — one FieldDecl with two declarators.
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+        let b = sym(&mut sess, "b");
+        let fd = field_decl(
+            vec![TypeSpec::Int],
+            vec![(Some(a), Vec::new(), None), (Some(b), Vec::new(), None)],
+        );
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        match kind {
+            DefKind::Record { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, Some(a));
+                assert_eq!(fields[1].name, Some(b));
+                assert_eq!(fields[0].ty, tcx.int);
+                assert_eq!(fields[1].ty, tcx.int);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_lower_union_kind() {
+        // union U { int a; } — kind is Union.
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+        let spec = record_spec(
+            rcc_ast::RecordKind::Union,
+            None,
+            Some(vec![named_field(a, vec![TypeSpec::Int])]),
+        );
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        match kind {
+            DefKind::Record { kind: RecordKind::Union, .. } => {}
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_bitfield_width_zero_separator() {
+        // struct { int : 0; int a; } — anonymous zero-width separator.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+
+        let zero_width = int_lit("0", &mut sess);
+        let sep = field_decl(vec![TypeSpec::Int], vec![(None, Vec::new(), Some(zero_width))]);
+        let named = named_field(a, vec![TypeSpec::Int]);
+
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![sep, named]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "zero-width anonymous bit-field should be accepted: {diags:?}");
+        match kind {
+            DefKind::Record { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, None, "separator has no name");
+                assert_eq!(fields[0].bit_width, Some(0));
+                assert_eq!(fields[1].name, Some(a));
+                assert_eq!(fields[1].bit_width, None);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_bitfield_width_negative_errors() {
+        // struct { int x : -1; } → E0077.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+
+        let neg = neg_lit("1", &mut sess);
+        let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(neg))]);
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0077"));
+        assert!(diags[0].message.contains("negative"));
+
+        // The invalid field is dropped from the field list.
+        match kind {
+            DefKind::Record { fields, .. } => {
+                assert!(fields.is_empty(), "invalid bit-field should be dropped");
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_bitfield_width_exceeds_type_errors() {
+        // struct { int x : 64; } — 64 > 32 (width of int) → E0077.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+
+        let big = int_lit("64", &mut sess);
+        let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(big))]);
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let _ = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0077"));
+        assert!(diags[0].message.contains("exceeds"));
+    }
+
+    #[test]
+    fn record_named_bitfield_zero_width_errors() {
+        // struct { int x : 0; } — named zero-width bit-field → E0077.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+
+        let zero = int_lit("0", &mut sess);
+        let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(zero))]);
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let _ = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0077"));
+        assert!(diags[0].message.contains("non-zero width"), "got: {}", diags[0].message);
+    }
+
+    #[test]
+    fn record_bitfield_width_equal_to_type_ok() {
+        // struct { int x : 32; } — exactly the type width is legal.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+
+        let width = int_lit("32", &mut sess);
+        let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(width))]);
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        assert!(cap.diagnostics().is_empty());
+        match kind {
+            DefKind::Record { fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].bit_width, Some(32));
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_anonymous_struct_flattens_fields() {
+        // Acceptance: struct { int a; struct { int b; }; } — outer struct
+        // exposes both `a` and `b` for lookup.
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+        let b = sym(&mut sess, "b");
+
+        // Inner anonymous struct: `struct { int b; }`
+        let inner_spec = record_spec(
+            rcc_ast::RecordKind::Struct,
+            None,
+            Some(vec![named_field(b, vec![TypeSpec::Int])]),
+        );
+
+        // Field declaring the anonymous inner struct (no declarator, no bit-width).
+        let anon_member =
+            field_decl(vec![TypeSpec::Record(inner_spec)], vec![(None, Vec::new(), None)]);
+
+        let outer_spec = record_spec(
+            rcc_ast::RecordKind::Struct,
+            None,
+            Some(vec![named_field(a, vec![TypeSpec::Int]), anon_member]),
+        );
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&outer_spec, &mut tcx, &resolver, &crate_, &mut sess);
+        assert!(cap.diagnostics().is_empty(), "anon flattening should not error");
+
+        match kind {
+            DefKind::Record { fields, .. } => {
+                // Flattened: both a and b appear in the outer list.
+                let names: Vec<_> = fields.iter().filter_map(|f| f.name).collect();
+                assert!(names.contains(&a), "outer should expose `a`");
+                assert!(names.contains(&b), "outer should expose flattened `b`");
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_anonymous_union_flattens_fields() {
+        // struct { int a; union { int b; int c; }; }
+        // Flattened: a, b, c.
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let a = sym(&mut sess, "a");
+        let b = sym(&mut sess, "b");
+        let c = sym(&mut sess, "c");
+
+        let inner_spec = record_spec(
+            rcc_ast::RecordKind::Union,
+            None,
+            Some(vec![named_field(b, vec![TypeSpec::Int]), named_field(c, vec![TypeSpec::Int])]),
+        );
+
+        let anon_member =
+            field_decl(vec![TypeSpec::Record(inner_spec)], vec![(None, Vec::new(), None)]);
+
+        let outer_spec = record_spec(
+            rcc_ast::RecordKind::Struct,
+            None,
+            Some(vec![named_field(a, vec![TypeSpec::Int]), anon_member]),
+        );
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&outer_spec, &mut tcx, &resolver, &crate_, &mut sess);
+        match kind {
+            DefKind::Record { fields, .. } => {
+                let names: Vec<_> = fields.iter().filter_map(|f| f.name).collect();
+                assert!(names.contains(&a));
+                assert!(names.contains(&b));
+                assert!(names.contains(&c));
+                assert_eq!(fields.len(), 3);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_bare_tag_ref_no_fields() {
+        // `struct S;` — no defining fields. `lower_record` shouldn't
+        // normally be called for this, but should handle it defensively.
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let s = sym(&mut sess, "S");
+        let spec = record_spec(rcc_ast::RecordKind::Struct, Some(s), None);
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        match kind {
+            DefKind::Record { fields, .. } => assert!(fields.is_empty()),
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_pointer_field_type() {
+        // struct { int *p; } — pointer declarator on a field.
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let p = sym(&mut sess, "p");
+
+        let fd = field_decl(vec![TypeSpec::Int], vec![(Some(p), vec![ptr()], None)]);
+        let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
+        let resolver = Resolver::default();
+        let crate_ = HirCrate::default();
+
+        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        match kind {
+            DefKind::Record { fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].ty, ptr_int);
+            }
+            other => panic!("expected Record, got {other:?}"),
+        }
     }
 }
