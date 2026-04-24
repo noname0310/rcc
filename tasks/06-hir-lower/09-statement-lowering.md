@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-25
+
 # 06-09: Statement lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-02, 06-04    **Milestone:** M2

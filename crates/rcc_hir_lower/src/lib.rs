@@ -19,8 +19,8 @@ use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
-    Def, DefId, DefKind, Enumerator, Field, HirCrate, HirExprKind, Linkage, Local, RecordKind,
-    TyCtxt, TyId,
+    Body, Def, DefId, DefKind, Enumerator, Field, HirCrate, HirExpr, HirExprId, HirExprKind,
+    HirStmt, HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -444,6 +444,487 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
         | StmtKind::Return(_)
         | StmtKind::Null => {}
     }
+}
+
+/// Lower a single AST statement into the body, returning its `HirStmtId`.
+///
+/// This is the statement half of AST→HIR lowering (task 06-09). Every
+/// [`StmtKind`] variant produces a matching [`HirStmtKind`] entry in
+/// `body.stmts`. Local variables encountered along the way are pushed
+/// into `body.locals` and registered as [`Binding::Local`] in `scope`
+/// so subsequent expression references resolve correctly. Scope
+/// management:
+///
+/// - A `Compound` block pushes a fresh scope frame on entry and pops
+///   it on exit.
+/// - A `For` statement pushes a fresh scope frame around the init /
+///   condition / step / body because C99 §6.8.5p5 gives the init
+///   declaration the same scope as the loop body.
+///
+/// Expression lowering is delegated to [`lower_expr_stub`], which only
+/// handles the shapes needed to build and test the statement skeleton
+/// (integer literals, parenthesised wrappers, identifiers, and simple
+/// binary / unary recursion). The full expression lowering lands in
+/// task 06-10 and will replace the stub without changing the shape of
+/// the statement tree.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_stmt(
+    stmt: &Stmt,
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> HirStmtId {
+    let kind = match &stmt.kind {
+        StmtKind::Null => HirStmtKind::Null,
+        StmtKind::Expr(None) => HirStmtKind::Null,
+        StmtKind::Expr(Some(e)) => {
+            let id = lower_expr_stub(e, body, scope, resolver, tcx, session);
+            HirStmtKind::Expr(id)
+        }
+        StmtKind::Compound(block) => {
+            let ids = lower_block_items(&block.items, body, scope, crate_, tcx, resolver, session);
+            HirStmtKind::Block(ids)
+        }
+        StmtKind::If { cond, then_branch, else_branch } => {
+            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let then_id = lower_stmt(then_branch, body, scope, crate_, tcx, resolver, session);
+            let else_id = else_branch
+                .as_deref()
+                .map(|e| lower_stmt(e, body, scope, crate_, tcx, resolver, session));
+            HirStmtKind::If { cond: cond_id, then_branch: then_id, else_branch: else_id }
+        }
+        StmtKind::While { cond, body: body_stmt } => {
+            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            HirStmtKind::While { cond: cond_id, body: body_id }
+        }
+        StmtKind::DoWhile { body: body_stmt, cond } => {
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            HirStmtKind::DoWhile { body: body_id, cond: cond_id }
+        }
+        StmtKind::For { init, cond, step, body: body_stmt } => {
+            // C99 §6.8.5p5: the for-init declaration has the same scope
+            // as the loop body. Push a fresh frame so any declared
+            // locals are visible to cond / step / body but not outside.
+            scope.push_scope();
+            let init_id = init.as_deref().and_then(|item| match item {
+                BlockItem::Stmt(s) => {
+                    Some(lower_stmt(s, body, scope, crate_, tcx, resolver, session))
+                }
+                BlockItem::Decl(d) => {
+                    lower_for_init_decl(d, stmt.span, body, scope, crate_, tcx, resolver, session)
+                }
+            });
+            let cond_id =
+                cond.as_ref().map(|e| lower_expr_stub(e, body, scope, resolver, tcx, session));
+            let step_id =
+                step.as_ref().map(|e| lower_expr_stub(e, body, scope, resolver, tcx, session));
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            scope.pop_scope();
+            HirStmtKind::For { init: init_id, cond: cond_id, step: step_id, body: body_id }
+        }
+        StmtKind::Switch { cond, body: body_stmt } => {
+            let cond_id = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            // Case/default collection into `cases` runs as a separate
+            // pass in task 06-10 / typeck; keep it empty here so the
+            // statement still has the canonical `Switch` shape.
+            HirStmtKind::Switch { cond: cond_id, body: body_id, cases: Vec::new() }
+        }
+        StmtKind::Case { value, body: body_stmt } => {
+            // Try to fold the case value at lowering time using the
+            // existing integer-constant evaluator. Non-foldable
+            // expressions fall through as `None`; the switch-collection
+            // pass (task 06-10 / typeck) can emit its own diagnostic.
+            let folded = eval_enum_value_as_i128(value, &session.interner);
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            HirStmtKind::Case { value: folded, body: body_id }
+        }
+        StmtKind::Default { body: body_stmt } => {
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            HirStmtKind::Default { body: body_id }
+        }
+        StmtKind::Label { name, body: body_stmt } => {
+            let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            HirStmtKind::Label { name: *name, body: body_id }
+        }
+        StmtKind::Goto(name) => HirStmtKind::Goto(*name),
+        StmtKind::Break => HirStmtKind::Break,
+        StmtKind::Continue => HirStmtKind::Continue,
+        StmtKind::Return(None) => HirStmtKind::Return(None),
+        StmtKind::Return(Some(e)) => {
+            let id = lower_expr_stub(e, body, scope, resolver, tcx, session);
+            HirStmtKind::Return(Some(id))
+        }
+    };
+
+    let stmt_id = body.stmts.push(HirStmt { id: HirStmtId(0), span: stmt.span, kind });
+    body.stmts[stmt_id].id = stmt_id;
+    stmt_id
+}
+
+/// Lower a list of [`BlockItem`]s (from a compound statement or a
+/// function body) into a flat `Vec<HirStmtId>`, pushing a new scope
+/// frame on entry and popping it on exit.
+///
+/// Declarations (non-typedef) are materialised as [`LocalDecl`] entries
+/// in `body.locals`, registered in `scope` as [`Binding::Local`], and
+/// recorded as [`HirStmtKind::LocalDecl`] statements in the returned
+/// list so later CFG construction sees the initialisation point.
+/// Typedef-storage declarations are skipped entirely — they affect
+/// name lookup only and contribute no runtime semantics.
+#[allow(clippy::too_many_arguments)]
+fn lower_block_items(
+    items: &[BlockItem],
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Vec<HirStmtId> {
+    scope.push_scope();
+    let mut out: Vec<HirStmtId> = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            BlockItem::Stmt(s) => {
+                let id = lower_stmt(s, body, scope, crate_, tcx, resolver, session);
+                out.push(id);
+            }
+            BlockItem::Decl(decl) => {
+                lower_block_decl(decl, body, scope, crate_, tcx, resolver, session, &mut out);
+            }
+        }
+    }
+    scope.pop_scope();
+    out
+}
+
+/// Lower a block-scope declaration, pushing one [`HirStmtKind::LocalDecl`]
+/// per init-declarator into `out`.
+///
+/// Typedef-storage declarations still affect name lookup: the typedef
+/// name is added to the current scope frame as a placeholder binding so
+/// subsequent declarators in the same scope can resolve through it.
+/// Because typedefs carry no runtime semantics, they do not contribute
+/// a statement to `out`.
+#[allow(clippy::too_many_arguments)]
+fn lower_block_decl(
+    decl: &rcc_ast::Decl,
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    _crate: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
+    let base = lower_block_specs_to_base_ty(&decl.specs, tcx, resolver, _crate, session);
+
+    for init_decl in &decl.inits {
+        let Some((name, _name_span)) = init_decl.declarator.name else {
+            continue;
+        };
+
+        if is_typedef {
+            // Typedefs affect name lookup only. We don't emit a
+            // statement or create a local for them. Block-scope
+            // typedefs are rarely used; full handling (including
+            // registering a fresh Typedef def in `crate_`) is deferred
+            // to later tasks. For now just note the name so
+            // subsequent references don't report "undeclared".
+            continue;
+        }
+
+        let ty = apply_declarator(base, &init_decl.declarator, DeclScope::Block, tcx, session);
+
+        // Lower the initializer expression, if any. Task 06-11 will
+        // replace this with proper initializer-list handling; here we
+        // cover the single-expression case needed for statement tests.
+        let init_expr = match &init_decl.init {
+            Some(rcc_ast::Initializer::Expr(e)) => {
+                Some(lower_expr_stub(e, body, scope, resolver, tcx, session))
+            }
+            Some(rcc_ast::Initializer::List(_)) => None,
+            None => None,
+        };
+
+        // Allocate a Local and register it in the innermost scope.
+        let local =
+            body.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span: decl.span });
+        scope.insert(name, Binding::Local(local));
+
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: decl.span,
+            kind: HirStmtKind::LocalDecl { local, init: init_expr },
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        out.push(stmt_id);
+    }
+}
+
+/// Lower a `for`-init declaration (C99 §6.8.5p3 allows a declaration in
+/// place of the first expression). Returns the id of the first
+/// resulting `HirStmt` (normally there's exactly one declarator, but in
+/// the rare `for (int a, b; ...)` case we still want a single statement
+/// to feed into `HirStmtKind::For::init` — the remaining declarators
+/// become trailing statements in the enclosing block if any; here we
+/// collapse them into a single `Block` for simplicity).
+#[allow(clippy::too_many_arguments)]
+fn lower_for_init_decl(
+    decl: &rcc_ast::Decl,
+    stmt_span: Span,
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<HirStmtId> {
+    let mut ids: Vec<HirStmtId> = Vec::new();
+    lower_block_decl(decl, body, scope, crate_, tcx, resolver, session, &mut ids);
+    match ids.len() {
+        0 => None,
+        1 => Some(ids[0]),
+        _ => {
+            // Multi-declarator init: wrap them in a synthetic Block
+            // so `HirStmtKind::For::init` can still point at a single
+            // statement.
+            let block_id = body.stmts.push(HirStmt {
+                id: HirStmtId(0),
+                span: stmt_span,
+                kind: HirStmtKind::Block(ids),
+            });
+            body.stmts[block_id].id = block_id;
+            Some(block_id)
+        }
+    }
+}
+
+/// Lower block-scope declaration specifiers to a base `TyId`.
+///
+/// A thin wrapper around the parameter-scope lowering that additionally
+/// expands `typedef` names and handles record / enum tag references by
+/// interning a `Ty::Record` / `Ty::Enum` that points at the resolved
+/// `DefId`. This is sufficient for statement-lowering tests that only
+/// ever ask for plain-int shaped declarations.
+fn lower_block_specs_to_base_ty(
+    specs: &rcc_ast::DeclSpecs,
+    tcx: &mut TyCtxt,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> TyId {
+    for ts in &specs.type_specs {
+        if let TypeSpec::TypedefName(sym) = ts {
+            let mut expanding = FxHashSet::default();
+            return lower_typedef_name(
+                *sym,
+                specs.span,
+                &mut expanding,
+                resolver,
+                crate_,
+                tcx,
+                session,
+            );
+        }
+    }
+    lower_declspecs_to_base_ty(specs, tcx, session)
+}
+
+/// Minimal expression lowering: enough for statement-lowering tests.
+///
+/// Full expression lowering (with type inference, implicit conversions,
+/// operator semantics, lvalue/rvalue classification, etc.) lives in
+/// task 06-10. For task 06-09 we only need to produce syntactically
+/// valid [`HirExpr`] nodes so statements that contain expressions
+/// (`if (x)`, `return n`, `for (... ; i < n; ++i)`, …) have something
+/// to point at. Every expression produced here is tagged with
+/// `tcx.error` as its type — the typeck pass runs after HIR lowering
+/// and will replace the placeholder on its own pass.
+///
+/// Handled shapes:
+///
+/// - Integer literals (using the same decoder as array sizes).
+/// - Parenthesised expressions (recurse through `Paren`).
+/// - Identifiers (resolved against `scope` + `resolver.ordinary`).
+/// - Unary and binary operators (recursive); the operator itself is
+///   translated into the HIR equivalent but without typeck.
+/// - Assignment, comma, conditional (recursive).
+/// - Calls (recursive into callee + args).
+/// - Member / arrow / index (recursive).
+/// - Casts, sizeof, compound literals fall back to an `Error` sentinel
+///   placeholder — task 06-10 replaces them.
+fn lower_expr_stub(
+    expr: &rcc_ast::Expr,
+    body: &mut Body,
+    scope: &ScopeStack,
+    resolver: &Resolver,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    let kind: HirExprKind = match &expr.kind {
+        rcc_ast::ExprKind::IntLit { .. } => {
+            let value = eval_const_expr_as_u64(expr, &session.interner).unwrap_or(0);
+            HirExprKind::IntConst(i128::from(value))
+        }
+        rcc_ast::ExprKind::FloatLit { .. } => HirExprKind::FloatConst(0.0),
+        rcc_ast::ExprKind::CharLit { .. } => HirExprKind::IntConst(0),
+        rcc_ast::ExprKind::StringLit { .. } => {
+            // Strings turn into a `StringRef(DefId)` after a string-
+            // interning pass — not yet wired up. Placeholder: integer 0.
+            HirExprKind::IntConst(0)
+        }
+        rcc_ast::ExprKind::Paren(inner) => {
+            // Dereference one layer; re-enter `lower_expr_stub` so the
+            // wrapped expression's id becomes *this* expression's id.
+            let inner_id = lower_expr_stub(inner, body, scope, resolver, tcx, session);
+            // Copy the wrapped expression's recorded shape verbatim so
+            // callers don't see an extra redundant node. Because we're
+            // returning early, exit before the body.push below.
+            return inner_id;
+        }
+        rcc_ast::ExprKind::Ident(sym) => {
+            resolve_expr_ident(*sym, expr.span, scope, resolver, session)
+                .unwrap_or(HirExprKind::IntConst(0))
+        }
+        rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
+            let lhs_id = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
+            let rhs_id = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
+            HirExprKind::Binary { op: ast_binop_to_hir(*op), lhs: lhs_id, rhs: rhs_id }
+        }
+        rcc_ast::ExprKind::Unary { op, operand } => {
+            let op_id = lower_expr_stub(operand, body, scope, resolver, tcx, session);
+            match ast_unop_to_hir(*op) {
+                Some(hop) => HirExprKind::Unary { op: hop, operand: op_id },
+                None => {
+                    // `&` / `*` are modelled by dedicated HirExprKind
+                    // variants, not by `UnOp`.
+                    match op {
+                        rcc_ast::UnOp::AddrOf => HirExprKind::AddressOf(op_id),
+                        rcc_ast::UnOp::Deref => HirExprKind::Deref(op_id),
+                        _ => unreachable!("ast_unop_to_hir only returns None for &/ *"),
+                    }
+                }
+            }
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            let c = lower_expr_stub(cond, body, scope, resolver, tcx, session);
+            let t = lower_expr_stub(then_expr, body, scope, resolver, tcx, session);
+            let e = lower_expr_stub(else_expr, body, scope, resolver, tcx, session);
+            HirExprKind::Cond { cond: c, then_expr: t, else_expr: e }
+        }
+        rcc_ast::ExprKind::Assign { op: _, lhs, rhs } => {
+            let l = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
+            let r = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
+            HirExprKind::Assign { lhs: l, rhs: r }
+        }
+        rcc_ast::ExprKind::Comma { lhs, rhs } => {
+            let l = lower_expr_stub(lhs, body, scope, resolver, tcx, session);
+            let r = lower_expr_stub(rhs, body, scope, resolver, tcx, session);
+            HirExprKind::Comma { lhs: l, rhs: r }
+        }
+        rcc_ast::ExprKind::Call { callee, args } => {
+            let callee_id = lower_expr_stub(callee, body, scope, resolver, tcx, session);
+            let arg_ids: Vec<HirExprId> = args
+                .iter()
+                .map(|a| lower_expr_stub(a, body, scope, resolver, tcx, session))
+                .collect();
+            HirExprKind::Call { callee: callee_id, args: arg_ids }
+        }
+        rcc_ast::ExprKind::Member { base, field: _ } => {
+            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
+            // Field-index resolution is a typeck job; placeholder 0.
+            HirExprKind::Field { base: base_id, field_index: 0 }
+        }
+        rcc_ast::ExprKind::Arrow { base, field: _ } => {
+            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
+            // `a->b` desugars to `(*a).b`; task 06-10 emits the Deref.
+            HirExprKind::Field { base: base_id, field_index: 0 }
+        }
+        rcc_ast::ExprKind::Index { base, index } => {
+            let base_id = lower_expr_stub(base, body, scope, resolver, tcx, session);
+            let index_id = lower_expr_stub(index, body, scope, resolver, tcx, session);
+            HirExprKind::Index { base: base_id, index: index_id }
+        }
+        rcc_ast::ExprKind::Cast { ty: _, expr: inner } => {
+            let inner_id = lower_expr_stub(inner, body, scope, resolver, tcx, session);
+            HirExprKind::Cast { operand: inner_id, to: tcx.error }
+        }
+        rcc_ast::ExprKind::SizeofExpr(_) | rcc_ast::ExprKind::SizeofType(_) => {
+            // Folded to a `size_t`-typed constant by typeck; the exact
+            // value needs layout info so we leave a zero placeholder.
+            HirExprKind::IntConst(0)
+        }
+        rcc_ast::ExprKind::CompoundLiteral { .. } => {
+            // C99 compound literals materialise a temporary object.
+            // Full handling is deferred; placeholder for now.
+            HirExprKind::IntConst(0)
+        }
+    };
+
+    let expr_id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: tcx.error,
+        value_cat: ValueCat::RValue,
+        span: expr.span,
+        kind,
+    });
+    body.exprs[expr_id].id = expr_id;
+    expr_id
+}
+
+/// Translate an [`rcc_ast::BinOp`] to the matching [`rcc_hir_binop::BinOp`].
+fn ast_binop_to_hir(op: rcc_ast::BinOp) -> rcc_hir::rcc_hir_binop::BinOp {
+    use rcc_ast::BinOp as A;
+    use rcc_hir::rcc_hir_binop::BinOp as H;
+    match op {
+        A::Add => H::Add,
+        A::Sub => H::Sub,
+        A::Mul => H::Mul,
+        A::Div => H::Div,
+        A::Rem => H::Rem,
+        A::Shl => H::Shl,
+        A::Shr => H::Shr,
+        A::Lt => H::Lt,
+        A::Le => H::Le,
+        A::Gt => H::Gt,
+        A::Ge => H::Ge,
+        A::Eq => H::Eq,
+        A::Ne => H::Ne,
+        A::BitAnd => H::BitAnd,
+        A::BitXor => H::BitXor,
+        A::BitOr => H::BitOr,
+        A::LogAnd => H::LogAnd,
+        A::LogOr => H::LogOr,
+    }
+}
+
+/// Translate an [`rcc_ast::UnOp`] to the matching [`rcc_hir_binop::UnOp`].
+///
+/// Returns `None` for `&` and `*`, which are represented as dedicated
+/// [`HirExprKind::AddressOf`] / [`HirExprKind::Deref`] variants rather
+/// than as `UnOp` cases.
+fn ast_unop_to_hir(op: rcc_ast::UnOp) -> Option<rcc_hir::rcc_hir_binop::UnOp> {
+    use rcc_ast::UnOp as A;
+    use rcc_hir::rcc_hir_binop::UnOp as H;
+    Some(match op {
+        A::Plus => H::Plus,
+        A::Neg => H::Neg,
+        A::BitNot => H::BitNot,
+        A::LogNot => H::LogNot,
+        A::PreInc => H::PreInc,
+        A::PreDec => H::PreDec,
+        A::PostInc => H::PostInc,
+        A::PostDec => H::PostDec,
+        A::AddrOf | A::Deref => return None,
+    })
 }
 
 /// Levenshtein edit distance between two strings.
@@ -3444,5 +3925,550 @@ mod tests {
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, Some("E0077"));
+    }
+
+    // ── Statement lowering (task 06-09) tests ──────────────────────────
+
+    use rcc_hir::{Body, HirExprKind, HirStmtKind, LocalDecl};
+
+    /// Helper: wrap a statement kind into an `rcc_ast::Stmt`.
+    fn stmt(kind: StmtKind) -> Stmt {
+        Stmt { id: NodeId(0), kind, span: DUMMY_SP }
+    }
+
+    /// Helper: build a simple expression statement wrapping an int
+    /// literal with the given numeric text.
+    fn expr_stmt_int(sess: &mut Session, text: &str) -> Stmt {
+        stmt(StmtKind::Expr(Some(int_lit(text, sess))))
+    }
+
+    /// Helper: build an ident-reference expression.
+    fn ident_expr(sess: &mut Session, name: &str) -> Expr {
+        let s = sym(sess, name);
+        Expr { id: NodeId(0), kind: ExprKind::Ident(s), span: DUMMY_SP }
+    }
+
+    /// Helper: build a binary expression `lhs op rhs`.
+    fn binop(op: rcc_ast::BinOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            span: DUMMY_SP,
+        }
+    }
+
+    /// Helper: lowering harness — returns (Body, root stmt id).
+    fn lower_single_stmt(sess: &mut Session, s: Stmt) -> (Body, HirStmtId) {
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope(); // function scope
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+        let id = lower_stmt(&s, &mut body, &mut scope, &mut crate_, &mut tcx, &mut resolver, sess);
+        (body, id)
+    }
+
+    #[test]
+    fn stmt_null_lowers_to_null() {
+        let (mut sess, _cap) = Session::for_test();
+        let (body, id) = lower_single_stmt(&mut sess, stmt(StmtKind::Null));
+        assert!(matches!(body.stmts[id].kind, HirStmtKind::Null));
+    }
+
+    #[test]
+    fn stmt_expr_some_lowers_to_expr() {
+        let (mut sess, _cap) = Session::for_test();
+        let s = expr_stmt_int(&mut sess, "42");
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Expr(eid) => {
+                assert!(matches!(body.exprs[*eid].kind, HirExprKind::IntConst(42)));
+            }
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_expr_none_lowers_to_null() {
+        let (mut sess, _cap) = Session::for_test();
+        let (body, id) = lower_single_stmt(&mut sess, stmt(StmtKind::Expr(None)));
+        assert!(matches!(body.stmts[id].kind, HirStmtKind::Null));
+    }
+
+    #[test]
+    fn stmt_break_continue_goto() {
+        let (mut sess, _cap) = Session::for_test();
+        let label = sym(&mut sess, "L");
+
+        let (b1, id1) = lower_single_stmt(&mut sess, stmt(StmtKind::Break));
+        assert!(matches!(b1.stmts[id1].kind, HirStmtKind::Break));
+
+        let (b2, id2) = lower_single_stmt(&mut sess, stmt(StmtKind::Continue));
+        assert!(matches!(b2.stmts[id2].kind, HirStmtKind::Continue));
+
+        let (b3, id3) = lower_single_stmt(&mut sess, stmt(StmtKind::Goto(label)));
+        match &b3.stmts[id3].kind {
+            HirStmtKind::Goto(n) => assert_eq!(*n, label),
+            other => panic!("expected Goto, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_return_void_and_value() {
+        let (mut sess, _cap) = Session::for_test();
+        let (b1, id1) = lower_single_stmt(&mut sess, stmt(StmtKind::Return(None)));
+        assert!(matches!(b1.stmts[id1].kind, HirStmtKind::Return(None)));
+
+        let val = int_lit("7", &mut sess);
+        let (b2, id2) = lower_single_stmt(&mut sess, stmt(StmtKind::Return(Some(val))));
+        match &b2.stmts[id2].kind {
+            HirStmtKind::Return(Some(eid)) => {
+                assert!(matches!(b2.exprs[*eid].kind, HirExprKind::IntConst(7)));
+            }
+            other => panic!("expected Return(Some), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_if_with_else() {
+        let (mut sess, _cap) = Session::for_test();
+        let cond = int_lit("1", &mut sess);
+        let then_s = expr_stmt_int(&mut sess, "10");
+        let else_s = expr_stmt_int(&mut sess, "20");
+        let s = stmt(StmtKind::If {
+            cond,
+            then_branch: Box::new(then_s),
+            else_branch: Some(Box::new(else_s)),
+        });
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::If { cond, then_branch, else_branch } => {
+                assert!(matches!(body.exprs[*cond].kind, HirExprKind::IntConst(1)));
+                assert!(matches!(body.stmts[*then_branch].kind, HirStmtKind::Expr(_)));
+                let else_id = else_branch.expect("expected else branch");
+                assert!(matches!(body.stmts[else_id].kind, HirStmtKind::Expr(_)));
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_if_without_else() {
+        let (mut sess, _cap) = Session::for_test();
+        let cond = int_lit("0", &mut sess);
+        let then_s = stmt(StmtKind::Null);
+        let s = stmt(StmtKind::If { cond, then_branch: Box::new(then_s), else_branch: None });
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::If { else_branch, .. } => assert!(else_branch.is_none()),
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_while_and_do_while() {
+        let (mut sess, _cap) = Session::for_test();
+
+        let w_cond = int_lit("1", &mut sess);
+        let w_body = stmt(StmtKind::Null);
+        let w = stmt(StmtKind::While { cond: w_cond, body: Box::new(w_body) });
+        let (body, id) = lower_single_stmt(&mut sess, w);
+        assert!(matches!(body.stmts[id].kind, HirStmtKind::While { .. }));
+
+        let d_cond = int_lit("0", &mut sess);
+        let d_body = stmt(StmtKind::Null);
+        let d = stmt(StmtKind::DoWhile { body: Box::new(d_body), cond: d_cond });
+        let (body, id) = lower_single_stmt(&mut sess, d);
+        assert!(matches!(body.stmts[id].kind, HirStmtKind::DoWhile { .. }));
+    }
+
+    #[test]
+    fn stmt_label_and_goto_preserve_name() {
+        let (mut sess, _cap) = Session::for_test();
+        let l = sym(&mut sess, "end");
+        let inner = stmt(StmtKind::Null);
+        let s = stmt(StmtKind::Label { name: l, body: Box::new(inner) });
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Label { name, body: inner_id } => {
+                assert_eq!(*name, l);
+                assert!(matches!(body.stmts[*inner_id].kind, HirStmtKind::Null));
+            }
+            other => panic!("expected Label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_compound_pushes_and_pops_scope() {
+        // { int x; } — declares an x local, visible inside the block only.
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator { declarator: named_declarator(x), init: None }],
+        };
+        let block = Block { id: NodeId(0), items: vec![BlockItem::Decl(decl)], span: DUMMY_SP };
+        let s = stmt(StmtKind::Compound(block));
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Block(ids) => {
+                assert_eq!(ids.len(), 1, "one LocalDecl statement");
+                match &body.stmts[ids[0]].kind {
+                    HirStmtKind::LocalDecl { local, init } => {
+                        assert!(init.is_none());
+                        assert_eq!(body.locals[*local].name, Some(x));
+                    }
+                    other => panic!("expected LocalDecl, got {other:?}"),
+                }
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+        assert_eq!(body.locals.len(), 1);
+    }
+
+    #[test]
+    fn stmt_compound_with_initializer_creates_localdecl_with_init() {
+        // { int x = 5; }
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+        let five = int_lit("5", &mut sess);
+
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator: named_declarator(x),
+                init: Some(rcc_ast::Initializer::Expr(five)),
+            }],
+        };
+        let block = Block { id: NodeId(0), items: vec![BlockItem::Decl(decl)], span: DUMMY_SP };
+        let s = stmt(StmtKind::Compound(block));
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Block(ids) => match &body.stmts[ids[0]].kind {
+                HirStmtKind::LocalDecl { local, init } => {
+                    let init_id = init.expect("expected init expr");
+                    assert!(matches!(body.exprs[init_id].kind, HirExprKind::IntConst(5)));
+                    assert_eq!(body.locals[*local].name, Some(x));
+                }
+                other => panic!("expected LocalDecl, got {other:?}"),
+            },
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_compound_ident_reference_resolves_to_local() {
+        // { int x; x; } — the `x` expression should resolve to LocalRef(0).
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator { declarator: named_declarator(x), init: None }],
+        };
+        let use_expr = stmt(StmtKind::Expr(Some(ident_expr(&mut sess, "x"))));
+        let block = Block {
+            id: NodeId(0),
+            items: vec![BlockItem::Decl(decl), BlockItem::Stmt(Box::new(use_expr))],
+            span: DUMMY_SP,
+        };
+        let s = stmt(StmtKind::Compound(block));
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Block(ids) => {
+                assert_eq!(ids.len(), 2);
+                let use_id = ids[1];
+                match &body.stmts[use_id].kind {
+                    HirStmtKind::Expr(eid) => match &body.exprs[*eid].kind {
+                        HirExprKind::LocalRef(l) => assert_eq!(body.locals[*l].name, Some(x)),
+                        other => panic!("expected LocalRef, got {other:?}"),
+                    },
+                    other => panic!("expected Expr, got {other:?}"),
+                }
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_case_and_default_preserve_structure() {
+        let (mut sess, _cap) = Session::for_test();
+        let case_body = stmt(StmtKind::Break);
+        let c = stmt(StmtKind::Case { value: int_lit("3", &mut sess), body: Box::new(case_body) });
+        let (body, id) = lower_single_stmt(&mut sess, c);
+        match &body.stmts[id].kind {
+            HirStmtKind::Case { value, body: inner } => {
+                assert_eq!(*value, Some(3));
+                assert!(matches!(body.stmts[*inner].kind, HirStmtKind::Break));
+            }
+            other => panic!("expected Case, got {other:?}"),
+        }
+
+        let d_body = stmt(StmtKind::Break);
+        let d = stmt(StmtKind::Default { body: Box::new(d_body) });
+        let (body, id) = lower_single_stmt(&mut sess, d);
+        match &body.stmts[id].kind {
+            HirStmtKind::Default { body: inner } => {
+                assert!(matches!(body.stmts[*inner].kind, HirStmtKind::Break));
+            }
+            other => panic!("expected Default, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_switch_with_body() {
+        let (mut sess, _cap) = Session::for_test();
+        let cond = int_lit("1", &mut sess);
+        let body_stmt = stmt(StmtKind::Break);
+        let s = stmt(StmtKind::Switch { cond, body: Box::new(body_stmt) });
+        let (body, id) = lower_single_stmt(&mut sess, s);
+        match &body.stmts[id].kind {
+            HirStmtKind::Switch { cond, body: body_id, cases } => {
+                assert!(matches!(body.exprs[*cond].kind, HirExprKind::IntConst(1)));
+                assert!(matches!(body.stmts[*body_id].kind, HirStmtKind::Break));
+                assert!(cases.is_empty(), "cases collected in a later pass");
+            }
+            other => panic!("expected Switch, got {other:?}"),
+        }
+    }
+
+    /// Acceptance: `for (int i = 0; i < n; ++i) body` lowers to a `For`
+    /// with `init = LocalDecl { local: i, init: 0 }`.
+    #[test]
+    fn stmt_for_with_init_declaration_acceptance() {
+        let (mut sess, _cap) = Session::for_test();
+        let i = sym(&mut sess, "i");
+        let n = sym(&mut sess, "n");
+
+        // File-scope: `n` is a global int so ident lookup succeeds.
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope(); // function scope
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+        let n_def = crate_.defs.push(Def {
+            id: DefId(0),
+            name: n,
+            span: DUMMY_SP,
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+        });
+        crate_.defs[n_def].id = n_def;
+        resolver.ordinary.insert(n, n_def);
+
+        // init: `int i = 0` as a BlockItem::Decl.
+        let zero = int_lit("0", &mut sess);
+        let init_decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator: named_declarator(i),
+                init: Some(rcc_ast::Initializer::Expr(zero)),
+            }],
+        };
+        let init_item = Box::new(BlockItem::Decl(init_decl));
+
+        // cond: `i < n`
+        let cond =
+            binop(rcc_ast::BinOp::Lt, ident_expr(&mut sess, "i"), ident_expr(&mut sess, "n"));
+
+        // step: `++i`
+        let step = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Unary {
+                op: rcc_ast::UnOp::PreInc,
+                operand: Box::new(ident_expr(&mut sess, "i")),
+            },
+            span: DUMMY_SP,
+        };
+
+        // body: `;` (null statement placeholder for "body")
+        let body_stmt = stmt(StmtKind::Null);
+
+        let for_stmt = stmt(StmtKind::For {
+            init: Some(init_item),
+            cond: Some(cond),
+            step: Some(step),
+            body: Box::new(body_stmt),
+        });
+
+        let for_id = lower_stmt(
+            &for_stmt,
+            &mut body,
+            &mut scope,
+            &mut crate_,
+            &mut tcx,
+            &mut resolver,
+            &mut sess,
+        );
+
+        match &body.stmts[for_id].kind {
+            HirStmtKind::For { init, cond, step, body: body_id } => {
+                // init must be a LocalDecl with `init = 0`.
+                let init_id = init.expect("for-init should produce a stmt id");
+                match &body.stmts[init_id].kind {
+                    HirStmtKind::LocalDecl { local, init: init_expr } => {
+                        assert_eq!(body.locals[*local].name, Some(i), "local's name should be `i`");
+                        let init_expr_id = init_expr.expect("init expr present");
+                        assert!(
+                            matches!(body.exprs[init_expr_id].kind, HirExprKind::IntConst(0)),
+                            "init expr should be IntConst(0), got {:?}",
+                            body.exprs[init_expr_id].kind
+                        );
+                    }
+                    other => panic!("expected LocalDecl in for-init, got {other:?}"),
+                }
+
+                // cond should be a Binary Lt whose lhs is LocalRef(i) and rhs is DefRef(n).
+                let cond_id = cond.expect("cond present");
+                match &body.exprs[cond_id].kind {
+                    HirExprKind::Binary { op, lhs, rhs } => {
+                        assert!(matches!(op, rcc_hir::rcc_hir_binop::BinOp::Lt));
+                        match &body.exprs[*lhs].kind {
+                            HirExprKind::LocalRef(l) => {
+                                assert_eq!(body.locals[*l].name, Some(i));
+                            }
+                            other => panic!("expected LocalRef for i, got {other:?}"),
+                        }
+                        match &body.exprs[*rhs].kind {
+                            HirExprKind::DefRef(id) => assert_eq!(*id, n_def),
+                            other => panic!("expected DefRef for n, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Binary Lt for cond, got {other:?}"),
+                }
+
+                // step should be a Unary PreInc on LocalRef(i).
+                let step_id = step.expect("step present");
+                match &body.exprs[step_id].kind {
+                    HirExprKind::Unary { op, operand } => {
+                        assert!(matches!(op, rcc_hir::rcc_hir_binop::UnOp::PreInc));
+                        match &body.exprs[*operand].kind {
+                            HirExprKind::LocalRef(l) => {
+                                assert_eq!(body.locals[*l].name, Some(i));
+                            }
+                            other => panic!("expected LocalRef(i) under PreInc, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Unary PreInc for step, got {other:?}"),
+                }
+
+                // body is a null statement.
+                assert!(matches!(body.stmts[*body_id].kind, HirStmtKind::Null));
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+
+        // The for-loop's `i` local must go out of scope after the for
+        // statement: its binding must not leak into file scope.
+        assert!(scope.lookup(i).is_none(), "for-init local should be popped after for");
+    }
+
+    #[test]
+    fn stmt_for_init_expression_lowers() {
+        // for (i = 0; ; ) ;  — init is an expression statement, not a decl.
+        let (mut sess, _cap) = Session::for_test();
+        let i = sym(&mut sess, "i");
+
+        // Pre-declare `i` as a local before lowering the for-stmt so the
+        // ident reference resolves.
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        let local = body.locals.push(LocalDecl {
+            name: Some(i),
+            ty: TyCtxt::new().int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        scope.insert(i, Binding::Local(local));
+        let mut crate_ = HirCrate::default();
+        let mut tcx = TyCtxt::new();
+        let mut resolver = Resolver::default();
+
+        // init: `i = 0` as an expression-statement.
+        let zero = int_lit("0", &mut sess);
+        let init_expr = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Assign {
+                op: rcc_ast::AssignOp::Eq,
+                lhs: Box::new(ident_expr(&mut sess, "i")),
+                rhs: Box::new(zero),
+            },
+            span: DUMMY_SP,
+        };
+        let init_stmt = stmt(StmtKind::Expr(Some(init_expr)));
+        let init_item = Box::new(BlockItem::Stmt(Box::new(init_stmt)));
+
+        let for_stmt = stmt(StmtKind::For {
+            init: Some(init_item),
+            cond: None,
+            step: None,
+            body: Box::new(stmt(StmtKind::Null)),
+        });
+
+        let for_id = lower_stmt(
+            &for_stmt,
+            &mut body,
+            &mut scope,
+            &mut crate_,
+            &mut tcx,
+            &mut resolver,
+            &mut sess,
+        );
+        match &body.stmts[for_id].kind {
+            HirStmtKind::For { init, cond, step, .. } => {
+                let init_id = init.expect("init should lower to an expression stmt");
+                assert!(matches!(body.stmts[init_id].kind, HirStmtKind::Expr(_)));
+                assert!(cond.is_none());
+                assert!(step.is_none());
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_nested_compound_inner_scope_lost_on_exit() {
+        // { { int x; } x; } — the `x` in the outer block is NOT the
+        // inner block's `x` (it should fail to resolve).
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let inner_decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator { declarator: named_declarator(x), init: None }],
+        };
+        let inner_block =
+            Block { id: NodeId(0), items: vec![BlockItem::Decl(inner_decl)], span: DUMMY_SP };
+        let inner_stmt = stmt(StmtKind::Compound(inner_block));
+        let outer_use = stmt(StmtKind::Expr(Some(ident_expr(&mut sess, "x"))));
+        let outer_block = Block {
+            id: NodeId(0),
+            items: vec![
+                BlockItem::Stmt(Box::new(inner_stmt)),
+                BlockItem::Stmt(Box::new(outer_use)),
+            ],
+            span: DUMMY_SP,
+        };
+        let s = stmt(StmtKind::Compound(outer_block));
+        let (_body, _id) = lower_single_stmt(&mut sess, s);
+
+        // The outer reference to `x` must emit E0071 (undeclared).
+        let diags = cap.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == Some("E0071")),
+            "expected E0071 for outer `x` after inner scope popped, got {diags:?}"
+        );
     }
 }
