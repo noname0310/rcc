@@ -13,7 +13,10 @@
 
 use rcc_ast::{BlockItem, ExternalDecl, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec};
 use rcc_data_structures::FxHashMap;
-use rcc_hir::{Def, DefId, DefKind, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt};
+use rcc_data_structures::FxHashSet;
+use rcc_hir::{
+    Def, DefId, DefKind, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt, TyId,
+};
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
@@ -463,6 +466,86 @@ fn edit_distance(a: &str, b: &str) -> u32 {
     }
 
     prev[n]
+}
+
+/// Resolve a `TypeSpec::TypedefName(sym)` to the underlying `TyId`.
+///
+/// Looks up `sym` in the ordinary namespace, verifies the binding is a
+/// `DefKind::Typedef(ty_id)`, and returns the stored `TyId`. If the
+/// typedef's stored type was itself produced by expanding another typedef
+/// (e.g. `typedef int T; typedef T U;`), the caller is expected to have
+/// already resolved `T` before `U`, so `U`'s stored `TyId` is already
+/// the final interned type (`tcx.int`).
+///
+/// Cycle detection: uses `expanding` to track which `DefId`s are currently
+/// being resolved. If a typedef chain revisits a `DefId` already in the
+/// set, emits `E0075` and returns `tcx.error`.
+///
+/// # Arguments
+///
+/// * `sym` — the typedef name to look up.
+/// * `span` — source span for diagnostics.
+/// * `expanding` — mutable set of `DefId`s currently being expanded in
+///   the caller's resolution pass. The caller must insert IDs before
+///   recursing and remove them afterward.
+/// * `resolver` — file-scope name tables.
+/// * `crate_` — the `HirCrate` holding all `Def` nodes.
+/// * `tcx` — the type interner.
+/// * `session` — the compilation session (for diagnostics + interner).
+pub fn lower_typedef_name(
+    sym: Symbol,
+    span: Span,
+    expanding: &mut FxHashSet<DefId>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    // Look up the symbol in the ordinary namespace.
+    let def_id = match resolver.ordinary.get(&sym) {
+        Some(&id) => id,
+        None => {
+            // Not found — emit undeclared identifier. This shouldn't
+            // normally happen because the parser only produces
+            // TypedefName when the name was seen as a typedef, but
+            // handle gracefully.
+            let sym_str = session.interner.get(sym);
+            session
+                .handler
+                .struct_err(span, format!("use of undeclared typedef `{sym_str}`"))
+                .code(rcc_errors::codes::E0071)
+                .emit();
+            return tcx.error;
+        }
+    };
+
+    // Cycle detection: if this DefId is already being expanded, we have
+    // a typedef cycle (e.g. `typedef U T; typedef T U;`).
+    if expanding.contains(&def_id) {
+        let sym_str = session.interner.get(sym);
+        session
+            .handler
+            .struct_err(span, format!("typedef cycle detected for `{sym_str}`"))
+            .code(rcc_errors::codes::E0075)
+            .emit();
+        return tcx.error;
+    }
+
+    let def = &crate_.defs[def_id];
+    match &def.kind {
+        DefKind::Typedef(ty_id) => *ty_id,
+        _ => {
+            // The symbol is not a typedef — this is unexpected when
+            // processing TypeSpec::TypedefName, but handle gracefully.
+            let sym_str = session.interner.get(sym);
+            session
+                .handler
+                .struct_err(span, format!("`{sym_str}` is not a typedef"))
+                .code(rcc_errors::codes::E0071)
+                .emit();
+            tcx.error
+        }
+    }
 }
 
 /// First-pass: walk the AST top-level and assign a `DefId` to every
@@ -1479,5 +1562,229 @@ mod tests {
 
         let diags = cap.diagnostics();
         assert!(diags.is_empty(), "label inside nested block should be visible: {diags:?}");
+    }
+
+    // ── Typedef expansion (task 06-05) tests ────────────────────────────
+
+    /// Helper: manually register a typedef in the HirCrate + Resolver.
+    ///
+    /// Returns the `DefId` of the new typedef definition.
+    fn register_typedef(
+        name: Symbol,
+        ty_id: rcc_hir::TyId,
+        crate_: &mut HirCrate,
+        resolver: &mut Resolver,
+    ) -> DefId {
+        let id = crate_.defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Typedef(ty_id),
+        });
+        crate_.defs[id].id = id;
+        resolver.ordinary.insert(name, id);
+        id
+    }
+
+    #[test]
+    fn typedef_simple_int() {
+        // typedef int T; — looking up T should return tcx.int.
+        let (mut sess, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let t = sym(&mut sess, "T");
+
+        register_typedef(t, tcx.int, &mut crate_, &mut resolver);
+
+        let mut expanding = rcc_data_structures::FxHashSet::default();
+        let result =
+            lower_typedef_name(t, DUMMY_SP, &mut expanding, &resolver, &crate_, &tcx, &mut sess);
+        assert_eq!(result, tcx.int, "typedef T should resolve to tcx.int");
+    }
+
+    #[test]
+    fn typedef_chain_resolves_to_original() {
+        // typedef int T; typedef T U; — looking up U should return tcx.int.
+        // After resolving T to tcx.int and storing that in T's Def,
+        // when U is defined as `typedef T U`, we call lower_typedef_name
+        // for T which returns tcx.int. Then U's Def stores tcx.int.
+        // Finally, looking up U returns tcx.int.
+        let (mut sess, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let t = sym(&mut sess, "T");
+        let u = sym(&mut sess, "U");
+
+        // T -> int
+        register_typedef(t, tcx.int, &mut crate_, &mut resolver);
+        // Resolve T to get its type.
+        let mut expanding = rcc_data_structures::FxHashSet::default();
+        let t_ty =
+            lower_typedef_name(t, DUMMY_SP, &mut expanding, &resolver, &crate_, &tcx, &mut sess);
+        assert_eq!(t_ty, tcx.int);
+
+        // U -> T's resolved type (tcx.int)
+        register_typedef(u, t_ty, &mut crate_, &mut resolver);
+        let mut expanding2 = rcc_data_structures::FxHashSet::default();
+        let u_ty =
+            lower_typedef_name(u, DUMMY_SP, &mut expanding2, &resolver, &crate_, &tcx, &mut sess);
+        assert_eq!(u_ty, tcx.int, "typedef chain T->U should resolve to tcx.int");
+    }
+
+    #[test]
+    fn typedef_chain_three_deep() {
+        // typedef int A; typedef A B; typedef B C;
+        // C should resolve to tcx.int.
+        let (mut sess, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let a = sym(&mut sess, "A");
+        let b = sym(&mut sess, "B");
+        let c = sym(&mut sess, "C");
+
+        // Simulate sequential resolution:
+        // A -> int
+        register_typedef(a, tcx.int, &mut crate_, &mut resolver);
+        let mut exp = rcc_data_structures::FxHashSet::default();
+        let a_ty = lower_typedef_name(a, DUMMY_SP, &mut exp, &resolver, &crate_, &tcx, &mut sess);
+
+        // B -> A's type (int)
+        register_typedef(b, a_ty, &mut crate_, &mut resolver);
+        let mut exp2 = rcc_data_structures::FxHashSet::default();
+        let b_ty = lower_typedef_name(b, DUMMY_SP, &mut exp2, &resolver, &crate_, &tcx, &mut sess);
+
+        // C -> B's type (int)
+        register_typedef(c, b_ty, &mut crate_, &mut resolver);
+        let mut exp3 = rcc_data_structures::FxHashSet::default();
+        let c_ty = lower_typedef_name(c, DUMMY_SP, &mut exp3, &resolver, &crate_, &tcx, &mut sess);
+
+        assert_eq!(c_ty, tcx.int, "three-deep typedef chain should resolve to tcx.int");
+    }
+
+    #[test]
+    fn typedef_cycle_emits_e0075() {
+        // Simulate a typedef cycle: T -> U -> T (both point to each other's
+        // DefId via error placeholders that would cause re-expansion).
+        //
+        // We set up the `expanding` set to contain T's DefId before
+        // trying to expand T, simulating the cycle detection.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let t = sym(&mut sess, "T");
+
+        let t_id = register_typedef(t, tcx.error, &mut crate_, &mut resolver);
+
+        // Simulate: we're already expanding T, and encounter T again.
+        let mut expanding = rcc_data_structures::FxHashSet::default();
+        expanding.insert(t_id);
+
+        let result =
+            lower_typedef_name(t, DUMMY_SP, &mut expanding, &resolver, &crate_, &tcx, &mut sess);
+        assert_eq!(result, tcx.error, "cycle should return tcx.error");
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0075"));
+        assert!(diags[0].message.contains("typedef cycle"));
+        assert!(diags[0].message.contains("T"));
+    }
+
+    #[test]
+    fn typedef_undeclared_emits_e0071() {
+        // Looking up a typedef name that doesn't exist should emit E0071.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let crate_ = HirCrate::default();
+        let resolver = Resolver::default();
+        let unknown = sym(&mut sess, "NoSuchType");
+
+        let mut expanding = rcc_data_structures::FxHashSet::default();
+        let result = lower_typedef_name(
+            unknown,
+            DUMMY_SP,
+            &mut expanding,
+            &resolver,
+            &crate_,
+            &tcx,
+            &mut sess,
+        );
+        assert_eq!(result, tcx.error);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0071"));
+        assert!(diags[0].message.contains("NoSuchType"));
+    }
+
+    #[test]
+    fn typedef_not_a_typedef_emits_e0071() {
+        // If the name resolves to a non-typedef (e.g. a global var),
+        // emit E0071.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let g = sym(&mut sess, "g");
+
+        // Register g as a global variable, not a typedef.
+        let id = crate_.defs.push(Def {
+            id: DefId(0),
+            name: g,
+            span: DUMMY_SP,
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+        });
+        crate_.defs[id].id = id;
+        resolver.ordinary.insert(g, id);
+
+        let mut expanding = rcc_data_structures::FxHashSet::default();
+        let result =
+            lower_typedef_name(g, DUMMY_SP, &mut expanding, &resolver, &crate_, &tcx, &mut sess);
+        assert_eq!(result, tcx.error);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0071"));
+        assert!(diags[0].message.contains("not a typedef"));
+    }
+
+    #[test]
+    fn typedef_acceptance_chain() {
+        // Acceptance criterion:
+        // `typedef int T; typedef T U; U x;`
+        // x's type is TyCtxt::int (interned singleton), not a new type.
+        let (mut sess, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let t = sym(&mut sess, "T");
+        let u = sym(&mut sess, "U");
+
+        // Step 1: process `typedef int T;`
+        // T's type is resolved to tcx.int (via DeclSpecs in a future task,
+        // but here we simulate the result).
+        register_typedef(t, tcx.int, &mut crate_, &mut resolver);
+
+        // Step 2: process `typedef T U;`
+        // U's DeclSpecs contains TypeSpec::TypedefName(T).
+        // Call lower_typedef_name to get T's type.
+        let mut exp = rcc_data_structures::FxHashSet::default();
+        let t_resolved =
+            lower_typedef_name(t, DUMMY_SP, &mut exp, &resolver, &crate_, &tcx, &mut sess);
+        // Store T's resolved type as U's type.
+        register_typedef(u, t_resolved, &mut crate_, &mut resolver);
+
+        // Step 3: process `U x;`
+        // x's DeclSpecs contains TypeSpec::TypedefName(U).
+        let mut exp2 = rcc_data_structures::FxHashSet::default();
+        let x_type =
+            lower_typedef_name(u, DUMMY_SP, &mut exp2, &resolver, &crate_, &tcx, &mut sess);
+
+        // Verify: x's type must be exactly tcx.int (same interned id).
+        assert_eq!(x_type, tcx.int, "x's type must be the interned tcx.int singleton");
     }
 }

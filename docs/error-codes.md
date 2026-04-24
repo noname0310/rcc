@@ -601,6 +601,18 @@ void f(void) {
 }
 ```
 
+## E0075 — typedef cycle detected
+
+A typedef directly or indirectly refers to itself through a chain of
+other typedefs. C99 §6.7.7 requires typedef names to denote a complete,
+acyclic type. `rcc` detects cycles during expansion and reports this
+error rather than looping forever.
+
+```c
+typedef T T;              // error[E0075]: typedef cycle detected for `T`
+typedef U V; typedef V U; // error[E0075]: typedef cycle detected for `U`
+```
+
 ---
 
 ## W0001 — unknown #pragma directive

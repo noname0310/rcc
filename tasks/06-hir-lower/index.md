@@ -12,7 +12,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [02-name-resolution-ordinary](02-name-resolution-ordinary.md)
 - [x] [03-name-resolution-tags](03-name-resolution-tags.md)
 - [x] [04-name-resolution-labels](04-name-resolution-labels.md)
-- [ ] [05-typedef-expansion](05-typedef-expansion.md)
+- [x] [05-typedef-expansion](05-typedef-expansion.md)
 - [ ] [06-declarator-to-ty](06-declarator-to-ty.md)
 - [ ] [07-composite-lowering](07-composite-lowering.md)
 - [ ] [08-enum-lowering](08-enum-lowering.md)

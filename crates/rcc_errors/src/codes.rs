@@ -71,6 +71,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0072, E0072_DESC),
     (E0073, E0073_DESC),
     (E0074, E0074_DESC),
+    (E0075, E0075_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -382,6 +383,15 @@ const E0073_DESC: &str = "undeclared label";
 /// constraint violation.
 pub const E0074: &str = "E0074";
 const E0074_DESC: &str = "duplicate label";
+
+/// Typedef cycle detected.
+///
+/// A typedef directly or indirectly refers to itself through a chain
+/// of other typedefs. C99 §6.7.7 requires typedef names to denote a
+/// complete, acyclic type. `rcc` detects cycles during expansion and
+/// reports this error rather than looping forever.
+pub const E0075: &str = "E0075";
+const E0075_DESC: &str = "typedef cycle detected";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
