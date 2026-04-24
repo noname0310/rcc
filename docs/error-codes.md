@@ -613,6 +613,25 @@ typedef T T;              // error[E0075]: typedef cycle detected for `T`
 typedef U V; typedef V U; // error[E0075]: typedef cycle detected for `U`
 ```
 
+## E0076 — illegal declarator form
+
+C99 §6.7.5 constrains the shapes of declarators in several ways. `rcc`
+rejects these illegal forms at lowering time:
+
+- **`void x;` for an object.** Only pointers-to-void (`void *p`) and
+  functions returning void (`void f(void)`) are legal; declaring a
+  variable of type `void` is a constraint violation (§6.2.5p19).
+- **Function returning an array** (`int f()[10]`). §6.7.5.3p1
+  requires that a function's return type shall not be an array type.
+- **Function returning a function** (`int f()(int)`). §6.7.5.3p1
+  also forbids functions returning function types — use a pointer.
+
+```c
+void x;              // error[E0076]: cannot declare variable of type `void`
+int f()[10];         // error[E0076]: function cannot return array type
+int g()(int);        // error[E0076]: function cannot return function type
+```
+
 ---
 
 ## W0001 — unknown #pragma directive

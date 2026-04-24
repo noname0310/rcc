@@ -11,9 +11,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use rcc_ast::{BlockItem, ExternalDecl, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec};
+use rcc_ast::{
+    BlockItem, Declarator, DerivedDeclarator, ExternalDecl, Stmt, StmtKind, StorageClass,
+    TranslationUnit, TypeSpec,
+};
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
+use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Def, DefId, DefKind, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt, TyId,
 };
@@ -545,6 +549,312 @@ pub fn lower_typedef_name(
                 .emit();
             tcx.error
         }
+    }
+}
+
+/// Whether the declaration occurs at file scope, function (block) scope,
+/// or as a function parameter.
+///
+/// This distinction matters for incomplete array types: `int arr[]` at
+/// file scope is a valid tentative definition (incomplete type with
+/// `len = None`), at function scope it is an error because locals
+/// must have a complete type, but as a parameter it is legal because
+/// C99 §6.7.5.3p7 adjusts array parameters to pointers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DeclScope {
+    /// File-scope (translation-unit level).
+    File,
+    /// Function / block scope (inside a function body).
+    Block,
+    /// Function parameter scope (incomplete arrays are allowed because
+    /// of the array-to-pointer adjustment).
+    Param,
+}
+
+/// Convert AST `TypeQuals` to HIR `Qual` wrapping a given `TyId`.
+fn quals_to_hir(base: TyId, q: &rcc_ast::TypeQuals) -> Qual {
+    Qual { ty: base, is_const: q.const_, is_volatile: q.volatile, is_restrict: q.restrict }
+}
+
+/// Fold a parsed `Declarator` (name + chain of `DerivedDeclarator`) over
+/// a base `Ty` obtained from `DeclSpecs`. Produces the final `TyId` for
+/// the declared name; applies qualifiers correctly.
+///
+/// The `derived` chain is stored outermost-to-innermost (as parsed).
+/// "Outermost" = the derivation farthest from the identifier in the
+/// reading rule; "innermost" = closest to the identifier. We iterate
+/// the chain in **forward order** so that the outermost derivation wraps
+/// the base type first, building the type inside-out.
+///
+/// For example, `int (*fp[3])(int)`:
+///
+/// ```text
+/// parsed derived chain: [Function([int]), Pointer, Array(3)]
+///                        ^^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^
+///                        outermost         middle   innermost
+/// ```
+///
+/// Forward iteration: Func(int)->int, then Ptr, then Array[3] →
+/// `Array[3] of Ptr to Func(int)->int`.
+///
+/// # Errors
+///
+/// Emits `E0076` for illegal declarator forms:
+/// - `void x;` (object of type void)
+/// - function returning array
+/// - function returning function
+///
+/// Returns `tcx.error` after emitting the diagnostic so lowering can
+/// continue.
+pub fn apply_declarator(
+    base: TyId,
+    d: &Declarator,
+    scope: DeclScope,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    let mut ty = base;
+
+    // Iterate the derived chain in forward order (outermost-to-innermost).
+    for dd in d.derived.iter() {
+        match dd {
+            DerivedDeclarator::Pointer(quals) => {
+                // Build a Ptr whose pointee is the current type + qualifiers.
+                let qual = quals_to_hir(ty, quals);
+                ty = tcx.intern(Ty::Ptr(qual));
+            }
+            DerivedDeclarator::Array(arr_decl) => {
+                // C99 §6.7.5.2: the element type shall be a complete object
+                // type. In particular, void arrays are illegal.
+                if *tcx.get(ty) == Ty::Void {
+                    session
+                        .handler
+                        .struct_err(d.span, "array element type cannot be `void`".to_string())
+                        .code(rcc_errors::codes::E0076)
+                        .emit();
+                    return tcx.error;
+                }
+
+                // Evaluate constant size expression (stub: only integer
+                // literal constants for now; VLA deferred).
+                let len = if arr_decl.star {
+                    // [*] — VLA of unspecified size.
+                    None
+                } else if let Some(ref size_expr) = arr_decl.size {
+                    // Try to evaluate as a constant integer.
+                    eval_const_expr_as_u64(size_expr, &session.interner)
+                } else {
+                    // No size — incomplete array.
+                    // At block scope, incomplete arrays without an initializer
+                    // are an error. However, the initializer check happens
+                    // at a higher level — here we just produce the incomplete
+                    // type and let the caller validate.
+                    if scope == DeclScope::Block {
+                        session
+                            .handler
+                            .struct_err(d.span, "incomplete array type at block scope".to_string())
+                            .code(rcc_errors::codes::E0076)
+                            .emit();
+                        return tcx.error;
+                    }
+                    None
+                };
+
+                let elem = quals_to_hir(ty, &arr_decl.quals);
+                ty = tcx.intern(Ty::Array { elem, len, is_vla: arr_decl.star });
+            }
+            DerivedDeclarator::Function(func_decl) => {
+                // C99 §6.7.5.3p1: the return type shall not be an array
+                // or function type.
+                match tcx.get(ty) {
+                    Ty::Array { .. } => {
+                        session
+                            .handler
+                            .struct_err(d.span, "function cannot return array type".to_string())
+                            .code(rcc_errors::codes::E0076)
+                            .emit();
+                        return tcx.error;
+                    }
+                    Ty::Func { .. } => {
+                        session
+                            .handler
+                            .struct_err(d.span, "function cannot return function type".to_string())
+                            .code(rcc_errors::codes::E0076)
+                            .emit();
+                        return tcx.error;
+                    }
+                    _ => {}
+                }
+
+                // Lower parameter types.
+                let mut param_tys = Vec::new();
+                for param in &func_decl.params {
+                    let param_base = lower_declspecs_to_base_ty(&param.specs, tcx, session);
+                    let param_ty = apply_declarator(
+                        param_base,
+                        &param.declarator,
+                        DeclScope::Param,
+                        tcx,
+                        session,
+                    );
+                    // C99 §6.7.5.3p7: array parameter types are
+                    // adjusted to pointer-to-element. Function parameter
+                    // types are adjusted to pointer-to-function.
+                    let adjusted = adjust_param_type(param_ty, tcx);
+                    param_tys.push(adjusted);
+                }
+
+                let proto = func_decl.is_void || !func_decl.params.is_empty();
+                ty = tcx.intern(Ty::Func {
+                    ret: ty,
+                    params: param_tys,
+                    variadic: func_decl.variadic,
+                    proto,
+                });
+            }
+        }
+    }
+
+    // Final check: if after all derivations the type is still void
+    // and the declarator has a name (i.e. it's an object, not a
+    // return type or parameter), reject it.
+    // But only if there were no derivations — if there were
+    // derivations, void was either wrapped in a pointer (legal) or
+    // caught above.
+    if d.derived.is_empty() && *tcx.get(ty) == Ty::Void && d.name.is_some() {
+        session
+            .handler
+            .struct_err(d.span, "cannot declare variable of type `void`".to_string())
+            .code(rcc_errors::codes::E0076)
+            .emit();
+        return tcx.error;
+    }
+
+    ty
+}
+
+/// Adjust a parameter type per C99 §6.7.5.3p7-8:
+/// - Array of T -> pointer to T
+/// - Function -> pointer to function
+fn adjust_param_type(ty: TyId, tcx: &mut TyCtxt) -> TyId {
+    match tcx.get(ty).clone() {
+        Ty::Array { elem, .. } => {
+            // Decay to pointer to element type.
+            tcx.intern(Ty::Ptr(elem))
+        }
+        Ty::Func { .. } => {
+            // Decay to pointer to function.
+            tcx.intern(Ty::Ptr(Qual::plain(ty)))
+        }
+        _ => ty,
+    }
+}
+
+/// Minimal DeclSpecs-to-base-type lowering for parameter declarations.
+///
+/// This is a simplified version that handles the common cases needed by
+/// `apply_declarator` when lowering function parameter types. A full
+/// implementation lives in a later task; here we cover the basics:
+/// `void`, `int`, `char`, `short`, `long`, `long long`, `float`,
+/// `double`, `signed`/`unsigned` variants, and `_Bool`.
+fn lower_declspecs_to_base_ty(
+    specs: &rcc_ast::DeclSpecs,
+    tcx: &mut TyCtxt,
+    _session: &mut Session,
+) -> TyId {
+    // Classify the type specifiers.
+    let mut has_void = false;
+    let mut has_char = false;
+    let mut has_short = false;
+    let mut has_int = false;
+    let mut long_count: u32 = 0;
+    let mut has_float = false;
+    let mut has_double = false;
+    let mut has_signed = false;
+    let mut has_unsigned = false;
+    let mut has_bool = false;
+
+    for ts in &specs.type_specs {
+        match ts {
+            TypeSpec::Void => has_void = true,
+            TypeSpec::Char => has_char = true,
+            TypeSpec::Short => has_short = true,
+            TypeSpec::Int => has_int = true,
+            TypeSpec::Long => long_count += 1,
+            TypeSpec::Float => has_float = true,
+            TypeSpec::Double => has_double = true,
+            TypeSpec::Signed => has_signed = true,
+            TypeSpec::Unsigned => has_unsigned = true,
+            TypeSpec::Bool => has_bool = true,
+            _ => {
+                // TypedefName, Record, Enum, Complex, Imaginary
+                // are handled by later tasks.
+            }
+        }
+    }
+
+    if has_void {
+        return tcx.void;
+    }
+    if has_bool {
+        return tcx.bool_;
+    }
+    if has_float {
+        return tcx.float;
+    }
+    if has_double && long_count >= 1 {
+        return tcx.long_double;
+    }
+    if has_double {
+        return tcx.double;
+    }
+    if has_char {
+        return if has_unsigned { tcx.uchar } else { tcx.char_ };
+    }
+    if has_short {
+        return if has_unsigned { tcx.ushort } else { tcx.short };
+    }
+    if long_count >= 2 {
+        return if has_unsigned { tcx.ulong_long } else { tcx.long_long };
+    }
+    if long_count == 1 {
+        return if has_unsigned { tcx.ulong } else { tcx.long };
+    }
+    if has_unsigned {
+        return tcx.uint;
+    }
+    // Default: signed int (covers `int`, `signed`, `signed int`, and
+    // empty specifier list which defaults to int).
+    if has_int || has_signed || specs.type_specs.is_empty() {
+        return tcx.int;
+    }
+
+    // Fallback for unrecognised combos — tcx.int is a safe default.
+    tcx.int
+}
+
+/// Stub constant-expression evaluator for array sizes.
+///
+/// Handles only integer literals for now. A full `ConstEval` lives in
+/// `rcc_typeck` and will be wired in later.
+fn eval_const_expr_as_u64(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<u64> {
+    match &expr.kind {
+        rcc_ast::ExprKind::IntLit { text } => {
+            // The text is the raw literal string. Parse it.
+            // Handle hex (0x), octal (0), and decimal.
+            let s = interner.get(*text);
+            // Strip any suffix (u, U, l, L, ll, LL, etc.)
+            let s = s.trim_end_matches(['u', 'U', 'l', 'L']);
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else if s.starts_with('0') && s.len() > 1 {
+                u64::from_str_radix(s, 8).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        }
+        rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_u64(inner, interner),
+        _ => None,
     }
 }
 
@@ -1786,5 +2096,348 @@ mod tests {
 
         // Verify: x's type must be exactly tcx.int (same interned id).
         assert_eq!(x_type, tcx.int, "x's type must be the interned tcx.int singleton");
+    }
+
+    // ── Declarator → Ty (task 06-06) tests ─────────────────────────────
+
+    use rcc_ast::{
+        ArrayDeclarator, DerivedDeclarator, Expr, ExprKind, FunctionDeclarator, ParamDecl,
+        TypeQuals,
+    };
+    use rcc_hir::ty::{Qual, Ty};
+
+    /// Helper: make a declarator with a name and a derived chain.
+    fn make_declarator(name: Symbol, derived: Vec<DerivedDeclarator>) -> Declarator {
+        Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP }
+    }
+
+    /// Helper: make a pointer derived declarator with no qualifiers.
+    fn ptr() -> DerivedDeclarator {
+        DerivedDeclarator::Pointer(TypeQuals::default())
+    }
+
+    /// Helper: make a pointer derived declarator with const qualifier.
+    fn const_ptr() -> DerivedDeclarator {
+        DerivedDeclarator::Pointer(TypeQuals { const_: true, volatile: false, restrict: false })
+    }
+
+    /// Helper: make an array derived declarator with a constant size.
+    fn array(size: u64, sess: &mut Session) -> DerivedDeclarator {
+        let text = sym(sess, &size.to_string());
+        DerivedDeclarator::Array(ArrayDeclarator {
+            quals: TypeQuals::default(),
+            has_static: false,
+            star: false,
+            size: Some(Expr { id: NodeId(0), kind: ExprKind::IntLit { text }, span: DUMMY_SP }),
+        })
+    }
+
+    /// Helper: make an incomplete array derived declarator (no size).
+    fn incomplete_array() -> DerivedDeclarator {
+        DerivedDeclarator::Array(ArrayDeclarator {
+            quals: TypeQuals::default(),
+            has_static: false,
+            star: false,
+            size: None,
+        })
+    }
+
+    /// Helper: make a function derived declarator with given param specs.
+    fn func_decl(params: Vec<ParamDecl>, is_void: bool, variadic: bool) -> DerivedDeclarator {
+        DerivedDeclarator::Function(FunctionDeclarator {
+            params,
+            is_void,
+            variadic,
+            kr_names: Vec::new(),
+        })
+    }
+
+    /// Helper: make a function declarator `(void)`.
+    fn func_void() -> DerivedDeclarator {
+        func_decl(Vec::new(), true, false)
+    }
+
+    /// Helper: make a ParamDecl with a given type spec and no derived.
+    fn param(type_specs: Vec<TypeSpec>) -> ParamDecl {
+        ParamDecl {
+            specs: DeclSpecs { type_specs, ..DeclSpecs::default() },
+            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            span: DUMMY_SP,
+        }
+    }
+
+    #[test]
+    fn declarator_simple_int() {
+        // `int x;` — base int, no derivations → int
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+        let d = make_declarator(x, Vec::new());
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        assert_eq!(result, tcx.int);
+    }
+
+    #[test]
+    fn declarator_pointer_to_int() {
+        // `int *p;` → Ptr(int)
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let p = sym(&mut sess, "p");
+        let d = make_declarator(p, vec![ptr()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_const_pointer_to_int() {
+        // `int * const cp;` → Ptr(const int)
+        // Wait, actually: `int * const cp` means cp is a const pointer
+        // to int. The const qualifies the pointer, not the pointee.
+        // In our representation: Ptr(Qual { ty: int, is_const: true })
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let cp = sym(&mut sess, "cp");
+        let d = make_declarator(cp, vec![const_ptr()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.int,
+            is_const: true,
+            is_volatile: false,
+            is_restrict: false,
+        }));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_array_of_int() {
+        // `int arr[10];` → Array[10] of int
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let arr = sym(&mut sess, "arr");
+        let d = make_declarator(arr, vec![array(10, &mut sess)]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(10), is_vla: false });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_pointer_to_array() {
+        // `int (*pa)[5];` → Ptr to Array[5] of int
+        //
+        // Reading from name: pa → * (pointer) → [5] (array) → int
+        // Innermost = Pointer, Outermost = Array(5)
+        // Stored outermost-to-innermost: [Array(5), Pointer]
+        // Forward iteration: Array(5) on int → Array[5] of int,
+        //   then Pointer → Ptr(Array[5] of int) ✓
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let pa = sym(&mut sess, "pa");
+        let d = make_declarator(pa, vec![array(5, &mut sess), ptr()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        // First: Array[5] of int
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(5), is_vla: false });
+        // Then: Ptr to Array[5] of int
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(arr_ty)));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_acceptance_fp_array_of_ptr_to_func() {
+        // Acceptance: `int (*fp[3])(int)` → Array[3] of Ptr to Func(int)->int
+        //
+        // C reading rule (right-left spiral from name):
+        //   fp → [3] (array) → * (pointer) → (int) (function) → int
+        //
+        // Outermost-to-innermost stored: [Function([int]), Pointer, Array(3)]
+        // Forward iteration:
+        //   base=int → Func(int)->int → Ptr(Func) → Array[3](Ptr(Func))
+
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let fp = sym(&mut sess, "fp");
+        let d = make_declarator(
+            fp,
+            vec![
+                func_decl(vec![param(vec![TypeSpec::Int])], false, false),
+                ptr(),
+                array(3, &mut sess),
+            ],
+        );
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+
+        // Expected: Array[3] of Ptr to Func(int)->int
+        let func_ty = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(func_ty)));
+        let expected =
+            tcx.intern(Ty::Array { elem: Qual::plain(ptr_ty), len: Some(3), is_vla: false });
+        assert_eq!(
+            result, expected,
+            "int (*fp[3])(int) should be Array[3] of Ptr to Func(int)->int"
+        );
+    }
+
+    #[test]
+    fn declarator_void_object_error() {
+        // `void x;` at file scope → error E0076
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let x = sym(&mut sess, "x");
+        let d = make_declarator(x, Vec::new());
+        let result = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+        assert_eq!(result, tcx.error);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0076"));
+        assert!(diags[0].message.contains("void"));
+    }
+
+    #[test]
+    fn declarator_void_pointer_ok() {
+        // `void *p;` → Ptr(void) — legal
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let p = sym(&mut sess, "p");
+        let d = make_declarator(p, vec![ptr()]);
+        let result = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_func_returning_array_error() {
+        // `int f()[10]` → function returning array → error E0076
+        // Derived chain outermost-to-innermost: [Array(10), Function]
+        // Apply in order: base=int, Array(10) → Array[10] of int,
+        //   then Function → func returning Array → ERROR
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let f = sym(&mut sess, "f");
+        let d = make_declarator(f, vec![array(10, &mut sess), func_void()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        assert_eq!(result, tcx.error);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0076"));
+        assert!(diags[0].message.contains("return array"));
+    }
+
+    #[test]
+    fn declarator_func_returning_func_error() {
+        // `int f()(int)` → function returning function → error E0076
+        // Derived chain outermost-to-innermost: [Function([int]), Function(void)]
+        // Apply in order: base=int, Function([int]) → Func(int)->int,
+        //   then Function(void) → func returning func → ERROR
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let f = sym(&mut sess, "f");
+        let d = make_declarator(
+            f,
+            vec![func_decl(vec![param(vec![TypeSpec::Int])], false, false), func_void()],
+        );
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        assert_eq!(result, tcx.error);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0076"));
+        assert!(diags[0].message.contains("return function"));
+    }
+
+    #[test]
+    fn declarator_incomplete_array_file_scope_ok() {
+        // `int arr[]` at file scope → incomplete type Array(None)
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let arr = sym(&mut sess, "arr");
+        let d = make_declarator(arr, vec![incomplete_array()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: false });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_incomplete_array_block_scope_error() {
+        // `int arr[]` at function scope → error E0076
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let arr = sym(&mut sess, "arr");
+        let d = make_declarator(arr, vec![incomplete_array()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::Block, &mut tcx, &mut sess);
+        assert_eq!(result, tcx.error);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0076"));
+    }
+
+    #[test]
+    fn declarator_function_returning_void() {
+        // `void f(void)` → Func(void)->void — legal
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let f = sym(&mut sess, "f");
+        let d = make_declarator(f, vec![func_void()]);
+        let result = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+        let expected = tcx.intern(Ty::Func {
+            ret: tcx.void,
+            params: Vec::new(),
+            variadic: false,
+            proto: true,
+        });
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_pointer_to_pointer() {
+        // `int **pp;` → Ptr(Ptr(int))
+        // Derived outermost-to-innermost: [Pointer, Pointer]
+        // Apply in order: base=int → Ptr(int) → Ptr(Ptr(int))
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let pp = sym(&mut sess, "pp");
+        let d = make_declarator(pp, vec![ptr(), ptr()]);
+        let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+        let inner_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(inner_ptr)));
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn declarator_array_param_adjusted_to_pointer() {
+        // In a function parameter, `int arr[]` is adjusted to `int *`.
+        // Test via a function declarator: `void f(int arr[])`
+        let (mut sess, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let f = sym(&mut sess, "f");
+
+        // Build the parameter: `int arr[]`
+        let param_decl = ParamDecl {
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            declarator: Declarator {
+                name: Some((sym(&mut sess, "arr"), DUMMY_SP)),
+                derived: vec![incomplete_array()],
+                span: DUMMY_SP,
+            },
+            span: DUMMY_SP,
+        };
+        let d = make_declarator(f, vec![func_decl(vec![param_decl], false, false)]);
+        let result = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+
+        // The function type should have a pointer parameter (adjusted from array).
+        let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let expected = tcx.intern(Ty::Func {
+            ret: tcx.void,
+            params: vec![ptr_int],
+            variadic: false,
+            proto: true,
+        });
+        assert_eq!(result, expected, "array parameter should be adjusted to pointer");
     }
 }

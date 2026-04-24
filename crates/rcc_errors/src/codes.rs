@@ -72,6 +72,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0073, E0073_DESC),
     (E0074, E0074_DESC),
     (E0075, E0075_DESC),
+    (E0076, E0076_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -392,6 +393,21 @@ const E0074_DESC: &str = "duplicate label";
 /// reports this error rather than looping forever.
 pub const E0075: &str = "E0075";
 const E0075_DESC: &str = "typedef cycle detected";
+
+/// Illegal declarator form.
+///
+/// C99 §6.7.5 imposes several constraints on the shapes of
+/// declarators. `rcc` rejects these at lowering time:
+///
+/// - `void x;` for an object declaration (only `void *` and
+///   function-returning-void are legal).
+/// - A function returning an array (`int f()[10]`).
+/// - A function returning a function (`int f()(int)`).
+///
+/// Each violation is flagged with this code at the offending
+/// declarator token.
+pub const E0076: &str = "E0076";
+const E0076_DESC: &str = "illegal declarator form";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

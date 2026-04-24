@@ -1,3 +1,4 @@
+> ✓ done — 2026-04-24
 # 06-06: Declarator → `Ty`
 
 **Phase:** 06-hir-lower    **Depends on:** 06-05    **Milestone:** M2
