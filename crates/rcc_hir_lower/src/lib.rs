@@ -12,14 +12,15 @@
 #![warn(missing_docs)]
 
 use rcc_ast::{
-    BlockItem, Declarator, DerivedDeclarator, ExternalDecl, RecordSpec, Stmt, StmtKind,
+    BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl, RecordSpec, Stmt, StmtKind,
     StorageClass, TranslationUnit, TypeSpec,
 };
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
-    Def, DefId, DefKind, Field, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt, TyId,
+    Def, DefId, DefKind, Enumerator, Field, HirCrate, HirExprKind, Linkage, Local, RecordKind,
+    TyCtxt, TyId,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -900,6 +901,133 @@ fn eval_bit_width(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option
         }
         _ => None,
     }
+}
+
+/// Fold an enumerator's `= expr` initializer into an `i128`.
+///
+/// Scope is deliberately narrow: enumerator values are constant
+/// expressions (C99 §6.7.2.2p3), but the full `ConstEval` on HIR is
+/// not wired up at this point of the pipeline yet (it runs on HIR
+/// expressions and we are still lowering the AST). We cover the same
+/// literal shapes as [`eval_const_expr_as_u64`] but keep the result
+/// signed so a negative explicit value like `-1` round-trips.
+///
+/// Returns `None` on unrecognised shapes; the caller then emits a
+/// diagnostic on behalf of the broken enumerator.
+fn eval_enum_value_as_i128(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<i128> {
+    match &expr.kind {
+        rcc_ast::ExprKind::IntLit { .. } => eval_const_expr_as_u64(expr, interner).map(i128::from),
+        rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner, interner),
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
+            eval_enum_value_as_i128(operand, interner).and_then(i128::checked_neg)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
+            eval_enum_value_as_i128(operand, interner)
+        }
+        _ => None,
+    }
+}
+
+/// Materialise an `enum` specifier into a `DefKind::Enum` value.
+///
+/// For each enumerator:
+/// - If an explicit `= expr` is present, fold it to an `i128` via
+///   [`eval_enum_value_as_i128`]. Non-foldable expressions emit `E0077`
+///   (reusing the invalid-constant diagnostic code) and the enumerator
+///   is dropped.
+/// - Otherwise the value is `previous + 1`, starting at `0` for the
+///   first enumerator (C99 §6.7.2.2p3). Overflow on the implicit
+///   `prev + 1` step is pinned at `i128::MAX` and still warned below.
+/// - Values outside `[INT_MIN, INT_MAX]` emit `W0007` (M4 simplifies
+///   the §6.7.2.2p4 type-selection algorithm to "always `int`"). The
+///   enumerator is still recorded so later passes see a stable binding.
+///
+/// Registration:
+/// - Each enumerator name is inserted into `resolver.ordinary` as a
+///   fresh `DefKind::Enumerator { ty: tcx.int, value }` (C99 §6.4.4.3).
+/// - A duplicate name in the same ordinary namespace emits `E0078` and
+///   the new binding is dropped (the first definition wins, matching
+///   the convention of the label and typedef passes).
+pub fn lower_enum(
+    spec: &EnumSpec,
+    tcx: &TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> DefKind {
+    let Some(enumerators) = spec.enumerators.as_ref() else {
+        // Bare tag reference (`enum E;`) — nothing to define.
+        return DefKind::Enum { repr: tcx.int, variants: Vec::new() };
+    };
+
+    let mut variants: Vec<Enumerator> = Vec::with_capacity(enumerators.len());
+    let mut next_value: i128 = 0;
+
+    for enumerator in enumerators {
+        let value = if let Some(value_expr) = &enumerator.value {
+            match eval_enum_value_as_i128(value_expr, &session.interner) {
+                Some(v) => v,
+                None => {
+                    session
+                        .handler
+                        .struct_err(
+                            enumerator.span,
+                            "enumerator value is not an integer constant expression".to_string(),
+                        )
+                        .code(rcc_errors::codes::E0077)
+                        .emit();
+                    // Fall back to the implicit-continuation counter so
+                    // later enumerators in the same list stay sensible.
+                    next_value
+                }
+            }
+        } else {
+            next_value
+        };
+
+        // In M4 the underlying type is fixed to `int`. The §6.7.2.2p4
+        // algorithm is deferred to M6; until then we warn when a value
+        // does not fit so users see the simplification bite.
+        if value < i128::from(i32::MIN) || value > i128::from(i32::MAX) {
+            let name_str = session.interner.get(enumerator.name);
+            session
+                .handler
+                .struct_warn(
+                    enumerator.span,
+                    format!(
+                        "value {value} of enumerator `{name_str}` is outside the range of `int`"
+                    ),
+                )
+                .code(rcc_errors::codes::W0007)
+                .emit();
+        }
+
+        // Register the enumerator in the ordinary namespace. Duplicate
+        // names at the same scope are an E0078 constraint violation;
+        // the first binding wins.
+        if let Some(&_existing) = resolver.ordinary.get(&enumerator.name) {
+            let name_str = session.interner.get(enumerator.name);
+            session
+                .handler
+                .struct_err(enumerator.span, format!("duplicate enumerator name `{name_str}`"))
+                .code(rcc_errors::codes::E0078)
+                .emit();
+        } else {
+            let id = crate_.defs.push(Def {
+                id: DefId(0),
+                name: enumerator.name,
+                span: enumerator.span,
+                kind: DefKind::Enumerator { ty: tcx.int, value },
+            });
+            crate_.defs[id].id = id;
+            resolver.ordinary.insert(enumerator.name, id);
+        }
+
+        variants.push(Enumerator { name: enumerator.name, value, span: enumerator.span });
+        next_value = value.saturating_add(1);
+    }
+
+    DefKind::Enum { repr: tcx.int, variants }
 }
 
 /// Materialise a `struct` / `union` specifier (with fields) into a
@@ -3105,5 +3233,216 @@ mod tests {
             }
             other => panic!("expected Record, got {other:?}"),
         }
+    }
+
+    // ── Enum lowering (task 06-08) tests ───────────────────────────────
+
+    /// Helper: build an `EnumSpec` from a list of `(name, optional value expr)`.
+    fn enum_spec(tag: Option<Symbol>, variants: Option<Vec<(Symbol, Option<Expr>)>>) -> EnumSpec {
+        EnumSpec {
+            id: NodeId(0),
+            tag,
+            enumerators: variants.map(|vs| {
+                vs.into_iter()
+                    .map(|(name, value)| rcc_ast::Enumerator { name, value, span: DUMMY_SP })
+                    .collect()
+            }),
+            span: DUMMY_SP,
+        }
+    }
+
+    #[test]
+    fn enum_default_only_values_are_sequential_from_zero() {
+        // enum { A, B, C } — A=0, B=1, C=2.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let b = sym(&mut sess, "B");
+        let c = sym(&mut sess, "C");
+        let spec = enum_spec(None, Some(vec![(a, None), (b, None), (c, None)]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        assert!(cap.diagnostics().is_empty(), "default enum: {:?}", cap.diagnostics());
+        match kind {
+            DefKind::Enum { repr, variants } => {
+                assert_eq!(repr, tcx.int);
+                assert_eq!(variants.len(), 3);
+                assert_eq!(variants[0].value, 0);
+                assert_eq!(variants[1].value, 1);
+                assert_eq!(variants[2].value, 2);
+                assert_eq!(variants[0].name, a);
+                assert_eq!(variants[1].name, b);
+                assert_eq!(variants[2].name, c);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+
+        // Each enumerator is now a def in `ordinary`.
+        assert_eq!(resolver.ordinary.len(), 3);
+        for name in [a, b, c] {
+            let def_id = resolver.ordinary.get(&name).copied().expect("enumerator registered");
+            match &crate_.defs[def_id].kind {
+                DefKind::Enumerator { ty, .. } => assert_eq!(*ty, tcx.int),
+                other => panic!("expected Enumerator def, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn enum_explicit_values_override_and_continue() {
+        // enum { A, B = 5, C } — A=0, B=5, C=6.  (Task acceptance.)
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let b = sym(&mut sess, "B");
+        let c = sym(&mut sess, "C");
+        let five = int_lit("5", &mut sess);
+        let spec = enum_spec(None, Some(vec![(a, None), (b, Some(five)), (c, None)]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        assert!(cap.diagnostics().is_empty(), "explicit enum: {:?}", cap.diagnostics());
+        match kind {
+            DefKind::Enum { variants, .. } => {
+                assert_eq!(variants.len(), 3);
+                assert_eq!(variants[0].value, 0);
+                assert_eq!(variants[1].value, 5);
+                assert_eq!(variants[2].value, 6);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_negative_explicit_value_is_supported() {
+        // enum { A = -1, B } — A=-1, B=0.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let b = sym(&mut sess, "B");
+        let neg_one = neg_lit("1", &mut sess);
+        let spec = enum_spec(None, Some(vec![(a, Some(neg_one)), (b, None)]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        assert!(
+            cap.diagnostics().is_empty(),
+            "-1 is representable as int: {:?}",
+            cap.diagnostics()
+        );
+        match kind {
+            DefKind::Enum { variants, .. } => {
+                assert_eq!(variants[0].value, -1);
+                assert_eq!(variants[1].value, 0);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_value_out_of_int_range_warns_w0007() {
+        // enum { HUGE = 0xFFFFFFFFFF }; // > INT_MAX.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let huge_name = sym(&mut sess, "HUGE");
+        let huge_lit = int_lit("0xFFFFFFFFFF", &mut sess);
+        let spec = enum_spec(None, Some(vec![(huge_name, Some(huge_lit))]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let _ = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one W0007 diagnostic, got {diags:?}");
+        assert_eq!(diags[0].code, Some("W0007"));
+        assert!(
+            diags[0].message.contains("outside the range of `int`"),
+            "unexpected message: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn enum_duplicate_enumerator_name_errors_e0078() {
+        // enum { A, A } — second A is a duplicate.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let spec = enum_spec(None, Some(vec![(a, None), (a, None)]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let _ = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one E0078, got {diags:?}");
+        assert_eq!(diags[0].code, Some("E0078"));
+        assert!(diags[0].message.contains("duplicate enumerator"));
+
+        // First binding wins: resolver.ordinary should still have exactly one
+        // entry for `A`.
+        assert_eq!(resolver.ordinary.len(), 1);
+    }
+
+    #[test]
+    fn enum_duplicate_against_earlier_ordinary_decl_errors_e0078() {
+        // typedef int A; enum { A }; — the enumerator conflicts with the
+        // existing ordinary-namespace binding.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+        // Pre-populate an existing ordinary binding (e.g. a prior typedef).
+        resolver.ordinary.insert(a, DefId(0));
+
+        let spec = enum_spec(None, Some(vec![(a, None)]));
+        let _ = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0078"));
+    }
+
+    #[test]
+    fn enum_bare_tag_ref_produces_empty_variants() {
+        // enum E; — no enumerators yet, lower_enum still produces a valid
+        // (empty) Enum definition.
+        let (mut sess, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let e = sym(&mut sess, "E");
+        let spec = enum_spec(Some(e), None);
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        match kind {
+            DefKind::Enum { variants, repr } => {
+                assert_eq!(repr, tcx.int);
+                assert!(variants.is_empty());
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+        assert!(resolver.ordinary.is_empty());
+    }
+
+    #[test]
+    fn enum_non_constant_value_errors_e0077() {
+        // enum { A = x } — `x` is not a constant expression.
+        let (mut sess, cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let a = sym(&mut sess, "A");
+        let x = sym(&mut sess, "x");
+        let non_const = Expr { id: NodeId(0), kind: ExprKind::Ident(x), span: DUMMY_SP };
+        let spec = enum_spec(None, Some(vec![(a, Some(non_const))]));
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
+
+        let _ = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0077"));
     }
 }

@@ -15,7 +15,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [05-typedef-expansion](05-typedef-expansion.md)
 - [x] [06-declarator-to-ty](06-declarator-to-ty.md)
 - [x] [07-composite-lowering](07-composite-lowering.md)
-- [ ] [08-enum-lowering](08-enum-lowering.md)
+- [x] [08-enum-lowering](08-enum-lowering.md)
 - [ ] [09-statement-lowering](09-statement-lowering.md)
 - [ ] [10-expression-lowering](10-expression-lowering.md)
 - [ ] [11-init-lowering](11-init-lowering.md)

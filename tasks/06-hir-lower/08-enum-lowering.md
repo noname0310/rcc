@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 06-08: Enum lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-03    **Milestone:** M4

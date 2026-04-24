@@ -74,12 +74,14 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0075, E0075_DESC),
     (E0076, E0076_DESC),
     (E0077, E0077_DESC),
+    (E0078, E0078_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
     (W0004, W0004_DESC),
     (W0005, W0005_DESC),
     (W0006, W0006_DESC),
+    (W0007, W0007_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -410,6 +412,17 @@ const E0075_DESC: &str = "typedef cycle detected";
 pub const E0076: &str = "E0076";
 const E0076_DESC: &str = "illegal declarator form";
 
+/// Duplicate enumerator name in the same scope.
+///
+/// C99 §6.7.2.2p3 requires enumerators within a single enumerator list
+/// to have distinct names, and §6.4.4.3 places enumerators in the
+/// ordinary identifier namespace — so repeating an enumerator already
+/// declared at the same scope (even via a previous `enum` definition)
+/// is a constraint violation. `rcc` flags the offending enumerator and
+/// keeps the first binding.
+pub const E0078: &str = "E0078";
+const E0078_DESC: &str = "duplicate enumerator name";
+
 /// Invalid bit-field width.
 ///
 /// C99 §6.7.2.1 constrains bit-field widths: the width shall be a
@@ -495,6 +508,19 @@ const W0005_DESC: &str = "K&R function definition is obsolete";
 /// one, matching GCC / Clang behaviour.
 pub const W0006: &str = "W0006";
 const W0006_DESC: &str = "macro redefined with a different body (permissive)";
+
+/// Enumerator value is outside the range of `int`.
+///
+/// C99 §6.7.2.2p2 requires each enumerator's value to be representable
+/// as `int`; §6.7.2.2p4 then lets the implementation pick any integer
+/// type wide enough to hold every enumerator of the enumeration. In
+/// M4 `rcc` always uses `int` as the underlying representation, so an
+/// explicit value that falls outside `[INT_MIN, INT_MAX]` — or a
+/// defaulted value that would overflow via `prev + 1` — is truncated
+/// and flagged with this warning. M6 will promote the rule to the
+/// §6.7.2.2p4 selection algorithm and drop the diagnostic.
+pub const W0007: &str = "W0007";
+const W0007_DESC: &str = "enumerator value outside the range of `int`";
 
 #[cfg(test)]
 mod tests {

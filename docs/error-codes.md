@@ -669,6 +669,25 @@ struct ok {
 
 ---
 
+## E0078 — duplicate enumerator name
+
+C99 §6.7.2.2p3 requires the enumerators inside a single enumeration
+specifier to have pairwise distinct names, and §6.4.4.3 places every
+enumeration constant in the ordinary identifier namespace. Repeating
+an enumerator name — either within the same `enum { ... }` body or
+against an earlier ordinary-namespace binding at the same scope — is
+therefore a constraint violation. `rcc` rejects the repeat and keeps
+the first binding so that subsequent references still resolve.
+
+```c
+enum { A, A };            // error[E0078]: duplicate enumerator name `A`
+
+typedef int B;
+enum { B };               // error[E0078]: duplicate enumerator name `B`
+```
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
@@ -759,3 +778,21 @@ behaviour.
 ```
 
 Like every warning, W0006 does not count toward `Handler::has_errors`.
+
+## W0007 — enumerator value outside the range of `int`
+
+C99 §6.7.2.2p2 requires each enumerator's value to be representable as
+`int`; §6.7.2.2p4 then lets the implementation pick any integer type
+wide enough to hold every enumerator of the enumeration. In M4 `rcc`
+simplifies the rule to "the underlying type is always `int`", so an
+explicit value outside `[INT_MIN, INT_MAX]` — or a defaulted value
+that would overflow `int` via the implicit `prev + 1` step — is
+flagged and the enumerator is still recorded so downstream passes see
+a stable binding. M6 will promote the rule to the full §6.7.2.2p4
+selection algorithm, at which point this warning goes away.
+
+```c
+enum huge { A = 0xFFFFFFFFFF };  // warning[W0007]: value 1099511627775 of enumerator `A` is outside the range of `int`
+```
+
+Like every warning, W0007 does not count toward `Handler::has_errors`.

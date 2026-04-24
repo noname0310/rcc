@@ -96,6 +96,16 @@ pub enum DefKind {
         /// Enumerators in declaration order.
         variants: Vec<Enumerator>,
     },
+    /// One enumerator entry (C99 §6.4.4.3). Enumerators live in the
+    /// ordinary namespace so each constant gets its own `DefId` pointing
+    /// at this variant; the parent `enum` definition is recorded
+    /// separately as `DefKind::Enum`.
+    Enumerator {
+        /// Integer type assigned to the constant (M4: always `int`).
+        ty: TyId,
+        /// Folded constant value.
+        value: i128,
+    },
 }
 
 /// Struct vs union.
