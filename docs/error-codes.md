@@ -576,6 +576,31 @@ struct S { int x; };
 union S;             // error[E0072]: use of `S` as `union` but previously declared as `struct`
 ```
 
+## E0073 — undeclared label
+
+A `goto` statement references a label that does not exist anywhere in
+the enclosing function. C99 §6.8.6.1p1 requires that the identifier in
+a `goto` name a label located somewhere in the same function body.
+Forward references are allowed — the label may appear after the `goto`.
+
+```c
+void f(void) {
+    goto missing;  // error[E0073]: use of undeclared label `missing`
+}
+```
+
+## E0074 — duplicate label
+
+Two labels with the same name appear in the same function body. C99
+§6.8.1p3 requires that label names be unique within a function.
+
+```c
+void f(void) {
+    a: ;
+    a: ;  // error[E0074]: duplicate label `a`
+}
+```
+
 ---
 
 ## W0001 — unknown #pragma directive

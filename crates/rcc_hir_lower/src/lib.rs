@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use rcc_ast::{ExternalDecl, StorageClass, TranslationUnit, TypeSpec};
+use rcc_ast::{BlockItem, ExternalDecl, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec};
 use rcc_data_structures::FxHashMap;
 use rcc_hir::{Def, DefId, DefKind, HirCrate, HirExprKind, Linkage, Local, RecordKind, TyCtxt};
 use rcc_session::Session;
@@ -276,6 +276,168 @@ pub fn resolve_tag(
     }
 }
 
+/// Two-pass label resolution for a single function body.
+///
+/// **Pass 1** — collect: walks every statement in the function body
+/// and records each `StmtKind::Label { name, .. }` in
+/// `resolver.labels`. Duplicate labels (same name in the same
+/// function) emit `E0074`.
+///
+/// **Pass 2** — check: walks every statement again and verifies that
+/// each `StmtKind::Goto(name)` references a label collected in pass 1.
+/// Unknown labels emit `E0073`.
+///
+/// The caller must clear `resolver.labels` before calling this for
+/// each function, ensuring labels are strictly per-function.
+pub fn resolve_labels(body: &rcc_ast::Block, resolver: &mut Resolver, session: &mut Session) {
+    // Pass 1: collect all labels.
+    for item in &body.items {
+        collect_labels_in_block_item(item, resolver, session);
+    }
+    // Pass 2: check all gotos.
+    for item in &body.items {
+        check_gotos_in_block_item(item, resolver, session);
+    }
+}
+
+/// Recursively collect labels from a block item.
+fn collect_labels_in_block_item(item: &BlockItem, resolver: &mut Resolver, session: &mut Session) {
+    match item {
+        BlockItem::Stmt(stmt) => collect_labels_in_stmt(stmt, resolver, session),
+        BlockItem::Decl(_) => {}
+    }
+}
+
+/// Recursively collect labels from a statement.
+fn collect_labels_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Session) {
+    match &stmt.kind {
+        StmtKind::Label { name, body } => {
+            // Check for duplicate label.
+            if resolver.labels.contains_key(name) {
+                let name_str = session.interner.get(*name);
+                session
+                    .handler
+                    .struct_err(stmt.span, format!("duplicate label `{name_str}`"))
+                    .code(rcc_errors::codes::E0074)
+                    .emit();
+            } else {
+                // Use HirStmtId(0) as a placeholder; the real id is
+                // assigned later during full statement lowering.
+                resolver.labels.insert(*name, rcc_hir::HirStmtId(0));
+            }
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::Compound(block) => {
+            for item in &block.items {
+                collect_labels_in_block_item(item, resolver, session);
+            }
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            collect_labels_in_stmt(then_branch, resolver, session);
+            if let Some(else_) = else_branch {
+                collect_labels_in_stmt(else_, resolver, session);
+            }
+        }
+        StmtKind::While { body, .. } => {
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::DoWhile { body, .. } => {
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::For { init, body, .. } => {
+            if let Some(init) = init {
+                if let BlockItem::Stmt(s) = init.as_ref() {
+                    collect_labels_in_stmt(s, resolver, session);
+                }
+            }
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::Switch { body, .. } => {
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::Case { body, .. } => {
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        StmtKind::Default { body } => {
+            collect_labels_in_stmt(body, resolver, session);
+        }
+        // Terminal statements — no sub-statements to recurse into.
+        StmtKind::Expr(_)
+        | StmtKind::Goto(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Return(_)
+        | StmtKind::Null => {}
+    }
+}
+
+/// Recursively check gotos in a block item.
+fn check_gotos_in_block_item(item: &BlockItem, resolver: &mut Resolver, session: &mut Session) {
+    match item {
+        BlockItem::Stmt(stmt) => check_gotos_in_stmt(stmt, resolver, session),
+        BlockItem::Decl(_) => {}
+    }
+}
+
+/// Recursively check that every `goto` references a known label.
+fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Session) {
+    match &stmt.kind {
+        StmtKind::Goto(name) => {
+            if !resolver.labels.contains_key(name) {
+                let name_str = session.interner.get(*name);
+                session
+                    .handler
+                    .struct_err(stmt.span, format!("use of undeclared label `{name_str}`"))
+                    .code(rcc_errors::codes::E0073)
+                    .emit();
+            }
+        }
+        StmtKind::Label { body, .. } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::Compound(block) => {
+            for item in &block.items {
+                check_gotos_in_block_item(item, resolver, session);
+            }
+        }
+        StmtKind::If { then_branch, else_branch, .. } => {
+            check_gotos_in_stmt(then_branch, resolver, session);
+            if let Some(else_) = else_branch {
+                check_gotos_in_stmt(else_, resolver, session);
+            }
+        }
+        StmtKind::While { body, .. } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::DoWhile { body, .. } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::For { init, body, .. } => {
+            if let Some(init) = init {
+                if let BlockItem::Stmt(s) = init.as_ref() {
+                    check_gotos_in_stmt(s, resolver, session);
+                }
+            }
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::Switch { body, .. } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::Case { body, .. } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::Default { body } => {
+            check_gotos_in_stmt(body, resolver, session);
+        }
+        // Terminal statements — no sub-statements to recurse into.
+        StmtKind::Expr(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Return(_)
+        | StmtKind::Null => {}
+    }
+}
+
 /// Levenshtein edit distance between two strings.
 fn edit_distance(a: &str, b: &str) -> u32 {
     let a_bytes = a.as_bytes();
@@ -419,8 +581,8 @@ fn assign_def_ids(
 mod tests {
     use super::*;
     use rcc_ast::{
-        Block, Decl, DeclSpecs, Declarator, EnumSpec, ExternalDecl, FunctionDef, InitDeclarator,
-        NodeId, RecordSpec, TranslationUnit, TypeSpec,
+        Block, BlockItem, Decl, DeclSpecs, Declarator, EnumSpec, ExternalDecl, FunctionDef,
+        InitDeclarator, NodeId, RecordSpec, Stmt, StmtKind, TranslationUnit, TypeSpec,
     };
     use rcc_hir::TyCtxt;
     use rcc_session::Session;
@@ -1159,5 +1321,163 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert!(!diags[0].help.is_empty(), "should suggest from local scope");
         assert!(diags[0].help[0].contains("value"));
+    }
+
+    // ── Label resolution (task 06-04) tests ─────────────────────────────
+
+    /// Helper: wrap a statement kind into a `Stmt`.
+    fn make_stmt(kind: StmtKind) -> Stmt {
+        Stmt { id: NodeId(0), kind, span: DUMMY_SP }
+    }
+
+    /// Helper: make a goto statement.
+    fn make_goto(name: Symbol) -> Stmt {
+        make_stmt(StmtKind::Goto(name))
+    }
+
+    /// Helper: make a labeled statement (`name: body`).
+    fn make_label(name: Symbol, body: Stmt) -> Stmt {
+        make_stmt(StmtKind::Label { name, body: Box::new(body) })
+    }
+
+    /// Helper: make a null statement (`;`).
+    fn make_null() -> Stmt {
+        make_stmt(StmtKind::Null)
+    }
+
+    /// Helper: make a block from a list of statements.
+    fn make_block(stmts: Vec<Stmt>) -> Block {
+        Block {
+            id: NodeId(0),
+            items: stmts.into_iter().map(|s| BlockItem::Stmt(Box::new(s))).collect(),
+            span: DUMMY_SP,
+        }
+    }
+
+    #[test]
+    fn label_forward_goto_resolves() {
+        // void f(){ goto x; x:; }
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let body = make_block(vec![make_goto(x), make_label(x, make_null())]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "forward goto should resolve without errors: {diags:?}");
+        assert!(resolver.labels.contains_key(&x));
+    }
+
+    #[test]
+    fn label_backward_goto_resolves() {
+        // void f(){ x:; goto x; }
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let body = make_block(vec![make_label(x, make_null()), make_goto(x)]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "backward goto should resolve without errors: {diags:?}");
+    }
+
+    #[test]
+    fn label_undefined_emits_e0073() {
+        // void f(){ goto missing; }
+        let (mut sess, cap) = Session::for_test();
+        let missing = sym(&mut sess, "missing");
+
+        let body = make_block(vec![make_goto(missing)]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0073"));
+        assert!(diags[0].message.contains("undeclared label"));
+        assert!(diags[0].message.contains("missing"));
+    }
+
+    #[test]
+    fn label_duplicate_emits_e0074() {
+        // void f(){ a:; a:; }
+        let (mut sess, cap) = Session::for_test();
+        let a = sym(&mut sess, "a");
+
+        let body = make_block(vec![make_label(a, make_null()), make_label(a, make_null())]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0074"));
+        assert!(diags[0].message.contains("duplicate label"));
+        assert!(diags[0].message.contains("a"));
+    }
+
+    #[test]
+    fn label_two_distinct_labels_ok() {
+        // void f(){ a: b: goto a; } — two distinct labels, one goto.
+        let (mut sess, cap) = Session::for_test();
+        let a = sym(&mut sess, "a");
+        let b = sym(&mut sess, "b");
+
+        let body = make_block(vec![make_label(a, make_null()), make_label(b, make_goto(a))]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "two distinct labels should be fine: {diags:?}");
+        assert!(resolver.labels.contains_key(&a));
+        assert!(resolver.labels.contains_key(&b));
+    }
+
+    #[test]
+    fn label_cleared_per_function() {
+        // Simulate two function bodies: labels from the first must not
+        // leak into the second.
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        // First function: `x:;`
+        let body1 = make_block(vec![make_label(x, make_null())]);
+        let mut resolver = Resolver::default();
+        resolve_labels(&body1, &mut resolver, &mut sess);
+        assert!(resolver.labels.contains_key(&x));
+
+        // Clear labels for second function (as the caller should do).
+        resolver.labels.clear();
+
+        // Second function: `goto x;` — x is NOT defined here.
+        let body2 = make_block(vec![make_goto(x)]);
+        resolve_labels(&body2, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0073"));
+    }
+
+    #[test]
+    fn label_nested_in_compound_stmt() {
+        // void f(){ { x:; } goto x; }
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+
+        let inner_block =
+            make_stmt(StmtKind::Compound(make_block(vec![make_label(x, make_null())])));
+        let body = make_block(vec![inner_block, make_goto(x)]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "label inside nested block should be visible: {diags:?}");
     }
 }

@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 06-04: Label resolution
 
 **Phase:** 06-hir-lower    **Depends on:** 06-01    **Milestone:** M3

@@ -69,6 +69,8 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0070, E0070_DESC),
     (E0071, E0071_DESC),
     (E0072, E0072_DESC),
+    (E0073, E0073_DESC),
+    (E0074, E0074_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -363,6 +365,23 @@ const E0071_DESC: &str = "undeclared identifier";
 /// (or vice versa, or struct/enum mismatch) is a constraint violation.
 pub const E0072: &str = "E0072";
 const E0072_DESC: &str = "tag kind mismatch";
+
+/// Use of an undeclared label in a `goto` statement.
+///
+/// C99 §6.8.6.1p1: the identifier in a `goto` statement shall name a
+/// label located somewhere in the enclosing function. Forward
+/// references are permitted — the label may appear after the `goto` —
+/// but it must exist somewhere in the same function body.
+pub const E0073: &str = "E0073";
+const E0073_DESC: &str = "undeclared label";
+
+/// Duplicate label in the same function.
+///
+/// C99 §6.8.1p3: label names shall be unique within a function. A
+/// second `name:` definition in the same function body is a
+/// constraint violation.
+pub const E0074: &str = "E0074";
+const E0074_DESC: &str = "duplicate label";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
