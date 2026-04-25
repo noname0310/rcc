@@ -626,6 +626,9 @@ dependencies = [
  "rcc_data_structures",
  "rcc_errors",
  "rcc_hir",
+ "rcc_lexer",
+ "rcc_parse",
+ "rcc_preprocess",
  "rcc_session",
  "rcc_span",
 ]

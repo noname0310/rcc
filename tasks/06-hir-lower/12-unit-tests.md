@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-25
+
 # 06-12: HIR lowering unit tests
 
 **Phase:** 06-hir-lower    **Depends on:** 06-01 .. 06-11    **Milestone:** M2

@@ -1,0 +1,1296 @@
+//! Integration tests for `rcc_hir_lower` (task 06-12).
+//!
+//! Walks every feature added during phase 06: declarator-table folding,
+//! the three-namespace name resolution, composite (struct/union/enum)
+//! lowering, initializer expansion, and statement / expression
+//! lowering. Each row is one `#[test]` so the failure point is
+//! pin-pointed; the helper [`lower_snippet`] feeds the full
+//! lex → preprocess → parse → `lower` pipeline and returns the
+//! resulting [`HirCrate`] together with its [`TyCtxt`] for assertions
+//! on top-level definitions and the resolver tables.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use rcc_ast::{
+    ArrayDeclarator, Block, BlockItem, Decl, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec,
+    Expr, ExprKind, FieldDecl, FieldDeclarator, FunctionDeclarator, InitDeclarator, Initializer,
+    NodeId, ParamDecl, RecordSpec, Stmt, StmtKind, TranslationUnit, TypeQuals, TypeSpec,
+};
+use rcc_errors::{CaptureEmitter, Handler};
+use rcc_hir::ty::{Qual, Ty};
+use rcc_hir::{
+    Body, DefId, DefKind, HirCrate, HirExprKind, HirStmtKind, Linkage, Local, LocalDecl,
+    RecordKind, TyCtxt, TyId, ValueCat,
+};
+use rcc_hir_lower::{
+    apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
+    lower_typedef_name, resolve_expr_ident, resolve_labels, resolve_tag, Binding, DeclScope,
+    Resolver, ScopeStack, TagKind,
+};
+use rcc_session::{Options, Session};
+use rcc_span::{Symbol, DUMMY_SP};
+
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/// Drive `src` through `rcc_lexer → rcc_preprocess → rcc_parse →
+/// rcc_hir_lower::lower` and return the resulting `HirCrate` together
+/// with the freshly-built `TyCtxt`. The returned `Session` is dropped
+/// because higher-level assertions only need the HIR shape; tests that
+/// inspect diagnostics use `parse_to_ast` instead.
+///
+/// This is the helper the task's *Deliverables* line names verbatim:
+///     `lower_snippet(src: &str) -> (HirCrate, TyCtxt)`.
+pub fn lower_snippet(src: &str) -> (HirCrate, TyCtxt) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap));
+    let mut sess = Session::with_handler(Options::default(), handler);
+    let fid =
+        sess.source_map.write().unwrap().add_file(PathBuf::from("<lower_snippet>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    let mut tcx = TyCtxt::new();
+    let hir = lower(&ast, &mut tcx, &mut sess);
+    (hir, tcx)
+}
+
+/// Like `lower_snippet`, but keeps the `Session` (with capture emitter)
+/// around so callers can inspect diagnostics. Returns the parsed AST,
+/// not the HIR — this is the entry point for hand-driven lowering of
+/// individual passes (declarators, records, statements, ...).
+fn parse_to_ast(src: &str) -> (TranslationUnit, Session, CaptureEmitter) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(Options::default(), handler);
+    let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<test>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    (ast, sess, cap)
+}
+
+fn intern(sess: &mut Session, s: &str) -> Symbol {
+    sess.interner.intern(s)
+}
+
+fn named(name: Symbol, derived: Vec<DerivedDeclarator>) -> Declarator {
+    Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP }
+}
+
+fn ptr() -> DerivedDeclarator {
+    DerivedDeclarator::Pointer(TypeQuals::default())
+}
+
+fn const_ptr() -> DerivedDeclarator {
+    DerivedDeclarator::Pointer(TypeQuals { const_: true, volatile: false, restrict: false })
+}
+
+fn int_lit(text: &str, sess: &mut Session) -> Expr {
+    let s = intern(sess, text);
+    Expr { id: NodeId(0), kind: ExprKind::IntLit { text: s }, span: DUMMY_SP }
+}
+
+fn array_size(size: u64, sess: &mut Session) -> DerivedDeclarator {
+    DerivedDeclarator::Array(ArrayDeclarator {
+        quals: TypeQuals::default(),
+        has_static: false,
+        star: false,
+        size: Some(int_lit(&size.to_string(), sess)),
+    })
+}
+
+fn array_unsized() -> DerivedDeclarator {
+    DerivedDeclarator::Array(ArrayDeclarator {
+        quals: TypeQuals::default(),
+        has_static: false,
+        star: false,
+        size: None,
+    })
+}
+
+fn func_decl(params: Vec<ParamDecl>, is_void: bool, variadic: bool) -> DerivedDeclarator {
+    DerivedDeclarator::Function(FunctionDeclarator {
+        params,
+        is_void,
+        variadic,
+        kr_names: Vec::new(),
+    })
+}
+
+fn func_no_params() -> DerivedDeclarator {
+    func_decl(Vec::new(), false, false)
+}
+
+fn func_void_params() -> DerivedDeclarator {
+    func_decl(Vec::new(), true, false)
+}
+
+fn param_int() -> ParamDecl {
+    ParamDecl {
+        specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+        declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+        span: DUMMY_SP,
+    }
+}
+
+fn ident_expr(sess: &mut Session, name: &str) -> Expr {
+    let s = intern(sess, name);
+    Expr { id: NodeId(0), kind: ExprKind::Ident(s), span: DUMMY_SP }
+}
+
+fn stmt_of(kind: StmtKind) -> Stmt {
+    Stmt { id: NodeId(0), kind, span: DUMMY_SP }
+}
+
+fn block_of(stmts: Vec<Stmt>) -> Block {
+    Block {
+        id: NodeId(0),
+        items: stmts.into_iter().map(|s| BlockItem::Stmt(Box::new(s))).collect(),
+        span: DUMMY_SP,
+    }
+}
+
+fn record_spec(
+    kind: rcc_ast::RecordKind,
+    tag: Option<Symbol>,
+    fields: Option<Vec<FieldDecl>>,
+) -> RecordSpec {
+    RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP }
+}
+
+fn named_field(name: Symbol, type_specs: Vec<TypeSpec>) -> FieldDecl {
+    FieldDecl {
+        specs: DeclSpecs { type_specs, ..DeclSpecs::default() },
+        declarators: vec![FieldDeclarator {
+            declarator: Some(Declarator {
+                name: Some((name, DUMMY_SP)),
+                derived: Vec::new(),
+                span: DUMMY_SP,
+            }),
+            bit_width: None,
+        }],
+        span: DUMMY_SP,
+    }
+}
+
+fn bitfield_field(name: Option<Symbol>, type_specs: Vec<TypeSpec>, width: Expr) -> FieldDecl {
+    FieldDecl {
+        specs: DeclSpecs { type_specs, ..DeclSpecs::default() },
+        declarators: vec![FieldDeclarator {
+            declarator: name.map(|n| Declarator {
+                name: Some((n, DUMMY_SP)),
+                derived: Vec::new(),
+                span: DUMMY_SP,
+            }),
+            bit_width: Some(width),
+        }],
+        span: DUMMY_SP,
+    }
+}
+
+fn enum_spec(tag: Option<Symbol>, variants: Vec<(Symbol, Option<Expr>)>) -> EnumSpec {
+    EnumSpec {
+        id: NodeId(0),
+        tag,
+        enumerators: Some(
+            variants
+                .into_iter()
+                .map(|(name, value)| rcc_ast::Enumerator { name, value, span: DUMMY_SP })
+                .collect(),
+        ),
+        span: DUMMY_SP,
+    }
+}
+
+/// Push a synthetic LocalRef expression so initializer / assignment
+/// helpers have an lvalue target. Returns the `HirExprId` of the new
+/// node and the `Local` that backs it.
+fn push_local_lvalue(
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    name: Symbol,
+    ty: TyId,
+) -> (Local, rcc_hir::HirExprId) {
+    let local =
+        body.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span: DUMMY_SP });
+    scope.insert(name, Binding::Local(local));
+    let id = body.exprs.push(rcc_hir::HirExpr {
+        id: rcc_hir::HirExprId(0),
+        ty,
+        value_cat: ValueCat::LValue,
+        span: DUMMY_SP,
+        kind: HirExprKind::LocalRef(local),
+    });
+    body.exprs[id].id = id;
+    (local, id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section A — C99 §6.7.5 declarator examples
+//
+// One row per canonical declarator from §6.7.5. Built programmatically
+// so that the chain shape is unambiguous; `apply_declarator` is the
+// system under test.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn s6_7_5_int_x() {
+    // int x;
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, Vec::new());
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    assert_eq!(ty, tcx.int);
+}
+
+#[test]
+fn s6_7_5_pointer_to_int() {
+    // int *x;
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![ptr()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    assert_eq!(ty, tcx.intern(Ty::Ptr(Qual::plain(tcx.int))));
+}
+
+#[test]
+fn s6_7_5_incomplete_array() {
+    // int x[];
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![array_unsized()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let expected = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_sized_array() {
+    // int x[10];
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![array_size(10, &mut sess)]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let expected =
+        tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(10), is_vla: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_array_of_pointers() {
+    // int *x[10]; — array of 10 pointers to int.
+    // Right-left: x → [10] (innermost) → * → int.
+    // Stored outermost-to-innermost: [Pointer, Array(10)].
+    // Forward iteration: int → Ptr(int) → Array[10](Ptr(int)).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![ptr(), array_size(10, &mut sess)]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+    let expected =
+        tcx.intern(Ty::Array { elem: Qual::plain(ptr_int), len: Some(10), is_vla: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_pointer_to_array() {
+    // int (*x)[10]; — pointer to array of 10 ints.
+    // Right-left: x → * (innermost) → [10] → int.
+    // Stored outermost-to-innermost: [Array(10), Pointer].
+    // Forward iteration: int → Array[10](int) → Ptr(Array[10](int)).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![array_size(10, &mut sess), ptr()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let arr = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(10), is_vla: false });
+    let expected = tcx.intern(Ty::Ptr(Qual::plain(arr)));
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_function_returning_int() {
+    // int x();  — old-style function (no prototype).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![func_no_params()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let expected =
+        tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_function_returning_pointer() {
+    // int *x();  — function returning a pointer to int.
+    // Right-left: x → () (innermost) → * → int.
+    // Stored outermost-to-innermost: [Pointer, Function].
+    // Forward iteration: int → Ptr(int) → Func()->Ptr(int).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![ptr(), func_no_params()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+    let expected =
+        tcx.intern(Ty::Func { ret: ptr_int, params: Vec::new(), variadic: false, proto: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_pointer_to_function() {
+    // int (*x)(); — pointer to function returning int.
+    // Right-left: x → * (innermost) → () → int.
+    // Stored outermost-to-innermost: [Function, Pointer].
+    // Forward iteration: int → Func()->int → Ptr(Func()->int).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![func_no_params(), ptr()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let func =
+        tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: false });
+    let expected = tcx.intern(Ty::Ptr(Qual::plain(func)));
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_array_of_pointers_to_function() {
+    // int (*fp[3])(int);  — the canonical "spiral" example.
+    // Right-left: fp → [3] (innermost) → * → (int) → int.
+    // Stored outermost-to-innermost: [Function([int]), Pointer, Array(3)].
+    // Forward iteration:
+    //   int → Func(int)->int → Ptr(Func) → Array[3](Ptr(Func)).
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let fp = intern(&mut sess, "fp");
+    let d = named(
+        fp,
+        vec![func_decl(vec![param_int()], false, false), ptr(), array_size(3, &mut sess)],
+    );
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let func =
+        tcx.intern(Ty::Func { ret: tcx.int, params: vec![tcx.int], variadic: false, proto: true });
+    let ptr_func = tcx.intern(Ty::Ptr(Qual::plain(func)));
+    let expected =
+        tcx.intern(Ty::Array { elem: Qual::plain(ptr_func), len: Some(3), is_vla: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_void_pointer() {
+    // void *p;  — pointer to void is legal even though `void p;` is not.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let p = intern(&mut sess, "p");
+    let d = named(p, vec![ptr()]);
+    let ty = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+    assert_eq!(ty, tcx.intern(Ty::Ptr(Qual::plain(tcx.void))));
+}
+
+#[test]
+fn s6_7_5_const_pointer_to_const_int() {
+    // const int * const p;
+    // Right-left: p → * const (top-level const pointer) → const int.
+    //
+    // C99 §6.7.5.1 "type qualifiers may follow `*`": the `* const` is
+    // captured as a `const_ptr()` derived element. The pointee `const`
+    // comes from the base specifier which the test-side simulates by
+    // wrapping the int in a `const Qual` prior to building the Ptr.
+    //
+    // The `apply_declarator` API takes a base `TyId` and applies the
+    // derived chain on top, so we reproduce the pointee-const by
+    // constructing the expected type explicitly.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let p = intern(&mut sess, "p");
+    // Base = int; the source-level `const int` qualifier is part of
+    // the DeclSpecs which `lower_declspecs_to_base_ty` consumes — at
+    // the declarator level we only fold the `* const`.
+    let d = named(p, vec![const_ptr()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let expected = tcx.intern(Ty::Ptr(Qual {
+        ty: tcx.int,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_pointer_to_pointer() {
+    // int **pp;  — double pointer.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let pp = intern(&mut sess, "pp");
+    let d = named(pp, vec![ptr(), ptr()]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
+    let inner = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+    let expected = tcx.intern(Ty::Ptr(Qual::plain(inner)));
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_function_with_void_param() {
+    // void f(void); — prototype with explicit `(void)` parameter.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let f = intern(&mut sess, "f");
+    let d = named(f, vec![func_void_params()]);
+    let ty = apply_declarator(tcx.void, &d, DeclScope::File, &mut tcx, &mut sess);
+    let expected =
+        tcx.intern(Ty::Func { ret: tcx.void, params: Vec::new(), variadic: false, proto: true });
+    assert_eq!(ty, expected);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section B — Name resolution (ordinary / tag / label namespaces)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn resolution_undeclared_emits_e0071() {
+    let (mut sess, cap) = Session::for_test();
+    let unknown = intern(&mut sess, "z");
+    let resolver = Resolver::default();
+    let scope = ScopeStack::new();
+    let result = resolve_expr_ident(unknown, DUMMY_SP, &scope, &resolver, &mut sess);
+    assert!(result.is_none());
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, Some("E0071"));
+}
+
+#[test]
+fn resolution_inner_block_shadows_outer() {
+    // void f(){ int x; { int x; /*inner*/ } /*outer*/ }
+    let (mut sess, _cap) = Session::for_test();
+    let x = intern(&mut sess, "x");
+    let resolver = Resolver::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    scope.insert(x, Binding::Local(Local(0)));
+    scope.push_scope();
+    scope.insert(x, Binding::Local(Local(1)));
+    match resolve_expr_ident(x, DUMMY_SP, &scope, &resolver, &mut sess) {
+        Some(HirExprKind::LocalRef(l)) => assert_eq!(l, Local(1)),
+        other => panic!("expected LocalRef(1), got {other:?}"),
+    }
+    scope.pop_scope();
+    match resolve_expr_ident(x, DUMMY_SP, &scope, &resolver, &mut sess) {
+        Some(HirExprKind::LocalRef(l)) => assert_eq!(l, Local(0)),
+        other => panic!("expected LocalRef(0), got {other:?}"),
+    }
+}
+
+#[test]
+fn resolution_tags_and_ordinary_are_independent() {
+    // `struct S { int x; }; int S = 1;` — tag `S` and ordinary `S`
+    // live in different namespaces, no clash.
+    let (hir, _tcx) = lower_snippet("struct S { int x; }; int S = 1;");
+    // Two definitions: the struct tag and the global int.
+    assert_eq!(hir.defs.len(), 2);
+    let kinds: Vec<_> = hir
+        .defs
+        .iter()
+        .map(|d| match d.kind {
+            DefKind::Record { .. } => "record",
+            DefKind::Global { .. } => "global",
+            _ => "other",
+        })
+        .collect();
+    assert!(kinds.contains(&"record"));
+    assert!(kinds.contains(&"global"));
+}
+
+#[test]
+fn resolution_tag_kind_mismatch_e0072() {
+    // `struct S {}; union S;` → E0072
+    let (mut sess, cap) = Session::for_test();
+    let s = intern(&mut sess, "S");
+    let tcx = TyCtxt::new();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+
+    let id = resolve_tag(s, DUMMY_SP, TagKind::Struct, &mut crate_, &tcx, &mut resolver, &mut sess);
+    assert!(id.is_some());
+
+    let result =
+        resolve_tag(s, DUMMY_SP, TagKind::Union, &mut crate_, &tcx, &mut resolver, &mut sess);
+    assert!(result.is_none());
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, Some("E0072"));
+}
+
+#[test]
+fn resolution_label_undefined_emits_e0073() {
+    // void f(){ goto missing; }
+    let (mut sess, cap) = Session::for_test();
+    let missing = intern(&mut sess, "missing");
+    let body = block_of(vec![stmt_of(StmtKind::Goto(missing))]);
+    let mut resolver = Resolver::default();
+    resolve_labels(&body, &mut resolver, &mut sess);
+    let diags = cap.diagnostics();
+    assert!(diags.iter().any(|d| d.code == Some("E0073")), "expected E0073, got {diags:?}");
+}
+
+#[test]
+fn resolution_label_duplicate_emits_e0074() {
+    // void f(){ x:; x:; }
+    let (mut sess, cap) = Session::for_test();
+    let x = intern(&mut sess, "x");
+    let body = block_of(vec![
+        stmt_of(StmtKind::Label { name: x, body: Box::new(stmt_of(StmtKind::Null)) }),
+        stmt_of(StmtKind::Label { name: x, body: Box::new(stmt_of(StmtKind::Null)) }),
+    ]);
+    let mut resolver = Resolver::default();
+    resolve_labels(&body, &mut resolver, &mut sess);
+    let diags = cap.diagnostics();
+    assert!(diags.iter().any(|d| d.code == Some("E0074")), "expected E0074, got {diags:?}");
+}
+
+#[test]
+fn resolution_typedef_via_lower_typedef_name() {
+    // `typedef int T;` — T resolves to tcx.int (interned singleton).
+    let (mut sess, _cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let t = intern(&mut sess, "T");
+    let id = crate_.defs.push(rcc_hir::Def {
+        id: DefId(0),
+        name: t,
+        span: DUMMY_SP,
+        kind: DefKind::Typedef(tcx.int),
+    });
+    crate_.defs[id].id = id;
+    resolver.ordinary.insert(t, id);
+
+    let mut expanding = rcc_data_structures::FxHashSet::default();
+    let resolved =
+        lower_typedef_name(t, DUMMY_SP, &mut expanding, &resolver, &crate_, &tcx, &mut sess);
+    assert_eq!(resolved, tcx.int);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section C — Composite (struct / union / enum) lowering
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn composite_struct_two_named_fields() {
+    // struct S { int a; int b; }
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let a = intern(&mut sess, "a");
+    let b = intern(&mut sess, "b");
+    let spec = record_spec(
+        rcc_ast::RecordKind::Struct,
+        None,
+        Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Int])]),
+    );
+    let resolver = Resolver::default();
+    let crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    match kind {
+        DefKind::Record { kind: RecordKind::Struct, fields, .. } => {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, Some(a));
+            assert_eq!(fields[0].ty, tcx.int);
+            assert_eq!(fields[1].name, Some(b));
+        }
+        other => panic!("expected struct, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_struct_with_named_bitfield() {
+    // struct S { int x : 3; }
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let spec = record_spec(
+        rcc_ast::RecordKind::Struct,
+        None,
+        Some(vec![bitfield_field(Some(x), vec![TypeSpec::Int], int_lit("3", &mut sess))]),
+    );
+    let resolver = Resolver::default();
+    let crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    match kind {
+        DefKind::Record { fields, .. } => {
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, Some(x));
+            assert_eq!(fields[0].bit_width, Some(3));
+        }
+        other => panic!("expected record, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_union_kind_propagates() {
+    // union U { int a; long b; }
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let a = intern(&mut sess, "a");
+    let b = intern(&mut sess, "b");
+    let spec = record_spec(
+        rcc_ast::RecordKind::Union,
+        None,
+        Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Long])]),
+    );
+    let resolver = Resolver::default();
+    let crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    assert!(matches!(kind, DefKind::Record { kind: RecordKind::Union, .. }));
+}
+
+#[test]
+fn composite_anonymous_struct_member_flattens() {
+    // struct Outer { struct { int a; int b; }; int c; }
+    // Field list seen from outside: [a, b, c].
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let a = intern(&mut sess, "a");
+    let b = intern(&mut sess, "b");
+    let c = intern(&mut sess, "c");
+
+    // Anonymous inner struct declared as the entire field's specifier.
+    let inner = record_spec(
+        rcc_ast::RecordKind::Struct,
+        None,
+        Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Int])]),
+    );
+    let inner_field = FieldDecl {
+        specs: DeclSpecs { type_specs: vec![TypeSpec::Record(inner)], ..DeclSpecs::default() },
+        declarators: vec![FieldDeclarator { declarator: None, bit_width: None }],
+        span: DUMMY_SP,
+    };
+    let outer = record_spec(
+        rcc_ast::RecordKind::Struct,
+        None,
+        Some(vec![inner_field, named_field(c, vec![TypeSpec::Int])]),
+    );
+    let resolver = Resolver::default();
+    let crate_ = HirCrate::default();
+    let kind = lower_record(&outer, &mut tcx, &resolver, &crate_, &mut sess);
+    match kind {
+        DefKind::Record { fields, .. } => {
+            let names: Vec<_> = fields.iter().map(|f| f.name).collect();
+            assert_eq!(names, vec![Some(a), Some(b), Some(c)]);
+        }
+        other => panic!("expected record, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_enum_default_values() {
+    // enum { A, B, C } — values 0, 1, 2.
+    let (mut sess, _cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let a = intern(&mut sess, "A");
+    let b = intern(&mut sess, "B");
+    let c = intern(&mut sess, "C");
+    let spec = enum_spec(None, vec![(a, None), (b, None), (c, None)]);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+    match kind {
+        DefKind::Enum { variants, .. } => {
+            let values: Vec<i128> = variants.iter().map(|v| v.value).collect();
+            assert_eq!(values, vec![0, 1, 2]);
+        }
+        other => panic!("expected enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_enum_explicit_resets_counter() {
+    // enum { A = 5, B, C = 10, D } — values 5, 6, 10, 11.
+    let (mut sess, _cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let a = intern(&mut sess, "A");
+    let b = intern(&mut sess, "B");
+    let c = intern(&mut sess, "C");
+    let d = intern(&mut sess, "D");
+    let spec = enum_spec(
+        None,
+        vec![
+            (a, Some(int_lit("5", &mut sess))),
+            (b, None),
+            (c, Some(int_lit("10", &mut sess))),
+            (d, None),
+        ],
+    );
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+    match kind {
+        DefKind::Enum { variants, .. } => {
+            let values: Vec<i128> = variants.iter().map(|v| v.value).collect();
+            assert_eq!(values, vec![5, 6, 10, 11]);
+        }
+        other => panic!("expected enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_enum_duplicate_emits_e0078() {
+    // enum { A }; enum { A = 1 };  — second `A` is duplicate.
+    let (mut sess, cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let a = intern(&mut sess, "A");
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let s1 = enum_spec(None, vec![(a, None)]);
+    let _ = lower_enum(&s1, &tcx, &mut resolver, &mut crate_, &mut sess);
+    let s2 = enum_spec(None, vec![(a, Some(int_lit("1", &mut sess)))]);
+    let _ = lower_enum(&s2, &tcx, &mut resolver, &mut crate_, &mut sess);
+    let diags = cap.diagnostics();
+    assert!(diags.iter().any(|d| d.code == Some("E0078")), "expected E0078, got {diags:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section D — Initializer lowering
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn init_scalar_assigns_rhs_to_target() {
+    // int x; x = 7;  — scalar init produces a single Assign.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let x = intern(&mut sess, "x");
+    let (_local, target) = push_local_lvalue(&mut body, &mut scope, x, tcx.int);
+
+    let init = Initializer::Expr(int_lit("7", &mut sess));
+    let mut out = Vec::new();
+    lower_initializer(
+        target,
+        tcx.int,
+        &init,
+        DUMMY_SP,
+        &mut body,
+        &scope,
+        &mut crate_,
+        &mut tcx,
+        &mut resolver,
+        &mut sess,
+        &mut out,
+    );
+    assert_eq!(out.len(), 1);
+    let assign_expr = match body.stmts[out[0]].kind {
+        HirStmtKind::Expr(eid) => eid,
+        ref other => panic!("expected Expr stmt, got {other:?}"),
+    };
+    let HirExprKind::Assign { rhs, .. } = body.exprs[assign_expr].kind else {
+        panic!("expected Assign, got {:?}", body.exprs[assign_expr].kind);
+    };
+    assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(7)));
+}
+
+#[test]
+fn init_array_partial_zero_fills_tail() {
+    // int a[3] = {1};  — a[1] and a[2] zero-filled.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let a = intern(&mut sess, "a");
+    let arr_ty = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+    let (_local, target) = push_local_lvalue(&mut body, &mut scope, a, arr_ty);
+
+    let init = Initializer::List(vec![(Vec::new(), Initializer::Expr(int_lit("1", &mut sess)))]);
+    let mut out = Vec::new();
+    lower_initializer(
+        target,
+        arr_ty,
+        &init,
+        DUMMY_SP,
+        &mut body,
+        &scope,
+        &mut crate_,
+        &mut tcx,
+        &mut resolver,
+        &mut sess,
+        &mut out,
+    );
+    // Three assignments — a[0]=1, a[1]=0, a[2]=0.
+    assert_eq!(out.len(), 3);
+    let mut idx_value: Vec<(i128, i128)> = Vec::new();
+    for sid in &out {
+        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
+        let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
+        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
+        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        idx_value.push((i, v));
+    }
+    idx_value.sort();
+    assert_eq!(idx_value, vec![(0, 1), (1, 0), (2, 0)]);
+}
+
+#[test]
+fn init_array_designator_resets_cursor() {
+    // int a[3] = { [2] = 7 };  — a[2]=7, a[0]=0, a[1]=0.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let a = intern(&mut sess, "a");
+    let arr_ty = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+    let (_local, target) = push_local_lvalue(&mut body, &mut scope, a, arr_ty);
+
+    let init = Initializer::List(vec![(
+        vec![rcc_ast::Designator::Index(int_lit("2", &mut sess))],
+        Initializer::Expr(int_lit("7", &mut sess)),
+    )]);
+    let mut out = Vec::new();
+    lower_initializer(
+        target,
+        arr_ty,
+        &init,
+        DUMMY_SP,
+        &mut body,
+        &scope,
+        &mut crate_,
+        &mut tcx,
+        &mut resolver,
+        &mut sess,
+        &mut out,
+    );
+    assert_eq!(out.len(), 3);
+    let mut idx_value: Vec<(i128, i128)> = Vec::new();
+    for sid in &out {
+        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
+        let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
+        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
+        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        idx_value.push((i, v));
+    }
+    idx_value.sort();
+    assert_eq!(idx_value, vec![(0, 0), (1, 0), (2, 7)]);
+}
+
+#[test]
+fn init_record_per_field_assign() {
+    // struct S { int a; int b; }; struct S s = { 1, 2 };
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+
+    // Hand-build a Record def + matching TyId for the test target.
+    let a = intern(&mut sess, "a");
+    let b = intern(&mut sess, "b");
+    let rec_id = crate_.defs.push(rcc_hir::Def {
+        id: DefId(0),
+        name: intern(&mut sess, "S"),
+        span: DUMMY_SP,
+        kind: DefKind::Record {
+            kind: RecordKind::Struct,
+            layout: None,
+            fields: vec![
+                rcc_hir::Field {
+                    name: Some(a),
+                    ty: tcx.int,
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+                rcc_hir::Field {
+                    name: Some(b),
+                    ty: tcx.int,
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+            ],
+        },
+    });
+    crate_.defs[rec_id].id = rec_id;
+    let rec_ty = tcx.intern(Ty::Record(rec_id));
+    let s = intern(&mut sess, "s");
+    let (_local, target) = push_local_lvalue(&mut body, &mut scope, s, rec_ty);
+
+    let init = Initializer::List(vec![
+        (Vec::new(), Initializer::Expr(int_lit("1", &mut sess))),
+        (Vec::new(), Initializer::Expr(int_lit("2", &mut sess))),
+    ]);
+    let mut out = Vec::new();
+    lower_initializer(
+        target,
+        rec_ty,
+        &init,
+        DUMMY_SP,
+        &mut body,
+        &scope,
+        &mut crate_,
+        &mut tcx,
+        &mut resolver,
+        &mut sess,
+        &mut out,
+    );
+    // Two assigns — one per field.
+    assert!(out.len() >= 2, "expected at least two field assigns, got {}", out.len());
+    let mut field_values: Vec<i128> = Vec::new();
+    for sid in &out {
+        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
+        let HirExprKind::Assign { rhs, .. } = body.exprs[eid].kind else { continue };
+        if let HirExprKind::IntConst(v) = body.exprs[rhs].kind {
+            field_values.push(v);
+        }
+    }
+    field_values.sort();
+    assert_eq!(field_values, vec![1, 2]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section E — Statement and expression lowering
+// ═══════════════════════════════════════════════════════════════════════
+
+fn fresh_lower_ctx() -> (Body, ScopeStack, HirCrate, TyCtxt, Resolver) {
+    let body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    (body, scope, HirCrate::default(), TyCtxt::new(), Resolver::default())
+}
+
+#[test]
+fn stmt_for_init_declaration_creates_local() {
+    // for (int i = 0; i < 3; i++) ;
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, mut scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+
+    let i = intern(&mut sess, "i");
+    let init_decl = Decl {
+        id: NodeId(0),
+        span: DUMMY_SP,
+        specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+        inits: vec![InitDeclarator {
+            declarator: named(i, Vec::new()),
+            init: Some(Initializer::Expr(int_lit("0", &mut sess))),
+        }],
+    };
+    let cond = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Binary {
+            op: rcc_ast::BinOp::Lt,
+            lhs: Box::new(ident_expr(&mut sess, "i")),
+            rhs: Box::new(int_lit("3", &mut sess)),
+        },
+        span: DUMMY_SP,
+    };
+    let step = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Unary {
+            op: rcc_ast::UnOp::PostInc,
+            operand: Box::new(ident_expr(&mut sess, "i")),
+        },
+        span: DUMMY_SP,
+    };
+    let s = stmt_of(StmtKind::For {
+        init: Some(Box::new(BlockItem::Decl(init_decl))),
+        cond: Some(cond),
+        step: Some(step),
+        body: Box::new(stmt_of(StmtKind::Null)),
+    });
+    let id = lower_stmt(&s, &mut body, &mut scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    let HirStmtKind::For { init, cond, step, .. } = &body.stmts[id].kind else {
+        panic!("expected For, got {:?}", body.stmts[id].kind);
+    };
+    assert!(init.is_some());
+    assert!(cond.is_some());
+    assert!(step.is_some());
+    // i must have been added as a local.
+    assert!(body.locals.iter().any(|l| l.name == Some(i)));
+}
+
+#[test]
+fn stmt_return_value_lowers_to_return_some() {
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, mut scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+    let s = stmt_of(StmtKind::Return(Some(int_lit("42", &mut sess))));
+    let id = lower_stmt(&s, &mut body, &mut scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    let HirStmtKind::Return(Some(eid)) = body.stmts[id].kind else {
+        panic!("expected Return(Some)");
+    };
+    assert!(matches!(body.exprs[eid].kind, HirExprKind::IntConst(42)));
+}
+
+#[test]
+fn expr_ternary_creates_cond_node() {
+    // 1 ? 2 : 3
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+    let e = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Cond {
+            cond: Box::new(int_lit("1", &mut sess)),
+            then_expr: Box::new(int_lit("2", &mut sess)),
+            else_expr: Box::new(int_lit("3", &mut sess)),
+        },
+        span: DUMMY_SP,
+    };
+    let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    let HirExprKind::Cond { cond, then_expr, else_expr } = body.exprs[id].kind else {
+        panic!("expected Cond");
+    };
+    assert!(matches!(body.exprs[cond].kind, HirExprKind::IntConst(1)));
+    assert!(matches!(body.exprs[then_expr].kind, HirExprKind::IntConst(2)));
+    assert!(matches!(body.exprs[else_expr].kind, HirExprKind::IntConst(3)));
+}
+
+#[test]
+fn expr_member_access_lowers_to_field() {
+    // Ad-hoc: synthesise a struct local + `s.a` member access.
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, mut scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+    let a = intern(&mut sess, "a");
+    let rec_id = crate_.defs.push(rcc_hir::Def {
+        id: DefId(0),
+        name: intern(&mut sess, "S"),
+        span: DUMMY_SP,
+        kind: DefKind::Record {
+            kind: RecordKind::Struct,
+            layout: None,
+            fields: vec![rcc_hir::Field {
+                name: Some(a),
+                ty: tcx.int,
+                offset: None,
+                bit_width: None,
+                span: DUMMY_SP,
+            }],
+        },
+    });
+    crate_.defs[rec_id].id = rec_id;
+    let rec_ty = tcx.intern(Ty::Record(rec_id));
+    let s = intern(&mut sess, "s");
+    let _ = push_local_lvalue(&mut body, &mut scope, s, rec_ty);
+
+    let e = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Member { base: Box::new(ident_expr(&mut sess, "s")), field: a },
+        span: DUMMY_SP,
+    };
+    let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    assert!(matches!(body.exprs[id].kind, HirExprKind::Field { field_index: 0, .. }));
+}
+
+#[test]
+fn expr_compound_assign_desugars_to_simple_assign() {
+    // x += 1   should lower to   x = x + 1   (i.e. an Assign whose RHS
+    // is a Binary { Add, x, 1 }).
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, mut scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+    let x = intern(&mut sess, "x");
+    let _ = push_local_lvalue(&mut body, &mut scope, x, tcx.int);
+
+    let e = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Assign {
+            op: rcc_ast::AssignOp::AddEq,
+            lhs: Box::new(ident_expr(&mut sess, "x")),
+            rhs: Box::new(int_lit("1", &mut sess)),
+        },
+        span: DUMMY_SP,
+    };
+    let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    let HirExprKind::Assign { rhs, .. } = body.exprs[id].kind else {
+        panic!("expected Assign");
+    };
+    assert!(matches!(
+        body.exprs[rhs].kind,
+        HirExprKind::Binary { op: rcc_hir::rcc_hir_binop::BinOp::Add, .. }
+    ));
+}
+
+#[test]
+fn expr_paren_does_not_create_extra_node() {
+    // (((42))) — paren wrappers are transparent.
+    let (mut sess, _cap) = Session::for_test();
+    let (mut body, scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
+    let lit = int_lit("42", &mut sess);
+    let paren = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Paren(Box::new(Expr {
+            id: NodeId(0),
+            kind: ExprKind::Paren(Box::new(Expr {
+                id: NodeId(0),
+                kind: ExprKind::Paren(Box::new(lit)),
+                span: DUMMY_SP,
+            })),
+            span: DUMMY_SP,
+        })),
+        span: DUMMY_SP,
+    };
+    let before = body.exprs.len();
+    let id = lower_expr(&paren, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+    assert_eq!(body.exprs.len() - before, 1, "paren should not add nodes");
+    assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section F — End-to-end smoke (parse → lower)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn snippet_empty_translation_unit_has_no_defs() {
+    let (hir, _tcx) = lower_snippet("");
+    assert_eq!(hir.defs.len(), 0);
+}
+
+#[test]
+fn snippet_function_prototype_yields_one_def() {
+    let (hir, _tcx) = lower_snippet("int add(int a, int b);");
+    assert_eq!(hir.defs.len(), 1);
+    let def = &hir.defs[DefId(0)];
+    assert!(matches!(def.kind, DefKind::Global { .. } | DefKind::Function { .. }));
+}
+
+#[test]
+fn snippet_function_definition_has_body_flag() {
+    let (hir, _tcx) = lower_snippet("int main(void) { return 0; }");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Function { .. }))
+        .expect("missing function def");
+    let DefKind::Function { has_body, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(has_body, "function definition should have has_body = true");
+}
+
+#[test]
+fn snippet_typedef_chain_resolves() {
+    // Acceptance: `typedef int T; typedef T U; U x;`
+    // x's type is the interned tcx.int singleton.
+    let (mut sess, _cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let t = intern(&mut sess, "T");
+    let u = intern(&mut sess, "U");
+
+    // Register T -> int directly, then U -> T's type.
+    let t_id = crate_.defs.push(rcc_hir::Def {
+        id: DefId(0),
+        name: t,
+        span: DUMMY_SP,
+        kind: DefKind::Typedef(tcx.int),
+    });
+    crate_.defs[t_id].id = t_id;
+    resolver.ordinary.insert(t, t_id);
+    let mut exp = rcc_data_structures::FxHashSet::default();
+    let t_ty = lower_typedef_name(t, DUMMY_SP, &mut exp, &resolver, &crate_, &tcx, &mut sess);
+    let u_id = crate_.defs.push(rcc_hir::Def {
+        id: DefId(0),
+        name: u,
+        span: DUMMY_SP,
+        kind: DefKind::Typedef(t_ty),
+    });
+    crate_.defs[u_id].id = u_id;
+    resolver.ordinary.insert(u, u_id);
+    let mut exp2 = rcc_data_structures::FxHashSet::default();
+    let u_ty = lower_typedef_name(u, DUMMY_SP, &mut exp2, &resolver, &crate_, &tcx, &mut sess);
+    assert_eq!(u_ty, tcx.int);
+}
+
+#[test]
+fn snippet_struct_global_yields_two_defs() {
+    // `struct P { int x; int y; } origin;` — one tag def + one global.
+    let (hir, _tcx) = lower_snippet("struct P { int x; int y; } origin;");
+    assert_eq!(hir.defs.len(), 2);
+    let kinds: Vec<&'static str> = hir
+        .defs
+        .iter()
+        .map(|d| match d.kind {
+            DefKind::Record { .. } => "record",
+            DefKind::Global { .. } => "global",
+            _ => "other",
+        })
+        .collect();
+    assert!(kinds.contains(&"record"));
+    assert!(kinds.contains(&"global"));
+}
+
+#[test]
+fn snippet_static_function_marked_internal() {
+    let (hir, _tcx) = lower_snippet("static int helper(void) { return 1; }");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Function { .. }))
+        .expect("missing function");
+    let DefKind::Function { is_static, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(is_static);
+}
+
+#[test]
+fn snippet_inline_function_marked_inline() {
+    let (hir, _tcx) = lower_snippet("inline int square(int x) { return x * x; }");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Function { .. }))
+        .expect("missing function");
+    let DefKind::Function { is_inline, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(is_inline);
+}
+
+#[test]
+fn snippet_extern_global_has_external_linkage() {
+    // Sanity: at least one def should have External linkage.
+    let (hir, _tcx) = lower_snippet("extern int errno;");
+    let def =
+        hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).expect("missing global");
+    let DefKind::Global { linkage, .. } = def.kind else {
+        unreachable!();
+    };
+    assert_eq!(linkage, Linkage::External);
+}
+
+#[test]
+fn snippet_static_global_has_internal_linkage() {
+    let (hir, _tcx) = lower_snippet("static int counter;");
+    let def =
+        hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).expect("missing global");
+    let DefKind::Global { linkage, .. } = def.kind else {
+        unreachable!();
+    };
+    assert_eq!(linkage, Linkage::Internal);
+}
+
+#[test]
+fn snippet_does_not_emit_diagnostics_on_clean_code() {
+    let (_ast, _sess, cap) = parse_to_ast("int main(void) { return 0; }");
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean source should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+}

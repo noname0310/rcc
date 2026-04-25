@@ -19,7 +19,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [09-statement-lowering](09-statement-lowering.md)
 - [x] [10-expression-lowering](10-expression-lowering.md)
 - [x] [11-init-lowering](11-init-lowering.md)
-- [ ] [12-unit-tests](12-unit-tests.md)
+- [x] [12-unit-tests](12-unit-tests.md)
 - [ ] [13-inline-linkage](13-inline-linkage.md)
 
 ## Downstream
