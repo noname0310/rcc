@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-25
+
 # 06-11: Initializer lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-06, 06-10    **Milestone:** M4

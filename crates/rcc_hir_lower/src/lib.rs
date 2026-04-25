@@ -644,15 +644,18 @@ fn lower_block_decl(
 
         let ty = apply_declarator(base, &init_decl.declarator, DeclScope::Block, tcx, session);
 
-        // Lower the initializer expression, if any. Task 06-11 will
-        // replace this with proper initializer-list handling; here we
-        // cover the single-expression case needed for statement tests.
-        let init_expr = match &init_decl.init {
+        // Scalar (single-expression) initialiser: keep the value inline
+        // on the LocalDecl so simple `int x = 5;` declarations still
+        // produce exactly one statement. Aggregate (brace-enclosed)
+        // initialisers are handled by `lower_initializer` below, which
+        // flattens them into a sequence of assignment statements per
+        // C99 §6.7.8.
+        let (init_expr, list_init) = match &init_decl.init {
             Some(rcc_ast::Initializer::Expr(e)) => {
-                Some(lower_expr(e, body, scope, _crate, tcx, resolver, session))
+                (Some(lower_expr(e, body, scope, _crate, tcx, resolver, session)), None)
             }
-            Some(rcc_ast::Initializer::List(_)) => None,
-            None => None,
+            Some(init @ rcc_ast::Initializer::List(_)) => (None, Some(init)),
+            None => (None, None),
         };
 
         // Allocate a Local and register it in the innermost scope.
@@ -667,7 +670,465 @@ fn lower_block_decl(
         });
         body.stmts[stmt_id].id = stmt_id;
         out.push(stmt_id);
+
+        // For brace-enclosed initialisers, flatten the list into a
+        // sequence of assignment statements appended to the current
+        // block. The target lvalue is a fresh `LocalRef` expression so
+        // every assignment has its own HIR node.
+        if let Some(init) = list_init {
+            let target = push_local_ref(local, ty, decl.span, body);
+            lower_initializer(
+                target, ty, init, decl.span, body, scope, _crate, tcx, resolver, session, out,
+            );
+        }
     }
+}
+
+/// Push an `HirExprKind::LocalRef` into `body.exprs` and return its id.
+///
+/// Used by [`lower_initializer`] to materialise the "root" lvalue for
+/// an aggregate local whenever it needs a fresh HIR node (each
+/// component assignment requires its own tree of `Field` / `Index`
+/// nodes referring back to this root).
+fn push_local_ref(local: Local, ty: TyId, span: Span, body: &mut Body) -> HirExprId {
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty,
+        value_cat: ValueCat::LValue,
+        span,
+        kind: HirExprKind::LocalRef(local),
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Flatten a brace-enclosed initialiser (`Initializer::List`) into a
+/// sequence of `HirStmtKind::Expr`-wrapped assignment statements.
+///
+/// Semantics (C99 §6.7.8):
+/// - **Scalar target + `{ v }`** — treated as `target = v;` (§6.7.8p11).
+/// - **Array target** — walks elements left-to-right. Each sub-initialiser
+///   binds to the "current element index", which advances after each
+///   item and can be reset by a `[N]` designator (§6.7.8p6, §6.7.8p17).
+///   After the last explicit item, every remaining element is
+///   zero-filled (§6.7.8p21).
+/// - **Struct target** — same walker, but the cursor is a field index,
+///   and `.name` designators reset it (§6.7.8p7, §6.7.8p17).
+/// - **Union target** — only one member is initialised: the first one,
+///   unless a designator selects a different member (§6.7.8p15-17).
+///
+/// Zero-fill policy: rather than emit an explicit assignment-to-zero for
+/// every unset scalar component (which would explode on large arrays),
+/// this pass only zero-fills *components that the walker actually
+/// visits*. For `int a[3] = {1}` the walker visits all three slots
+/// (because the explicit list still advances the cursor until the array
+/// is covered on the zero-fill pass) so the acceptance test sees three
+/// stores `a[0]=1, a[1]=0, a[2]=0`. Tail zero-fill for huge arrays is
+/// deferred to codegen (BSS / static-init constant data); an aggregate
+/// zero-fill marker expression is not introduced at this stage.
+///
+/// Deferred (not handled here):
+/// - String-literal initialisation of a `char[]` (`char s[] = "hi";`).
+/// - Compound-literal lowering (`(int[]){1,2,3}`).
+/// - Initialising a struct/union with a non-brace aggregate (GNU ext).
+/// - Excess initialiser diagnostics (typeck will flag these).
+#[allow(clippy::too_many_arguments)]
+pub fn lower_initializer(
+    target: HirExprId,
+    target_ty: TyId,
+    init: &rcc_ast::Initializer,
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    match init {
+        rcc_ast::Initializer::Expr(e) => {
+            // Scalar (or string-to-char-array) initialiser.
+            let rhs = lower_expr(e, body, scope, crate_, tcx, resolver, session);
+            emit_assign_stmt(target, rhs, span, body, out);
+        }
+        rcc_ast::Initializer::List(items) => {
+            lower_initializer_list(
+                target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+    }
+}
+
+/// Core of [`lower_initializer`] for brace-enclosed lists. See that
+/// function's docs for the overall semantics.
+#[allow(clippy::too_many_arguments)]
+fn lower_initializer_list(
+    target: HirExprId,
+    target_ty: TyId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    // Scalar target with a `{ v }` wrapper: unwrap and assign. Empty
+    // `{}` on a scalar is malformed C but we emit nothing here; typeck
+    // will diagnose.
+    let target_ty_kind = tcx.get(target_ty).clone();
+    if !matches!(target_ty_kind, Ty::Array { .. } | Ty::Record(_)) {
+        if let Some((desigs, nested)) = items.first() {
+            if !desigs.is_empty() {
+                // Designators on a scalar target are a hard constraint
+                // violation per §6.7.8p7; typeck will diagnose. Still
+                // walk the inner initialiser so the HIR has an assign.
+            }
+            // Recurse so nested `{{ 1 }}` still works, but use the same
+            // scalar target lvalue.
+            lower_initializer(
+                target, target_ty, nested, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+        return;
+    }
+
+    match target_ty_kind {
+        Ty::Array { elem, len, .. } => {
+            lower_array_initializer(
+                target, elem.ty, len, items, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+        Ty::Record(def_id) => {
+            lower_record_initializer(
+                target, def_id, items, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+        _ => unreachable!("scalar case handled above"),
+    }
+}
+
+/// Walker for array initialiser lists.
+#[allow(clippy::too_many_arguments)]
+fn lower_array_initializer(
+    target: HirExprId,
+    elem_ty: TyId,
+    len: Option<u64>,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    // Track which indices have been explicitly written; zero-fill the
+    // remaining slots of a known-length array at the end.
+    let mut written: FxHashSet<u64> = FxHashSet::default();
+    let mut cursor: u64 = 0;
+
+    for (desigs, sub_init) in items {
+        // A designator list resets the cursor. `[N]` for arrays, then
+        // subsequent designators drill into the element's aggregate.
+        // Here we only support a leading `[N]` designator for the
+        // array level; deeper designators are recursed into via the
+        // element-level initialiser walker.
+        let (idx, nested_desigs) = match desigs.split_first() {
+            Some((rcc_ast::Designator::Index(e), rest)) => {
+                let i = eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor);
+                (i, rest)
+            }
+            Some((rcc_ast::Designator::Field(_), _)) => {
+                // `.field` designator against an array target is a
+                // constraint violation (§6.7.8p7). Skip; typeck emits
+                // the diagnostic.
+                continue;
+            }
+            None => (cursor, &[][..]),
+        };
+
+        // Emit the assignment for this sub-initialiser, nested inside
+        // the target[idx] lvalue.
+        let index_expr = push_index_expr(target, idx, elem_ty, span, body, tcx);
+        if nested_desigs.is_empty() {
+            lower_initializer(
+                index_expr, elem_ty, sub_init, span, body, scope, crate_, tcx, resolver, session,
+                out,
+            );
+        } else {
+            // Nested designators like `{ [1].x = 5 }` — feed the
+            // remaining designators through a synthetic single-item
+            // list so the element-level walker can consume them.
+            let nested_items = vec![(nested_desigs.to_vec(), sub_init.clone())];
+            lower_initializer_list(
+                index_expr,
+                elem_ty,
+                &nested_items,
+                span,
+                body,
+                scope,
+                crate_,
+                tcx,
+                resolver,
+                session,
+                out,
+            );
+        }
+        written.insert(idx);
+        cursor = idx + 1;
+    }
+
+    // Zero-fill the tail (and any gaps, for designated inits) when the
+    // array length is known. For the classic `int a[3] = {1}` case this
+    // emits `a[1]=0; a[2]=0;` after the explicit `a[0]=1;`.
+    let _ = cursor; // only used to advance during the walk above.
+    if let Some(n) = len {
+        for i in 0..n {
+            if written.contains(&i) {
+                continue;
+            }
+            let index_expr = push_index_expr(target, i, elem_ty, span, body, tcx);
+            emit_zero_init(
+                index_expr, elem_ty, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+    }
+}
+
+/// Walker for struct/union initialiser lists.
+#[allow(clippy::too_many_arguments)]
+fn lower_record_initializer(
+    target: HirExprId,
+    def_id: DefId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    // Pull the record's fields out. If the def is incomplete (still
+    // under lowering) or isn't a Record at all, bail.
+    let (fields, is_union): (Vec<(Option<Symbol>, TyId)>, bool) = match &crate_.defs[def_id].kind {
+        DefKind::Record { fields, kind, .. } => {
+            (fields.iter().map(|f| (f.name, f.ty)).collect(), matches!(kind, RecordKind::Union))
+        }
+        _ => return,
+    };
+
+    let mut written: FxHashSet<u32> = FxHashSet::default();
+    let mut cursor: u32 = 0;
+
+    for (desigs, sub_init) in items {
+        let (field_idx, nested_desigs) = match desigs.split_first() {
+            Some((rcc_ast::Designator::Field(name), rest)) => {
+                let Some((i, _)) =
+                    fields.iter().enumerate().find(|(_, (fname, _))| *fname == Some(*name))
+                else {
+                    // Unknown field: typeck will diagnose. Skip.
+                    continue;
+                };
+                (i as u32, rest)
+            }
+            Some((rcc_ast::Designator::Index(_), _)) => {
+                // `[N]` against a struct — constraint violation.
+                continue;
+            }
+            None => (cursor, &[][..]),
+        };
+
+        if field_idx as usize >= fields.len() {
+            // Beyond the end — excess initialiser; typeck diagnoses.
+            continue;
+        }
+        let (_, field_ty) = fields[field_idx as usize];
+
+        let field_expr = push_field_expr(target, field_idx, field_ty, span, body);
+        if nested_desigs.is_empty() {
+            lower_initializer(
+                field_expr, field_ty, sub_init, span, body, scope, crate_, tcx, resolver, session,
+                out,
+            );
+        } else {
+            let nested_items = vec![(nested_desigs.to_vec(), sub_init.clone())];
+            lower_initializer_list(
+                field_expr,
+                field_ty,
+                &nested_items,
+                span,
+                body,
+                scope,
+                crate_,
+                tcx,
+                resolver,
+                session,
+                out,
+            );
+        }
+        written.insert(field_idx);
+        cursor = field_idx + 1;
+
+        // C99 §6.7.8p15-17: a union initialiser sets exactly one member.
+        if is_union {
+            break;
+        }
+    }
+
+    // Zero-fill any un-initialised struct fields (not for unions — the
+    // member selection already picks exactly one member to live).
+    if !is_union {
+        for (i, (_, field_ty)) in fields.iter().enumerate() {
+            let i = i as u32;
+            if written.contains(&i) {
+                continue;
+            }
+            let field_expr = push_field_expr(target, i, *field_ty, span, body);
+            emit_zero_init(
+                field_expr, *field_ty, span, body, scope, crate_, tcx, resolver, session, out,
+            );
+        }
+    }
+}
+
+/// Recursively zero-initialise a component whose type may itself be an
+/// aggregate. Scalar components become `comp = 0;`; nested aggregates
+/// recurse so every leaf scalar is written.
+#[allow(clippy::too_many_arguments)]
+fn emit_zero_init(
+    target: HirExprId,
+    target_ty: TyId,
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    let ty_kind = tcx.get(target_ty).clone();
+    match ty_kind {
+        Ty::Array { elem, len, .. } => {
+            if let Some(n) = len {
+                for i in 0..n {
+                    let index_expr = push_index_expr(target, i, elem.ty, span, body, tcx);
+                    emit_zero_init(
+                        index_expr, elem.ty, span, body, scope, crate_, tcx, resolver, session, out,
+                    );
+                }
+            }
+            // Unknown-length arrays can't be zero-filled here; rely on
+            // the declaration emitting a BSS slot at codegen time.
+        }
+        Ty::Record(def_id) => {
+            let fields: Vec<(Option<Symbol>, TyId)> = match &crate_.defs[def_id].kind {
+                DefKind::Record { fields, .. } => fields.iter().map(|f| (f.name, f.ty)).collect(),
+                _ => return,
+            };
+            for (i, (_, fty)) in fields.iter().enumerate() {
+                let field_expr = push_field_expr(target, i as u32, *fty, span, body);
+                emit_zero_init(
+                    field_expr, *fty, span, body, scope, crate_, tcx, resolver, session, out,
+                );
+            }
+        }
+        _ => {
+            // Scalar leaf — emit `target = 0;`. `scope` is unused for
+            // zero-init since we synthesise the RHS directly.
+            let _ = (scope, resolver, session);
+            let zero = push_int_const(0, target_ty, span, body);
+            emit_assign_stmt(target, zero, span, body, out);
+        }
+    }
+}
+
+/// Build a `target[idx]` lvalue expression and push it into `body.exprs`.
+fn push_index_expr(
+    base: HirExprId,
+    idx: u64,
+    elem_ty: TyId,
+    span: Span,
+    body: &mut Body,
+    tcx: &TyCtxt,
+) -> HirExprId {
+    let idx_id = push_int_const(i128::from(idx), tcx.int, span, body);
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: elem_ty,
+        value_cat: ValueCat::LValue,
+        span,
+        kind: HirExprKind::Index { base, index: idx_id },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Build a `target.<field_index>` lvalue expression.
+fn push_field_expr(
+    base: HirExprId,
+    field_index: u32,
+    field_ty: TyId,
+    span: Span,
+    body: &mut Body,
+) -> HirExprId {
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: field_ty,
+        value_cat: ValueCat::LValue,
+        span,
+        kind: HirExprKind::Field { base, field_index },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Push an `IntConst` expression and return its id.
+fn push_int_const(value: i128, ty: TyId, span: Span, body: &mut Body) -> HirExprId {
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::IntConst(value),
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Build an `Assign { lhs, rhs }` expression and wrap it in an
+/// `HirStmtKind::Expr` statement appended to `out`.
+fn emit_assign_stmt(
+    lhs: HirExprId,
+    rhs: HirExprId,
+    span: Span,
+    body: &mut Body,
+    out: &mut Vec<HirStmtId>,
+) {
+    // Assign expression carries the lhs type in HIR (typeck refines it
+    // later); we borrow it from the lhs node so the placeholder is at
+    // least the right shape.
+    let lhs_ty = body.exprs[lhs].ty;
+    let assign_id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: lhs_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Assign { lhs, rhs },
+    });
+    body.exprs[assign_id].id = assign_id;
+
+    let stmt_id =
+        body.stmts.push(HirStmt { id: HirStmtId(0), span, kind: HirStmtKind::Expr(assign_id) });
+    body.stmts[stmt_id].id = stmt_id;
+    out.push(stmt_id);
 }
 
 /// Lower a `for`-init declaration (C99 §6.8.5p3 allows a declaration in
@@ -5450,5 +5911,201 @@ mod tests {
         let (body, _id, _c, _r) = lower_single_expr(&mut sess, ast);
         assert_eq!(body.exprs.len(), n_ast, "one HIR expr node per AST expr node");
         assert_eq!(n_ast, 5); // Binary + Binary + 3 literals
+    }
+
+    // ── Initializer lowering (task 06-11) ───────────────────────────────
+
+    /// Helper: extract the assignment statements that follow a `LocalDecl`
+    /// inside a freshly-lowered Compound block. Returns (local id, vec of
+    /// (lhs HirExprId, rhs HirExprId)) for assert convenience.
+    fn collect_init_assigns(
+        body: &Body,
+        block_root: HirStmtId,
+    ) -> (Local, Vec<(HirExprId, HirExprId)>) {
+        let HirStmtKind::Block(ids) = &body.stmts[block_root].kind else {
+            panic!("expected block at root");
+        };
+        let mut local = None;
+        let mut out = Vec::new();
+        for sid in ids {
+            match &body.stmts[*sid].kind {
+                HirStmtKind::LocalDecl { local: l, .. } => local = Some(*l),
+                HirStmtKind::Expr(eid) => {
+                    if let HirExprKind::Assign { lhs, rhs } = &body.exprs[*eid].kind {
+                        out.push((*lhs, *rhs));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (local.expect("LocalDecl missing"), out)
+    }
+
+    /// Build a `int a[3] = {1};` decl-block and lower it through the
+    /// statement pipeline so we exercise lower_block_decl + lower_initializer
+    /// end-to-end.
+    fn lower_array_init_block(
+        sess: &mut Session,
+        name: Symbol,
+        len_text: &str,
+        items: Vec<rcc_ast::Initializer>,
+    ) -> (Body, HirStmtId) {
+        let derived = vec![rcc_ast::DerivedDeclarator::Array(rcc_ast::ArrayDeclarator {
+            quals: rcc_ast::TypeQuals::default(),
+            has_static: false,
+            star: false,
+            size: Some(int_lit(len_text, sess)),
+        })];
+        let declarator =
+            rcc_ast::Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP };
+        let init_items: Vec<(Vec<rcc_ast::Designator>, rcc_ast::Initializer)> =
+            items.into_iter().map(|i| (Vec::new(), i)).collect();
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator,
+                init: Some(rcc_ast::Initializer::List(init_items)),
+            }],
+        };
+        let block = Block { id: NodeId(0), items: vec![BlockItem::Decl(decl)], span: DUMMY_SP };
+        let s = stmt(StmtKind::Compound(block));
+        lower_single_stmt(sess, s)
+    }
+
+    #[test]
+    fn init_array_partial_zero_fills_tail_acceptance() {
+        // int a[3] = {1};  ⇒  a[0]=1; a[1]=0; a[2]=0; (acceptance bullet 1)
+        let (mut sess, _cap) = Session::for_test();
+        let a = sym(&mut sess, "a");
+        let one = rcc_ast::Initializer::Expr(int_lit("1", &mut sess));
+        let (body, root) = lower_array_init_block(&mut sess, a, "3", vec![one]);
+        let (_local, assigns) = collect_init_assigns(&body, root);
+        assert_eq!(assigns.len(), 3, "expected one assign per element, got {}", assigns.len());
+
+        // Pair (index, value) so order is deterministic for assert.
+        let mut paired: Vec<(i128, i128)> = assigns
+            .iter()
+            .map(|(lid, rid)| {
+                let i = match &body.exprs[*lid].kind {
+                    HirExprKind::Index { index, .. } => match body.exprs[*index].kind {
+                        HirExprKind::IntConst(n) => n,
+                        _ => panic!("non-IntConst index"),
+                    },
+                    other => panic!("expected Index lhs, got {other:?}"),
+                };
+                let v = match body.exprs[*rid].kind {
+                    HirExprKind::IntConst(n) => n,
+                    _ => panic!("non-IntConst rhs"),
+                };
+                (i, v)
+            })
+            .collect();
+        paired.sort_by_key(|(i, _)| *i);
+        assert_eq!(paired, vec![(0, 1), (1, 0), (2, 0)]);
+    }
+
+    #[test]
+    fn init_array_designator_resets_cursor() {
+        // int a[3] = { [2] = 7 };  ⇒  a[2]=7; a[0]=0; a[1]=0;
+        let (mut sess, _cap) = Session::for_test();
+        let a = sym(&mut sess, "a");
+        let derived = vec![rcc_ast::DerivedDeclarator::Array(rcc_ast::ArrayDeclarator {
+            quals: rcc_ast::TypeQuals::default(),
+            has_static: false,
+            star: false,
+            size: Some(int_lit("3", &mut sess)),
+        })];
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator: rcc_ast::Declarator {
+                    name: Some((a, DUMMY_SP)),
+                    derived,
+                    span: DUMMY_SP,
+                },
+                init: Some(rcc_ast::Initializer::List(vec![(
+                    vec![rcc_ast::Designator::Index(int_lit("2", &mut sess))],
+                    rcc_ast::Initializer::Expr(int_lit("7", &mut sess)),
+                )])),
+            }],
+        };
+        let block = Block { id: NodeId(0), items: vec![BlockItem::Decl(decl)], span: DUMMY_SP };
+        let s = stmt(StmtKind::Compound(block));
+        let (body, root) = lower_single_stmt(&mut sess, s);
+        let (_local, assigns) = collect_init_assigns(&body, root);
+        assert_eq!(assigns.len(), 3);
+
+        let mut paired: Vec<(i128, i128)> = assigns
+            .iter()
+            .map(|(lid, rid)| {
+                let i = match &body.exprs[*lid].kind {
+                    HirExprKind::Index { index, .. } => match body.exprs[*index].kind {
+                        HirExprKind::IntConst(n) => n,
+                        _ => panic!(),
+                    },
+                    _ => panic!(),
+                };
+                let v = match body.exprs[*rid].kind {
+                    HirExprKind::IntConst(n) => n,
+                    _ => panic!(),
+                };
+                (i, v)
+            })
+            .collect();
+        paired.sort_by_key(|(i, _)| *i);
+        assert_eq!(paired, vec![(0, 0), (1, 0), (2, 7)]);
+    }
+
+    #[test]
+    fn init_scalar_brace_wrapper_unwraps() {
+        // int x = { 5 };  ⇒  x = 5;  (single Assign statement)
+        let (mut sess, _cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator: named_declarator(x),
+                init: Some(rcc_ast::Initializer::List(vec![(
+                    Vec::new(),
+                    rcc_ast::Initializer::Expr(int_lit("5", &mut sess)),
+                )])),
+            }],
+        };
+        let block = Block { id: NodeId(0), items: vec![BlockItem::Decl(decl)], span: DUMMY_SP };
+        let s = stmt(StmtKind::Compound(block));
+        let (body, root) = lower_single_stmt(&mut sess, s);
+        let (_local, assigns) = collect_init_assigns(&body, root);
+        assert_eq!(assigns.len(), 1);
+        assert!(matches!(body.exprs[assigns[0].1].kind, HirExprKind::IntConst(5)));
+    }
+
+    #[test]
+    fn init_array_full_explicit_no_zero_fill() {
+        // int a[3] = {10, 20, 30};  ⇒  exactly three assigns, no zero-fill.
+        let (mut sess, _cap) = Session::for_test();
+        let a = sym(&mut sess, "a");
+        let items = vec![
+            rcc_ast::Initializer::Expr(int_lit("10", &mut sess)),
+            rcc_ast::Initializer::Expr(int_lit("20", &mut sess)),
+            rcc_ast::Initializer::Expr(int_lit("30", &mut sess)),
+        ];
+        let (body, root) = lower_array_init_block(&mut sess, a, "3", items);
+        let (_local, assigns) = collect_init_assigns(&body, root);
+        assert_eq!(assigns.len(), 3);
+        let mut values: Vec<i128> = assigns
+            .iter()
+            .map(|(_, rid)| match body.exprs[*rid].kind {
+                HirExprKind::IntConst(n) => n,
+                _ => panic!(),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, vec![10, 20, 30]);
     }
 }
