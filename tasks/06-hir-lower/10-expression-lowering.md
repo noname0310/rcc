@@ -5,7 +5,7 @@
 **Phase:** 06-hir-lower    **Depends on:** 06-02    **Milestone:** M2
 
 ## Goal
-Map every `cc_ast::ExprKind` variant to `cc_hir::HirExprKind`, resolving
+Map every `rcc_ast::ExprKind` variant to `rcc_hir::HirExprKind`, resolving
 identifier references. Types are still placeholders (`TyCtxt::error`);
 the typeck phase fills them in.
 

@@ -30,7 +30,7 @@ enum Mode {
 
 /// Run conformance suites against `rcc` and emit a JSON report.
 #[derive(Parser)]
-#[command(name = "cc_conformance_run")]
+#[command(name = "rcc_conformance_run")]
 struct Cli {
     /// Path to the `rcc` binary under test.
     #[arg(long)]

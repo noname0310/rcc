@@ -11,7 +11,7 @@ use rcc_conformance::Report;
 
 /// Render the conformance dashboard from JSON into Markdown.
 #[derive(Parser)]
-#[command(name = "cc_conformance_render")]
+#[command(name = "rcc_conformance_render")]
 struct Cli {
     /// Path to the JSON report (default: `docs/conformance.json`).
     #[arg(long, default_value = "docs/conformance.json")]

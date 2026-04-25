@@ -29,7 +29,7 @@ Run the preprocessor portion of chibicc's `test/macro.c` (and
 ## Notes (agent)
 
 Landed infrastructure (driver `--emit=pp` short-circuit, `ChibiccAdapter`
-preprocess mode, `cc_conformance_run --mode preprocess`, in-process
+preprocess mode, `rcc_conformance_run --mode preprocess`, in-process
 integration tests) and cleanly passing fixtures (`typedef.c`,
 `include1.h` chain). `macro.c` is blocked from 100 % by four
 GNU-extension gaps traced to follow-up task

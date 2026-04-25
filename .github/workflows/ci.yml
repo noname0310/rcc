@@ -114,7 +114,7 @@ jobs:
         run: cargo build --release --bin rcc
       - name: Run conformance
         run: |
-          cargo run --release --package rcc_conformance --bin cc_conformance_run -- \
+          cargo run --release --package rcc_conformance --bin rcc_conformance_run -- \
             --rcc target/release/rcc \
             --suite c-testsuite \
             --suite chibicc

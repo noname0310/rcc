@@ -11,17 +11,17 @@ that runs every configured suite and serialises the `Report` to
 truth for `docs/conformance.md`.
 
 ## Scope
-- In: new `bin/cc_conformance_run.rs`; CLI flags: `--rcc <path>`,
+- In: new `bin/rcc_conformance_run.rs`; CLI flags: `--rcc <path>`,
   `--suite <name>` (may repeat), `--output <path>`, `--include-gpl`.
 - Out: the markdown renderer (task 11).
 
 ## Deliverables
-- `crates/rcc_conformance/src/bin/cc_conformance_run.rs`.
+- `crates/rcc_conformance/src/bin/rcc_conformance_run.rs`.
 - `Report::to_json_pretty` is exercised by a new integration test
   asserting round-trip `serde` works.
 
 ## Acceptance
-- `cargo run --release --package rcc_conformance --bin cc_conformance_run \
+- `cargo run --release --package rcc_conformance --bin rcc_conformance_run \
     --rcc target/release/rcc --suite c-testsuite --suite chibicc` produces a
   valid JSON with per-case outcomes.
 - JSON shape matches the `SuiteReport` / `Outcome` enum in

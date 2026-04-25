@@ -5,7 +5,7 @@
 **Phase:** 06-hir-lower    **Depends on:** 06-02, 06-04    **Milestone:** M2
 
 ## Goal
-Map every `cc_ast::StmtKind` variant to a `cc_hir::HirStmtKind`.
+Map every `rcc_ast::StmtKind` variant to a `rcc_hir::HirStmtKind`.
 Local variables encountered along the way populate `Body::locals`;
 `HirStmtKind::LocalDecl { local, init }` records the binding.
 

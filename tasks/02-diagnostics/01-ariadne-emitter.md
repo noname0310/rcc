@@ -15,7 +15,7 @@ uses the `ariadne` crate to render:
 ## Scope
 - In: `crates/rcc_errors/src/emitter.rs` rewrite of `StderrEmitter`;
   integrate `ariadne::Report` / `Source`; pull file contents from
-  `cc_span::SourceMap` via a small adapter trait.
+  `rcc_span::SourceMap` via a small adapter trait.
 - Out: multi-file rendering (task 03).
 
 ## Deliverables

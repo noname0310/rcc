@@ -9,12 +9,12 @@ publish.workspace = true
 description = "External C test-suite runner and reporting"
 
 [[bin]]
-name = "cc_conformance_run"
-path = "src/bin/cc_conformance_run.rs"
+name = "rcc_conformance_run"
+path = "src/bin/rcc_conformance_run.rs"
 
 [[bin]]
-name = "cc_conformance_render"
-path = "src/bin/cc_conformance_render.rs"
+name = "rcc_conformance_render"
+path = "src/bin/rcc_conformance_render.rs"
 
 [dependencies]
 anyhow     = { workspace = true }

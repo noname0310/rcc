@@ -13,7 +13,7 @@ cargo run --release --package rcc_conformance
 
 ### Modes
 
-`cc_conformance_run` accepts a `--mode` flag (default `compile`):
+`rcc_conformance_run` accepts a `--mode` flag (default `compile`):
 
 ```bash
 # chibicc preprocessor-only gate (task 04-18, milestone M5)

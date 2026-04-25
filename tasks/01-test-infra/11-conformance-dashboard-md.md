@@ -9,7 +9,7 @@ intro text (above a fenced `<!-- BEGIN autogen -->` marker) and only
 rewrites the autogen block.
 
 ## Scope
-- In: `crates/rcc_conformance/src/bin/cc_conformance_render.rs`;
+- In: `crates/rcc_conformance/src/bin/rcc_conformance_render.rs`;
   `<!-- BEGIN autogen -->` / `<!-- END autogen -->` sentinel handling;
   percentages computed as `(pass + xfail) / discovered` with single
   decimal place.
