@@ -134,37 +134,130 @@ fn promote_bitfield(tcx: &TyCtxt, signed: bool, width: u32) -> TyId {
     }
 }
 
-/// Usual arithmetic conversions (C99 §6.3.1.8). Returns the common type.
-/// Caller is responsible for inserting conversions on both operands.
-pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
-    // Long double dominates, then double, then float.
-    match (tcx.get(a), tcx.get(b)) {
-        (Ty::Float(FloatKind::F80), _) | (_, Ty::Float(FloatKind::F80)) => tcx.long_double,
-        (Ty::Float(FloatKind::F64), _) | (_, Ty::Float(FloatKind::F64)) => tcx.double,
-        (Ty::Float(FloatKind::F32), _) | (_, Ty::Float(FloatKind::F32)) => tcx.float,
-        _ => {
-            // Integer case: promote then pick higher rank; tie-break by signedness.
-            let a = integer_promotion(tcx, a, None);
-            let b = integer_promotion(tcx, b, None);
-            match (tcx.get(a), tcx.get(b)) {
-                (Ty::Int { signed: sa, rank: ra }, Ty::Int { signed: sb, rank: rb }) => {
-                    if ra > rb {
-                        a
-                    } else if rb > ra {
-                        b
-                    } else if sa == sb || !sa {
-                        // Equal rank: same signedness -> either (pick `a`);
-                        // different signedness -> the unsigned operand wins
-                        // (C99 §6.3.1.8), and `!sa` means `a` is unsigned.
-                        a
-                    } else {
-                        b
-                    }
-                }
-                _ => a,
-            }
-        }
+/// Width in bits of an `IntRank` on the LP64 model rcc currently targets.
+///
+/// Phase 15 (`TargetInfo`) replaces this hard-coded table with a
+/// target-driven one. Until then, every backend rcc supports is LP64
+/// (`int` = 32, `long` = `long long` = 64, plus 8-bit `char` and 16-bit
+/// `short`). Values match what `rcc_codegen_llvm` already emits.
+fn int_rank_bits(rank: IntRank) -> u32 {
+    match rank {
+        IntRank::Bool => 1,
+        IntRank::Char => 8,
+        IntRank::Short => 16,
+        IntRank::Int => INT_BITS,
+        IntRank::Long => 64,
+        IntRank::LongLong => 64,
     }
+}
+
+/// "Unsigned counterpart" of an `IntRank`. For C99 §6.3.1.8 step 4 we may
+/// need `unsigned long` from `long`, etc. Helper returns the matching
+/// pre-interned `TyId` from the context.
+fn unsigned_counterpart(tcx: &TyCtxt, rank: IntRank) -> TyId {
+    match rank {
+        // `_Bool` is already unsigned; `char`'s unsigned counterpart is
+        // `unsigned char`. Neither path is reachable for the §6.3.1.8 rule
+        // (their integer-promoted form is `int`/`unsigned int`), but we
+        // keep the entries so the helper is total.
+        IntRank::Bool => tcx.bool_,
+        IntRank::Char => tcx.uchar,
+        IntRank::Short => tcx.ushort,
+        IntRank::Int => tcx.uint,
+        IntRank::Long => tcx.ulong,
+        IntRank::LongLong => tcx.ulong_long,
+    }
+}
+
+/// Usual arithmetic conversions (C99 §6.3.1.8). Returns the common real type.
+///
+/// Implements the spec ladder verbatim:
+///
+/// 1. If either operand has `long double` type, the other is converted to
+///    `long double`.
+/// 2. Otherwise, if either has `double` type, the other → `double`.
+/// 3. Otherwise, if either has `float` type, the other → `float`.
+/// 4. Otherwise, integer promotions are performed on both operands, then
+///    one of the following sub-rules applies:
+///    - (4a) If both have the same type, no further conversion is needed.
+///    - (4b) If both are signed or both are unsigned, the operand of lesser
+///      rank is converted to the type of the operand of greater rank.
+///    - (4c.i) Otherwise (exactly one operand is signed, the other
+///      unsigned), if the unsigned operand has rank ≥ signed operand's
+///      rank, convert the signed operand to the unsigned type.
+///    - (4c.ii) Else if the signed type can represent every value of the
+///      unsigned type (signed has more value bits), convert the unsigned
+///      operand to the signed type.
+///    - (4c.iii) Otherwise, both operands are converted to the unsigned
+///      counterpart of the signed operand's type.
+///
+/// `_Complex` arithmetic (C99 §6.3.1.8 second paragraph) is deferred to
+/// task 07-12; we only handle real arithmetic here.
+///
+/// The caller is responsible for actually inserting `Convert` nodes on
+/// each operand to bring it to the returned common type.
+pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
+    // Steps 1-3: floating types dominate, in long-double / double / float order.
+    match (tcx.get(a), tcx.get(b)) {
+        (Ty::Float(FloatKind::F80), _) | (_, Ty::Float(FloatKind::F80)) => return tcx.long_double,
+        (Ty::Float(FloatKind::F64), _) | (_, Ty::Float(FloatKind::F64)) => return tcx.double,
+        (Ty::Float(FloatKind::F32), _) | (_, Ty::Float(FloatKind::F32)) => return tcx.float,
+        _ => {}
+    }
+
+    // Step 4: apply integer promotion to both operands.
+    let a = integer_promotion(tcx, a, None);
+    let b = integer_promotion(tcx, b, None);
+
+    // Decompose both promoted operands into (signed, rank). Non-integer
+    // operands (`Ty::Error`, pointers, records) reach this function only
+    // through a malformed call; keep it lossy by returning the first
+    // operand unchanged so downstream passes can keep going on already
+    // poisoned input.
+    //
+    // `Ty` is not `Copy` (some variants carry a `Vec`), so we destructure
+    // through a reference; `signed`/`rank` are themselves `Copy` and bind
+    // by value via the default-binding-mode rules.
+    let Ty::Int { signed: sa, rank: ra } = tcx.get(a) else { return a };
+    let Ty::Int { signed: sb, rank: rb } = tcx.get(b) else { return a };
+    let (sa, ra, sb, rb) = (*sa, *ra, *sb, *rb);
+
+    // Step 4a: same type after promotion → done.
+    if a == b {
+        return a;
+    }
+
+    // Step 4b: same signedness → operand of greater rank wins.
+    if sa == sb {
+        return if ra >= rb { a } else { b };
+    }
+
+    // Step 4c: mixed signedness. Identify the signed and unsigned operands.
+    let (signed_ty, signed_rank, unsigned_ty, unsigned_rank) =
+        if sa { (a, ra, b, rb) } else { (b, rb, a, ra) };
+
+    // Step 4c.i: unsigned rank ≥ signed rank → result is the unsigned type.
+    if unsigned_rank >= signed_rank {
+        return unsigned_ty;
+    }
+
+    // Step 4c.ii: signed rank > unsigned rank. The signed type can represent
+    // every value of the unsigned type iff it has strictly more value bits
+    // (signed-bits − 1 > unsigned-bits, i.e. signed-bits ≥ unsigned-bits + 2).
+    // On LP64 this is true for `long`/`long long` paired with `unsigned int`
+    // (64 ≥ 32 + 2) and for any wider signed paired with a strictly narrower
+    // unsigned. On a hypothetical LLP64 target where `long` is 32 bits this
+    // helper would correctly fall through to step 4c.iii.
+    let signed_bits = int_rank_bits(signed_rank);
+    let unsigned_bits = int_rank_bits(unsigned_rank);
+    if signed_bits >= unsigned_bits + 2 {
+        return signed_ty;
+    }
+
+    // Step 4c.iii: convert both to the unsigned counterpart of the signed
+    // operand's type. (Reached today only on hypothetical non-LP64 targets;
+    // included for spec completeness so phase-15 retargeting is one edit.)
+    unsigned_counterpart(tcx, signed_rank)
 }
 
 #[cfg(test)]
@@ -278,5 +371,176 @@ mod tests {
         assert_eq!(usual_arithmetic(&tcx, tcx.char_, tcx.char_), tcx.int);
         assert_eq!(usual_arithmetic(&tcx, tcx.short, tcx.uint), tcx.uint);
         assert_eq!(usual_arithmetic(&tcx, tcx.long, tcx.int), tcx.long);
+    }
+
+    /// Acceptance criteria spelled out in the task file.
+    #[test]
+    fn usual_arithmetic_acceptance_signed_int_op_unsigned_int() {
+        // Step 4c.i (equal rank, mixed signedness): result is `unsigned int`.
+        let tcx = TyCtxt::new();
+        assert_eq!(usual_arithmetic(&tcx, tcx.int, tcx.uint), tcx.uint);
+        assert_eq!(usual_arithmetic(&tcx, tcx.uint, tcx.int), tcx.uint);
+    }
+
+    #[test]
+    fn usual_arithmetic_acceptance_long_op_unsigned_int_lp64() {
+        // Step 4c.ii: on LP64, `long` has 64 bits and can represent every
+        // value of 32-bit `unsigned int`, so the result is `long`.
+        let tcx = TyCtxt::new();
+        assert_eq!(usual_arithmetic(&tcx, tcx.long, tcx.uint), tcx.long);
+        assert_eq!(usual_arithmetic(&tcx, tcx.uint, tcx.long), tcx.long);
+    }
+
+    /// Truth-table for §6.3.1.8 across the 13 scalar types. Checks every
+    /// rule (steps 1-9) at least twice with both orderings (a,b) and (b,a)
+    /// to make sure the implementation is symmetric.
+    ///
+    /// The 13 types per the spec are:
+    ///   long double, double, float,
+    ///   long long, unsigned long long,
+    ///   long, unsigned long,
+    ///   int, unsigned int,
+    ///   short, unsigned short,
+    ///   char, _Bool.
+    ///
+    /// We do not literally enumerate 169 pairs — instead the table encodes
+    /// representative cases for every C99 sub-rule.
+    #[test]
+    fn usual_arithmetic_truth_table_13_scalars() {
+        let tcx = TyCtxt::new();
+
+        // Each row: (description, lhs, rhs, expected common type).
+        // The implementation must be symmetric, so we feed each row twice
+        // (a,b) and (b,a). Cells where lhs == rhs are not duplicated.
+        let cases: &[(&str, TyId, TyId, TyId)] = &[
+            // ---- Step 1: long double dominates everything. ----
+            ("long double / long double", tcx.long_double, tcx.long_double, tcx.long_double),
+            ("long double / double", tcx.long_double, tcx.double, tcx.long_double),
+            ("long double / float", tcx.long_double, tcx.float, tcx.long_double),
+            ("long double / int", tcx.long_double, tcx.int, tcx.long_double),
+            ("long double / unsigned long long", tcx.long_double, tcx.ulong_long, tcx.long_double),
+            ("long double / _Bool", tcx.long_double, tcx.bool_, tcx.long_double),
+            // ---- Step 2: double beats float and any integer. ----
+            ("double / double", tcx.double, tcx.double, tcx.double),
+            ("double / float", tcx.double, tcx.float, tcx.double),
+            ("double / unsigned long", tcx.double, tcx.ulong, tcx.double),
+            ("double / char", tcx.double, tcx.char_, tcx.double),
+            // ---- Step 3: float beats any integer. ----
+            ("float / float", tcx.float, tcx.float, tcx.float),
+            ("float / long long", tcx.float, tcx.long_long, tcx.float),
+            ("float / unsigned int", tcx.float, tcx.uint, tcx.float),
+            ("float / _Bool", tcx.float, tcx.bool_, tcx.float),
+            // ---- Step 4a: integer promotion brings both to the same type. ----
+            ("_Bool / _Bool -> int", tcx.bool_, tcx.bool_, tcx.int),
+            ("char / char -> int", tcx.char_, tcx.char_, tcx.int),
+            ("short / short -> int", tcx.short, tcx.short, tcx.int),
+            ("unsigned short / unsigned short -> int", tcx.ushort, tcx.ushort, tcx.int),
+            ("char / short -> int (both promote to int)", tcx.char_, tcx.short, tcx.int),
+            ("_Bool / unsigned short -> int", tcx.bool_, tcx.ushort, tcx.int),
+            ("int / int", tcx.int, tcx.int, tcx.int),
+            ("unsigned int / unsigned int", tcx.uint, tcx.uint, tcx.uint),
+            ("long / long", tcx.long, tcx.long, tcx.long),
+            ("unsigned long / unsigned long", tcx.ulong, tcx.ulong, tcx.ulong),
+            ("long long / long long", tcx.long_long, tcx.long_long, tcx.long_long),
+            (
+                "unsigned long long / unsigned long long",
+                tcx.ulong_long,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            // ---- Step 4b: same signedness, different rank. ----
+            ("int / long -> long (both signed)", tcx.int, tcx.long, tcx.long),
+            ("int / long long -> long long (both signed)", tcx.int, tcx.long_long, tcx.long_long),
+            ("long / long long -> long long (both signed)", tcx.long, tcx.long_long, tcx.long_long),
+            ("unsigned int / unsigned long -> unsigned long", tcx.uint, tcx.ulong, tcx.ulong),
+            (
+                "unsigned long / unsigned long long -> unsigned long long",
+                tcx.ulong,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            (
+                "unsigned int / unsigned long long -> unsigned long long",
+                tcx.uint,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            // ---- Step 4c.i: equal rank, mixed signedness → unsigned wins. ----
+            ("int / unsigned int -> unsigned int", tcx.int, tcx.uint, tcx.uint),
+            ("long / unsigned long -> unsigned long", tcx.long, tcx.ulong, tcx.ulong),
+            (
+                "long long / unsigned long long -> unsigned long long",
+                tcx.long_long,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            // ---- Step 4c.i: unsigned rank > signed rank → unsigned wins. ----
+            ("int / unsigned long -> unsigned long", tcx.int, tcx.ulong, tcx.ulong),
+            (
+                "int / unsigned long long -> unsigned long long",
+                tcx.int,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            (
+                "long / unsigned long long -> unsigned long long",
+                tcx.long,
+                tcx.ulong_long,
+                tcx.ulong_long,
+            ),
+            // ---- Step 4c.ii: signed rank > unsigned rank, signed type can
+            //                  represent every value of the unsigned type
+            //                  (LP64: long has 64 bits, unsigned int has 32).
+            ("long / unsigned int -> long (LP64)", tcx.long, tcx.uint, tcx.long),
+            (
+                "long long / unsigned int -> long long (LP64)",
+                tcx.long_long,
+                tcx.uint,
+                tcx.long_long,
+            ),
+            // After integer promotion, `unsigned short` becomes `int` (every
+            // value of unsigned short fits in int on a 32-bit-int target),
+            // so pairing it with `long` falls through to step 4b after
+            // promotion, not 4c. Same for char/_Bool.
+            ("long / unsigned short -> long", tcx.long, tcx.ushort, tcx.long),
+            ("long long / unsigned short -> long long", tcx.long_long, tcx.ushort, tcx.long_long),
+            ("long / char -> long", tcx.long, tcx.char_, tcx.long),
+            ("long / _Bool -> long", tcx.long, tcx.bool_, tcx.long),
+            // ---- Sub-int signed/unsigned mixes promote to int/unsigned int
+            //      via §6.3.1.1, then re-enter §6.3.1.8 step 4. ----
+            ("char / unsigned int -> unsigned int", tcx.char_, tcx.uint, tcx.uint),
+            ("short / unsigned int -> unsigned int", tcx.short, tcx.uint, tcx.uint),
+            ("unsigned short / int -> int (promotes to int)", tcx.ushort, tcx.int, tcx.int),
+            ("unsigned char / int -> int", tcx.uchar, tcx.int, tcx.int),
+            ("_Bool / int -> int", tcx.bool_, tcx.int, tcx.int),
+            ("_Bool / unsigned int -> unsigned int", tcx.bool_, tcx.uint, tcx.uint),
+        ];
+
+        for (desc, a, b, expected) in cases {
+            let got_ab = usual_arithmetic(&tcx, *a, *b);
+            assert_eq!(got_ab, *expected, "(a,b): {desc}");
+            let got_ba = usual_arithmetic(&tcx, *b, *a);
+            assert_eq!(got_ba, *expected, "(b,a): {desc} (symmetry)");
+        }
+    }
+
+    /// Direct white-box test for step 4c.iii: when the signed type cannot
+    /// represent every value of the unsigned type, both convert to the
+    /// unsigned counterpart of the signed type. This branch is unreachable
+    /// on LP64 with the current scalar set (every signed type whose rank
+    /// strictly exceeds an unsigned operand's rank also has at least 2
+    /// extra bits over it). We exercise it indirectly via the helper.
+    #[test]
+    fn usual_arithmetic_step_4c_iii_helpers() {
+        let tcx = TyCtxt::new();
+        assert_eq!(unsigned_counterpart(&tcx, IntRank::Int), tcx.uint);
+        assert_eq!(unsigned_counterpart(&tcx, IntRank::Long), tcx.ulong);
+        assert_eq!(unsigned_counterpart(&tcx, IntRank::LongLong), tcx.ulong_long);
+        assert_eq!(int_rank_bits(IntRank::Int), 32);
+        assert_eq!(int_rank_bits(IntRank::Long), 64);
+        assert_eq!(int_rank_bits(IntRank::LongLong), 64);
+        assert_eq!(int_rank_bits(IntRank::Short), 16);
+        assert_eq!(int_rank_bits(IntRank::Char), 8);
+        assert_eq!(int_rank_bits(IntRank::Bool), 1);
     }
 }

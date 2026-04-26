@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-02: Usual Arithmetic Conversion table
 
 **Phase:** 07-typeck    **Depends on:** 07-01    **Milestone:** M3
