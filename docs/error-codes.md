@@ -688,6 +688,30 @@ enum { B };               // error[E0078]: duplicate enumerator name `B`
 
 ---
 
+## E0080 — assignment to rvalue
+
+C99 §6.5.16p2 requires the left operand of a simple or compound
+assignment to be a *modifiable lvalue*. The narrower constraint that
+the LHS be an lvalue at all is checked first — writing to the result
+of a cast, an arithmetic expression, a literal, a function call, or
+any other expression that does not designate an object is a
+constraint violation. (The "modifiable" half — rejecting writes to
+const-qualified objects, array types, and the like — piggybacks on
+the same code; see task 07-05.)
+
+```c
+void f(int x) {
+    (int)x = 1;     // error[E0080]: assignment to rvalue
+    1 = x;          // error[E0080]: assignment to rvalue
+    x + 0 = 1;      // error[E0080]: assignment to rvalue
+}
+```
+
+`x = 1;` on a plain `int` local is well-formed: an identifier
+referring to an object is an lvalue.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

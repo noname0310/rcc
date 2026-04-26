@@ -75,6 +75,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0076, E0076_DESC),
     (E0077, E0077_DESC),
     (E0078, E0078_DESC),
+    (E0080, E0080_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -434,6 +435,18 @@ const E0078_DESC: &str = "duplicate enumerator name";
 /// named bit-fields with this code.
 pub const E0077: &str = "E0077";
 const E0077_DESC: &str = "invalid bit-field width";
+
+/// Assignment to an rvalue.
+///
+/// C99 §6.5.16p2 requires the left operand of a simple or compound
+/// assignment to be a modifiable lvalue. The narrower constraint that
+/// the LHS be an lvalue at all is checked first: writing to the
+/// result of a cast (`(int)x = 1;`), an arithmetic expression, a
+/// literal, or any other rvalue is rejected with this code. The
+/// "modifiable" half (const-qualified objects, array types, etc.)
+/// piggybacks on this code in task 07-05.
+pub const E0080: &str = "E0080";
+const E0080_DESC: &str = "assignment to rvalue";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

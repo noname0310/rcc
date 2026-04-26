@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-04: lvalue / rvalue and the L→R conversion
 
 **Phase:** 07-typeck    **Depends on:** 07-03    **Milestone:** M3

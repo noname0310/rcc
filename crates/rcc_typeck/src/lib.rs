@@ -342,6 +342,163 @@ pub fn decay_if_needed(
     id
 }
 
+/// Compute the value category of `expr` per C99 §6.3.2.1.
+///
+/// An *lvalue* is an expression that designates an object; an *rvalue*
+/// (or, in the standard's wording, the value of an expression that is
+/// not an lvalue) is everything else — including the value-producing
+/// result of a cast, a function call, a binary operator, address-of,
+/// etc. C99 §6.3.2.1p1 enumerates the lvalue-producing forms; this
+/// function is the canonical encoder of that table for HIR.
+///
+/// The classification is computed *from the kind*, not read from
+/// `HirExpr::value_cat`: lowering writes a best-guess category as the
+/// nodes are produced, but the type-checker must own the final answer
+/// because lowering does not have full type information yet (e.g. the
+/// distinction between a function designator and a regular identifier
+/// depends on the resolved `DefKind`).
+///
+/// The rules implemented here are:
+///
+/// | HIR kind                                        | Category |
+/// |-------------------------------------------------|----------|
+/// | `IntConst`, `FloatConst`                         | rvalue   |
+/// | `StringRef`                                      | lvalue   |
+/// | `LocalRef`, `DefRef`                             | lvalue   |
+/// | `Deref(p)` (i.e. `*p`)                           | lvalue   |
+/// | `Index { base, .. }` (`a[i]` lowered to `*(a+i)`)| lvalue   |
+/// | `Field { base, .. }` (`s.f`, `p->f`)             | inherits from `base` |
+/// | `Convert { kind: LvalueToRvalue }`              | rvalue   |
+/// | `Convert { kind: ArrayToPtr | FuncToPtr }`      | rvalue   |
+/// | other `Convert { .. }`                          | rvalue   |
+/// | `Cast { .. }`                                   | rvalue   |
+/// | `Binary`, `Unary`, `Call`                       | rvalue   |
+/// | `AddressOf`                                     | rvalue   |
+/// | `Cond`, `Comma`, `Assign`                       | rvalue   |
+///
+/// Notes:
+/// - `Field` follows the base because C99 §6.5.2.3p3 says `s.f` is an
+///   lvalue iff `s` is. The `p->f` case is always an lvalue and is
+///   already represented as `Field { base: Deref(p), .. }` in HIR, so
+///   the recursive rule produces the right answer without a special
+///   case.
+/// - Pre/post increment and decrement are *rvalues*: they produce the
+///   updated (or original) value, not an lvalue designating the
+///   modified object (C99 §6.5.3.1p2 and §6.5.2.4p2). They're carried
+///   in `Unary`, which uniformly returns rvalue.
+/// - Assignment expressions (`a = b`) are rvalues per C99 §6.5.16p3.
+pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
+    match body.exprs[expr].kind {
+        // Constants and arithmetic / pointer-producing operators.
+        HirExprKind::IntConst(_)
+        | HirExprKind::FloatConst(_)
+        | HirExprKind::Binary { .. }
+        | HirExprKind::Unary { .. }
+        | HirExprKind::Call { .. }
+        | HirExprKind::Cast { .. }
+        | HirExprKind::AddressOf(_)
+        | HirExprKind::Cond { .. }
+        | HirExprKind::Comma { .. }
+        | HirExprKind::Assign { .. }
+        | HirExprKind::Convert { .. } => ValueCat::RValue,
+
+        // Identifier-style designators are lvalues. String literals are
+        // arrays of `char` (with static storage duration) and §6.4.5p6
+        // makes them lvalues that decay to pointers in most contexts.
+        HirExprKind::LocalRef(_)
+        | HirExprKind::DefRef(_)
+        | HirExprKind::StringRef(_)
+        | HirExprKind::Deref(_)
+        | HirExprKind::Index { .. } => ValueCat::LValue,
+
+        // `s.f` is an lvalue iff `s` is. `p->f` is lowered as
+        // `Field { base: Deref(p), .. }`, so this also covers it.
+        HirExprKind::Field { base, .. } => value_category(body, base),
+    }
+}
+
+/// Apply the C99 §6.3.2.1p2 lvalue-to-rvalue conversion to `expr` if
+/// needed. Returns the id of either:
+///
+/// * the original expression, or
+/// * a freshly-pushed `Convert { kind: LvalueToRvalue }` wrapper whose
+///   type strips top-level qualifiers (§6.3.2.1p2: "the value has the
+///   unqualified version of the type of the lvalue") and whose
+///   `value_cat` is `RValue`.
+///
+/// The conversion is *not* applied to:
+///
+/// * expressions of array type — those decay via `decay_if_needed`
+///   (§6.3.2.1p3) and the lvalue-to-rvalue rule explicitly excludes
+///   them ("except when it is the operand of … or is an array");
+/// * expressions that are already rvalues (no-op);
+/// * function designators — handled by `decay_if_needed`.
+///
+/// Callers responsible for context-specific exemptions (operand of
+/// `sizeof`, `&`, the LHS of `=` / `op=`, `++`/`--`) must simply not
+/// call this helper in those positions. The helper is the unconditional
+/// "force this position to an rvalue" primitive; the calling-side
+/// decision of whether to force is in task 07-07.
+pub fn lvalue_to_rvalue_if_needed(tcx: &mut TyCtxt, body: &mut Body, expr: HirExprId) -> HirExprId {
+    if value_category(body, expr) == ValueCat::RValue {
+        return expr;
+    }
+
+    let orig_ty = body.exprs[expr].ty;
+
+    // Arrays and functions don't take this path (they decay first).
+    // We're conservative here: if the operand still has array/function
+    // type by the time we're invoked, leave it alone — `decay_if_needed`
+    // is the right tool.
+    match tcx.get(orig_ty) {
+        Ty::Array { .. } | Ty::Func { .. } => return expr,
+        _ => {}
+    }
+
+    // C99 §6.3.2.1p2: the converted value has the *unqualified* version
+    // of the lvalue's type. For our `Ty` model qualifiers ride on the
+    // pointee inside `Ptr` / `Array::elem`; the top-level `TyId` for an
+    // ordinary scalar already has no qualifiers, so no rewrite is
+    // required. Pointer-to-qualified-T stays pointer-to-qualified-T:
+    // the qualifier belongs to the pointee, not the pointer value.
+    let new_ty = orig_ty;
+    let span = body.exprs[expr].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: new_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: expr, kind: ConvertKind::LvalueToRvalue },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Verify that `lhs` is an lvalue, suitable as the destination of an
+/// assignment (`=` or any compound `op=`). Emits E0080 ("assignment to
+/// rvalue") when the LHS is not an lvalue and returns `false`. The
+/// caller is then free to either keep going (the typechecker will paper
+/// over the constraint violation downstream) or skip further checks on
+/// the offending statement.
+///
+/// This helper covers C99 §6.5.16p2's *lvalue* requirement only. The
+/// orthogonal *modifiable*-lvalue requirement (no const-qualified
+/// objects, no array types, no incomplete types, no const-qualified
+/// member of a struct/union, …) lives in task 07-05.
+pub fn check_assignment_lhs(session: &mut Session, body: &Body, lhs: HirExprId) -> bool {
+    if value_category(body, lhs) == ValueCat::LValue {
+        return true;
+    }
+
+    let span = body.exprs[lhs].span;
+    session
+        .handler
+        .struct_err(span, "assignment to rvalue: left operand must designate an object")
+        .code(rcc_errors::codes::E0080)
+        .emit();
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,5 +1040,399 @@ mod tests {
             }
             other => panic!("expected Ptr(const int), got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // value_category — every HirExprKind arm.
+    // ------------------------------------------------------------------
+
+    use rcc_hir::{rcc_hir_binop::BinOp, rcc_hir_binop::UnOp, DefId, Local};
+
+    /// Push a fully-typed `HirExpr` with the given `kind` and return its id.
+    /// `value_cat` here is the *lowering-time guess* that lib.rs writes; the
+    /// type-checker is supposed to override it via `value_category`. We
+    /// deliberately set it to the WRONG category in some of these tests so
+    /// that any accidental "read it back from value_cat" implementation gets
+    /// caught.
+    fn push_kind(body: &mut Body, ty: TyId, kind: HirExprKind) -> HirExprId {
+        let id = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty,
+            // Sentinel: the unit under test must derive the answer from
+            // `kind`, not echo this back.
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind,
+        });
+        body.exprs[id].id = id;
+        id
+    }
+
+    /// Acceptance row: literals are rvalues.
+    #[test]
+    fn value_category_int_const_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    #[test]
+    fn value_category_float_const_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.double, HirExprKind::FloatConst(0.0));
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// String literal is an array-typed lvalue (C99 §6.4.5p6).
+    #[test]
+    fn value_category_string_ref_is_lvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let arr =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(4), is_vla: false });
+        let id = push_kind(&mut body, arr, HirExprKind::StringRef(DefId(0)));
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// Identifier resolving to a local object → lvalue (C99 §6.5.1p2).
+    #[test]
+    fn value_category_local_ref_is_lvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// Identifier resolving to a top-level def (global / function) → lvalue.
+    #[test]
+    fn value_category_def_ref_is_lvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::DefRef(DefId(0)));
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// Binary op result is always an rvalue.
+    #[test]
+    fn value_category_binary_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Binary { op: BinOp::Add, lhs, rhs });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// Unary op (including pre/post inc/dec) is rvalue per §6.5.3.1p2.
+    #[test]
+    fn value_category_unary_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let operand = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Unary { op: UnOp::Neg, operand });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// Function call result is rvalue (C99 §6.5.2.2p10 — the value of a
+    /// function call is not an lvalue).
+    #[test]
+    fn value_category_call_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let callee = push_kind(&mut body, tcx.int, HirExprKind::DefRef(DefId(0)));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Call { callee, args: Vec::new() });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `s.f` follows the base. Lvalue base → lvalue field.
+    #[test]
+    fn value_category_field_inherits_lvalue_from_base() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let base = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Field { base, field_index: 0 });
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// `(a + b).f` (rvalue base) → rvalue field. Synthetic but covers the
+    /// inheritance rule when the base is not itself an lvalue.
+    #[test]
+    fn value_category_field_inherits_rvalue_from_base() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let l = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let r = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+        let base =
+            push_kind(&mut body, tcx.int, HirExprKind::Binary { op: BinOp::Add, lhs: l, rhs: r });
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Field { base, field_index: 0 });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `a[i]` → lvalue (lowered to `*(a + i)` semantically).
+    #[test]
+    fn value_category_index_is_lvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let base = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let index = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Index { base, index });
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// Convert wrappers always produce rvalues — the whole point of an
+    /// LvalueToRvalue / ArrayToPtr / FuncToPtr / Pointer / IntegerPromotion
+    /// / UsualArithmetic conversion is to *yield a value*.
+    #[test]
+    fn value_category_convert_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let inner = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        for kind in [
+            ConvertKind::IntegerPromotion,
+            ConvertKind::UsualArithmetic,
+            ConvertKind::ArrayToPtr,
+            ConvertKind::FuncToPtr,
+            ConvertKind::LvalueToRvalue,
+            ConvertKind::Pointer,
+        ] {
+            let id = push_kind(&mut body, tcx.int, HirExprKind::Convert { operand: inner, kind });
+            assert_eq!(value_category(&body, id), ValueCat::RValue, "Convert {kind:?}");
+        }
+    }
+
+    /// Cast expression is an rvalue per §6.5.4p4.
+    #[test]
+    fn value_category_cast_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let operand = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Cast { operand, to: tcx.int });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `&x` produces a pointer rvalue.
+    #[test]
+    fn value_category_address_of_is_rvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let inner = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let id = push_kind(&mut body, ptr_ty, HirExprKind::AddressOf(inner));
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `*p` is an lvalue (C99 §6.5.3.2p4).
+    #[test]
+    fn value_category_deref_is_lvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let inner = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(Local(0)));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Deref(inner));
+        assert_eq!(value_category(&body, id), ValueCat::LValue);
+    }
+
+    /// Conditional `a ? b : c` is an rvalue (§6.5.15p4).
+    #[test]
+    fn value_category_cond_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let then_expr = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+        let else_expr = push_kind(&mut body, tcx.int, HirExprKind::IntConst(3));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Cond { cond, then_expr, else_expr });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `,` is an rvalue.
+    #[test]
+    fn value_category_comma_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Comma { lhs, rhs });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    /// `a = b` is an rvalue (§6.5.16p3 — "An assignment expression has the
+    /// value of the left operand after the assignment, but is not an
+    /// lvalue").
+    #[test]
+    fn value_category_assign_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let id = push_kind(&mut body, tcx.int, HirExprKind::Assign { lhs, rhs });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    // ------------------------------------------------------------------
+    // lvalue_to_rvalue_if_needed
+    // ------------------------------------------------------------------
+
+    /// LValue scalar → wrapped in `Convert { kind: LvalueToRvalue }`.
+    #[test]
+    fn l_to_r_wraps_scalar_lvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let inner = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+
+        let after = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, inner);
+        assert_ne!(after, inner, "scalar lvalue must allocate a Convert wrapper");
+
+        let wrapper = &body.exprs[after];
+        match wrapper.kind {
+            HirExprKind::Convert { operand, kind } => {
+                assert_eq!(operand, inner);
+                assert_eq!(kind, ConvertKind::LvalueToRvalue);
+            }
+            ref other => panic!("expected Convert/LvalueToRvalue, got {other:?}"),
+        }
+        assert_eq!(wrapper.value_cat, ValueCat::RValue);
+        assert_eq!(wrapper.ty, tcx.int);
+    }
+
+    /// Already-rvalue → no wrapper, returns same id.
+    #[test]
+    fn l_to_r_passthrough_rvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let after = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, id);
+        assert_eq!(after, id);
+    }
+
+    /// Array-typed lvalue → no wrapper (decay is a separate conversion).
+    #[test]
+    fn l_to_r_passthrough_array_lvalue() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let arr_ty = intern_int_array(&mut tcx, 3);
+        let id = push_kind(&mut body, arr_ty, HirExprKind::LocalRef(Local(0)));
+        let after = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, id);
+        assert_eq!(after, id, "array lvalue must not get LvalueToRvalue wrapper");
+    }
+
+    /// Function-designator lvalue → no wrapper.
+    #[test]
+    fn l_to_r_passthrough_function_designator() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let fn_ty = intern_int_func_no_args(&mut tcx);
+        let id = push_kind(&mut body, fn_ty, HirExprKind::DefRef(DefId(0)));
+        let after = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, id);
+        assert_eq!(after, id, "function designator must not get LvalueToRvalue wrapper");
+    }
+
+    /// Idempotent: applying the helper twice does not stack wrappers.
+    #[test]
+    fn l_to_r_is_idempotent() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let inner = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+
+        let once = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, inner);
+        let twice = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, once);
+        assert_eq!(once, twice, "second application must be a no-op");
+    }
+
+    // ------------------------------------------------------------------
+    // check_assignment_lhs (E0080).
+    // ------------------------------------------------------------------
+
+    /// Acceptance: `x = 1;` — `x` is an lvalue, no diagnostic.
+    #[test]
+    fn assignment_lhs_lvalue_local_accepted() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(ok, "LocalRef LHS must be accepted as lvalue");
+        assert!(cap.diagnostics().is_empty(), "no E0080 expected");
+    }
+
+    /// Acceptance: `(int)x = 1;` — cast result is an rvalue → E0080.
+    #[test]
+    fn assignment_lhs_cast_rejected_e0080() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let inner = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::Cast { operand: inner, to: tcx.int });
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(!ok, "cast LHS must be rejected as rvalue");
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::E0080));
+    }
+
+    /// `1 = x;` — int literal LHS is an rvalue → E0080.
+    #[test]
+    fn assignment_lhs_int_const_rejected_e0080() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(!ok);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::E0080));
+    }
+
+    /// `(a + b) = 1;` — binary-op result LHS rejected.
+    #[test]
+    fn assignment_lhs_binary_rejected_e0080() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let l = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let r = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let lhs =
+            push_kind(&mut body, tcx.int, HirExprKind::Binary { op: BinOp::Add, lhs: l, rhs: r });
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(!ok);
+        assert_eq!(cap.diagnostics().len(), 1);
+    }
+
+    /// `*p = 1;` — deref LHS is an lvalue, accepted.
+    #[test]
+    fn assignment_lhs_deref_accepted() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let p = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(Local(0)));
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::Deref(p));
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(ok);
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    /// `a[i] = 1;` — subscript LHS is an lvalue, accepted.
+    #[test]
+    fn assignment_lhs_index_accepted() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let base = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
+        let idx = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let lhs = push_kind(&mut body, tcx.int, HirExprKind::Index { base, index: idx });
+
+        let (mut session, cap) = Session::for_test();
+        let ok = check_assignment_lhs(&mut session, &body, lhs);
+        assert!(ok);
+        assert!(cap.diagnostics().is_empty());
     }
 }
