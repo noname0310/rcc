@@ -7,7 +7,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use rcc_hir::{FloatKind, HirCrate, IntRank, Ty, TyCtxt, TyId};
+use rcc_hir::{
+    Body, ConvertKind, FloatKind, HirCrate, HirExpr, HirExprId, HirExprKind, IntRank, Qual, Ty,
+    TyCtxt, TyId, ValueCat,
+};
 use rcc_session::Session;
 
 pub mod const_eval;
@@ -258,6 +261,85 @@ pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
     // operand's type. (Reached today only on hypothetical non-LP64 targets;
     // included for spec completeness so phase-15 retargeting is one edit.)
     unsigned_counterpart(tcx, signed_rank)
+}
+
+/// Syntactic context in which an expression appears, for the purposes of
+/// C99 §6.3.2.1p3 / p4 array-and-function decay.
+///
+/// The default context (`Normal`) decays array lvalues to a pointer to the
+/// first element and function designators to a pointer to function. The
+/// other variants are the spec's enumerated exceptions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DecayContext {
+    /// Ordinary use: arrays decay to `&arr[0]`, functions decay to `&func`.
+    Normal,
+    /// Operand of `sizeof` (C99 §6.3.2.1p3: array case) /
+    /// `sizeof` of a function-designator is a constraint violation but we
+    /// still decline to decay so the diagnostic can spot the function type.
+    SizeofOperand,
+    /// Operand of unary `&` (C99 §6.3.2.1p3 array case + p4 function case).
+    /// Address-of an array yields a pointer to the array, not to its first
+    /// element; address-of a function yields a pointer to the function
+    /// (semantically identical to the decayed form, but no `Convert` is
+    /// inserted because `&f` and `f` are interchangeable per p4).
+    AddrOfOperand,
+    /// String literal used to initialise a `char[]` array (C99 §6.7.8p14):
+    /// the array initialiser keeps its array type rather than decaying to
+    /// `char *`.
+    CharArrayInitializer,
+}
+
+/// Apply C99 §6.3.2.1p3 (array → pointer) and §6.3.2.1p4 (function →
+/// pointer) decay to `expr` if `ctx` permits it. Returns the id of either:
+///
+/// * the original expression (no decay needed or context forbids it), or
+/// * a freshly-pushed `HirExprKind::Convert { kind: ArrayToPtr | FuncToPtr }`
+///   wrapper whose `ty` is the decayed pointer type.
+///
+/// The wrapper's `value_cat` is always `RValue` — both decays produce a
+/// non-modifiable rvalue per the spec ("which is not an lvalue").
+///
+/// `ctx == Normal` is the rule; the other variants encode the three
+/// enumerated exceptions in p3/p4. Callers should pass the more specific
+/// variant whenever the syntactic position is known. Unknown positions
+/// default to `Normal` (the conservative choice — failing to decay where
+/// the spec requires decay is a soundness bug; decaying where it isn't
+/// required is at worst a missed diagnostic).
+pub fn decay_if_needed(
+    tcx: &mut TyCtxt,
+    body: &mut Body,
+    expr: HirExprId,
+    ctx: DecayContext,
+) -> HirExprId {
+    // Look up the operand's type; clone the relevant variants so we can
+    // hand `tcx` back as `&mut` for `intern`.
+    let (decay_kind, new_ty) = match tcx.get(body.exprs[expr].ty).clone() {
+        Ty::Array { elem, .. } if ctx == DecayContext::Normal => {
+            (ConvertKind::ArrayToPtr, tcx.intern(Ty::Ptr(elem)))
+        }
+        Ty::Func { .. } if ctx == DecayContext::Normal => {
+            // `func -> &func` is type "pointer to function", with no
+            // qualifiers (functions cannot be qualified).
+            let func_ty = body.exprs[expr].ty;
+            (ConvertKind::FuncToPtr, tcx.intern(Ty::Ptr(Qual::plain(func_ty))))
+        }
+        // Either the operand is not a candidate for decay, or `ctx` forbids
+        // the conversion in this position. In both cases the spec says the
+        // expression keeps its original type, so we hand `expr` back
+        // verbatim — no Convert wrapper is inserted.
+        _ => return expr,
+    };
+
+    let span = body.exprs[expr].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: new_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: expr, kind: decay_kind },
+    });
+    body.exprs[id].id = id;
+    id
 }
 
 #[cfg(test)]
@@ -542,5 +624,264 @@ mod tests {
         assert_eq!(int_rank_bits(IntRank::Short), 16);
         assert_eq!(int_rank_bits(IntRank::Char), 8);
         assert_eq!(int_rank_bits(IntRank::Bool), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Array/function decay (C99 §6.3.2.1p3-4) — decay_if_needed.
+    // ------------------------------------------------------------------
+    //
+    // These tests exercise the helper directly against a hand-built `Body`
+    // rather than driving lowering end-to-end; the helper's contract is
+    // purely "given an expr id whose type is array/function, return the
+    // decayed wrapper unless the context forbids it". End-to-end coverage
+    // arrives in task 07-07 once `check()` actually runs.
+
+    use rcc_span::DUMMY_SP;
+
+    /// Build a minimal `IntConst`-shaped leaf expression of type `ty` and
+    /// category `cat` and return its id. The constant payload is a stand-in
+    /// — the decay helper inspects `ty`/`value_cat` only, never the kind.
+    fn push_leaf_expr(body: &mut Body, ty: TyId, cat: ValueCat) -> HirExprId {
+        let id = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty,
+            value_cat: cat,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(0),
+        });
+        body.exprs[id].id = id;
+        id
+    }
+
+    fn intern_int_array(tcx: &mut TyCtxt, len: u64) -> TyId {
+        tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(len), is_vla: false })
+    }
+
+    fn intern_int_func_no_args(tcx: &mut TyCtxt) -> TyId {
+        let int = tcx.int;
+        tcx.intern(Ty::Func { ret: int, params: Vec::new(), variadic: false, proto: true })
+    }
+
+    /// Acceptance: `int arr[10]; int *p = arr;` inserts ArrayToPtr around `arr`.
+    /// We model this as `decay_if_needed(arr, Normal)` and check the wrapper.
+    #[test]
+    fn decay_array_to_ptr_in_normal_context() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let arr_ty = intern_int_array(&mut tcx, 10);
+        let arr_id = push_leaf_expr(&mut body, arr_ty, ValueCat::LValue);
+
+        let decayed = decay_if_needed(&mut tcx, &mut body, arr_id, DecayContext::Normal);
+
+        // A new wrapper expression must have been pushed.
+        assert_ne!(decayed, arr_id, "decay must allocate a fresh expr id");
+        let wrapper = &body.exprs[decayed];
+
+        // Wrapper kind: Convert { operand: arr_id, kind: ArrayToPtr }.
+        match wrapper.kind {
+            HirExprKind::Convert { operand, kind } => {
+                assert_eq!(operand, arr_id);
+                assert_eq!(kind, ConvertKind::ArrayToPtr);
+            }
+            ref other => panic!("expected Convert wrapper, got {other:?}"),
+        }
+
+        // Wrapper type: `int *` (Ptr to plain int).
+        match tcx.get(wrapper.ty) {
+            Ty::Ptr(q) => assert_eq!(q.ty, tcx.int),
+            other => panic!("expected Ptr(int), got {other:?}"),
+        }
+
+        // Decayed expression is an rvalue (C99 §6.3.2.1p3).
+        assert_eq!(wrapper.value_cat, ValueCat::RValue);
+    }
+
+    /// Function designator → pointer-to-function (C99 §6.3.2.1p4).
+    #[test]
+    fn decay_function_to_ptr_in_normal_context() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let fn_ty = intern_int_func_no_args(&mut tcx);
+        let fn_id = push_leaf_expr(&mut body, fn_ty, ValueCat::LValue);
+
+        let decayed = decay_if_needed(&mut tcx, &mut body, fn_id, DecayContext::Normal);
+
+        assert_ne!(decayed, fn_id);
+        let wrapper = &body.exprs[decayed];
+
+        match wrapper.kind {
+            HirExprKind::Convert { operand, kind } => {
+                assert_eq!(operand, fn_id);
+                assert_eq!(kind, ConvertKind::FuncToPtr);
+            }
+            ref other => panic!("expected Convert wrapper, got {other:?}"),
+        }
+
+        // Wrapper type: pointer to the original function type.
+        match tcx.get(wrapper.ty) {
+            Ty::Ptr(q) => assert_eq!(q.ty, fn_ty),
+            other => panic!("expected Ptr(func_ty), got {other:?}"),
+        }
+
+        assert_eq!(wrapper.value_cat, ValueCat::RValue);
+    }
+
+    /// Acceptance: `int arr[10]; sizeof arr;` does NOT decay — sizeof returns
+    /// 40. We assert the array type is preserved (size is a codegen concern).
+    #[test]
+    fn decay_array_skipped_inside_sizeof() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let arr_ty = intern_int_array(&mut tcx, 10);
+        let arr_id = push_leaf_expr(&mut body, arr_ty, ValueCat::LValue);
+
+        let result = decay_if_needed(&mut tcx, &mut body, arr_id, DecayContext::SizeofOperand);
+
+        // Same id, same type — no Convert wrapper inserted.
+        assert_eq!(result, arr_id, "sizeof operand must not decay");
+        assert_eq!(body.exprs[result].ty, arr_ty);
+        match tcx.get(body.exprs[result].ty) {
+            Ty::Array { len, .. } => assert_eq!(*len, Some(10)),
+            other => panic!("expected Array preserved, got {other:?}"),
+        }
+    }
+
+    /// `&arr` — the operand of unary `&` does not decay (C99 §6.3.2.1p3).
+    #[test]
+    fn decay_array_skipped_inside_addrof() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let arr_ty = intern_int_array(&mut tcx, 10);
+        let arr_id = push_leaf_expr(&mut body, arr_ty, ValueCat::LValue);
+
+        let result = decay_if_needed(&mut tcx, &mut body, arr_id, DecayContext::AddrOfOperand);
+
+        assert_eq!(result, arr_id);
+        assert_eq!(body.exprs[result].ty, arr_ty);
+    }
+
+    /// `char a[] = "abc";` — the string literal initialiser keeps array type.
+    #[test]
+    fn decay_skipped_inside_char_array_initializer() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let char_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(4), is_vla: false });
+        let lit_id = push_leaf_expr(&mut body, char_arr_ty, ValueCat::LValue);
+
+        let result =
+            decay_if_needed(&mut tcx, &mut body, lit_id, DecayContext::CharArrayInitializer);
+
+        assert_eq!(result, lit_id);
+        assert_eq!(body.exprs[result].ty, char_arr_ty);
+    }
+
+    /// Function designator under `sizeof` — sizeof of a function is a
+    /// constraint violation in C99, but the helper still declines to decay
+    /// so the diagnostic pass can spot the function type. (No diagnostic is
+    /// emitted by decay_if_needed itself.)
+    #[test]
+    fn decay_function_skipped_inside_sizeof() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let fn_ty = intern_int_func_no_args(&mut tcx);
+        let fn_id = push_leaf_expr(&mut body, fn_ty, ValueCat::LValue);
+
+        let result = decay_if_needed(&mut tcx, &mut body, fn_id, DecayContext::SizeofOperand);
+
+        assert_eq!(result, fn_id);
+        assert_eq!(body.exprs[result].ty, fn_ty);
+    }
+
+    /// Function designator under `&` — `&f` and `f` (decayed) are
+    /// interchangeable per §6.3.2.1p4, so we leave the operand alone and let
+    /// the AddressOf node carry the same pointer-to-function type itself.
+    #[test]
+    fn decay_function_skipped_inside_addrof() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let fn_ty = intern_int_func_no_args(&mut tcx);
+        let fn_id = push_leaf_expr(&mut body, fn_ty, ValueCat::LValue);
+
+        let result = decay_if_needed(&mut tcx, &mut body, fn_id, DecayContext::AddrOfOperand);
+
+        assert_eq!(result, fn_id);
+        assert_eq!(body.exprs[result].ty, fn_ty);
+    }
+
+    /// Non-array, non-function operands pass through untouched in every
+    /// context. Run the rule across the four context variants.
+    #[test]
+    fn decay_passthrough_for_non_decaying_types() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        for ctx in [
+            DecayContext::Normal,
+            DecayContext::SizeofOperand,
+            DecayContext::AddrOfOperand,
+            DecayContext::CharArrayInitializer,
+        ] {
+            let mut body = Body::default();
+            let id = push_leaf_expr(&mut body, int_ty, ValueCat::RValue);
+            let result = decay_if_needed(&mut tcx, &mut body, id, ctx);
+            assert_eq!(result, id, "non-array/func passthrough in {ctx:?}");
+            assert_eq!(body.exprs[result].ty, int_ty);
+        }
+    }
+
+    /// Pointer-typed operands are not "arrays" — they must pass through
+    /// even in `Normal` context (no double-decay).
+    #[test]
+    fn decay_pointer_does_not_decay() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let id = push_leaf_expr(&mut body, ptr_ty, ValueCat::LValue);
+
+        let result = decay_if_needed(&mut tcx, &mut body, id, DecayContext::Normal);
+        assert_eq!(result, id);
+        assert_eq!(body.exprs[result].ty, ptr_ty);
+    }
+
+    /// VLAs (`int v[n]`) decay too — `len: None, is_vla: true` is still an
+    /// `Array` and its element type is well-defined.
+    #[test]
+    fn decay_vla_to_ptr_in_normal_context() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let vla_ty = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: true });
+        let id = push_leaf_expr(&mut body, vla_ty, ValueCat::LValue);
+
+        let decayed = decay_if_needed(&mut tcx, &mut body, id, DecayContext::Normal);
+        assert_ne!(decayed, id);
+        match body.exprs[decayed].kind {
+            HirExprKind::Convert { kind, .. } => assert_eq!(kind, ConvertKind::ArrayToPtr),
+            ref other => panic!("expected Convert/ArrayToPtr, got {other:?}"),
+        }
+        match tcx.get(body.exprs[decayed].ty) {
+            Ty::Ptr(q) => assert_eq!(q.ty, tcx.int),
+            other => panic!("expected Ptr(int), got {other:?}"),
+        }
+    }
+
+    /// Qualified element type (e.g. `const int arr[3]`) decays to a pointer
+    /// whose pointee carries the same qualifiers (C99 §6.3.2.1p3 + §6.7.3).
+    #[test]
+    fn decay_preserves_element_qualifiers() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let elem = Qual { ty: tcx.int, is_const: true, is_volatile: false, is_restrict: false };
+        let arr_ty = tcx.intern(Ty::Array { elem, len: Some(3), is_vla: false });
+        let id = push_leaf_expr(&mut body, arr_ty, ValueCat::LValue);
+
+        let decayed = decay_if_needed(&mut tcx, &mut body, id, DecayContext::Normal);
+        match tcx.get(body.exprs[decayed].ty) {
+            Ty::Ptr(q) => {
+                assert_eq!(q.ty, tcx.int);
+                assert!(q.is_const, "const-ness of element type must survive decay");
+                assert!(!q.is_volatile);
+            }
+            other => panic!("expected Ptr(const int), got {other:?}"),
+        }
     }
 }

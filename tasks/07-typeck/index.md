@@ -10,7 +10,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 
 - [x] [01-integer-promotion](01-integer-promotion.md)
 - [x] [02-usual-arithmetic-table](02-usual-arithmetic-table.md)
-- [ ] [03-array-function-decay](03-array-function-decay.md)
+- [x] [03-array-function-decay](03-array-function-decay.md)
 - [ ] [04-lvalue-rvalue](04-lvalue-rvalue.md)
 - [ ] [05-assignment-constraint](05-assignment-constraint.md)
 - [ ] [06-pointer-conversions](06-pointer-conversions.md)

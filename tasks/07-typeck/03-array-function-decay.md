@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-03: Array / function decay
 
 **Phase:** 07-typeck    **Depends on:** —    **Milestone:** M3
