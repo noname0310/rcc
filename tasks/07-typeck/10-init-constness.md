@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 07-10: Global initializer constness
 
 **Phase:** 07-typeck    **Depends on:** 07-09    **Milestone:** M4

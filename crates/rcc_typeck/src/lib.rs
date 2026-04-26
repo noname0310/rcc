@@ -15,8 +15,10 @@ use rcc_hir::{
 use rcc_session::Session;
 
 pub mod const_eval;
+pub mod init_const;
 
 pub use const_eval::{ConstEval, ConstScalar, ConstValue};
+pub use init_const::{check_init_const, is_const_init_expr};
 
 /// Width in bits of `int` assumed by the type checker.
 ///

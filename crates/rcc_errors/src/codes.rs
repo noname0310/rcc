@@ -81,6 +81,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0081, E0081_DESC),
     (E0082, E0082_DESC),
     (E0083, E0083_DESC),
+    (E0084, E0084_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -527,6 +528,28 @@ const E0082_DESC: &str = "incompatible pointer conversion";
 /// type-checker inferred for each side.
 pub const E0083: &str = "E0083";
 const E0083_DESC: &str = "invalid operands to binary operator";
+
+/// Non-constant expression in a static or thread-storage initializer.
+///
+/// C99 §6.7.8p4: "All the expressions in an initializer for an object
+/// that has static or thread storage duration shall be constant
+/// expressions or string literals." A global / file-scope object's
+/// initializer must therefore reduce, after the type-checker's
+/// implicit conversions, to a value the constant-expression evaluator
+/// (C99 §6.6) can fold:
+///
+/// - an integer constant expression (§6.6p6),
+/// - an arithmetic constant expression (§6.6p7), or
+/// - an address constant (§6.6p8) — `&obj`, `&arr[ice]`, function
+///   designator, or `(T*)0 + ice`.
+///
+/// Anything else — a function call, a reference to a non-static local,
+/// a `*p` or `++x`, an arbitrary side-effecting comma — is a constraint
+/// violation. `rcc` emits this code at the offending sub-expression's
+/// span and continues so later passes still see the partially-typed
+/// initializer.
+pub const E0084: &str = "E0084";
+const E0084_DESC: &str = "non-constant expression in static initializer";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

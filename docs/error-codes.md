@@ -833,6 +833,32 @@ type-checker inferred for each side.
 
 ---
 
+## E0084 — non-constant expression in static initializer
+
+C99 §6.7.8p4 requires every expression in the initializer of an object
+with static or thread storage duration to be a constant expression
+(§6.6) or a string literal. After type checking, the constant-expression
+evaluator must be able to fold each scalar leaf into one of:
+
+- an integer constant expression (§6.6p6),
+- an arithmetic constant expression (§6.6p7), or
+- an address constant (§6.6p8) — `&obj`, `&arr[ice]`, function
+  designator, or `(T*)0 + ice`.
+
+```c
+static int x = 2 + 3;     // OK — integer constant expression
+static int y = foo();     // error[E0084]: non-constant expression in
+                          //               static initializer
+static int *p = &x;       // OK — address constant
+```
+
+The label points at the offending sub-expression so users can see
+which leaf of an aggregate initializer is at fault. The check has no
+effect on local-variable initializers — those may be arbitrary
+expressions per §6.7.8p3.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
