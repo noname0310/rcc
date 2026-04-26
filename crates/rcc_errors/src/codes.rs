@@ -79,6 +79,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0078, E0078_DESC),
     (E0080, E0080_DESC),
     (E0081, E0081_DESC),
+    (E0082, E0082_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -476,6 +477,32 @@ const E0080_DESC: &str = "assignment to rvalue";
 /// this code at the assignment / initializer / argument site.
 pub const E0081: &str = "E0081";
 const E0081_DESC: &str = "incompatible types in assignment";
+
+/// Incompatible pointer conversion.
+///
+/// C99 §6.3.2.3 enumerates the only legal implicit conversions
+/// between pointer types:
+///
+/// - any pointer to (qualified or unqualified) `void` may be
+///   converted to/from a pointer to any object/incomplete type, with
+///   qualifier additions on the destination side allowed but
+///   qualifier *removals* requiring an explicit cast;
+/// - a null pointer constant (the integer constant `0`, optionally
+///   cast to `void *`) converts to any pointer type;
+/// - two pointers to *compatible* types (in the §6.7.5 sense) are
+///   interchangeable when the destination's pointee qualifier set
+///   includes every qualifier of the source's pointee;
+/// - two pointers to function types are interchangeable iff the
+///   function types are compatible (return type + parameter list).
+///
+/// All other pointer-to-pointer conversions — `int*` ↔ `char*`,
+/// dropping a `const` qualifier without an explicit cast,
+/// converting between function pointers with mismatched signatures,
+/// or going between integer and pointer without a cast — are
+/// constraint violations and are reported with this code at the
+/// conversion site.
+pub const E0082: &str = "E0082";
+const E0082_DESC: &str = "incompatible pointer conversion";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

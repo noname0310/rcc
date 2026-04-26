@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-06: Pointer conversions
 
 **Phase:** 07-typeck    **Depends on:** 07-05    **Milestone:** M3

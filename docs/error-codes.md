@@ -755,6 +755,60 @@ and `0` itself all match.
 
 ---
 
+## E0082 — incompatible pointer conversion
+
+C99 §6.3.2.3 enumerates the only implicit conversions between
+pointer types that the type-checker may insert without an explicit
+cast:
+
+- any pointer to (qualified or unqualified) `void` may be converted
+  to/from a pointer to any object/incomplete type, with qualifier
+  *additions* on the destination side allowed but qualifier
+  *removals* requiring an explicit cast;
+- a *null pointer constant* (the integer constant `0`, optionally
+  cast to `void *`) converts to any pointer type;
+- two pointers to compatible types (in the §6.7.5 sense) are
+  interchangeable when the destination's pointee qualifier set
+  includes every qualifier of the source's pointee;
+- two pointers to function types are interchangeable iff the
+  function types are compatible (matching return type, parameter
+  list, and variadicity).
+
+All other pointer-shaped conversions land here:
+
+```c
+void f(void) {
+    int   *p   = 0;        // OK: null pointer constant
+    void  *q   = p;        // OK: object pointer to void *
+    int    x   = 0;
+    int   *r   = &x;
+    char  *s   = r;        // error[E0082]: int * is not compatible
+                           //               with char *
+    const int *cp = r;     // OK: qualifier addition
+    int   *rw   = cp;      // error[E0082]: drops `const` qualifier
+                           //               (cast required)
+    int (*fp1)(int);
+    int (*fp2)(double) = fp1;  // error[E0082]: incompatible function
+                               //               signatures
+    int   *ip = 1;         // error[E0082]: only the integer constant
+                           //               0 may be assigned to a
+                           //               pointer without a cast
+    int    n  = ip;        // error[E0082]: pointer to integer needs
+                           //               an explicit cast
+}
+```
+
+Function pointers are *not* object pointers (§6.3.2.3p8), so
+`void *p = &f;` and `int (*fp)() = malloc(n);` are both
+constraint violations regardless of the matching pointee shapes.
+
+Null-pointer-constant detection unwraps `Cast` and the
+type-checker's own `Convert` wrappers, so `(void *)0`, `(int *)0`,
+and `0` itself all qualify as null pointer constants and may be
+assigned to any pointer type.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

@@ -803,6 +803,198 @@ pub fn is_assignable(
     Err(AssignError::Incompatible)
 }
 
+// ---------------------------------------------------------------------
+// Pointer conversions (C99 §6.3.2.3)
+// ---------------------------------------------------------------------
+
+/// Outcome of [`pointer_convert`]: a structural reason why the implicit
+/// conversion is rejected. Successful conversions return the converted
+/// `HirExprId` directly; this enum catalogues only the failure modes
+/// callers may want to surface as different diagnostics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ConvertError {
+    /// Source and destination are pointers but not interchangeable per
+    /// any §6.3.2.3 bullet — most commonly two object pointers with
+    /// unrelated pointee types (`int *` ↔ `char *`), or two function
+    /// pointers with incompatible signatures. Caller emits **E0082**.
+    Incompatible,
+    /// Source and destination are pointer-compatible (or one is
+    /// `void *`), but the destination's pointee qualifier set drops a
+    /// qualifier the source promised. C99 §6.3.2.3p2 / §6.5.16.1p1
+    /// third bullet treat this as a constraint violation; an explicit
+    /// cast is required to suppress it. Caller emits **E0082**.
+    QualifierLoss,
+    /// One operand is a pointer and the other is an integer that is
+    /// *not* a null pointer constant. C99 §6.3.2.3p5 / §6.3.2.3p6 say
+    /// the conversion is implementation-defined and requires an
+    /// explicit cast. Caller emits **E0082**.
+    IntegerPointerMix,
+}
+
+/// Apply a C99 §6.3.2.3 pointer conversion to `src` so its value can
+/// stand in for an expression of type `dst_ty`. The helper covers
+/// every bullet of §6.3.2.3:
+///
+/// 1. **Null pointer constant ↔ pointer.** An integer constant
+///    expression with value `0` (or such an expression cast to
+///    `void *`) converts to any pointer type as the null pointer.
+///    The resulting wrapper has type `dst_ty` and `kind: Pointer`.
+/// 2. **`void *` ↔ object pointer.** Any pointer to an
+///    object/incomplete type may be converted to/from a pointer to
+///    `void`, with qualifier additions on the destination pointee
+///    permitted. Function pointers do *not* qualify (§6.3.2.3p8).
+/// 3. **Pointer to compatible-pointee object types.** Two object
+///    pointers are interchangeable when their pointee types are
+///    compatible (here: identical, since `is_compatible_type`
+///    bottoms out in `TyId` equality after interning) and the
+///    destination's pointee qualifier set is a superset of the
+///    source's.
+/// 4. **Pointer to function ↔ pointer to function.** Two function
+///    pointers are interchangeable iff their pointee function types
+///    are *compatible* — same return type, same parameter list (after
+///    default argument promotions), same variadicity.
+/// 5. **Integer ↔ pointer.** Implementation-defined per §6.3.2.3p5/6;
+///    rcc demands an explicit cast and rejects the implicit form
+///    (except for the null-pointer-constant case in bullet 1).
+///
+/// Returns:
+///
+/// * `Ok(src)` — types already match (`dst_ty == src_ty`); no wrapper
+///   inserted. The caller can treat the result as identical to the
+///   input.
+/// * `Ok(new_id)` — a freshly pushed `HirExprKind::Convert { kind:
+///   ConvertKind::Pointer }` wrapper with type `dst_ty` and
+///   `value_cat: RValue`.
+/// * `Err(ConvertError::*)` — the conversion is ill-formed; the caller
+///   chooses the diagnostic (E0082 in every case for now).
+///
+/// The helper is purely structural — it inspects `tcx`/`body` but
+/// emits no diagnostics. Diagnostics are routed through task 07-07,
+/// which is the central caller of this helper for assignment / call
+/// argument / return / initializer positions.
+pub fn pointer_convert(
+    tcx: &mut TyCtxt,
+    body: &mut Body,
+    src: HirExprId,
+    dst_ty: TyId,
+) -> Result<HirExprId, ConvertError> {
+    let src_ty = body.exprs[src].ty;
+
+    // Trivial: types already equal (after interning). No conversion
+    // needed; keep the original id so callers can reason about
+    // identity.
+    if src_ty == dst_ty {
+        return Ok(src);
+    }
+
+    // Destination must be a pointer for §6.3.2.3 to apply at all. If
+    // it isn't, fall through to the IntegerPointerMix / Incompatible
+    // distinction so the caller can produce a precise diagnostic.
+    let Some(dst_pointee) = pointee_qual(tcx, dst_ty) else {
+        // Source is a pointer, dest is not — it's the "pointer to
+        // integer" half of §6.3.2.3p6. Without an explicit cast, this
+        // is rejected. Pointer to non-pointer non-integer (struct,
+        // float, …) bottoms out at Incompatible.
+        if is_pointer(tcx, src_ty) {
+            if is_integer(tcx, dst_ty) {
+                return Err(ConvertError::IntegerPointerMix);
+            }
+            return Err(ConvertError::Incompatible);
+        }
+        // Neither side is a pointer: not our problem. Caller is
+        // misusing the helper; report Incompatible so it still gets
+        // an error code.
+        return Err(ConvertError::Incompatible);
+    };
+
+    // Bullet 1: null pointer constant → any pointer type.
+    if is_null_pointer_constant(body, src) {
+        return Ok(push_pointer_convert(body, src, dst_ty));
+    }
+
+    // Source must be a pointer from here on. If it's an integer,
+    // we're in §6.3.2.3p5 territory ("integer to pointer"); rcc
+    // requires an explicit cast.
+    let Some(src_pointee) = pointee_qual(tcx, src_ty) else {
+        if is_integer(tcx, src_ty) {
+            return Err(ConvertError::IntegerPointerMix);
+        }
+        return Err(ConvertError::Incompatible);
+    };
+
+    let dst_is_func = matches!(tcx.get(dst_pointee.ty), Ty::Func { .. });
+    let src_is_func = matches!(tcx.get(src_pointee.ty), Ty::Func { .. });
+
+    // Bullet 4: function-pointer ↔ function-pointer. Both sides must
+    // be function pointers, and the pointee function types must be
+    // compatible. A function-pointer / object-pointer mix is
+    // explicitly disallowed (§6.3.2.3p8) — fall through to
+    // Incompatible below if exactly one side is a function pointer.
+    if src_is_func && dst_is_func {
+        if is_compatible_type(tcx, src_pointee.ty, dst_pointee.ty) {
+            // Function types are unqualified — qualifiers on a
+            // function-pointer's pointee are not meaningful, so
+            // qualifier-superset is vacuously satisfied. We still
+            // emit the wrapper so type-equality at the use site
+            // matches the destination.
+            return Ok(push_pointer_convert(body, src, dst_ty));
+        }
+        return Err(ConvertError::Incompatible);
+    }
+    if src_is_func || dst_is_func {
+        return Err(ConvertError::Incompatible);
+    }
+
+    // From here on both sides are object/incomplete pointers.
+    let dst_is_void_ptr = is_void(tcx, dst_pointee.ty);
+    let src_is_void_ptr = is_void(tcx, src_pointee.ty);
+
+    // Bullet 2: `void *` ↔ object pointer. Permit either direction
+    // when the *other* side is an object/incomplete pointer (we
+    // already excluded function pointers above, so any non-void
+    // pointee is an object/incomplete pointee).
+    if dst_is_void_ptr || src_is_void_ptr {
+        if !qualifiers_superset(dst_pointee, src_pointee) {
+            return Err(ConvertError::QualifierLoss);
+        }
+        return Ok(push_pointer_convert(body, src, dst_ty));
+    }
+
+    // Bullet 3: two object pointers, pointee types must be
+    // compatible. After interning, that's TyId equality on the
+    // (unqualified) pointee.
+    if is_compatible_type(tcx, src_pointee.ty, dst_pointee.ty) {
+        if !qualifiers_superset(dst_pointee, src_pointee) {
+            return Err(ConvertError::QualifierLoss);
+        }
+        return Ok(push_pointer_convert(body, src, dst_ty));
+    }
+
+    Err(ConvertError::Incompatible)
+}
+
+/// Push a `ConvertKind::Pointer` wrapper around `src` with destination
+/// type `dst_ty`. The wrapper inherits `src`'s span and is always an
+/// rvalue (a converted pointer is the value of the conversion, not
+/// an lvalue designating the original object).
+fn push_pointer_convert(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExprId {
+    let span = body.exprs[src].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: dst_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: src, kind: ConvertKind::Pointer },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// True iff `t` is an integer type per C99 §6.2.5p17.
+fn is_integer(tcx: &TyCtxt, t: TyId) -> bool {
+    matches!(tcx.get(t), Ty::Int { .. })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2040,5 +2232,662 @@ mod tests {
         assert!(is_compatible_type(&tcx, p1, p2));
         assert!(is_compatible_type(&tcx, tcx.int, tcx.int));
         assert!(!is_compatible_type(&tcx, tcx.int, tcx.long));
+    }
+
+    // ------------------------------------------------------------------
+    // Pointer conversions (C99 §6.3.2.3) — pointer_convert.
+    // ------------------------------------------------------------------
+
+    /// Helper: build a `const`-qualified `Qual` over `ty`.
+    fn const_qual(ty: TyId) -> Qual {
+        Qual { ty, is_const: true, is_volatile: false, is_restrict: false }
+    }
+
+    /// Assert the most-recently pushed expression in `body` is a
+    /// `Convert { kind: Pointer }` wrapper around `expected_operand`
+    /// with type `expected_ty`. Returns the wrapper id for callers
+    /// that want to chain checks.
+    fn assert_pointer_wrapper(
+        body: &Body,
+        wrapper: HirExprId,
+        expected_operand: HirExprId,
+        expected_ty: TyId,
+    ) {
+        let expr = &body.exprs[wrapper];
+        assert_eq!(expr.ty, expected_ty, "wrapper type");
+        assert_eq!(expr.value_cat, ValueCat::RValue, "wrapper value cat");
+        match expr.kind {
+            HirExprKind::Convert { operand, kind } => {
+                assert_eq!(operand, expected_operand, "wrapped operand");
+                assert_eq!(kind, ConvertKind::Pointer, "convert kind");
+            }
+            ref other => panic!("expected Convert::Pointer wrapper, got {other:?}"),
+        }
+    }
+
+    /// Acceptance: `void *p = &x;` — `int *` source, `void *` dest is
+    /// accepted and a `ConvertKind::Pointer` wrapper is inserted.
+    #[test]
+    fn pointer_convert_object_ptr_to_void_ptr_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        let result = pointer_convert(&mut tcx, &mut body, src, void_ptr).expect("must succeed");
+        assert_ne!(result, src, "must allocate a wrapper");
+        assert_pointer_wrapper(&body, result, src, void_ptr);
+    }
+
+    /// `void *` → `int *` accepted (the symmetric case of the void*
+    /// rule, exercised by e.g. `int *p = malloc(n);`).
+    #[test]
+    fn pointer_convert_void_ptr_to_object_ptr_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let src = push_kind(&mut body, void_ptr, HirExprKind::LocalRef(Local(0)));
+
+        let result = pointer_convert(&mut tcx, &mut body, src, int_ptr).expect("must succeed");
+        assert_pointer_wrapper(&body, result, src, int_ptr);
+    }
+
+    /// Acceptance: `int *p = &x; char *q = p;` is rejected — `int *`
+    /// and `char *` have unrelated pointee types.
+    #[test]
+    fn pointer_convert_unrelated_object_ptrs_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, char_ptr),
+            Err(ConvertError::Incompatible),
+        );
+    }
+
+    /// Identical pointer types (`int *` ↔ `int *`) need no wrapper —
+    /// the helper returns the source id unchanged.
+    #[test]
+    fn pointer_convert_identical_ptr_no_wrapper() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+        let len_before = body.exprs.len();
+
+        let result = pointer_convert(&mut tcx, &mut body, src, int_ptr).expect("trivial ok");
+        assert_eq!(result, src, "no wrapper needed");
+        assert_eq!(body.exprs.len(), len_before, "no allocation");
+    }
+
+    /// Bullet 1: literal `0` (a null pointer constant) converts to any
+    /// pointer type. Source type happens to be `int`, but the
+    /// integer-to-pointer rejection path must not fire because the
+    /// expression is a null pointer constant.
+    #[test]
+    fn pointer_convert_null_pointer_constant_to_int_ptr() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let zero = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+
+        let result = pointer_convert(&mut tcx, &mut body, zero, int_ptr).expect("npc ok");
+        assert_pointer_wrapper(&body, result, zero, int_ptr);
+    }
+
+    /// `(void *)0` is also a null pointer constant — it survives the
+    /// `Cast` wrapper inside `is_null_pointer_constant`.
+    #[test]
+    fn pointer_convert_null_pointer_constant_via_cast() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let zero = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let void_zero =
+            push_kind(&mut body, void_ptr, HirExprKind::Cast { operand: zero, to: void_ptr });
+
+        let result = pointer_convert(&mut tcx, &mut body, void_zero, int_ptr).expect("npc ok");
+        assert_pointer_wrapper(&body, result, void_zero, int_ptr);
+    }
+
+    /// Bullet 1 negative: `int x = 7; int *p = x;` — non-zero integer
+    /// to pointer is *not* a null pointer constant, so it requires an
+    /// explicit cast.
+    #[test]
+    fn pointer_convert_nonzero_int_to_ptr_requires_cast() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let seven = push_kind(&mut body, tcx.int, HirExprKind::IntConst(7));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, seven, int_ptr),
+            Err(ConvertError::IntegerPointerMix),
+        );
+    }
+
+    /// Bullet 1 negative: pointer-to-integer assignment requires an
+    /// explicit cast (regardless of source pointer's value).
+    #[test]
+    fn pointer_convert_ptr_to_int_requires_cast() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let int_ty = tcx.int;
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, int_ty),
+            Err(ConvertError::IntegerPointerMix),
+        );
+    }
+
+    /// Bullet 2 / 3 qualifier rule: `const int *q = p;` with `int *p`
+    /// adds `const` on the pointee — accepted.
+    #[test]
+    fn pointer_convert_qualifier_addition_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(const_qual(tcx.int)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        let result = pointer_convert(&mut tcx, &mut body, src, const_int_ptr).expect("widen qual");
+        assert_pointer_wrapper(&body, result, src, const_int_ptr);
+    }
+
+    /// Bullet 3 negative: `int *q = cp;` with `const int *cp` drops
+    /// `const` — must be rejected as `QualifierLoss`.
+    #[test]
+    fn pointer_convert_qualifier_drop_loss() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(const_qual(tcx.int)));
+        let src = push_kind(&mut body, const_int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, int_ptr),
+            Err(ConvertError::QualifierLoss),
+        );
+    }
+
+    /// Bullet 2 with qualifiers: `void *p = cp;` where `cp` is
+    /// `const int *` drops `const` — qualifier loss.
+    #[test]
+    fn pointer_convert_void_ptr_qualifier_drop_loss() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(const_qual(tcx.int)));
+        let src = push_kind(&mut body, const_int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, void_ptr),
+            Err(ConvertError::QualifierLoss),
+        );
+    }
+
+    /// Bullet 2 with qualifiers OK: `const void *p = cp;` carries the
+    /// `const` through — accepted.
+    #[test]
+    fn pointer_convert_const_void_ptr_from_const_object_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let const_void_ptr = tcx.intern(Ty::Ptr(const_qual(tcx.void)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(const_qual(tcx.int)));
+        let src = push_kind(&mut body, const_int_ptr, HirExprKind::LocalRef(Local(0)));
+
+        let result = pointer_convert(&mut tcx, &mut body, src, const_void_ptr).expect("qual ok");
+        assert_pointer_wrapper(&body, result, src, const_void_ptr);
+    }
+
+    /// Bullet 4: function pointers with the *same* signature are
+    /// interchangeable — `int (*)(int) = int (*)(int)`.
+    #[test]
+    fn pointer_convert_compatible_function_ptrs_ok() {
+        // Two structurally-identical Func types intern to the same
+        // TyId, so this path actually goes through the trivial
+        // "src_ty == dst_ty" branch. Use intermediate shapes to make
+        // sure we exercise the function-pointer branch when types
+        // differ but pointees are interned-equal at point of call.
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_func = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let int_func_ptr = tcx.intern(Ty::Ptr(Qual::plain(int_func)));
+        // Re-intern the same Func; we expect the same TyId because of
+        // dedup. This means the helper takes the trivial-equal
+        // shortcut, returning `src` unchanged.
+        let int_func_ptr_dup = tcx.intern(Ty::Ptr(Qual::plain(int_func)));
+        assert_eq!(int_func_ptr, int_func_ptr_dup);
+
+        let src = push_kind(&mut body, int_func_ptr, HirExprKind::LocalRef(Local(0)));
+        let result =
+            pointer_convert(&mut tcx, &mut body, src, int_func_ptr_dup).expect("trivial ok");
+        assert_eq!(result, src);
+    }
+
+    /// Bullet 4 negative: function pointers with different parameter
+    /// lists are *not* compatible — `int (*)(int)` ↔ `int (*)(double)`
+    /// must be rejected. This is the explicit acceptance scenario in
+    /// the task spec.
+    #[test]
+    fn pointer_convert_incompatible_function_ptrs_e0082() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_double = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.double],
+            variadic: false,
+            proto: true,
+        });
+        let int_int = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let src_ptr = tcx.intern(Ty::Ptr(Qual::plain(int_double)));
+        let dst_ptr = tcx.intern(Ty::Ptr(Qual::plain(int_int)));
+        let src = push_kind(&mut body, src_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, dst_ptr),
+            Err(ConvertError::Incompatible),
+        );
+    }
+
+    /// Bullet 4 / 8: function pointers with *different return types*
+    /// are also incompatible.
+    #[test]
+    fn pointer_convert_function_ptrs_different_return_e0082() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_func = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let void_func = tcx.intern(Ty::Func {
+            ret: tcx.void,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let src_ptr = tcx.intern(Ty::Ptr(Qual::plain(int_func)));
+        let dst_ptr = tcx.intern(Ty::Ptr(Qual::plain(void_func)));
+        let src = push_kind(&mut body, src_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, dst_ptr),
+            Err(ConvertError::Incompatible),
+        );
+    }
+
+    /// §6.3.2.3p8: a function pointer is *not* an object pointer, so
+    /// `void* = func_ptr` is rejected (no implicit conversion between
+    /// function pointers and `void*`).
+    #[test]
+    fn pointer_convert_function_ptr_to_void_ptr_rejected() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let func_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let func_ptr = tcx.intern(Ty::Ptr(Qual::plain(func_ty)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let src = push_kind(&mut body, func_ptr, HirExprKind::LocalRef(Local(0)));
+
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src, void_ptr),
+            Err(ConvertError::Incompatible),
+        );
+        // And the reverse direction.
+        let src2 = push_kind(&mut body, void_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(
+            pointer_convert(&mut tcx, &mut body, src2, func_ptr),
+            Err(ConvertError::Incompatible),
+        );
+    }
+
+    /// §6.3.2.3p4 records "qualifiers must be added, not removed" for
+    /// the function-pointer case (functions cannot be qualified, so
+    /// the only meaningful test is that compatibility is decided on
+    /// the function type itself, not the surrounding qualifiers).
+    /// Already covered by the compatible/incompatible tests above.
+    /// Truth table: walk every §6.3.2.3 bullet at least once with the
+    /// expected outcome.
+    #[test]
+    fn pointer_convert_truth_table() {
+        // (description, src_ty_builder, dst_ty_builder, src_kind_builder,
+        //  expected) — encoded as closures so each row gets a fresh tcx
+        // / body and we don't cross-pollute interned ids.
+        #[derive(Debug)]
+        enum Outcome {
+            Trivial,
+            Wrap,
+            Err(ConvertError),
+        }
+
+        // Helper: run one row.
+        fn run(
+            label: &str,
+            build_src: impl FnOnce(&mut TyCtxt) -> TyId,
+            build_dst: impl FnOnce(&mut TyCtxt) -> TyId,
+            build_kind: impl FnOnce(&mut TyCtxt) -> HirExprKind,
+            expected: Outcome,
+        ) {
+            let mut tcx = TyCtxt::new();
+            let mut body = Body::default();
+            let src_ty = build_src(&mut tcx);
+            let dst_ty = build_dst(&mut tcx);
+            let kind = build_kind(&mut tcx);
+            let src = push_kind(&mut body, src_ty, kind);
+
+            let len_before = body.exprs.len();
+            let result = pointer_convert(&mut tcx, &mut body, src, dst_ty);
+            match (result, expected) {
+                (Ok(id), Outcome::Trivial) => {
+                    assert_eq!(id, src, "{label}: trivial path must reuse src id");
+                    assert_eq!(body.exprs.len(), len_before, "{label}: no allocation");
+                }
+                (Ok(id), Outcome::Wrap) => {
+                    assert_ne!(id, src, "{label}: wrap path must allocate fresh id");
+                    let expr = &body.exprs[id];
+                    assert_eq!(expr.ty, dst_ty, "{label}: wrapper has dst type");
+                    match expr.kind {
+                        HirExprKind::Convert { operand, kind: ConvertKind::Pointer } => {
+                            assert_eq!(operand, src, "{label}: wrapped operand")
+                        }
+                        ref other => panic!("{label}: expected Convert::Pointer, got {other:?}"),
+                    }
+                }
+                (Err(e), Outcome::Err(want)) => {
+                    assert_eq!(e, want, "{label}");
+                }
+                (got, want) => panic!("{label}: result={got:?}, want={want:?}"),
+            }
+        }
+
+        // ---- §6.3.2.3p1: pointer to qualified ↔ unqualified; trivial. ----
+        // `int *` → `int *` (same TyId after interning) → no wrapper.
+        run(
+            "int* -> int* (trivial)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Trivial,
+        );
+
+        // ---- §6.3.2.3p3: null pointer constant ↔ pointer. ----
+        run(
+            "0 -> int* (null pointer constant)",
+            |t| t.int,
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::IntConst(0),
+            Outcome::Wrap,
+        );
+        run(
+            "0 -> char* (null pointer constant)",
+            |t| t.int,
+            |t| t.intern(Ty::Ptr(Qual::plain(t.char_))),
+            |_| HirExprKind::IntConst(0),
+            Outcome::Wrap,
+        );
+        run(
+            "1 -> int* (non-zero int, requires cast)",
+            |t| t.int,
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::IntConst(1),
+            Outcome::Err(ConvertError::IntegerPointerMix),
+        );
+
+        // ---- §6.3.2.3p1 + p7: void* ↔ object pointer (both directions). ----
+        run(
+            "int* -> void*",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Wrap,
+        );
+        run(
+            "void* -> int*",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Wrap,
+        );
+        run(
+            "char* -> void* (object pointer)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.char_))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Wrap,
+        );
+
+        // ---- §6.3.2.3p1 qualifier rule: addition OK, removal not. ----
+        run(
+            "int* -> const int* (add const)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.intern(Ty::Ptr(const_qual(t.int))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Wrap,
+        );
+        run(
+            "const int* -> int* (drop const)",
+            |t| t.intern(Ty::Ptr(const_qual(t.int))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::QualifierLoss),
+        );
+        run(
+            "void* -> const void* (add const)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |t| t.intern(Ty::Ptr(const_qual(t.void))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Wrap,
+        );
+        run(
+            "const void* -> void* (drop const)",
+            |t| t.intern(Ty::Ptr(const_qual(t.void))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::QualifierLoss),
+        );
+
+        // ---- §6.3.2.3p1: unrelated object pointers reject. ----
+        run(
+            "int* -> char* (unrelated pointee)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.char_))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+        run(
+            "int* -> float* (unrelated pointee)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.intern(Ty::Ptr(Qual::plain(t.float))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+
+        // ---- §6.3.2.3p8: function-pointer compatibility. ----
+        run(
+            "int(*)(int) -> int(*)(int) (compatible)",
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Trivial,
+        );
+        run(
+            "int(*)(int) -> int(*)(double) (incompatible)",
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.double],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+        run(
+            "int(*)(int) -> void(*)(int) (different return)",
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.void,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+        run(
+            "int(*)(int) -> int(*)(int, ...) (variadic mismatch)",
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: true,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+
+        // ---- §6.3.2.3p8 again: function-pointer / object-pointer mix. ----
+        run(
+            "int(*)(int) -> void* (function pointer not object pointer)",
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+        run(
+            "void* -> int(*)(int) (function pointer not object pointer)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.void))),
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
+        run(
+            "0 -> int(*)(int) (null pointer constant ok for function ptr)",
+            |t| t.int,
+            |t| {
+                let f = t.intern(Ty::Func {
+                    ret: t.int,
+                    params: vec![t.int],
+                    variadic: false,
+                    proto: true,
+                });
+                t.intern(Ty::Ptr(Qual::plain(f)))
+            },
+            |_| HirExprKind::IntConst(0),
+            Outcome::Wrap,
+        );
+
+        // ---- §6.3.2.3p5/p6: integer ↔ pointer requires explicit cast. ----
+        run(
+            "int* -> int (pointer to integer)",
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |t| t.int,
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::IntegerPointerMix),
+        );
+        run(
+            "int -> int* (non-null integer to pointer)",
+            |t| t.int,
+            |t| t.intern(Ty::Ptr(Qual::plain(t.int))),
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::IntegerPointerMix),
+        );
+
+        // ---- Sanity: non-pointer ↔ non-pointer falls through to
+        // Incompatible (caller must not invoke us on this shape, but
+        // we keep the helper total). ----
+        run(
+            "int -> float (caller misuse)",
+            |t| t.int,
+            |t| t.float,
+            |_| HirExprKind::LocalRef(Local(0)),
+            Outcome::Err(ConvertError::Incompatible),
+        );
     }
 }
