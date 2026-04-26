@@ -499,6 +499,310 @@ pub fn check_assignment_lhs(session: &mut Session, body: &Body, lhs: HirExprId) 
     false
 }
 
+// ---------------------------------------------------------------------
+// Assignment compatibility (C99 §6.5.16.1)
+// ---------------------------------------------------------------------
+
+/// Outcome of [`is_assignable`]. The two non-`Incompatible` variants
+/// flag the conversion as well-formed *but worth a warning* — the
+/// caller is expected to forward `Narrowing` to W0008 and
+/// `QualifierLoss` to E0081 (the spec treats discarding qualifiers as
+/// a constraint violation, not a warning, but we keep them as separate
+/// cases so downstream callers can choose finer-grained messaging in
+/// task 07-07).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AssignError {
+    /// The two types do not match any §6.5.16.1p1 bullet.
+    Incompatible,
+    /// Arithmetic-to-arithmetic conversion that loses range or precision.
+    /// The assignment is still legal (C99 silently allows it); the
+    /// caller emits W0008.
+    Narrowing,
+    /// Pointer-to-pointer assignment where the destination's pointee
+    /// type does not include every qualifier on the source's pointee.
+    /// C99 §6.5.16.1p1 third bullet treats this as a constraint
+    /// violation, but we report it separately so callers can produce a
+    /// more specific diagnostic (\"discards `const` qualifier\").
+    QualifierLoss,
+}
+
+/// True if `expr` is a *null pointer constant* per C99 §6.3.2.3p3:
+/// "An integer constant expression with the value 0, or such an
+/// expression cast to type `void *`".
+///
+/// In HIR a literal `0` lowers to [`HirExprKind::IntConst(0)`]; an
+/// explicit `(void *)0` lowers to a [`HirExprKind::Cast`] over the
+/// same; the type-checker's own [`ConvertKind::Pointer`] /
+/// [`ConvertKind::IntegerPromotion`] / [`ConvertKind::UsualArithmetic`]
+/// wrappers may also sit on top once task 07-07 lands. We unwrap
+/// `Cast` and `Convert` recursively so the test stays robust as more
+/// implicit conversions accrue.
+pub fn is_null_pointer_constant(body: &Body, expr: HirExprId) -> bool {
+    match body.exprs[expr].kind {
+        HirExprKind::IntConst(0) => true,
+        HirExprKind::Cast { operand, .. } => is_null_pointer_constant(body, operand),
+        HirExprKind::Convert { operand, .. } => is_null_pointer_constant(body, operand),
+        _ => false,
+    }
+}
+
+/// True iff `a` and `b` denote *compatible types* per C99 §6.2.7.
+///
+/// In our HIR every type is interned via [`TyCtxt::intern`], so equal
+/// `TyId`s always denote the same `Ty` and are therefore compatible.
+/// The non-trivial cases — pointer / array / function compatibility,
+/// tagged-type definitions across translation units — all bottom out
+/// in `TyId` equality once interning has done its job:
+///
+/// * Pointers are compatible iff their pointees are compatible
+///   (qualifiers must match).
+/// * Arrays are compatible iff their element types are compatible and
+///   any specified lengths agree.
+/// * Function types are compatible iff return types match and every
+///   parameter pair matches (after default argument promotions).
+/// * `Ty::Record(DefId)` carries a single `DefId`, so two records
+///   compare equal iff they refer to the same definition — which is
+///   what §6.2.7 demands within a single translation unit.
+///
+/// The interner gives us all of this for free: `tcx.intern(ty)` is
+/// idempotent, so any two structurally-identical `Ty` values share a
+/// single `TyId`. We expose the helper as a named function anyway so
+/// callers (and future cross-TU compatibility logic) have a stable
+/// extension point.
+pub fn is_compatible_type(_tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
+    a == b
+}
+
+/// Width in bits of an integer rank. Re-exported helper so the
+/// narrowing classifier can share it with [`usual_arithmetic`].
+fn integer_bits(rank: IntRank) -> u32 {
+    int_rank_bits(rank)
+}
+
+/// Width in bits of a float kind's mantissa (number of value bits the
+/// significand can represent exactly). Used to decide when an integer
+/// → float conversion loses precision.
+fn float_significand_bits(kind: FloatKind) -> u32 {
+    match kind {
+        // IEEE 754 binary32: 1 implicit + 23 explicit fraction bits.
+        FloatKind::F32 => 24,
+        // IEEE 754 binary64: 1 implicit + 52 explicit fraction bits.
+        FloatKind::F64 => 53,
+        // x87 extended precision: 64 explicit bits, no implicit bit.
+        // For our LP64 / x86_64 target this is the long double layout.
+        FloatKind::F80 => 64,
+    }
+}
+
+/// "Width" of a float kind for descending-precision narrowing checks
+/// (`double → float` is narrowing, `float → double` is not).
+fn float_rank(kind: FloatKind) -> u32 {
+    match kind {
+        FloatKind::F32 => 0,
+        FloatKind::F64 => 1,
+        FloatKind::F80 => 2,
+    }
+}
+
+/// True iff converting a value of type `src` to type `dst` may lose
+/// information at run time. Both types are assumed to be arithmetic
+/// (integer or float); records, pointers, void, and the error sentinel
+/// must be filtered out before calling this.
+fn is_narrowing_arithmetic(tcx: &TyCtxt, src: TyId, dst: TyId) -> bool {
+    if src == dst {
+        return false;
+    }
+    let src_ty = tcx.get(src);
+    let dst_ty = tcx.get(dst);
+    match (src_ty, dst_ty) {
+        // Integer → integer.
+        (Ty::Int { signed: ss, rank: sr }, Ty::Int { signed: ds, rank: dr }) => {
+            let sb = integer_bits(*sr);
+            let db = integer_bits(*dr);
+            match (*ss, *ds) {
+                // Same signedness: narrowing iff dst is strictly narrower.
+                (true, true) | (false, false) => sb > db,
+                // Signed src → unsigned dst: negatives become huge values, so
+                // *every* such conversion can lose information regardless of width.
+                (true, false) => true,
+                // Unsigned src → signed dst: dst must have at least one extra
+                // bit to hold every unsigned value (sign bit). Otherwise narrowing.
+                (false, true) => sb >= db,
+            }
+        }
+        // Float → float: narrowing iff dst rank is lower.
+        (Ty::Float(s), Ty::Float(d)) => float_rank(*s) > float_rank(*d),
+        // Integer → float: narrowing iff the integer's value bits exceed
+        // the float's significand width.
+        (Ty::Int { signed, rank }, Ty::Float(f)) => {
+            let int_bits = integer_bits(*rank);
+            let value_bits = if *signed { int_bits.saturating_sub(1) } else { int_bits };
+            value_bits > float_significand_bits(*f)
+        }
+        // Float → integer: always narrowing (the fractional part is lost,
+        // and the integer range may not cover the float's range either).
+        (Ty::Float(_), Ty::Int { .. }) => true,
+        // Anything else (including `_Complex` — task 07-12) we conservatively
+        // call non-narrowing; the caller will already have rejected the
+        // assignment via `is_assignable` if the types are otherwise
+        // incompatible.
+        _ => false,
+    }
+}
+
+/// True iff `a` is an arithmetic type per C99 §6.2.5p18 (integer or
+/// floating, real or complex). `_Complex` is included because §6.5.16.1
+/// treats every arithmetic type uniformly.
+fn is_arithmetic(tcx: &TyCtxt, a: TyId) -> bool {
+    matches!(tcx.get(a), Ty::Int { .. } | Ty::Float(_) | Ty::Complex(_))
+}
+
+/// True iff `a` is a pointer type.
+fn is_pointer(tcx: &TyCtxt, a: TyId) -> bool {
+    matches!(tcx.get(a), Ty::Ptr(_))
+}
+
+/// Pointee `Qual` of a pointer type, or `None` for non-pointers.
+fn pointee_qual(tcx: &TyCtxt, a: TyId) -> Option<Qual> {
+    match *tcx.get(a) {
+        Ty::Ptr(q) => Some(q),
+        _ => None,
+    }
+}
+
+/// True iff every qualifier set on `inner` is also set on `outer`
+/// (i.e. `outer ⊇ inner`). C99 §6.5.16.1p1 third bullet requires the
+/// destination pointee's qualifiers to be a *superset* of the source
+/// pointee's, so writing through the destination cannot drop a qualifier
+/// the source promised.
+fn qualifiers_superset(outer: Qual, inner: Qual) -> bool {
+    (!inner.is_const || outer.is_const)
+        && (!inner.is_volatile || outer.is_volatile)
+        && (!inner.is_restrict || outer.is_restrict)
+}
+
+/// True iff `t` is `void` (possibly via a `Qual` wrapper at the call
+/// site; this helper takes the bare `TyId`).
+fn is_void(tcx: &TyCtxt, t: TyId) -> bool {
+    matches!(tcx.get(t), Ty::Void)
+}
+
+/// True iff `t` is an "object type" or incomplete type in the sense of
+/// §6.5.16.1p1 fourth bullet — anything that is not a function type.
+fn is_object_or_incomplete(tcx: &TyCtxt, t: TyId) -> bool {
+    !matches!(tcx.get(t), Ty::Func { .. })
+}
+
+/// Check the C99 §6.5.16.1 simple-assignment constraint. Returns
+/// `Ok(())` when the assignment, function-call argument, return
+/// statement, or initializer is well-formed; otherwise yields an
+/// [`AssignError`] describing how the constraint is violated.
+///
+/// The six cases of §6.5.16.1p1 are matched in spec order:
+///
+/// 1. Both operands have arithmetic type — accepted; flagged as
+///    [`AssignError::Narrowing`] when the source's value range or
+///    precision does not fit in the destination.
+/// 2. Both operands have a compatible struct or union type — accepted.
+/// 3. Both operands are pointers to compatible (possibly differently
+///    qualified) types, with the destination pointee carrying every
+///    qualifier of the source pointee. Flagged as
+///    [`AssignError::QualifierLoss`] when the pointee types are
+///    compatible but qualifiers narrow.
+/// 4. One operand is a pointer to an object/incomplete type and the
+///    other is a pointer to (qualified or unqualified) `void`, with
+///    the same qualifier-superset rule on the destination side.
+/// 5. The destination is a pointer and the source expression is a
+///    *null pointer constant* (see [`is_null_pointer_constant`]).
+/// 6. The destination has type `_Bool` and the source has any pointer
+///    type.
+///
+/// All other shapes are [`AssignError::Incompatible`]. The function is
+/// intentionally pure — it does *not* emit diagnostics; the caller
+/// (task 07-07) decides how to surface the result.
+pub fn is_assignable(
+    tcx: &TyCtxt,
+    body: &Body,
+    dst: TyId,
+    src_ty: TyId,
+    src_expr: HirExprId,
+) -> Result<(), AssignError> {
+    // Same TyId: trivially assignable. Catches `int = int`, `T* = T*`,
+    // `struct S = struct S`. No conversion is required.
+    if dst == src_ty {
+        return Ok(());
+    }
+
+    // Bullet 1: arithmetic ↔ arithmetic.
+    if is_arithmetic(tcx, dst) && is_arithmetic(tcx, src_ty) {
+        if is_narrowing_arithmetic(tcx, src_ty, dst) {
+            return Err(AssignError::Narrowing);
+        }
+        return Ok(());
+    }
+
+    // Bullet 6: _Bool ← any pointer (C99 §6.3.1.2 + §6.5.16.1p1 last
+    // bullet). Match this *before* the pointer rules so a pointer source
+    // doesn't accidentally fall into bullet 5 via the dst-is-pointer
+    // shortcut. Note: dst != src_ty by the early-return above, so this
+    // only fires when one side is a real pointer and the other is _Bool.
+    if dst == tcx.bool_ && is_pointer(tcx, src_ty) {
+        return Ok(());
+    }
+
+    // Bullet 2: struct / union of compatible types. Records are interned
+    // by `DefId`, so compatibility reduces to TyId equality — already
+    // handled by the early-return at the top. We keep an explicit branch
+    // here so a future cross-TU "compatible record" rule has a hook.
+    if let (Ty::Record(da), Ty::Record(db)) = (tcx.get(dst), tcx.get(src_ty)) {
+        if da == db {
+            return Ok(());
+        }
+        return Err(AssignError::Incompatible);
+    }
+
+    // Bullets 3 + 4 + 5: pointer-shaped destination.
+    if let Some(dst_pointee) = pointee_qual(tcx, dst) {
+        // Bullet 5: null pointer constant.
+        if is_null_pointer_constant(body, src_expr) {
+            return Ok(());
+        }
+
+        // Both operands must be pointers from here on; otherwise it's
+        // incompatible. (Integer-to-pointer assignment of a non-null
+        // constant is a constraint violation in C99.)
+        let Some(src_pointee) = pointee_qual(tcx, src_ty) else {
+            return Err(AssignError::Incompatible);
+        };
+
+        // Bullet 4: void* ↔ object-pointer.
+        let dst_is_void_ptr = is_void(tcx, dst_pointee.ty);
+        let src_is_void_ptr = is_void(tcx, src_pointee.ty);
+        if (dst_is_void_ptr && is_object_or_incomplete(tcx, src_pointee.ty))
+            || (src_is_void_ptr && is_object_or_incomplete(tcx, dst_pointee.ty))
+        {
+            // Qualifier rule still applies: writing through `dst` must
+            // not drop a qualifier the source promised.
+            if !qualifiers_superset(dst_pointee, src_pointee) {
+                return Err(AssignError::QualifierLoss);
+            }
+            return Ok(());
+        }
+
+        // Bullet 3: pointer-to-compatible-types, qualifier superset.
+        if is_compatible_type(tcx, dst_pointee.ty, src_pointee.ty) {
+            if !qualifiers_superset(dst_pointee, src_pointee) {
+                return Err(AssignError::QualifierLoss);
+            }
+            return Ok(());
+        }
+
+        return Err(AssignError::Incompatible);
+    }
+
+    Err(AssignError::Incompatible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,5 +1738,307 @@ mod tests {
         let ok = check_assignment_lhs(&mut session, &body, lhs);
         assert!(ok);
         assert!(cap.diagnostics().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Assignment compatibility (C99 §6.5.16.1) — is_assignable.
+    // ------------------------------------------------------------------
+
+    use rcc_hir::DefId as RecDefId;
+
+    /// Bullet 1: arithmetic ↔ arithmetic. Same type → Ok, no narrowing.
+    #[test]
+    fn assignable_arith_same_type_ok() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        assert_eq!(is_assignable(&tcx, &body, tcx.int, tcx.int, src), Ok(()));
+    }
+
+    /// Bullet 1: widening (`char → long`, `float → double`) accepted with no warning.
+    #[test]
+    fn assignable_arith_widening_ok() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_kind(&mut body, tcx.char_, HirExprKind::IntConst(1));
+        assert_eq!(is_assignable(&tcx, &body, tcx.long, tcx.char_, src), Ok(()));
+        assert_eq!(is_assignable(&tcx, &body, tcx.double, tcx.float, src), Ok(()));
+        // unsigned-narrower → signed-wider holds the value range:
+        assert_eq!(is_assignable(&tcx, &body, tcx.long, tcx.uint, src), Ok(()));
+    }
+
+    /// Acceptance: `int x = 1.5;` is accepted but flags Narrowing → caller emits W0008.
+    #[test]
+    fn assignable_double_to_int_is_narrowing() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_kind(&mut body, tcx.double, HirExprKind::FloatConst(1.5));
+        assert_eq!(
+            is_assignable(&tcx, &body, tcx.int, tcx.double, src),
+            Err(AssignError::Narrowing),
+        );
+    }
+
+    /// Bullet 1: signed → unsigned of same width is narrowing (negatives lost).
+    #[test]
+    fn assignable_signed_to_unsigned_is_narrowing() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_kind(&mut body, tcx.int, HirExprKind::IntConst(-1));
+        assert_eq!(is_assignable(&tcx, &body, tcx.uint, tcx.int, src), Err(AssignError::Narrowing),);
+    }
+
+    /// Bullet 1: `long → int` (truncation) is narrowing.
+    #[test]
+    fn assignable_long_to_int_is_narrowing() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_kind(&mut body, tcx.long, HirExprKind::IntConst(0));
+        assert_eq!(is_assignable(&tcx, &body, tcx.int, tcx.long, src), Err(AssignError::Narrowing),);
+    }
+
+    /// Acceptance: `int *p = 0;` accepted (null pointer constant).
+    #[test]
+    fn assignable_null_pointer_constant_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        // Source: literal `0` of type int.
+        let src = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        assert_eq!(is_assignable(&tcx, &body, int_ptr, tcx.int, src), Ok(()));
+    }
+
+    /// Null pointer constant survives Cast / Convert wrappers (`(void*)0`).
+    #[test]
+    fn assignable_null_pointer_through_cast() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let zero = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let cast =
+            push_kind(&mut body, void_ptr, HirExprKind::Cast { operand: zero, to: void_ptr });
+        assert_eq!(is_assignable(&tcx, &body, int_ptr, void_ptr, cast), Ok(()));
+    }
+
+    /// Non-zero integer to pointer is a constraint violation
+    /// (C99 §6.5.16.1p1 — only the *integer constant 0* is a null pointer
+    /// constant).
+    #[test]
+    fn assignable_nonzero_int_to_pointer_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let one = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+        assert_eq!(
+            is_assignable(&tcx, &body, int_ptr, tcx.int, one),
+            Err(AssignError::Incompatible),
+        );
+    }
+
+    /// Bullet 4: `void *p = &x;` — object pointer → void* (and reverse) accepted.
+    #[test]
+    fn assignable_void_ptr_from_object_ptr_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, void_ptr, int_ptr, src), Ok(()));
+        assert_eq!(is_assignable(&tcx, &body, int_ptr, void_ptr, src), Ok(()));
+    }
+
+    /// Bullet 4: function pointer is *not* an object pointer, so
+    /// `void* = &func` is a constraint violation per §6.3.2.3p8.
+    #[test]
+    fn assignable_void_ptr_from_function_ptr_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let func_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let func_ptr = tcx.intern(Ty::Ptr(Qual::plain(func_ty)));
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let src = push_kind(&mut body, func_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(
+            is_assignable(&tcx, &body, void_ptr, func_ptr, src),
+            Err(AssignError::Incompatible),
+        );
+    }
+
+    /// Bullet 3: `const int *p = &c_i;` accepted — both pointee types are
+    /// `int`, dst pointee is `const`, src pointee is unqualified, dst's
+    /// qualifier set is a superset.
+    #[test]
+    fn assignable_qualifier_widen_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.int,
+            is_const: true,
+            is_volatile: false,
+            is_restrict: false,
+        }));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, const_int_ptr, int_ptr, src), Ok(()));
+    }
+
+    /// Bullet 3: `int *p = &c_i;` (dropping `const`) is a qualifier-loss
+    /// constraint violation.
+    #[test]
+    fn assignable_qualifier_drop_loss() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let const_int_ptr = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.int,
+            is_const: true,
+            is_volatile: false,
+            is_restrict: false,
+        }));
+        let src = push_kind(&mut body, const_int_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(
+            is_assignable(&tcx, &body, int_ptr, const_int_ptr, src),
+            Err(AssignError::QualifierLoss),
+        );
+    }
+
+    /// Acceptance: `struct A; struct B; struct A a; struct B *p = &a;` → E0081.
+    /// Different record `DefId`s → not compatible.
+    #[test]
+    fn assignable_different_records_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let rec_a = tcx.intern(Ty::Record(RecDefId(0)));
+        let rec_b = tcx.intern(Ty::Record(RecDefId(1)));
+        let ptr_a = tcx.intern(Ty::Ptr(Qual::plain(rec_a)));
+        let ptr_b = tcx.intern(Ty::Ptr(Qual::plain(rec_b)));
+        let src = push_kind(&mut body, ptr_a, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, ptr_b, ptr_a, src), Err(AssignError::Incompatible),);
+    }
+
+    /// Bullet 2: same-DefId record ↔ record assignment accepted.
+    #[test]
+    fn assignable_same_record_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let rec = tcx.intern(Ty::Record(RecDefId(0)));
+        let src = push_kind(&mut body, rec, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, rec, rec, src), Ok(()));
+    }
+
+    /// Bullet 6: `_Bool b = p;` for any pointer `p` is well-formed
+    /// (C99 §6.3.1.2 — pointer-to-bool is the standard "is non-null?" idiom).
+    #[test]
+    fn assignable_bool_from_pointer_ok() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, tcx.bool_, int_ptr, src), Ok(()));
+    }
+
+    /// Mismatched non-void pointers (e.g. `int* = float*`) reject as Incompatible.
+    #[test]
+    fn assignable_unrelated_pointers_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let float_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.float)));
+        let src = push_kind(&mut body, float_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(
+            is_assignable(&tcx, &body, int_ptr, float_ptr, src),
+            Err(AssignError::Incompatible),
+        );
+    }
+
+    /// Pointer LHS, struct RHS — incompatible (no §6.5.16.1p1 bullet matches).
+    #[test]
+    fn assignable_pointer_from_record_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let rec = tcx.intern(Ty::Record(RecDefId(0)));
+        let src = push_kind(&mut body, rec, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(is_assignable(&tcx, &body, int_ptr, rec, src), Err(AssignError::Incompatible),);
+    }
+
+    /// Arithmetic LHS, pointer RHS (other than `_Bool`) — incompatible.
+    #[test]
+    fn assignable_int_from_pointer_incompatible() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let src = push_kind(&mut body, int_ptr, HirExprKind::LocalRef(Local(0)));
+        assert_eq!(
+            is_assignable(&tcx, &body, tcx.int, int_ptr, src),
+            Err(AssignError::Incompatible),
+        );
+    }
+
+    /// `is_null_pointer_constant` — IntConst(0) is the canonical match.
+    #[test]
+    fn npc_int_const_zero() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        assert!(is_null_pointer_constant(&body, id));
+    }
+
+    /// `is_null_pointer_constant` — IntConst(7) is not a null pointer constant.
+    #[test]
+    fn npc_int_const_nonzero_rejected() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.int, HirExprKind::IntConst(7));
+        assert!(!is_null_pointer_constant(&body, id));
+    }
+
+    /// `is_null_pointer_constant` recurses through Cast and Convert wrappers.
+    #[test]
+    fn npc_through_cast_and_convert() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let zero = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let cast =
+            push_kind(&mut body, tcx.long, HirExprKind::Cast { operand: zero, to: tcx.long });
+        assert!(is_null_pointer_constant(&body, cast));
+
+        let convert = push_kind(
+            &mut body,
+            tcx.long,
+            HirExprKind::Convert { operand: zero, kind: ConvertKind::IntegerPromotion },
+        );
+        assert!(is_null_pointer_constant(&body, convert));
+
+        // Nested wrappers still bottom out in IntConst(0).
+        let nested = push_kind(
+            &mut body,
+            tcx.long,
+            HirExprKind::Convert { operand: cast, kind: ConvertKind::IntegerPromotion },
+        );
+        assert!(is_null_pointer_constant(&body, nested));
+    }
+
+    /// Float literal is not a null pointer constant — only *integer*
+    /// constant expressions with value 0 qualify (§6.3.2.3p3).
+    #[test]
+    fn npc_float_const_rejected() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(&mut body, tcx.double, HirExprKind::FloatConst(0.0));
+        assert!(!is_null_pointer_constant(&body, id));
+    }
+
+    /// `is_compatible_type` — interned `TyId` equality covers the standard
+    /// in-translation-unit cases.
+    #[test]
+    fn compatible_type_basic() {
+        let mut tcx = TyCtxt::new();
+        let p1 = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let p2 = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        assert!(is_compatible_type(&tcx, p1, p2));
+        assert!(is_compatible_type(&tcx, tcx.int, tcx.int));
+        assert!(!is_compatible_type(&tcx, tcx.int, tcx.long));
     }
 }

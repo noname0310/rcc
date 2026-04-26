@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-05: Assignment constraint
 
 **Phase:** 07-typeck    **Depends on:** 07-04    **Milestone:** M3

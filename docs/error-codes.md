@@ -712,6 +712,49 @@ referring to an object is an lvalue.
 
 ---
 
+## E0081 — incompatible types in assignment
+
+C99 §6.5.16.1p1 enumerates the only legal RHS shapes for a simple
+assignment, function-call argument, return statement, or initializer:
+
+- both operands have arithmetic type (the RHS may be implicitly
+  converted; lossy conversions are flagged with W0008, not E0081);
+- both operands are compatible struct or union types;
+- both operands are pointers to compatible types, with the LHS's
+  pointee qualifier set including every qualifier on the RHS's
+  pointee;
+- one operand is a pointer to an object/incomplete type and the
+  other is a pointer to (qualified or unqualified) `void`;
+- the LHS is a pointer and the RHS is a *null pointer constant* —
+  an integer constant expression with value 0, optionally cast to
+  `void *` (§6.3.2.3p3);
+- the LHS is `_Bool` and the RHS is any pointer.
+
+Anything else is a constraint violation:
+
+```c
+struct A { int x; };
+struct B { int y; };
+void f(struct A a) {
+    struct B *p = &a;   // error[E0081]: incompatible types in assignment
+    int *q = 1;         // error[E0081]: only the *integer constant 0*
+                        //               is a null pointer constant
+    int n = &a;         // error[E0081]: pointer cannot initialise an int
+}
+```
+
+Pointer assignment that drops a qualifier on the pointee — `int *p
+= &c_i;` where `c_i` is `const int` — also lands here; the LHS's
+pointee qualifier set must be a superset of the RHS's so writing
+through the LHS cannot violate the source's `const` / `volatile` /
+`restrict` promise.
+
+Null-pointer-constant detection unwraps `Cast` and the
+type-checker's own `Convert` wrappers, so `(void *)0`, `(int *)0`,
+and `0` itself all match.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
@@ -820,3 +863,28 @@ enum huge { A = 0xFFFFFFFFFF };  // warning[W0007]: value 1099511627775 of enume
 ```
 
 Like every warning, W0007 does not count toward `Handler::has_errors`.
+
+## W0008 — implicit conversion narrows value
+
+The C99 §6.5.16.1 assignment-compatibility rules accept any
+arithmetic-to-arithmetic conversion on the RHS of `=` (and on
+function-call arguments, return statements, and initializers — all
+follow the same rule). Many of those conversions silently lose
+information at run time:
+
+```c
+int    x = 1.5;            // warning[W0008]: 1.5 cannot be represented as `int`
+unsigned char b = 300;     // warning[W0008]: 300 wraps to 44
+int    n = 1ULL << 40;     // warning[W0008]: high bits of `unsigned long long` lost
+unsigned u = -1;           // warning[W0008]: -1 reinterpreted as 0xFFFFFFFF
+```
+
+`rcc` follows every other modern C compiler and warns whenever the
+destination type cannot represent the full range or precision of the
+source type. The conversion is still performed; the warning gives
+the user a chance to add an explicit cast or fix the type.
+
+Task 07-05 introduces the warning; task 07-07 wires it to the
+implicit `Convert` insertion pass.
+
+Like every warning, W0008 does not count toward `Handler::has_errors`.

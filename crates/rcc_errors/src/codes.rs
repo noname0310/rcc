@@ -8,7 +8,9 @@
 //!   E0021..E0040  — parser          (reserved, future)
 //!   E0041..E0060  — type-checking   (reserved, future)
 //!   E0061..E0080  — HIR lowering    (reserved, future)
-//!   E0081..E0100  — codegen         (reserved, future)
+//!   E0081..E0100  — type-checking / codegen (E0081 spent on
+//!                                            assignment compatibility,
+//!                                            see task 07-05)
 //!
 //! Warning codes use the `WNNNN` spelling and live in their own
 //! namespace; task 04-16 introduces the first, W0001 for unknown
@@ -76,6 +78,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0077, E0077_DESC),
     (E0078, E0078_DESC),
     (E0080, E0080_DESC),
+    (E0081, E0081_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -83,6 +86,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0005, W0005_DESC),
     (W0006, W0006_DESC),
     (W0007, W0007_DESC),
+    (W0008, W0008_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -448,6 +452,31 @@ const E0077_DESC: &str = "invalid bit-field width";
 pub const E0080: &str = "E0080";
 const E0080_DESC: &str = "assignment to rvalue";
 
+/// Incompatible types in assignment.
+///
+/// C99 §6.5.16.1p1 enumerates the only legal RHS shapes for a simple
+/// assignment, function-call argument, return statement, or
+/// initializer:
+///
+/// - both operands are arithmetic types (the RHS may need
+///   conversion — narrowing is flagged with W0008, not E0081);
+/// - both operands are compatible struct or union types (modulo
+///   qualifier expansion on the LHS pointee);
+/// - both operands are pointers to compatible types, with the LHS's
+///   pointee qualifier set including every qualifier on the RHS's
+///   pointee;
+/// - one operand is a pointer to an object/incomplete type and the
+///   other is a pointer to (qualified or unqualified) `void`;
+/// - the LHS is a pointer and the RHS is a null pointer constant
+///   (an integer constant expression with value 0, optionally cast
+///   to `void *`);
+/// - the LHS is `_Bool` and the RHS is any pointer.
+///
+/// Anything else is a constraint violation. `rcc` reports it with
+/// this code at the assignment / initializer / argument site.
+pub const E0081: &str = "E0081";
+const E0081_DESC: &str = "incompatible types in assignment";
+
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
 /// Unknown `#pragma` directive — accepted but ignored.
@@ -534,6 +563,23 @@ const W0006_DESC: &str = "macro redefined with a different body (permissive)";
 /// §6.7.2.2p4 selection algorithm and drop the diagnostic.
 pub const W0007: &str = "W0007";
 const W0007_DESC: &str = "enumerator value outside the range of `int`";
+
+/// Implicit narrowing conversion in an assignment / initializer /
+/// argument / return.
+///
+/// The C99 §6.5.16.1 assignment compatibility rules accept any
+/// arithmetic-to-arithmetic conversion, but a great many of those
+/// conversions silently lose information at run time — `int x = 1.5;`
+/// drops the fractional part, `unsigned char b = 300;` truncates to
+/// `44`, `int n = 1ULL << 40;` discards the high bits. `rcc` follows
+/// every other modern C compiler and warns at compile time when the
+/// destination type cannot represent the full range / precision of the
+/// source type. The conversion is still performed; the warning gives
+/// the user a chance to add an explicit cast or fix the type. Task
+/// 07-05 introduces the warning; task 07-07 wires it to the implicit
+/// `Convert` insertion pass.
+pub const W0008: &str = "W0008";
+const W0008_DESC: &str = "implicit conversion narrows value";
 
 #[cfg(test)]
 mod tests {
