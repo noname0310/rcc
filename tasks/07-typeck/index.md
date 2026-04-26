@@ -8,7 +8,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 
 ## Tasks (pick in order)
 
-- [ ] [01-integer-promotion](01-integer-promotion.md)
+- [x] [01-integer-promotion](01-integer-promotion.md)
 - [ ] [02-usual-arithmetic-table](02-usual-arithmetic-table.md)
 - [ ] [03-array-function-decay](03-array-function-decay.md)
 - [ ] [04-lvalue-rvalue](04-lvalue-rvalue.md)

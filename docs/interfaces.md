@@ -244,7 +244,7 @@ pub struct Resolver { pub ordinary: FxHashMap<Symbol, DefId>, pub tags: FxHashMa
 ```rust
 pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate);
 
-pub fn integer_promotion(tcx: &TyCtxt, ty: TyId) -> TyId;
+pub fn integer_promotion(tcx: &TyCtxt, ty: TyId, bit_width: Option<u32>) -> TyId;
 pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId;
 
 pub struct ConstEval<'tcx, 'body>; pub enum ConstValue { Int(i128), Float(f64) }

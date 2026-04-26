@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-26
+
 # 07-01: Integer promotion
 
 **Phase:** 07-typeck    **Depends on:** —    **Milestone:** M3
