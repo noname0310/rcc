@@ -16,7 +16,7 @@ use rcc_session::Session;
 
 pub mod const_eval;
 
-pub use const_eval::{ConstEval, ConstValue};
+pub use const_eval::{ConstEval, ConstScalar, ConstValue};
 
 /// Width in bits of `int` assumed by the type checker.
 ///

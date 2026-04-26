@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 07-09: Extended constant expression evaluator
 
 **Phase:** 07-typeck    **Depends on:** 07-08    **Milestone:** M4
