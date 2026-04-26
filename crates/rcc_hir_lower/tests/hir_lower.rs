@@ -1250,16 +1250,55 @@ fn snippet_static_function_marked_internal() {
 
 #[test]
 fn snippet_inline_function_marked_inline() {
+    // Plain `inline` (no storage class): inline definition without
+    // providing the external definition (C99 §6.7.4).
     let (hir, _tcx) = lower_snippet("inline int square(int x) { return x * x; }");
     let def = hir
         .defs
         .iter()
         .find(|d| matches!(d.kind, DefKind::Function { .. }))
         .expect("missing function");
-    let DefKind::Function { is_inline, .. } = def.kind else {
+    let DefKind::Function { is_inline, is_extern_inline, is_static, .. } = def.kind else {
         unreachable!();
     };
     assert!(is_inline);
+    assert!(!is_extern_inline);
+    assert!(!is_static);
+}
+
+#[test]
+fn snippet_extern_inline_function_marked_extern_inline() {
+    // `extern inline` provides the external definition (C99 §6.7.4).
+    let (hir, _tcx) = lower_snippet("extern inline int square(int x) { return x * x; }");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Function { .. }))
+        .expect("missing function");
+    let DefKind::Function { is_inline, is_extern_inline, is_static, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(is_inline);
+    assert!(is_extern_inline);
+    assert!(!is_static);
+}
+
+#[test]
+fn snippet_static_inline_function_marked_inline_and_static() {
+    // `static inline` always emits with internal linkage; not an
+    // `extern inline` definition.
+    let (hir, _tcx) = lower_snippet("static inline int square(int x) { return x * x; }");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Function { .. }))
+        .expect("missing function");
+    let DefKind::Function { is_inline, is_extern_inline, is_static, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(is_inline);
+    assert!(!is_extern_inline);
+    assert!(is_static);
 }
 
 #[test]

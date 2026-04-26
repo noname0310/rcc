@@ -2484,6 +2484,21 @@ fn assign_def_ids(
             ExternalDecl::Function(func_def) => {
                 // Function definition — extract name from declarator.
                 if let Some((name, _span)) = func_def.declarator.name {
+                    // C99 §6.7.4 inline classification.
+                    //
+                    // Three meaningful combinations of `inline` with a
+                    // storage-class:
+                    //   * `inline`           → inline definition only; the
+                    //     translation unit does not provide an external
+                    //     definition (`is_inline=true, is_extern_inline=false`).
+                    //   * `extern inline`    → both inline and an external
+                    //     definition (`is_inline=true, is_extern_inline=true`).
+                    //   * `static inline`    → internal linkage definition,
+                    //     always emitted (`is_inline=true, is_static=true`).
+                    let is_inline = func_def.specs.func_specs.inline;
+                    let is_static = func_def.specs.storage == Some(StorageClass::Static);
+                    let is_extern_inline =
+                        is_inline && func_def.specs.storage == Some(StorageClass::Extern);
                     let id = crate_.defs.push(Def {
                         id: DefId(0), // patched below
                         name,
@@ -2491,8 +2506,9 @@ fn assign_def_ids(
                         kind: DefKind::Function {
                             ty: tcx.error,
                             has_body: true,
-                            is_static: func_def.specs.storage == Some(StorageClass::Static),
-                            is_inline: func_def.specs.func_specs.inline,
+                            is_static,
+                            is_inline,
+                            is_extern_inline,
                             variadic: false,
                         },
                     });
@@ -5669,6 +5685,7 @@ mod tests {
                 has_body: false,
                 is_static: false,
                 is_inline: false,
+                is_extern_inline: false,
                 variadic: false,
             },
         });

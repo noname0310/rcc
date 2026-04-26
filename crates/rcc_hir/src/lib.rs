@@ -68,6 +68,10 @@ pub enum DefKind {
         is_static: bool,
         /// `inline`?
         is_inline: bool,
+        /// `extern inline`? Distinguishes the C99 §6.7.4 case where an
+        /// `inline` definition is also explicitly `extern`, which provides
+        /// the external definition (vs. plain `inline`, which does not).
+        is_extern_inline: bool,
         /// Variadic?
         variadic: bool,
     },
