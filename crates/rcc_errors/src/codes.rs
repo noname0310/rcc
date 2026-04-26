@@ -80,6 +80,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0080, E0080_DESC),
     (E0081, E0081_DESC),
     (E0082, E0082_DESC),
+    (E0083, E0083_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -503,6 +504,26 @@ const E0081_DESC: &str = "incompatible types in assignment";
 /// conversion site.
 pub const E0082: &str = "E0082";
 const E0082_DESC: &str = "incompatible pointer conversion";
+
+/// Invalid operands to a binary operator (C99 §6.5.5–§6.5.14).
+///
+/// Raised by the type-checker when the operand types of a binary
+/// operator do not match any rule the operator allows. Examples:
+///
+/// * `s1 / s2` where `s1` and `s2` are struct values — the arithmetic
+///   operators `* / + -` require arithmetic operands (or, for `+`/`-`,
+///   one pointer + one integer).
+/// * `p & q` where either operand is not an integer — the bitwise
+///   operators `& | ^ << >>` require integer operands.
+/// * `p % i` where `p` is a pointer — `%` is integer-only.
+/// * `&&` / `||` / `?:` / `!` / equality / relational with operands
+///   whose types cannot be brought into a common scalar type.
+///
+/// The diagnostic is emitted at the operator's span; the operand
+/// types are included in the message so the user can see what the
+/// type-checker inferred for each side.
+pub const E0083: &str = "E0083";
+const E0083_DESC: &str = "invalid operands to binary operator";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

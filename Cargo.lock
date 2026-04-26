@@ -690,6 +690,7 @@ dependencies = [
 name = "rcc_typeck"
 version = "0.0.1"
 dependencies = [
+ "rcc_data_structures",
  "rcc_errors",
  "rcc_hir",
  "rcc_session",

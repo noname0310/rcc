@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 07-07: Wire implicit conversions into HIR
 
 **Phase:** 07-typeck    **Depends on:** 07-01 .. 07-06    **Milestone:** M3

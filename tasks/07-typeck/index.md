@@ -14,7 +14,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [x] [04-lvalue-rvalue](04-lvalue-rvalue.md)
 - [x] [05-assignment-constraint](05-assignment-constraint.md)
 - [x] [06-pointer-conversions](06-pointer-conversions.md)
-- [ ] [07-implicit-convert-insertion](07-implicit-convert-insertion.md)
+- [x] [07-implicit-convert-insertion](07-implicit-convert-insertion.md)
 - [ ] [08-const-eval-integer](08-const-eval-integer.md)
 - [ ] [09-const-eval-extended](09-const-eval-extended.md)
 - [ ] [10-init-constness](10-init-constness.md)

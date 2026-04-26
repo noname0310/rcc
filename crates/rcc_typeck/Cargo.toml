@@ -9,7 +9,8 @@ publish.workspace = true
 description = "C99 type checking, usual arithmetic conversions, const eval"
 
 [dependencies]
-rcc_span    = { workspace = true }
-rcc_errors  = { workspace = true }
-rcc_session = { workspace = true }
-rcc_hir     = { workspace = true }
+rcc_span             = { workspace = true }
+rcc_errors           = { workspace = true }
+rcc_session          = { workspace = true }
+rcc_hir              = { workspace = true }
+rcc_data_structures  = { workspace = true }

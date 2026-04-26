@@ -8,8 +8,9 @@
 #![warn(missing_docs)]
 
 use rcc_hir::{
-    Body, ConvertKind, FloatKind, HirCrate, HirExpr, HirExprId, HirExprKind, IntRank, Qual, Ty,
-    TyCtxt, TyId, ValueCat,
+    rcc_hir_binop::{BinOp, UnOp},
+    Body, ConvertKind, DefKind, FloatKind, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmtId,
+    HirStmtKind, IntRank, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 
@@ -28,9 +29,839 @@ const INT_BITS: u32 = 32;
 /// Run full type checking over `hir`. After this call every `HirExpr` has a
 /// resolved `ty` and every mandatory implicit conversion has been inserted.
 ///
-/// M2 scope: interface only.
-pub fn check(_session: &mut Session, _tcx: &mut TyCtxt, _hir: &mut HirCrate) {
-    // Implementation in M2-follow-up.
+/// Iterates over every function body in `hir` and dispatches to
+/// [`check_body`]. Read-only data (top-level `Def`s and their kinds) is
+/// captured up-front so each per-body walk does not need shared `&hir`
+/// access concurrently with the `&mut Body` it edits.
+pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
+    // We need to look up `Def::kind` while typing `DefRef` nodes. Snapshot
+    // the (DefId, ty/value-cat-relevant) info up front so the per-body
+    // walk does not have to borrow `hir.defs` while it holds `&mut hir.bodies[id]`.
+    let def_info: rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot> =
+        hir.defs.iter_enumerated().map(|(id, def)| (id, def_snapshot(&def.kind))).collect();
+
+    // `hir.bodies` is a HashMap; iterate over its keys via a snapshot to
+    // avoid alias trouble between the keys-iterator and the per-body
+    // `get_mut` that follows.
+    let body_keys: Vec<_> = hir.bodies.keys().copied().collect();
+    for def_id in body_keys {
+        if let Some(body) = hir.bodies.get_mut(&def_id) {
+            check_body_with_defs(body, tcx, session, &def_info);
+        }
+    }
+}
+
+/// Per-`DefId` snapshot of the information `check_body` needs about a
+/// top-level definition referenced via `HirExprKind::DefRef`. We only
+/// keep what the walker reads, so the snapshot stays compact and the
+/// borrow shape stays simple.
+#[derive(Copy, Clone, Debug)]
+pub struct DefSnapshot {
+    /// Type of the referenced object/function, or `None` if the kind has
+    /// no associated type (records, enums — never the target of `DefRef`).
+    pub ty: Option<TyId>,
+    /// Value category produced by referencing this def. Functions are
+    /// lvalues that decay to pointer-to-function; globals/enumerators are
+    /// lvalues for globals and rvalues for enumerators.
+    pub value_cat: ValueCat,
+    /// Folded enumerator value, when the `DefRef` resolves to an
+    /// enumerator. Enumerators are rvalue integer constants (C99
+    /// §6.4.4.3p2 + §6.7.2.2p3) — we materialise them as `IntConst` so
+    /// later passes do not need to chase a `DefId` to evaluate one.
+    pub enumerator_value: Option<i128>,
+}
+
+/// Read what we need from a `DefKind` for `DefRef` typing.
+fn def_snapshot(kind: &DefKind) -> DefSnapshot {
+    match kind {
+        DefKind::Function { ty, .. } => DefSnapshot {
+            ty: Some(*ty),
+            // Function designator is an lvalue (C99 §6.3.2.1p4 says it
+            // converts to a pointer-to-function — that conversion is the
+            // `FuncToPtr` decay, applied by `decay_if_needed`).
+            value_cat: ValueCat::LValue,
+            enumerator_value: None,
+        },
+        DefKind::Global { ty, .. } => {
+            DefSnapshot { ty: Some(*ty), value_cat: ValueCat::LValue, enumerator_value: None }
+        }
+        DefKind::Typedef(ty) => {
+            // Should never appear as a `DefRef` operand (typedefs live in
+            // a different namespace). Pass through with the typedef's
+            // alias type so the walker is total.
+            DefSnapshot { ty: Some(*ty), value_cat: ValueCat::RValue, enumerator_value: None }
+        }
+        DefKind::Enumerator { ty, value } => DefSnapshot {
+            ty: Some(*ty),
+            value_cat: ValueCat::RValue,
+            enumerator_value: Some(*value),
+        },
+        DefKind::Record { .. } | DefKind::Enum { .. } => {
+            DefSnapshot { ty: None, value_cat: ValueCat::RValue, enumerator_value: None }
+        }
+    }
+}
+
+/// Type-check every expression in `body`. After this call every reachable
+/// expression carries a non-`Error` type and the value-category required
+/// by its position, with every mandatory conversion (integer promotion,
+/// usual-arithmetic, lvalue-to-rvalue, array/function decay, pointer
+/// conversion) materialised as a fresh `Convert` wrapper.
+///
+/// Walks the statement tree top-down so each expression is visited in
+/// the position it appears, then drives the per-expression typing
+/// bottom-up: `visit_expr` types every child first, then folds the
+/// children's types into the parent.
+///
+/// This three-argument form is the public API listed in the task
+/// spec; callers that have access to a containing [`HirCrate`] should
+/// prefer [`check_body_with_defs`] so `DefRef` nodes can resolve to
+/// the type / value-category of the referenced definition.
+pub fn check_body(body: &mut Body, tcx: &mut TyCtxt, session: &mut Session) {
+    let empty: rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot> =
+        rcc_data_structures::FxHashMap::default();
+    check_body_with_defs(body, tcx, session, &empty);
+}
+
+/// Internal entry point used by [`check`] when the full crate is
+/// available so `DefRef` nodes can be typed against the referenced
+/// definition.
+pub fn check_body_with_defs(
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) {
+    // Walk every statement in the body, visiting whichever expressions
+    // each statement points at. The traversal is rooted at `body.root`
+    // when present (top-level functions); free-standing test bodies that
+    // build an isolated expression set their `root` to `None` and rely
+    // on the caller to drive `visit_expr` directly.
+    if let Some(root) = body.root {
+        visit_stmt(root, body, tcx, session, def_info);
+    }
+}
+
+/// Type-check the statement at `stmt_id`, recursing into nested
+/// statements and expressions. Updates child expression ids in-place so
+/// any `Convert` wrappers inserted by the per-expression walker remain
+/// reachable from their parent statement.
+fn visit_stmt(
+    stmt_id: HirStmtId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) {
+    // Clone the kind so we can mutate child ids without holding a borrow
+    // on `body.stmts` while we recurse into `body.exprs`.
+    let kind = body.stmts[stmt_id].kind.clone();
+    let new_kind = match kind {
+        HirStmtKind::Block(stmts) => {
+            for s in &stmts {
+                visit_stmt(*s, body, tcx, session, def_info);
+            }
+            HirStmtKind::Block(stmts)
+        }
+        HirStmtKind::Expr(e) => {
+            let e2 = visit_expr(e, body, tcx, session, def_info);
+            HirStmtKind::Expr(e2)
+        }
+        HirStmtKind::If { cond, then_branch, else_branch } => {
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            // Controlling expression must be scalar; convert lvalue-to-rvalue
+            // and decay arrays/functions so the resulting node is a plain
+            // scalar rvalue.
+            let cond2 = scalar_rvalue(cond2, body, tcx);
+            visit_stmt(then_branch, body, tcx, session, def_info);
+            if let Some(eb) = else_branch {
+                visit_stmt(eb, body, tcx, session, def_info);
+            }
+            HirStmtKind::If { cond: cond2, then_branch, else_branch }
+        }
+        HirStmtKind::While { cond, body: b } => {
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond2 = scalar_rvalue(cond2, body, tcx);
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::While { cond: cond2, body: b }
+        }
+        HirStmtKind::DoWhile { body: b, cond } => {
+            visit_stmt(b, body, tcx, session, def_info);
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond2 = scalar_rvalue(cond2, body, tcx);
+            HirStmtKind::DoWhile { body: b, cond: cond2 }
+        }
+        HirStmtKind::For { init, cond, step, body: b } => {
+            if let Some(i) = init {
+                visit_stmt(i, body, tcx, session, def_info);
+            }
+            let cond2 = cond.map(|c| {
+                let c2 = visit_expr(c, body, tcx, session, def_info);
+                scalar_rvalue(c2, body, tcx)
+            });
+            let step2 = step.map(|s| visit_expr(s, body, tcx, session, def_info));
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::For { init, cond: cond2, step: step2, body: b }
+        }
+        HirStmtKind::Switch { cond, body: b, cases } => {
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond2 = scalar_rvalue(cond2, body, tcx);
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::Switch { cond: cond2, body: b, cases }
+        }
+        HirStmtKind::Label { name, body: b } => {
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::Label { name, body: b }
+        }
+        HirStmtKind::Case { value, body: b } => {
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::Case { value, body: b }
+        }
+        HirStmtKind::Default { body: b } => {
+            visit_stmt(b, body, tcx, session, def_info);
+            HirStmtKind::Default { body: b }
+        }
+        HirStmtKind::Return(opt_e) => {
+            // The return-value's expected type is the enclosing function's
+            // return type. We don't have that here without threading more
+            // context; for now just type-check the expression and fall
+            // through. Task 07-11 will tighten this with `is_assignable`
+            // against the declared return type.
+            let opt_e2 = opt_e.map(|e| {
+                let e2 = visit_expr(e, body, tcx, session, def_info);
+                rvalue_decayed(e2, body, tcx)
+            });
+            HirStmtKind::Return(opt_e2)
+        }
+        HirStmtKind::LocalDecl { local, init } => {
+            let init2 = init.map(|e| {
+                let e2 = visit_expr(e, body, tcx, session, def_info);
+                let e2 = rvalue_decayed(e2, body, tcx);
+                // Coerce the initializer to the declared local type.
+                let want = body.locals[local].ty;
+                coerce_to(e2, want, body, tcx, session)
+            });
+            HirStmtKind::LocalDecl { local, init: init2 }
+        }
+        HirStmtKind::Goto(_) | HirStmtKind::Break | HirStmtKind::Continue | HirStmtKind::Null => {
+            kind
+        }
+    };
+    body.stmts[stmt_id].kind = new_kind;
+}
+
+/// Type-check the expression at `expr_id`, recursing into its children
+/// first. Returns the id the parent should now reference — typically
+/// `expr_id` itself (the type was filled in place), but can be a fresh
+/// id when the walker wrapped the expression in a `Convert` node.
+pub fn visit_expr(
+    expr_id: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> HirExprId {
+    // Clone the kind to break the borrow on `body.exprs` for the
+    // recursive calls below. After computing the new kind we write it
+    // back, along with the resolved type and value category.
+    let kind = body.exprs[expr_id].kind.clone();
+    let span = body.exprs[expr_id].span;
+
+    match kind {
+        // ---- Leaves --------------------------------------------------
+        HirExprKind::IntConst(_) => {
+            body.exprs[expr_id].ty = tcx.int;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            expr_id
+        }
+        HirExprKind::FloatConst(_) => {
+            body.exprs[expr_id].ty = tcx.double;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            expr_id
+        }
+        HirExprKind::StringRef(def_id) => {
+            // String literal: the `Def` carries the array-of-char type
+            // built by lowering. `value_cat` is lvalue (string literals
+            // designate static-storage objects).
+            if let Some(snap) = def_info.get(&def_id) {
+                if let Some(ty) = snap.ty {
+                    body.exprs[expr_id].ty = ty;
+                }
+            }
+            body.exprs[expr_id].value_cat = ValueCat::LValue;
+            expr_id
+        }
+        HirExprKind::LocalRef(local) => {
+            body.exprs[expr_id].ty = body.locals[local].ty;
+            body.exprs[expr_id].value_cat = ValueCat::LValue;
+            expr_id
+        }
+        HirExprKind::DefRef(def_id) => {
+            let snap = def_info.get(&def_id).copied().unwrap_or(DefSnapshot {
+                ty: None,
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+            });
+            // Enumerator references rewrite to a typed `IntConst` so
+            // const-eval and the CFG never need to look up enumerators.
+            if let Some(value) = snap.enumerator_value {
+                body.exprs[expr_id].ty = snap.ty.unwrap_or(tcx.int);
+                body.exprs[expr_id].value_cat = ValueCat::RValue;
+                body.exprs[expr_id].kind = HirExprKind::IntConst(value);
+                return expr_id;
+            }
+            if let Some(ty) = snap.ty {
+                body.exprs[expr_id].ty = ty;
+            }
+            body.exprs[expr_id].value_cat = snap.value_cat;
+            expr_id
+        }
+
+        // ---- Compound forms -----------------------------------------
+        HirExprKind::Binary { op, lhs, rhs } => {
+            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+            type_binary(expr_id, op, lhs2, rhs2, span, body, tcx, session)
+        }
+        HirExprKind::Unary { op, operand } => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            type_unary(expr_id, op, op2, body, tcx, session)
+        }
+        HirExprKind::AddressOf(operand) => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            // Address-of: operand of `&` does not decay (DecayContext::AddrOfOperand).
+            // We still need to record the operand id (no l-to-r conversion either).
+            let inner_ty = body.exprs[op2].ty;
+            let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(inner_ty)));
+            body.exprs[expr_id].ty = ptr_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::AddressOf(op2);
+            expr_id
+        }
+        HirExprKind::Deref(operand) => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            // The pointer needs to be an rvalue (a value to dereference);
+            // if it's an lvalue (e.g. a pointer-typed local), apply
+            // lvalue-to-rvalue. Arrays decay to pointers.
+            let op2 = rvalue_decayed(op2, body, tcx);
+            let pointee = match *tcx.get(body.exprs[op2].ty) {
+                Ty::Ptr(q) => q.ty,
+                _ => tcx.error,
+            };
+            body.exprs[expr_id].ty = pointee;
+            body.exprs[expr_id].value_cat = ValueCat::LValue;
+            body.exprs[expr_id].kind = HirExprKind::Deref(op2);
+            expr_id
+        }
+        HirExprKind::Index { base, index } => {
+            let base2 = visit_expr(base, body, tcx, session, def_info);
+            let index2 = visit_expr(index, body, tcx, session, def_info);
+            // `a[i]` is `*(a + i)`: base decays to pointer, index is an
+            // integer rvalue. Result type is the pointee of the decayed
+            // base; result is an lvalue.
+            let base2 = rvalue_decayed(base2, body, tcx);
+            let index2 = rvalue_decayed(index2, body, tcx);
+            let elem = match *tcx.get(body.exprs[base2].ty) {
+                Ty::Ptr(q) => q.ty,
+                _ => tcx.error,
+            };
+            body.exprs[expr_id].ty = elem;
+            body.exprs[expr_id].value_cat = ValueCat::LValue;
+            body.exprs[expr_id].kind = HirExprKind::Index { base: base2, index: index2 };
+            expr_id
+        }
+        HirExprKind::Field { base, field_index } => {
+            let base2 = visit_expr(base, body, tcx, session, def_info);
+            // We don't yet have struct field-resolution machinery in HIR
+            // typeck (task 07-11 covers fields). Best we can do today:
+            // preserve the placeholder type from lowering. We at least
+            // get the value category right so assignment LHS checks work.
+            let cat = value_category(body, base2);
+            body.exprs[expr_id].value_cat = cat;
+            body.exprs[expr_id].kind = HirExprKind::Field { base: base2, field_index };
+            expr_id
+        }
+        HirExprKind::Call { callee, args } => {
+            let callee2 = visit_expr(callee, body, tcx, session, def_info);
+            // Function designator decays to pointer-to-function.
+            let callee2 = rvalue_decayed(callee2, body, tcx);
+            let mut new_args = Vec::with_capacity(args.len());
+            for a in args {
+                let a2 = visit_expr(a, body, tcx, session, def_info);
+                let a2 = rvalue_decayed(a2, body, tcx);
+                // Argument promotion is handled per-parameter when we
+                // know the prototype below; for unprototyped / variadic
+                // arguments we apply default argument promotions.
+                new_args.push(a2);
+            }
+            type_call(expr_id, callee2, new_args, body, tcx, session)
+        }
+        HirExprKind::Convert { operand, kind } => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            // Preserve the convert kind; just rewire the operand id and
+            // leave the type untouched (the wrapper was inserted with a
+            // deliberate destination type at construction time).
+            body.exprs[expr_id].kind = HirExprKind::Convert { operand: op2, kind };
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            // If the wrapper still has a placeholder type, fall back to
+            // the operand's type — this is the common shape for the
+            // string-literal global case where lowering pre-built a
+            // Convert with a known destination type.
+            if body.exprs[expr_id].ty == tcx.error {
+                body.exprs[expr_id].ty = body.exprs[op2].ty;
+            }
+            expr_id
+        }
+        HirExprKind::Cast { operand, to } => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            // Cast operand becomes an rvalue, with arrays/functions decayed.
+            let op2 = rvalue_decayed(op2, body, tcx);
+            // The `to` field is the placeholder `tcx.error` from lowering;
+            // task 07-11 will resolve the source type-name. For now we
+            // leave the destination as `to` if it is not the error sentinel,
+            // otherwise fall back to the operand's type so we do not poison
+            // the IR.
+            let dst = if to == tcx.error { body.exprs[op2].ty } else { to };
+            body.exprs[expr_id].ty = dst;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Cast { operand: op2, to: dst };
+            expr_id
+        }
+        HirExprKind::Assign { lhs, rhs } => {
+            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+            // C99 §6.5.16p2: LHS must be a modifiable lvalue. We check
+            // the lvalue requirement here; the modifiable subset is task
+            // 07-05's job (already in tree).
+            check_assignment_lhs(session, body, lhs2);
+            // RHS is an rvalue, decayed.
+            let rhs2 = rvalue_decayed(rhs2, body, tcx);
+            // Coerce RHS to LHS's type.
+            let lhs_ty = body.exprs[lhs2].ty;
+            let rhs2 = coerce_to(rhs2, lhs_ty, body, tcx, session);
+            body.exprs[expr_id].ty = lhs_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Assign { lhs: lhs2, rhs: rhs2 };
+            expr_id
+        }
+        HirExprKind::Cond { cond, then_expr, else_expr } => {
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let then2 = visit_expr(then_expr, body, tcx, session, def_info);
+            let else2 = visit_expr(else_expr, body, tcx, session, def_info);
+            let then2 = rvalue_decayed(then2, body, tcx);
+            let else2 = rvalue_decayed(else2, body, tcx);
+            let then_ty = body.exprs[then2].ty;
+            let else_ty = body.exprs[else2].ty;
+            // Common case: both arithmetic — apply usual arithmetic.
+            let result_ty = if is_arithmetic(tcx, then_ty) && is_arithmetic(tcx, else_ty) {
+                let common = usual_arithmetic(tcx, then_ty, else_ty);
+                // No diagnostics on narrowing here — usual_arithmetic
+                // is a widening conversion by construction.
+                let then2_w = if body.exprs[then2].ty != common {
+                    push_arith_convert(body, then2, common)
+                } else {
+                    then2
+                };
+                let else2_w = if body.exprs[else2].ty != common {
+                    push_arith_convert(body, else2, common)
+                } else {
+                    else2
+                };
+                body.exprs[expr_id].kind =
+                    HirExprKind::Cond { cond: cond2, then_expr: then2_w, else_expr: else2_w };
+                common
+            } else if then_ty == else_ty {
+                body.exprs[expr_id].kind =
+                    HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
+                then_ty
+            } else {
+                // Pointer / mixed cases: pick `then`'s type as a
+                // best-effort placeholder. Task 07-11 expands this.
+                body.exprs[expr_id].kind =
+                    HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
+                then_ty
+            };
+            body.exprs[expr_id].ty = result_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            expr_id
+        }
+        HirExprKind::Comma { lhs, rhs } => {
+            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+            // LHS is evaluated for side effects and discarded — apply
+            // lvalue-to-rvalue + decay so the discard is on the value.
+            let lhs2 = rvalue_decayed(lhs2, body, tcx);
+            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+            let rhs2 = rvalue_decayed(rhs2, body, tcx);
+            body.exprs[expr_id].ty = body.exprs[rhs2].ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Comma { lhs: lhs2, rhs: rhs2 };
+            expr_id
+        }
+    }
+}
+
+/// Apply lvalue-to-rvalue + array/function decay to `expr`. Returns the
+/// id callers should reference. Common helper for "I want a value here".
+fn rvalue_decayed(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExprId {
+    let after_decay = decay_if_needed(tcx, body, expr, DecayContext::Normal);
+    lvalue_to_rvalue_if_needed(tcx, body, after_decay)
+}
+
+/// Same as [`rvalue_decayed`] but used in scalar-controlling positions
+/// (`if`/`while`/`?:` first operand). C99 §6.8.4 / §6.5.15 require the
+/// controlling expression to have scalar type; for us "scalar rvalue"
+/// suffices structurally. Diagnostic enforcement of "must be scalar" is
+/// task 07-11.
+fn scalar_rvalue(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExprId {
+    rvalue_decayed(expr, body, tcx)
+}
+
+/// Wrap `expr` in a `Convert { kind: UsualArithmetic }` whose type is
+/// `dst`. Used by binary arithmetic / conditional to bring an operand
+/// up to the common type. Returns the new expression id.
+fn push_arith_convert(body: &mut Body, expr: HirExprId, dst: TyId) -> HirExprId {
+    let span = body.exprs[expr].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: dst,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: expr, kind: ConvertKind::UsualArithmetic },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Wrap `expr` in a `Convert { kind: IntegerPromotion }` whose type is
+/// `dst`. Used by unary `+`/`-`/`~`/`!` and shift/bitwise operands.
+fn push_int_promote(body: &mut Body, expr: HirExprId, dst: TyId) -> HirExprId {
+    let span = body.exprs[expr].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: dst,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: expr, kind: ConvertKind::IntegerPromotion },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Coerce `expr` to type `dst` for a context that requires assignment-
+/// compatibility (initializer, simple assignment RHS, function call
+/// argument, return). Inserts the appropriate `Convert` wrapper.
+///
+/// Diagnostics for the constraint-violating cases of [`AssignError`] are
+/// emitted here; the bare-conversion case (arithmetic widening, pointer
+/// adjustments, null-pointer-constant, `_Bool` from a pointer) is
+/// silent. Narrowing is currently silent too — W0008 is the future
+/// home for that warning (task 07-11).
+fn coerce_to(
+    expr: HirExprId,
+    dst: TyId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    _session: &mut Session,
+) -> HirExprId {
+    let src_ty = body.exprs[expr].ty;
+    if src_ty == dst {
+        return expr;
+    }
+    // Skip coercion when either side is the error sentinel — there is
+    // already a diagnostic upstream.
+    if src_ty == tcx.error || dst == tcx.error {
+        return expr;
+    }
+    // Arithmetic ↔ arithmetic: pick a UsualArithmetic-style widening
+    // wrapper. Narrowing diagnostics deferred to 07-11.
+    if is_arithmetic(tcx, src_ty) && is_arithmetic(tcx, dst) {
+        return push_arith_convert(body, expr, dst);
+    }
+    // Pointer-shaped destination: try `pointer_convert`. Errors are
+    // silent here (07-11 wires up E0081/E0082). On error fall through
+    // and leave the expr untouched.
+    if matches!(*tcx.get(dst), Ty::Ptr(_)) {
+        if let Ok(new_id) = pointer_convert(tcx, body, expr, dst) {
+            return new_id;
+        }
+    }
+    // `_Bool` ← pointer / arithmetic. We emit a UsualArithmetic-flavoured
+    // convert for now; the dedicated `BoolFromPtr` ConvertKind is task
+    // 07-11.
+    if dst == tcx.bool_ {
+        return push_arith_convert(body, expr, dst);
+    }
+    expr
+}
+
+/// Diagnostic-emitting type-checker for `HirExprKind::Binary`. Updates
+/// `body.exprs[expr_id]` in place with the resolved type and rewires
+/// the lhs/rhs references to whatever `Convert` wrappers the conversion
+/// rules required.
+#[allow(clippy::too_many_arguments)]
+fn type_binary(
+    expr_id: HirExprId,
+    op: BinOp,
+    lhs: HirExprId,
+    rhs: HirExprId,
+    span: rcc_span::Span,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    // Both operands undergo lvalue-to-rvalue + decay before any further
+    // typing (C99 §6.3.2.1 + §6.5.* operand rules).
+    let lhs = rvalue_decayed(lhs, body, tcx);
+    let rhs = rvalue_decayed(rhs, body, tcx);
+    let lhs_ty = body.exprs[lhs].ty;
+    let rhs_ty = body.exprs[rhs].ty;
+
+    let (result_ty, lhs_final, rhs_final) = match op {
+        // Arithmetic: usual arithmetic conversions, integer-only for `%`.
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            // `+`/`-` accept pointer arithmetic; the others demand
+            // arithmetic operands. We handle pointer arithmetic in a
+            // best-effort fashion here: result type is the pointer side.
+            if matches!(op, BinOp::Add | BinOp::Sub)
+                && (matches!(*tcx.get(lhs_ty), Ty::Ptr(_))
+                    || matches!(*tcx.get(rhs_ty), Ty::Ptr(_)))
+            {
+                let result_ty =
+                    if matches!(*tcx.get(lhs_ty), Ty::Ptr(_)) { lhs_ty } else { rhs_ty };
+                (result_ty, lhs, rhs)
+            } else if op == BinOp::Rem {
+                if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
+                    invalid_operands(session, span, "%");
+                    (tcx.error, lhs, rhs)
+                } else {
+                    let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                    let l =
+                        if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
+                    let r =
+                        if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                    (common, l, r)
+                }
+            } else if !is_arithmetic(tcx, lhs_ty) || !is_arithmetic(tcx, rhs_ty) {
+                invalid_operands(session, span, binop_symbol(op));
+                (tcx.error, lhs, rhs)
+            } else {
+                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
+                let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                (common, l, r)
+            }
+        }
+        // Bitwise & shift: integer-only operands. Shifts apply integer
+        // promotion to each side independently (the result type is the
+        // promoted LHS, per §6.5.7p3).
+        BinOp::Shl | BinOp::Shr => {
+            if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
+                invalid_operands(session, span, binop_symbol(op));
+                (tcx.error, lhs, rhs)
+            } else {
+                let lhs_p = integer_promotion(tcx, lhs_ty, None);
+                let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                let l = if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
+                let r = if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
+                (lhs_p, l, r)
+            }
+        }
+        BinOp::BitAnd | BinOp::BitXor | BinOp::BitOr => {
+            if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
+                invalid_operands(session, span, binop_symbol(op));
+                (tcx.error, lhs, rhs)
+            } else {
+                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
+                let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                (common, l, r)
+            }
+        }
+        // Comparisons: result is `int` (0 or 1). Apply usual arithmetic
+        // when both sides are arithmetic; otherwise leave the operands
+        // alone (pointer comparisons are valid but we don't materialise
+        // additional Converts at this stage).
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
+            if is_arithmetic(tcx, lhs_ty) && is_arithmetic(tcx, rhs_ty) {
+                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
+                let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                (tcx.int, l, r)
+            } else {
+                (tcx.int, lhs, rhs)
+            }
+        }
+        // Logical && / ||: scalar operands, result is `int`.
+        BinOp::LogAnd | BinOp::LogOr => (tcx.int, lhs, rhs),
+    };
+
+    body.exprs[expr_id].ty = result_ty;
+    body.exprs[expr_id].value_cat = ValueCat::RValue;
+    body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs: lhs_final, rhs: rhs_final };
+    expr_id
+}
+
+/// Diagnostic for E0083: invalid operands to a binary operator. The
+/// operator spelling is included so the diagnostic carries the offending
+/// token.
+fn invalid_operands(session: &mut Session, span: rcc_span::Span, op_spelling: &str) {
+    session
+        .handler
+        .struct_err(span, format!("invalid operands to binary `{op_spelling}`"))
+        .code(rcc_errors::codes::E0083)
+        .emit();
+}
+
+/// Source spelling of a `BinOp` for diagnostics.
+fn binop_symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::BitAnd => "&",
+        BinOp::BitXor => "^",
+        BinOp::BitOr => "|",
+        BinOp::LogAnd => "&&",
+        BinOp::LogOr => "||",
+    }
+}
+
+/// Type-check a unary operator. C99 §6.5.3 cases:
+///
+/// * `+x` / `-x` / `~x`: arithmetic operand, integer promotion applied;
+///   result is the promoted type.
+/// * `!x`: scalar operand, result is `int`.
+/// * `++x` / `--x` / `x++` / `x--`: scalar operand (real or pointer),
+///   modifiable lvalue; result is the operand's type as an rvalue.
+fn type_unary(
+    expr_id: HirExprId,
+    op: UnOp,
+    operand: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    _session: &mut Session,
+) -> HirExprId {
+    match op {
+        UnOp::Plus | UnOp::Neg | UnOp::BitNot => {
+            let operand = rvalue_decayed(operand, body, tcx);
+            let op_ty = body.exprs[operand].ty;
+            let promoted =
+                if is_integer(tcx, op_ty) { integer_promotion(tcx, op_ty, None) } else { op_ty };
+            let operand = if op_ty != promoted && is_integer(tcx, op_ty) {
+                push_int_promote(body, operand, promoted)
+            } else {
+                operand
+            };
+            body.exprs[expr_id].ty = promoted;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Unary { op, operand };
+            expr_id
+        }
+        UnOp::LogNot => {
+            let operand = rvalue_decayed(operand, body, tcx);
+            body.exprs[expr_id].ty = tcx.int;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Unary { op, operand };
+            expr_id
+        }
+        UnOp::PreInc | UnOp::PreDec | UnOp::PostInc | UnOp::PostDec => {
+            // The operand of ++/-- is a modifiable lvalue. We do NOT apply
+            // lvalue-to-rvalue (the read+modify+write is emitted at the
+            // CFG layer). Decay similarly does not apply (operand must be
+            // a scalar lvalue). The result is the operand's type as an
+            // rvalue (post-forms produce the original value, pre-forms
+            // produce the new value; both are rvalues per §6.5.3.1p2).
+            body.exprs[expr_id].ty = body.exprs[operand].ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Unary { op, operand };
+            expr_id
+        }
+    }
+}
+
+/// Type-check a `Call` expression. Picks the result type from the
+/// callee's function signature (after function-to-pointer decay) and
+/// coerces each argument to its declared parameter type. Variadic /
+/// unprototyped trailing arguments go through default argument
+/// promotions.
+fn type_call(
+    expr_id: HirExprId,
+    callee: HirExprId,
+    mut args: Vec<HirExprId>,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    // After `rvalue_decayed`, `callee` should have type `Ptr(Func {..})`.
+    let callee_ty = body.exprs[callee].ty;
+    let pointee = match *tcx.get(callee_ty) {
+        Ty::Ptr(q) => Some(q.ty),
+        Ty::Func { .. } => Some(callee_ty),
+        _ => None,
+    };
+    let (ret, params, variadic, proto) = match pointee.map(|p| tcx.get(p).clone()) {
+        Some(Ty::Func { ret, params, variadic, proto }) => (ret, params, variadic, proto),
+        _ => {
+            body.exprs[expr_id].ty = tcx.error;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::Call { callee, args };
+            return expr_id;
+        }
+    };
+
+    if proto {
+        // Coerce each prototyped argument to its parameter type. Surplus
+        // args go through default argument promotion (only valid when the
+        // function is variadic; the diagnostic for arity mismatch is
+        // task 07-11's job).
+        for (i, arg) in args.iter_mut().enumerate() {
+            if let Some(param_ty) = params.get(i) {
+                *arg = coerce_to(*arg, *param_ty, body, tcx, session);
+            } else if variadic {
+                *arg = default_arg_promote(*arg, body, tcx);
+            }
+        }
+    } else {
+        // K&R-style prototype-less function: every argument goes through
+        // default argument promotions (C99 §6.5.2.2p6).
+        for arg in args.iter_mut() {
+            *arg = default_arg_promote(*arg, body, tcx);
+        }
+    }
+
+    body.exprs[expr_id].ty = ret;
+    body.exprs[expr_id].value_cat = ValueCat::RValue;
+    body.exprs[expr_id].kind = HirExprKind::Call { callee, args };
+    expr_id
+}
+
+/// Apply default argument promotions to `expr` (C99 §6.5.2.2p6 +
+/// §6.3.1.1p2): integers go through integer promotion, and `float`
+/// promotes to `double`.
+fn default_arg_promote(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExprId {
+    let ty = body.exprs[expr].ty;
+    if is_integer(tcx, ty) {
+        let promoted = integer_promotion(tcx, ty, None);
+        if promoted != ty {
+            return push_int_promote(body, expr, promoted);
+        }
+        return expr;
+    }
+    if let Ty::Float(FloatKind::F32) = *tcx.get(ty) {
+        return push_arith_convert(body, expr, tcx.double);
+    }
+    expr
 }
 
 /// Integer promotion (C99 §6.3.1.1).
@@ -2889,5 +3720,677 @@ mod tests {
             |_| HirExprKind::LocalRef(Local(0)),
             Outcome::Err(ConvertError::Incompatible),
         );
+    }
+
+    // ------------------------------------------------------------------
+    // check_body / visit_expr — implicit conversion insertion (07-07).
+    // ------------------------------------------------------------------
+
+    use rcc_hir::HirStmt;
+
+    /// Wrap a single expression as the root statement of a fresh body.
+    /// Returns the body and the expression id so the test can drive
+    /// `check_body` and then inspect the typed result.
+    fn body_with_root_expr(expr_kind: HirExprKind, ty: TyId) -> (Body, HirExprId, HirStmtId) {
+        let mut body = Body::default();
+        let expr_id = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: expr_kind,
+        });
+        body.exprs[expr_id].id = expr_id;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(expr_id),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+        (body, expr_id, stmt_id)
+    }
+
+    /// Acceptance: `1 + 2.0` — IntConst is wrapped in `Convert(IntToFloat, f64)`
+    /// before the FAdd. The HIR uses `ConvertKind::UsualArithmetic` to label
+    /// the wrapper; `IntToFloat` is the target lowering category, not a HIR
+    /// kind. We assert: the int side is wrapped in a Convert with destination
+    /// type `double`, and the binary op result type is `double`.
+    #[test]
+    fn check_body_acceptance_int_plus_double() {
+        let mut tcx = TyCtxt::new();
+        // Build the operands first: IntConst(1) and FloatConst(2.0).
+        let mut body = Body::default();
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(2.0),
+        });
+        body.exprs[rhs].id = rhs;
+        let bin = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Add, lhs, rhs },
+        });
+        body.exprs[bin].id = bin;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(bin),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        // Binary expression's result type is `double`.
+        assert_eq!(body.exprs[bin].ty, tcx.double);
+
+        // The lhs (originally IntConst(1)) must now be referenced via a
+        // Convert wrapper whose destination type is `double`.
+        let HirExprKind::Binary { lhs: new_lhs, rhs: new_rhs, .. } = body.exprs[bin].kind.clone()
+        else {
+            panic!("expected Binary kind");
+        };
+        match body.exprs[new_lhs].kind {
+            HirExprKind::Convert { operand, kind: _ } => {
+                assert_eq!(operand, lhs, "wrapper must wrap the original IntConst");
+                assert_eq!(body.exprs[new_lhs].ty, tcx.double, "wrapper has type double");
+            }
+            ref other => panic!("expected Convert on lhs, got {other:?}"),
+        }
+        // The rhs is already double, so no wrapper expected — the id
+        // stays the original.
+        assert_eq!(new_rhs, rhs, "rhs already double, no wrapper needed");
+        assert_eq!(body.exprs[rhs].ty, tcx.double);
+
+        // No errors emitted.
+        assert!(!session.handler.has_errors());
+    }
+
+    /// Plain `1 + 2` — both IntConst, both already typed `int` after
+    /// the leaf typer; no Convert wrappers expected on the operands.
+    #[test]
+    fn check_body_int_plus_int_no_wrapper() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(2),
+        });
+        body.exprs[rhs].id = rhs;
+        let bin = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Add, lhs, rhs },
+        });
+        body.exprs[bin].id = bin;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(bin),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[bin].ty, tcx.int);
+        let HirExprKind::Binary { lhs: nl, rhs: nr, .. } = body.exprs[bin].kind.clone() else {
+            panic!()
+        };
+        assert_eq!(nl, lhs);
+        assert_eq!(nr, rhs);
+    }
+
+    /// Comparison `1 < 2` returns `int` regardless of operand types.
+    #[test]
+    fn check_body_comparison_yields_int() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(2.0),
+        });
+        body.exprs[rhs].id = rhs;
+        let bin = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Lt, lhs, rhs },
+        });
+        body.exprs[bin].id = bin;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(bin),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[bin].ty, tcx.int, "comparison result is int");
+    }
+
+    /// Bitwise `&` on a float operand emits E0083.
+    #[test]
+    fn check_body_bitand_on_float_emits_e0083() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(2.0),
+        });
+        body.exprs[rhs].id = rhs;
+        let bin = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::BitAnd, lhs, rhs },
+        });
+        body.exprs[bin].id = bin;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(bin),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::E0083));
+    }
+
+    /// Unary `-` on a `char` integer-promotes to `int`.
+    #[test]
+    fn check_body_unary_neg_promotes_char_to_int() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        // Add a local of type `char` so we have an lvalue to negate.
+        let char_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.char_,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let operand = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(char_local),
+        });
+        body.exprs[operand].id = operand;
+        let neg = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Unary { op: UnOp::Neg, operand },
+        });
+        body.exprs[neg].id = neg;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(neg),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[neg].ty, tcx.int, "char promoted to int by unary -");
+    }
+
+    /// Unary `!` on a scalar yields `int`.
+    #[test]
+    fn check_body_unary_lognot_yields_int() {
+        let mut tcx = TyCtxt::new();
+        let (mut body, _, _) = body_with_root_expr(HirExprKind::IntConst(1), tcx.error);
+        let kid = HirExprId(0); // root expr
+        let not = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Unary { op: UnOp::LogNot, operand: kid },
+        });
+        body.exprs[not].id = not;
+        // Re-root so the walker visits the LogNot.
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(not),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[not].ty, tcx.int);
+    }
+
+    /// `*p` produces an lvalue of the pointee type.
+    #[test]
+    fn check_body_deref_typed_to_pointee() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let p_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: ptr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let p_ref = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(p_local),
+        });
+        body.exprs[p_ref].id = p_ref;
+        let deref = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Deref(p_ref),
+        });
+        body.exprs[deref].id = deref;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(deref),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[deref].ty, tcx.int);
+        assert_eq!(body.exprs[deref].value_cat, ValueCat::LValue);
+    }
+
+    /// `&x` for an `int x` produces a value of type `int *` rvalue.
+    #[test]
+    fn check_body_address_of_yields_pointer() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let x_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let x_ref = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(x_local),
+        });
+        body.exprs[x_ref].id = x_ref;
+        let addr = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::AddressOf(x_ref),
+        });
+        body.exprs[addr].id = addr;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(addr),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        match *tcx.get(body.exprs[addr].ty) {
+            Ty::Ptr(q) => assert_eq!(q.ty, tcx.int),
+            ref other => panic!("expected Ptr(int), got {other:?}"),
+        }
+        assert_eq!(body.exprs[addr].value_cat, ValueCat::RValue);
+    }
+
+    /// Assignment `x = 1.5` for an `int x`: RHS is a double, must be
+    /// wrapped in a Convert to `int` before the Assign.
+    #[test]
+    fn check_body_assign_inserts_narrowing_convert() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let x_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(x_local),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(1.5),
+        });
+        body.exprs[rhs].id = rhs;
+        let assign = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Assign { lhs, rhs },
+        });
+        body.exprs[assign].id = assign;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(assign),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        // The Assign's type is the LHS type (int).
+        assert_eq!(body.exprs[assign].ty, tcx.int);
+        // The RHS is now a Convert wrapper of type `int`.
+        let HirExprKind::Assign { rhs: new_rhs, .. } = body.exprs[assign].kind.clone() else {
+            panic!()
+        };
+        assert_eq!(body.exprs[new_rhs].ty, tcx.int);
+        assert!(matches!(body.exprs[new_rhs].kind, HirExprKind::Convert { .. }));
+    }
+
+    /// Comma `a, b` has the type of its RHS, evaluating the LHS for side
+    /// effects.
+    #[test]
+    fn check_body_comma_takes_rhs_type() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(2.0),
+        });
+        body.exprs[rhs].id = rhs;
+        let comma = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Comma { lhs, rhs },
+        });
+        body.exprs[comma].id = comma;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(comma),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[comma].ty, tcx.double);
+    }
+
+    /// Conditional `1 ? 2 : 3.0` — operands taken to common type `double`.
+    #[test]
+    fn check_body_conditional_unifies_types() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let cond = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[cond].id = cond;
+        let t = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(2),
+        });
+        body.exprs[t].id = t;
+        let e = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(3.0),
+        });
+        body.exprs[e].id = e;
+        let qm = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Cond { cond, then_expr: t, else_expr: e },
+        });
+        body.exprs[qm].id = qm;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(qm),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[qm].ty, tcx.double);
+    }
+
+    /// `LocalRef` to an `int` local types as `int` lvalue.
+    #[test]
+    fn check_body_local_ref_typed_from_local_decl() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let l = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.int,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let r = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(l),
+        });
+        body.exprs[r].id = r;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(r),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[r].ty, tcx.int);
+        assert_eq!(body.exprs[r].value_cat, ValueCat::LValue);
+    }
+
+    /// Integer constants always type as `int`.
+    #[test]
+    fn check_body_int_const_typed_to_int() {
+        let mut tcx = TyCtxt::new();
+        let (mut body, eid, _) = body_with_root_expr(HirExprKind::IntConst(42), tcx.error);
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+        assert_eq!(body.exprs[eid].ty, tcx.int);
+    }
+
+    /// Float constants type as `double`.
+    #[test]
+    fn check_body_float_const_typed_to_double() {
+        let mut tcx = TyCtxt::new();
+        let (mut body, eid, _) = body_with_root_expr(HirExprKind::FloatConst(2.5), tcx.error);
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+        assert_eq!(body.exprs[eid].ty, tcx.double);
+    }
+
+    /// Acceptance: after a clean typeck pass, no `Ty::Error` surfaces in
+    /// any expression of the body.
+    #[test]
+    fn check_body_no_error_type_after_clean_pass() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        // (1 + 2) * 3.5
+        let e1 = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(1),
+        });
+        body.exprs[e1].id = e1;
+        let e2 = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::IntConst(2),
+        });
+        body.exprs[e2].id = e2;
+        let add = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Add, lhs: e1, rhs: e2 },
+        });
+        body.exprs[add].id = add;
+        let e3 = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(3.5),
+        });
+        body.exprs[e3].id = e3;
+        let mul = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Mul, lhs: add, rhs: e3 },
+        });
+        body.exprs[mul].id = mul;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(mul),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        // Walk every reachable expression and confirm no Ty::Error.
+        for expr in body.exprs.iter() {
+            assert_ne!(
+                expr.ty, tcx.error,
+                "expr {:?} of kind {:?} still has Ty::Error",
+                expr.id, expr.kind
+            );
+        }
+        // The outer multiply yields double (1 + 2 is int, 3.5 is double,
+        // usual arithmetic raises both sides to double).
+        assert_eq!(body.exprs[mul].ty, tcx.double);
     }
 }

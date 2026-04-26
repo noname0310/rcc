@@ -809,6 +809,30 @@ assigned to any pointer type.
 
 ---
 
+## E0083 — invalid operands to binary operator
+
+Raised by the type-checker when the operand types of a binary
+operator do not match any rule the operator allows
+(C99 §6.5.5–§6.5.14).
+
+```c
+struct S { int x; } s1, s2;
+void f(int *p, int i, double d) {
+    s1 / s2;          // error[E0083]: arithmetic ops need arithmetic
+                      //               (or pointer + integer for +/-)
+    p & i;            // error[E0083]: bitwise ops need integer
+    p % i;            // error[E0083]: % is integer-only
+    p && d;           // error[E0083]: logical operands must be scalar
+                      //               with a common type
+}
+```
+
+The diagnostic is emitted at the operator's span; the operand
+types are included in the message so the user can see what the
+type-checker inferred for each side.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
