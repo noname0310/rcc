@@ -89,6 +89,9 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0006, W0006_DESC),
     (W0007, W0007_DESC),
     (W0008, W0008_DESC),
+    (W0009, W0009_DESC),
+    (W0010, W0010_DESC),
+    (W0011, W0011_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -628,6 +631,42 @@ const W0007_DESC: &str = "enumerator value outside the range of `int`";
 /// `Convert` insertion pass.
 pub const W0008: &str = "W0008";
 const W0008_DESC: &str = "implicit conversion narrows value";
+
+/// Integer overflow while folding an integer constant expression.
+///
+/// C99 §6.5p5 makes signed integer overflow undefined behaviour, but the
+/// constant-expression evaluator (C99 §6.6) folds constant arithmetic at
+/// compile time on a 128-bit signed accumulator. When the result of `+`,
+/// `-`, `*`, or `<<` overflows that accumulator — or, more commonly, the
+/// destination type's range — the fold is abandoned (the expression is
+/// not a usable integer constant expression) and this warning is emitted
+/// at the offending operator's span. The diagnostic is informational:
+/// runtime behaviour stays UB, but the user is warned that the literal
+/// they wrote does not fit.
+pub const W0009: &str = "W0009";
+const W0009_DESC: &str = "integer overflow in constant expression";
+
+/// Division or remainder by zero in a folded integer constant expression.
+///
+/// C99 §6.5.5p5 makes `a / 0` and `a % 0` undefined behaviour. The
+/// constant-expression folder (C99 §6.6) cannot produce a result for
+/// such an expression, so the fold returns `None` and emits this
+/// warning at the operator's span. Use of the un-foldable expression in
+/// a context that requires an integer constant expression — array
+/// length, case label, enumerator initialiser, `#if` controlling
+/// expression — escalates to a hard error in that context.
+pub const W0010: &str = "W0010";
+const W0010_DESC: &str = "division by zero in constant expression";
+
+/// Shift count out of range in a folded integer constant expression.
+///
+/// C99 §6.5.7p3 makes `a << n` and `a >> n` undefined when the right
+/// operand is negative or is greater than or equal to the width of the
+/// promoted left operand's type. The constant-expression folder treats
+/// any such shift as un-evaluable, returns `None`, and warns at the
+/// operator's span so the user can spot the typo at compile time.
+pub const W0011: &str = "W0011";
+const W0011_DESC: &str = "shift count out of range in constant expression";
 
 #[cfg(test)]
 mod tests {

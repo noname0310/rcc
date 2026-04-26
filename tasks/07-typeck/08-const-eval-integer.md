@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-24
+
 # 07-08: Integer constant-expression evaluator
 
 **Phase:** 07-typeck    **Depends on:** 07-01    **Milestone:** M3

@@ -966,3 +966,58 @@ Task 07-05 introduces the warning; task 07-07 wires it to the
 implicit `Convert` insertion pass.
 
 Like every warning, W0008 does not count toward `Handler::has_errors`.
+
+
+---
+
+## W0009 — integer overflow in constant expression
+
+C99 §6.6 specifies integer constant expressions and §6.5p5 declares
+that signed-integer overflow is undefined behaviour. The constant
+evaluator (`rcc_typeck::const_eval`) detects overflow on `+ - * /
+% <<` while folding and reports it instead of silently wrapping:
+
+```c
+int  a = INT_MAX + 1;          // warning[W0009]: overflow folds to None
+long b = (1LL << 62) * 4;      // warning[W0009]: high bits lost
+int  c = -INT_MIN;             // warning[W0009]: |INT_MIN| has no positive
+                               //                 counterpart in `int`
+```
+
+When `eval_int` reports `W0009` it returns `None`; the surrounding
+expression therefore decays to a runtime computation rather than an
+integer constant. Initializers and `case` labels that needed a
+constant value will follow up with their own diagnostic.
+
+---
+
+## W0010 — division by zero in constant expression
+
+The constant-expression evaluator also flags `n / 0` and `n % 0`:
+
+```c
+int q = 10 / 0;                // warning[W0010]
+int r = 10 % 0;                // warning[W0010]
+```
+
+C99 §6.5.5p5 makes division by zero undefined behaviour. The
+evaluator returns `None` rather than panicking, so the rest of the
+translation unit still type-checks; the runtime behaviour is left
+to whatever LLVM emits.
+
+---
+
+## W0011 — shift count out of range in constant expression
+
+C99 §6.5.7p3 makes left- or right-shifting by a value `>= width` (or
+negative) undefined behaviour. The evaluator detects this when both
+operands are constants:
+
+```c
+int x = 1 << 32;               // warning[W0011]: 32 bits is the int width
+int y = 1 << -1;               // warning[W0011]: negative shift count
+```
+
+As with W0009 / W0010 the fold returns `None`; the operator stays
+in HIR for codegen to emit (where LLVM in turn picks a target-
+specific behaviour).
