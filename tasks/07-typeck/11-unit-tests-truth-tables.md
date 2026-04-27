@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 07-11: Truth tables + diagnostic fixtures
 
 **Phase:** 07-typeck    **Depends on:** 07-01 .. 07-10    **Milestone:** M3
