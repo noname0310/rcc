@@ -362,6 +362,12 @@ pub enum ConvertKind {
     LvalueToRvalue,
     /// Pointer conversion to `void*` or between compatible pointer types.
     Pointer,
+    /// Real-to-complex conversion (C99 §6.3.1.6): the real value becomes
+    /// the real part, the imaginary part is zero.
+    RealToComplex,
+    /// Complex-to-real conversion (C99 §6.3.1.6): the imaginary part is
+    /// discarded. The type-checker emits W0012 at the conversion site.
+    ComplexToReal,
 }
 
 /// Small nested module so `HirExprKind` names don't collide with `rcc_ast::BinOp`.

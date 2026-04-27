@@ -152,6 +152,12 @@ pub struct TyCtxt {
     pub double: TyId,
     /// `long double`
     pub long_double: TyId,
+    /// `_Complex float`
+    pub complex_float: TyId,
+    /// `_Complex double`
+    pub complex_double: TyId,
+    /// `_Complex long double`
+    pub complex_long_double: TyId,
     /// Error sentinel.
     pub error: TyId,
 }
@@ -178,6 +184,9 @@ impl TyCtxt {
             float: TyId(0),
             double: TyId(0),
             long_double: TyId(0),
+            complex_float: TyId(0),
+            complex_double: TyId(0),
+            complex_long_double: TyId(0),
             error: TyId(0),
         };
         this.void = this.intern(Ty::Void);
@@ -196,6 +205,9 @@ impl TyCtxt {
         this.float = this.intern(Ty::Float(FloatKind::F32));
         this.double = this.intern(Ty::Float(FloatKind::F64));
         this.long_double = this.intern(Ty::Float(FloatKind::F80));
+        this.complex_float = this.intern(Ty::Complex(FloatKind::F32));
+        this.complex_double = this.intern(Ty::Complex(FloatKind::F64));
+        this.complex_long_double = this.intern(Ty::Complex(FloatKind::F80));
         this.error = this.intern(Ty::Error);
         this
     }

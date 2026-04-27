@@ -458,18 +458,16 @@ pub fn visit_expr(
             // Common case: both arithmetic — apply usual arithmetic.
             let result_ty = if is_arithmetic(tcx, then_ty) && is_arithmetic(tcx, else_ty) {
                 let common = usual_arithmetic(tcx, then_ty, else_ty);
-                // No diagnostics on narrowing here — usual_arithmetic
-                // is a widening conversion by construction.
-                let then2_w = if body.exprs[then2].ty != common {
-                    push_arith_convert(body, then2, common)
-                } else {
-                    then2
-                };
-                let else2_w = if body.exprs[else2].ty != common {
-                    push_arith_convert(body, else2, common)
-                } else {
-                    else2
-                };
+                // No diagnostics on real-arithmetic narrowing here —
+                // usual_arithmetic is a widening conversion by
+                // construction. Complex ↔ real is dispatched via
+                // `push_arithmetic_convert` so a `?:` whose arms mix a
+                // complex and a real operand wraps the real arm in
+                // `RealToComplex` (no warning); a complex source going
+                // into a real arm cannot arise here because `common` is
+                // complex whenever either arm is.
+                let then2_w = push_arithmetic_convert(body, session, tcx, then2, common);
+                let else2_w = push_arithmetic_convert(body, session, tcx, else2, common);
                 body.exprs[expr_id].kind =
                     HirExprKind::Cond { cond: cond2, then_expr: then2_w, else_expr: else2_w };
                 common
@@ -564,7 +562,7 @@ fn coerce_to(
     dst: TyId,
     body: &mut Body,
     tcx: &mut TyCtxt,
-    _session: &mut Session,
+    session: &mut Session,
 ) -> HirExprId {
     let src_ty = body.exprs[expr].ty;
     if src_ty == dst {
@@ -575,10 +573,13 @@ fn coerce_to(
     if src_ty == tcx.error || dst == tcx.error {
         return expr;
     }
-    // Arithmetic ↔ arithmetic: pick a UsualArithmetic-style widening
-    // wrapper. Narrowing diagnostics deferred to 07-11.
+    // Arithmetic ↔ arithmetic: dispatch through `push_arithmetic_convert`
+    // so real ↔ complex conversions land on the right ConvertKind and
+    // emit W0012 when complex-to-real drops the imaginary part. Real ↔
+    // real continues to use the UsualArithmetic-style wrapper. Narrowing
+    // diagnostics for real arithmetic remain deferred to W0008.
     if is_arithmetic(tcx, src_ty) && is_arithmetic(tcx, dst) {
-        return push_arith_convert(body, expr, dst);
+        return push_arithmetic_convert(body, session, tcx, expr, dst);
     }
     // Pointer-shaped destination: try `pointer_convert`. Errors are
     // silent here (07-11 wires up E0081/E0082). On error fall through
@@ -648,9 +649,14 @@ fn type_binary(
                 invalid_operands(session, span, binop_symbol(op));
                 (tcx.error, lhs, rhs)
             } else {
+                // `+`/`-`/`*`/`/` may have complex operands; route the
+                // operand wrappers through `push_arithmetic_convert` so a
+                // real operand paired with a complex one is wrapped in
+                // `RealToComplex` rather than the generic
+                // `UsualArithmetic`. Same flow for pure-real cases.
                 let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
-                let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
-                let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                let l = push_arithmetic_convert(body, session, tcx, lhs, common);
+                let r = push_arithmetic_convert(body, session, tcx, rhs, common);
                 (common, l, r)
             }
         }
@@ -687,8 +693,13 @@ fn type_binary(
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
             if is_arithmetic(tcx, lhs_ty) && is_arithmetic(tcx, rhs_ty) {
                 let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
-                let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
-                let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
+                // Equality on complex operands is well-formed; relational
+                // (`<` / `<=` / `>` / `>=`) on complex operands is not, but
+                // diagnostic enforcement of the §6.5.8 constraint is task
+                // 07-11. Either way the operand wrappers go through
+                // `push_arithmetic_convert` to handle real ↔ complex.
+                let l = push_arithmetic_convert(body, session, tcx, lhs, common);
+                let r = push_arithmetic_convert(body, session, tcx, rhs, common);
                 (tcx.int, l, r)
             } else {
                 (tcx.int, lhs, rhs)
@@ -1027,12 +1038,47 @@ fn unsigned_counterpart(tcx: &TyCtxt, rank: IntRank) -> TyId {
 ///    - (4c.iii) Otherwise, both operands are converted to the unsigned
 ///      counterpart of the signed operand's type.
 ///
-/// `_Complex` arithmetic (C99 §6.3.1.8 second paragraph) is deferred to
-/// task 07-12; we only handle real arithmetic here.
+/// `_Complex` arithmetic (C99 §6.3.1.8 second paragraph) is handled before
+/// the real-only ladder: if at least one operand is complex, the result
+/// type is the complex flavour of the higher-rank corresponding real
+/// type. A pure-real operand paired with a complex operand uses the real
+/// operand's rank for the comparison; the caller is then responsible for
+/// inserting a `RealToComplex` `Convert` on the real side.
 ///
 /// The caller is responsible for actually inserting `Convert` nodes on
 /// each operand to bring it to the returned common type.
 pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
+    // §6.3.1.8 second paragraph: if either operand has complex type, the
+    // result has complex type, and its corresponding real type is the
+    // higher of the two operands' corresponding real types. Pre-empt the
+    // real-only ladder so a `_Complex float + double` mix lands on
+    // `_Complex double`, not `double`.
+    let a_is_cx = matches!(tcx.get(a), Ty::Complex(_));
+    let b_is_cx = matches!(tcx.get(b), Ty::Complex(_));
+    if a_is_cx || b_is_cx {
+        // "Corresponding real type" of an operand: the float kind for
+        // `_Complex K`/`Float K`, or the implicit float kind that arises
+        // from integer promotion (handled by treating integers as the
+        // lowest-rank float, F32 — they will be promoted to that or
+        // higher anyway via the §6.3.1.8 first paragraph rule for the
+        // real operand). We pick the *higher* rank between the two and
+        // wrap the result in `Complex`.
+        let rank = |t: TyId| -> FloatKind {
+            match *tcx.get(t) {
+                Ty::Float(k) | Ty::Complex(k) => k,
+                // Integers and anything else: treat as the lowest float
+                // rank so the complex side dominates rank selection.
+                _ => FloatKind::F32,
+            }
+        };
+        let result_rank = max_float_kind(rank(a), rank(b));
+        return match result_rank {
+            FloatKind::F32 => tcx.complex_float,
+            FloatKind::F64 => tcx.complex_double,
+            FloatKind::F80 => tcx.complex_long_double,
+        };
+    }
+
     // Steps 1-3: floating types dominate, in long-double / double / float order.
     match (tcx.get(a), tcx.get(b)) {
         (Ty::Float(FloatKind::F80), _) | (_, Ty::Float(FloatKind::F80)) => return tcx.long_double,
@@ -1437,6 +1483,17 @@ fn float_rank(kind: FloatKind) -> u32 {
     }
 }
 
+/// Pick the higher-precision of two float kinds. Used by the complex
+/// branch of [`usual_arithmetic`] to determine the corresponding real
+/// type of the result (C99 §6.3.1.8 second paragraph).
+fn max_float_kind(a: FloatKind, b: FloatKind) -> FloatKind {
+    if float_rank(a) >= float_rank(b) {
+        a
+    } else {
+        b
+    }
+}
+
 /// True iff converting a value of type `src` to type `dst` may lose
 /// information at run time. Both types are assumed to be arithmetic
 /// (integer or float); records, pointers, void, and the error sentinel
@@ -1475,10 +1532,13 @@ fn is_narrowing_arithmetic(tcx: &TyCtxt, src: TyId, dst: TyId) -> bool {
         // Float → integer: always narrowing (the fractional part is lost,
         // and the integer range may not cover the float's range either).
         (Ty::Float(_), Ty::Int { .. }) => true,
-        // Anything else (including `_Complex` — task 07-12) we conservatively
-        // call non-narrowing; the caller will already have rejected the
-        // assignment via `is_assignable` if the types are otherwise
-        // incompatible.
+        // Anything else we conservatively call non-narrowing; the
+        // caller will already have rejected the assignment via
+        // `is_assignable` if the types are otherwise incompatible.
+        // `_Complex` ↔ real conversions are well-formed (C99 §6.3.1.6)
+        // and never trip W0008 — complex-to-real already carries the
+        // dedicated W0012 warning emitted at convert-insertion time;
+        // real-to-complex never loses information.
         _ => false,
     }
 }
@@ -1826,6 +1886,89 @@ fn push_pointer_convert(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExp
 /// True iff `t` is an integer type per C99 §6.2.5p17.
 fn is_integer(tcx: &TyCtxt, t: TyId) -> bool {
     matches!(tcx.get(t), Ty::Int { .. })
+}
+
+/// True iff `t` is a `_Complex` floating type per C99 §6.2.5p11.
+fn is_complex(tcx: &TyCtxt, t: TyId) -> bool {
+    matches!(tcx.get(t), Ty::Complex(_))
+}
+
+/// Push a `Convert { kind: RealToComplex }` wrapper around `src` whose
+/// destination type is the complex `dst_ty`. The wrapper is always an
+/// rvalue. Used by [`coerce_to`] and [`type_binary`] to lift a real
+/// operand into the surrounding complex computation (C99 §6.3.1.6:
+/// the real value becomes the real part, the imaginary part is zero).
+fn push_real_to_complex(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExprId {
+    let span = body.exprs[src].span;
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: dst_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: src, kind: ConvertKind::RealToComplex },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Push a `Convert { kind: ComplexToReal }` wrapper around `src` whose
+/// destination type is the real `dst_ty`, and emit W0012 at the source
+/// span warning that the imaginary part is being discarded
+/// (C99 §6.3.1.6). The wrapper is always an rvalue.
+fn push_complex_to_real(
+    body: &mut Body,
+    session: &mut Session,
+    src: HirExprId,
+    dst_ty: TyId,
+) -> HirExprId {
+    let span = body.exprs[src].span;
+    session
+        .handler
+        .struct_warn(span, "imaginary part discarded in complex-to-real conversion")
+        .code(rcc_errors::codes::W0012)
+        .emit();
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: dst_ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::Convert { operand: src, kind: ConvertKind::ComplexToReal },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+/// Insert the appropriate arithmetic-conversion wrapper to bring `src`
+/// from its current arithmetic type to the arithmetic type `dst_ty`.
+/// Dispatches between [`push_arith_convert`] (real ↔ real, complex ↔
+/// complex), [`push_real_to_complex`] (real → complex), and
+/// [`push_complex_to_real`] (complex → real, with W0012). The caller
+/// must have verified that both sides are arithmetic.
+fn push_arithmetic_convert(
+    body: &mut Body,
+    session: &mut Session,
+    tcx: &TyCtxt,
+    src: HirExprId,
+    dst_ty: TyId,
+) -> HirExprId {
+    let src_ty = body.exprs[src].ty;
+    if src_ty == dst_ty {
+        return src;
+    }
+    let src_cx = is_complex(tcx, src_ty);
+    let dst_cx = is_complex(tcx, dst_ty);
+    match (src_cx, dst_cx) {
+        // real → complex: imaginary part becomes 0.
+        (false, true) => push_real_to_complex(body, src, dst_ty),
+        // complex → real: imaginary part discarded; warn (W0012).
+        (true, false) => push_complex_to_real(body, session, src, dst_ty),
+        // Same family (real ↔ real or complex ↔ complex of different
+        // rank): a UsualArithmetic-flavoured widening/narrowing wrapper.
+        // For complex ↔ complex this models the "convert both parts
+        // independently" rule of C99 §6.3.1.6 — the same wrapper kind
+        // back-ends already use for real → real conversions.
+        (false, false) | (true, true) => push_arith_convert(body, src, dst_ty),
+    }
 }
 
 #[cfg(test)]
@@ -2512,7 +2655,8 @@ mod tests {
 
     /// Convert wrappers always produce rvalues — the whole point of an
     /// LvalueToRvalue / ArrayToPtr / FuncToPtr / Pointer / IntegerPromotion
-    /// / UsualArithmetic conversion is to *yield a value*.
+    /// / UsualArithmetic / RealToComplex / ComplexToReal conversion is to
+    /// *yield a value*.
     #[test]
     fn value_category_convert_is_rvalue() {
         let tcx = TyCtxt::new();
@@ -2525,6 +2669,8 @@ mod tests {
             ConvertKind::FuncToPtr,
             ConvertKind::LvalueToRvalue,
             ConvertKind::Pointer,
+            ConvertKind::RealToComplex,
+            ConvertKind::ComplexToReal,
         ] {
             let id = push_kind(&mut body, tcx.int, HirExprKind::Convert { operand: inner, kind });
             assert_eq!(value_category(&body, id), ValueCat::RValue, "Convert {kind:?}");
@@ -4394,5 +4540,411 @@ mod tests {
         // The outer multiply yields double (1 + 2 is int, 3.5 is double,
         // usual arithmetic raises both sides to double).
         assert_eq!(body.exprs[mul].ty, tcx.double);
+    }
+
+    // ------------------------------------------------------------------
+    // Complex arithmetic (07-12) — usual_arithmetic + coerce_to + W0012.
+    // ------------------------------------------------------------------
+
+    /// `_Complex float` + `_Complex double` → `_Complex double`. Mixing
+    /// two complex operands picks the higher rank (C99 §6.3.1.8 second
+    /// paragraph).
+    #[test]
+    fn usual_arithmetic_complex_complex_picks_higher_rank() {
+        let tcx = TyCtxt::new();
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_float, tcx.complex_double),
+            tcx.complex_double
+        );
+        // Symmetric.
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_double, tcx.complex_float),
+            tcx.complex_double
+        );
+        // Same kind passes through.
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_double, tcx.complex_double),
+            tcx.complex_double
+        );
+        // Long-double dominates.
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_double, tcx.complex_long_double),
+            tcx.complex_long_double
+        );
+    }
+
+    /// `_Complex double` + `double` → `_Complex double`. A pure-real
+    /// operand paired with a complex operand promotes to complex of the
+    /// max real-rank.
+    #[test]
+    fn usual_arithmetic_complex_real_yields_complex() {
+        let tcx = TyCtxt::new();
+        assert_eq!(usual_arithmetic(&tcx, tcx.complex_double, tcx.double), tcx.complex_double);
+        assert_eq!(usual_arithmetic(&tcx, tcx.double, tcx.complex_double), tcx.complex_double);
+        // `_Complex float` paired with `double` widens both to
+        // `_Complex double` because the corresponding-real-type max is
+        // `double`.
+        assert_eq!(usual_arithmetic(&tcx, tcx.complex_float, tcx.double), tcx.complex_double);
+        assert_eq!(usual_arithmetic(&tcx, tcx.double, tcx.complex_float), tcx.complex_double);
+        // `_Complex float` + `long double` → `_Complex long double`.
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_float, tcx.long_double),
+            tcx.complex_long_double
+        );
+    }
+
+    /// `_Complex double` + `int` → `_Complex double`. Integer paired
+    /// with complex always yields complex of the complex operand's rank
+    /// (the integer is promoted into the complex side).
+    #[test]
+    fn usual_arithmetic_complex_int_yields_complex() {
+        let tcx = TyCtxt::new();
+        assert_eq!(usual_arithmetic(&tcx, tcx.complex_double, tcx.int), tcx.complex_double);
+        assert_eq!(usual_arithmetic(&tcx, tcx.int, tcx.complex_double), tcx.complex_double);
+        assert_eq!(usual_arithmetic(&tcx, tcx.complex_float, tcx.int), tcx.complex_float);
+        assert_eq!(
+            usual_arithmetic(&tcx, tcx.complex_long_double, tcx.long_long),
+            tcx.complex_long_double
+        );
+    }
+
+    /// `is_arithmetic` accepts every flavour of `_Complex`.
+    #[test]
+    fn is_arithmetic_includes_complex() {
+        let tcx = TyCtxt::new();
+        assert!(is_arithmetic(&tcx, tcx.complex_float));
+        assert!(is_arithmetic(&tcx, tcx.complex_double));
+        assert!(is_arithmetic(&tcx, tcx.complex_long_double));
+        assert!(is_complex(&tcx, tcx.complex_double));
+        assert!(!is_complex(&tcx, tcx.double));
+    }
+
+    /// `is_assignable(complex_double <- double)` is OK with no
+    /// `Narrowing` flag — real → complex is always non-narrowing
+    /// (C99 §6.3.1.6).
+    #[test]
+    fn is_assignable_real_to_complex_not_narrowing() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_leaf_expr(&mut body, tcx.double, ValueCat::RValue);
+        assert_eq!(is_assignable(&tcx, &body, tcx.complex_double, tcx.double, src), Ok(()));
+        // Same shape for `_Complex float` ← int / float.
+        let src2 = push_leaf_expr(&mut body, tcx.int, ValueCat::RValue);
+        assert_eq!(is_assignable(&tcx, &body, tcx.complex_float, tcx.int, src2), Ok(()));
+    }
+
+    /// `is_assignable(double <- complex_double)` is structurally OK; the
+    /// narrowing classifier returns `false` because the dedicated W0012
+    /// at the conversion site already covers the imaginary-discard
+    /// shape (so we don't double-flag with W0008).
+    #[test]
+    fn is_assignable_complex_to_real_not_flagged_as_narrowing() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let src = push_leaf_expr(&mut body, tcx.complex_double, ValueCat::RValue);
+        assert_eq!(is_assignable(&tcx, &body, tcx.double, tcx.complex_double, src), Ok(()));
+    }
+
+    /// `double* p; _Complex double* q; p = q;` is not an arithmetic
+    /// assignment — pointers to `T` and `_Complex T` are distinct
+    /// (interned) types and the assignment falls through to the
+    /// pointer-bullet, where compatibility fails: Incompatible.
+    /// We use a `LocalRef`-shaped source so the null-pointer-constant
+    /// shortcut (bullet 5) does not fire.
+    #[test]
+    fn complex_pointers_are_incompatible_with_real_pointers() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let real_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.double)));
+        let cx_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.complex_double)));
+        // Use a Local-backed pointer source so `is_null_pointer_constant`
+        // returns false (it would otherwise short-circuit a pointer-shaped
+        // destination via bullet 5 of §6.5.16.1p1).
+        let local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: cx_ptr,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let src = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: cx_ptr,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(local),
+        });
+        body.exprs[src].id = src;
+        assert_eq!(
+            is_assignable(&tcx, &body, real_ptr, cx_ptr, src),
+            Err(AssignError::Incompatible)
+        );
+    }
+
+    /// `(_Complex double)1.0 + 2.0` (modelled directly): the
+    /// `FloatConst(2.0)` is wrapped in `RealToComplex` and the binary
+    /// result types as `_Complex double`. We pre-load the LHS as a
+    /// LocalRef to a `_Complex double` so check_body sees a complex
+    /// operand without having to drive the cast pipeline.
+    #[test]
+    fn check_body_complex_plus_real_inserts_real_to_complex() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let cx_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.complex_double,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(cx_local),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(2.0),
+        });
+        body.exprs[rhs].id = rhs;
+        let bin = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Add, lhs, rhs },
+        });
+        body.exprs[bin].id = bin;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(bin),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[bin].ty, tcx.complex_double);
+        let HirExprKind::Binary { lhs: nl, rhs: nr, .. } = body.exprs[bin].kind.clone() else {
+            panic!("expected Binary kind");
+        };
+        // RHS is now wrapped in RealToComplex with type complex_double.
+        match body.exprs[nr].kind {
+            HirExprKind::Convert { kind: ConvertKind::RealToComplex, operand } => {
+                assert_eq!(body.exprs[nr].ty, tcx.complex_double);
+                // Operand is the original FloatConst (which lvalue-to-rvalue
+                // is a no-op for an rvalue; check_body may chain a
+                // `LvalueToRvalue` only when needed).
+                assert_eq!(body.exprs[operand].ty, tcx.double);
+            }
+            ref other => panic!("expected RealToComplex on rhs, got {other:?}"),
+        }
+        // LHS: a Convert(LvalueToRvalue, complex_double) wrapping the
+        // original LocalRef. We don't pin the exact wrapper kind here —
+        // critically, no RealToComplex appears on the LHS.
+        assert_ne!(nl, lhs, "LHS should be wrapped (lvalue-to-rvalue)");
+        assert!(
+            !matches!(
+                body.exprs[nl].kind,
+                HirExprKind::Convert { kind: ConvertKind::RealToComplex, .. }
+            ),
+            "LHS was already complex; no RealToComplex expected"
+        );
+
+        // No errors and no W0012 (RealToComplex is silent).
+        assert!(!session.handler.has_errors());
+        let diags = cap.diagnostics();
+        assert!(
+            !diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0012)),
+            "W0012 must not fire on real → complex"
+        );
+    }
+
+    /// Assigning a complex value to a real local inserts ComplexToReal
+    /// and emits W0012.
+    ///
+    /// Models `double r = c;` where `c` is a `_Complex double` local.
+    /// The local-decl initializer flow runs `coerce_to(rhs, declared_ty)`,
+    /// which dispatches to `push_complex_to_real` and emits the warning.
+    #[test]
+    fn check_body_complex_to_real_assignment_emits_w0012() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let cx_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.complex_double,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let real_local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.double,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let init = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(cx_local),
+        });
+        body.exprs[init].id = init;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::LocalDecl { local: real_local, init: Some(init) },
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        // Wrap the local-decl in a Block so check_body's traversal visits it.
+        let block_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Block(vec![stmt_id]),
+        });
+        body.stmts[block_id].id = block_id;
+        body.root = Some(block_id);
+
+        let (mut session, cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        // The init child should now be a Convert(ComplexToReal) with
+        // type `double`. Walk the (now-rewritten) statement to find it.
+        let HirStmtKind::Block(ref children) = body.stmts[block_id].kind else { panic!() };
+        let HirStmtKind::LocalDecl { init: Some(init_id), .. } = body.stmts[children[0]].kind
+        else {
+            panic!("expected LocalDecl with initializer");
+        };
+        match body.exprs[init_id].kind {
+            HirExprKind::Convert { kind: ConvertKind::ComplexToReal, .. } => {
+                assert_eq!(body.exprs[init_id].ty, tcx.double);
+            }
+            ref other => panic!("expected ComplexToReal wrapper on initializer, got {other:?}"),
+        }
+
+        // Exactly one W0012 diagnostic; no errors.
+        assert!(!session.handler.has_errors(), "W0012 must not count as an error");
+        let diags = cap.diagnostics();
+        let w0012 = diags.iter().filter(|d| d.code == Some(rcc_errors::codes::W0012)).count();
+        assert_eq!(w0012, 1, "exactly one W0012 expected, got {diags:?}");
+    }
+
+    /// Acceptance: `_Complex double a; _Complex double b = a * a;`
+    /// type-checks. Models the body as `_Complex double a; ...; a * a;`
+    /// and asserts the binary's type is `_Complex double` with no
+    /// errors.
+    #[test]
+    fn check_body_complex_double_self_multiply_typechecks() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let a = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.complex_double,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let lhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(a),
+        });
+        body.exprs[lhs].id = lhs;
+        let rhs = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::LocalRef(a),
+        });
+        body.exprs[rhs].id = rhs;
+        let mul = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::Binary { op: BinOp::Mul, lhs, rhs },
+        });
+        body.exprs[mul].id = mul;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(mul),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[mul].ty, tcx.complex_double);
+        assert!(!session.handler.has_errors());
+    }
+
+    /// Acceptance: `(_Complex double)3.0` (modelled via an explicit
+    /// `Cast`) types as `_Complex double` with the operand wrapped in a
+    /// `RealToComplex` convert when assigned into a `_Complex double`
+    /// local. The cast itself just sets the destination type; the
+    /// implicit Convert lands when a coercion follows.
+    #[test]
+    fn check_body_real_to_complex_cast_then_assign() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        // `_Complex double r;` declared local.
+        let r = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.complex_double,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        // Initializer: `3.0` (a real `double`). The local-decl init flow
+        // calls coerce_to(rhs, complex_double) and inserts RealToComplex.
+        let init = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: tcx.error,
+            value_cat: ValueCat::RValue,
+            span: DUMMY_SP,
+            kind: HirExprKind::FloatConst(3.0),
+        });
+        body.exprs[init].id = init;
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::LocalDecl { local: r, init: Some(init) },
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        let block_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Block(vec![stmt_id]),
+        });
+        body.stmts[block_id].id = block_id;
+        body.root = Some(block_id);
+
+        let (mut session, cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let HirStmtKind::Block(ref children) = body.stmts[block_id].kind else { panic!() };
+        let HirStmtKind::LocalDecl { init: Some(init_id), .. } = body.stmts[children[0]].kind
+        else {
+            panic!()
+        };
+        match body.exprs[init_id].kind {
+            HirExprKind::Convert { kind: ConvertKind::RealToComplex, .. } => {
+                assert_eq!(body.exprs[init_id].ty, tcx.complex_double);
+            }
+            ref other => panic!("expected RealToComplex wrapper, got {other:?}"),
+        }
+        // No diagnostics — real → complex is silent.
+        assert!(!session.handler.has_errors());
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "real → complex must not emit diagnostics: {diags:?}");
     }
 }

@@ -244,6 +244,13 @@ impl<'a> ConstEval<'a> {
                 | ConvertKind::UsualArithmetic
                 | ConvertKind::LvalueToRvalue => self.eval_arith(operand),
                 ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr | ConvertKind::Pointer => None,
+                // `_Complex` arithmetic constant folding is not part of
+                // M7 — a real-to-complex / complex-to-real wrapper means
+                // the surrounding expression is *not* a real arithmetic
+                // constant. Bail without trying to fold (full complex
+                // const-eval is genuinely hard and is left as future
+                // work for the §6.6p7 arithmetic-constant pass).
+                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
             },
 
             HirExprKind::Call { .. }
@@ -303,6 +310,8 @@ impl<'a> ConstEval<'a> {
                 ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr => self.eval_address(operand),
                 ConvertKind::Pointer | ConvertKind::LvalueToRvalue => self.eval_address(operand),
                 ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic => None,
+                // Complex conversions never produce an address constant.
+                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
             },
 
             // `(T*) icex` — null pointer constant with an integer offset.
@@ -540,6 +549,10 @@ impl<'a> ConstEval<'a> {
                 // Decay / pointer conversions never produce an
                 // integer-typed result.
                 ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr | ConvertKind::Pointer => None,
+                // `_Complex` conversions never produce an integer-typed
+                // result either. The surrounding expression is not an
+                // integer constant expression in the §6.6p6 sense.
+                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
             },
 
             // The remaining HIR kinds are not part of an integer

@@ -14,7 +14,8 @@
 //!
 //! Warning codes use the `WNNNN` spelling and live in their own
 //! namespace; task 04-16 introduces the first, W0001 for unknown
-//! `#pragma` directives.
+//! `#pragma` directives, and task 07-12 introduces W0012 for
+//! complex-to-real imaginary-part discard.
 //!
 //! The preprocessor block E0001..E0020 was filled during lexer work, so
 //! task 04-03 borrows the first slot of the parser window for the
@@ -93,6 +94,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0009, W0009_DESC),
     (W0010, W0010_DESC),
     (W0011, W0011_DESC),
+    (W0012, W0012_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -690,6 +692,19 @@ const W0010_DESC: &str = "division by zero in constant expression";
 /// operator's span so the user can spot the typo at compile time.
 pub const W0011: &str = "W0011";
 const W0011_DESC: &str = "shift count out of range in constant expression";
+
+/// Imaginary part discarded in a complex-to-real conversion.
+///
+/// C99 §6.3.1.6 specifies that converting a value of complex type to a
+/// real type drops the imaginary part. The conversion is well-formed,
+/// but if the source value carried a non-zero imaginary component the
+/// information is silently lost — the same footgun shape as W0008's
+/// arithmetic narrowing. `rcc` emits this warning whenever the
+/// type-checker inserts a `ConvertKind::ComplexToReal` wrapper, both
+/// for explicit casts (`(double)complex_value`) and for the implicit
+/// case (assigning a complex source into a real destination).
+pub const W0012: &str = "W0012";
+const W0012_DESC: &str = "imaginary part discarded in complex-to-real conversion";
 
 #[cfg(test)]
 mod tests {
