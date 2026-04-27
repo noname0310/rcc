@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 08-01: `BodyBuilder`
 
 **Phase:** 08-cfg    **Depends on:** —    **Milestone:** M3

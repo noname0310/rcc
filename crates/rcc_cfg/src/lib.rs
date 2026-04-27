@@ -14,7 +14,7 @@ use rcc_span::Span;
 
 pub mod build;
 
-pub use build::build_bodies;
+pub use build::{build_bodies, BodyBuilder};
 
 rcc_data_structures::new_index! {
     /// Basic-block id within a `Body`.
