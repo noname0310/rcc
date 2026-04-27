@@ -9,7 +9,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 ## Tasks (pick in order)
 
 - [x] [01-body-builder](01-body-builder.md)
-- [ ] [02-local-allocation](02-local-allocation.md)
+- [x] [02-local-allocation](02-local-allocation.md)
 - [ ] [03-expr-to-rvalue](03-expr-to-rvalue.md)
 - [ ] [04-place-projections](04-place-projections.md)
 - [ ] [05-short-circuit-lowering](05-short-circuit-lowering.md)

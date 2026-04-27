@@ -7,7 +7,7 @@
 use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_hir::{DefId, HirCrate, Local, TyCtxt, TyId};
 use rcc_session::Session;
-use rcc_span::Span;
+use rcc_span::{Span, Symbol};
 
 use crate::{BasicBlock, BasicBlockId, Body, LocalDecl, Statement, Terminator, TerminatorKind};
 
@@ -33,6 +33,27 @@ struct BlockState {
     terminated: bool,
 }
 
+/// Where in the local-allocation pipeline the builder currently sits.
+///
+/// The CFG layout convention (mirrors rustc's MIR) is:
+/// 1. `Local(0)` = return slot,
+/// 2. `Local(1..=N)` = parameters in source order,
+/// 3. subsequent locals = declared user variables, then lowering temporaries.
+///
+/// The phase only advances forward; debug-mode assertions in `alloc_param` /
+/// `alloc_user_local` / `alloc_temp` reject out-of-order calls. Release builds
+/// skip the checks (the helpers still produce well-formed `Local`s, just
+/// without the order audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocPhase {
+    /// Nothing allocated yet; only `alloc_return_slot` is valid.
+    ReturnSlot,
+    /// Return slot done; `alloc_param` extends the parameter run.
+    Params,
+    /// Parameters done; `alloc_user_local` / `alloc_temp` may be mixed freely.
+    Locals,
+}
+
 /// Mutable cursor used by lowering code to incrementally build a [`Body`].
 ///
 /// The builder owns:
@@ -52,6 +73,9 @@ pub struct BodyBuilder {
     blocks: IndexVec<BasicBlockId, BasicBlock>,
     states: IndexVec<BasicBlockId, BlockState>,
     current: BasicBlockId,
+    /// Tracks how far the local-allocation pipeline has advanced. See
+    /// [`AllocPhase`] for the staged convention.
+    phase: AllocPhase,
 }
 
 impl Default for BodyBuilder {
@@ -69,7 +93,15 @@ impl BodyBuilder {
         let entry = blocks.push(BasicBlock::default());
         let entry_state = states.push(BlockState { terminated: false });
         debug_assert_eq!(entry, entry_state);
-        Self { def: None, ret_ty: None, locals: IndexVec::new(), blocks, states, current: entry }
+        Self {
+            def: None,
+            ret_ty: None,
+            locals: IndexVec::new(),
+            blocks,
+            states,
+            current: entry,
+            phase: AllocPhase::ReturnSlot,
+        }
     }
 
     /// Set the [`DefId`] this body belongs to.
@@ -117,9 +149,104 @@ impl BodyBuilder {
         self.current = bb;
     }
 
-    /// Allocate a new local slot, returning its [`Local`] id.
+    /// Low-level escape hatch: append `decl` to the locals table verbatim.
+    ///
+    /// Prefer the staged helpers — [`alloc_return_slot`](Self::alloc_return_slot),
+    /// [`alloc_param`](Self::alloc_param), [`alloc_user_local`](Self::alloc_user_local),
+    /// [`alloc_temp`](Self::alloc_temp) — which enforce the `Local(0) = ret`,
+    /// then params, then user-locals/temps ordering.
+    ///
+    /// This entry point performs **no** ordering check and does not advance
+    /// the internal phase tracker; it exists for tests and for code paths
+    /// that already validated their own invariants.
     pub fn alloc_local(&mut self, decl: LocalDecl) -> Local {
         self.locals.push(decl)
+    }
+
+    /// Allocate `Local(0)` as the return slot.
+    ///
+    /// Must be called exactly once, before any parameter or user-local. The
+    /// task spec ([rustc-style MIR convention][rustc-mir]) reserves
+    /// `Local(0)` for the value the function returns; void functions use a
+    /// `void`/unit `TyId` here.
+    ///
+    /// Also calls [`set_ret_ty`](Self::set_ret_ty) so callers do not have to
+    /// pass `ret_ty` twice.
+    ///
+    /// [rustc-mir]: https://rustc-dev-guide.rust-lang.org/mir/index.html#mir-data-types
+    ///
+    /// # Panics
+    /// In debug builds, panics if called twice or after parameters /
+    /// user-locals were already allocated.
+    pub fn alloc_return_slot(&mut self, ret_ty: TyId, span: Span) -> Local {
+        debug_assert_eq!(
+            self.phase,
+            AllocPhase::ReturnSlot,
+            "alloc_return_slot: must be the first allocation (phase is {:?})",
+            self.phase
+        );
+        debug_assert!(
+            self.locals.is_empty(),
+            "alloc_return_slot: locals table is non-empty ({} entries)",
+            self.locals.len()
+        );
+        self.ret_ty = Some(ret_ty);
+        let local = self.locals.push(LocalDecl { name: None, ty: ret_ty, is_param: false, span });
+        debug_assert_eq!(local, Local(0));
+        self.phase = AllocPhase::Params;
+        local
+    }
+
+    /// Allocate a parameter slot. Must follow [`alloc_return_slot`] and
+    /// precede any [`alloc_user_local`] / [`alloc_temp`] call.
+    ///
+    /// [`alloc_return_slot`]: Self::alloc_return_slot
+    /// [`alloc_user_local`]: Self::alloc_user_local
+    /// [`alloc_temp`]: Self::alloc_temp
+    ///
+    /// # Panics
+    /// In debug builds, panics if the return slot was not allocated yet, or
+    /// if a user-local / temp has already been allocated.
+    pub fn alloc_param(&mut self, name: Symbol, ty: TyId, span: Span) -> Local {
+        debug_assert_eq!(
+            self.phase,
+            AllocPhase::Params,
+            "alloc_param: phase is {:?}, expected Params (call alloc_return_slot first, \
+             and do not interleave alloc_user_local/alloc_temp before parameters)",
+            self.phase
+        );
+        self.locals.push(LocalDecl { name: Some(name), ty, is_param: true, span })
+    }
+
+    /// Allocate a user-declared local. Closes the parameter run on the first
+    /// call.
+    pub fn alloc_user_local(&mut self, name: Symbol, ty: TyId, span: Span) -> Local {
+        debug_assert!(
+            self.phase != AllocPhase::ReturnSlot,
+            "alloc_user_local: return slot has not been allocated yet"
+        );
+        self.phase = AllocPhase::Locals;
+        self.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span })
+    }
+
+    /// Allocate a lowering-introduced temporary. Closes the parameter run on
+    /// the first call.
+    pub fn alloc_temp(&mut self, ty: TyId, span: Span) -> Local {
+        debug_assert!(
+            self.phase != AllocPhase::ReturnSlot,
+            "alloc_temp: return slot has not been allocated yet"
+        );
+        self.phase = AllocPhase::Locals;
+        self.locals.push(LocalDecl { name: None, ty, is_param: false, span })
+    }
+
+    /// Convenience matching the task spec's `local(ty, name)` signature:
+    /// allocate a user-local when `name` is `Some`, a temporary otherwise.
+    pub fn local(&mut self, ty: TyId, name: Option<Symbol>, span: Span) -> Local {
+        match name {
+            Some(sym) => self.alloc_user_local(sym, ty, span),
+            None => self.alloc_temp(ty, span),
+        }
     }
 
     /// Append a statement to the current block.
@@ -239,12 +366,20 @@ mod tests {
     use super::*;
     use crate::{Const, ConstKind, Operand, Place, Rvalue, StatementKind};
     use rcc_hir::TyId;
-    use rcc_span::DUMMY_SP;
+    use rcc_span::{Symbol, DUMMY_SP};
 
     fn dummy_ty() -> TyId {
         // `TyId` is a `u32`-backed newtype; any value is structurally valid
         // for a builder unit test that never consults the type interner.
         TyId(0)
+    }
+
+    fn ty(n: u32) -> TyId {
+        TyId(n)
+    }
+
+    fn sym(n: u32) -> Symbol {
+        Symbol(n)
     }
 
     fn int_const(n: i128) -> Operand {
@@ -356,6 +491,155 @@ mod tests {
         let _orphan = b.new_block();
         let body = b.finish();
         assert_eq!(body.blocks.len(), 2);
+    }
+
+    /// Acceptance test for 08-cfg/02-local-allocation:
+    /// `void f(int a, int b) { int c; }` yields locals
+    /// `[ret:void, a, b, c]`.
+    #[test]
+    fn acceptance_void_f_int_a_int_b_int_c() {
+        // Pretend TyId(1) = int, TyId(2) = void; the builder never resolves
+        // these, so any distinct ids will do.
+        let int_ty = ty(1);
+        let void_ty = ty(2);
+        let a = sym(10);
+        let b = sym(11);
+        let c = sym(12);
+
+        let mut bld = BodyBuilder::new();
+        let ret = bld.alloc_return_slot(void_ty, DUMMY_SP);
+        let pa = bld.alloc_param(a, int_ty, DUMMY_SP);
+        let pb = bld.alloc_param(b, int_ty, DUMMY_SP);
+        let lc = bld.alloc_user_local(c, int_ty, DUMMY_SP);
+
+        // Slot indices must follow the rustc-style convention.
+        assert_eq!(ret, Local(0));
+        assert_eq!(pa, Local(1));
+        assert_eq!(pb, Local(2));
+        assert_eq!(lc, Local(3));
+
+        // Terminate so finish() does not trip the reachability audit.
+        bld.terminate(Terminator { kind: TerminatorKind::Return, span: DUMMY_SP });
+        let body = bld.finish();
+
+        assert_eq!(body.locals.len(), 4);
+        assert_eq!(body.ret_ty, Some(void_ty));
+
+        // Local 0: return slot — no name, type = void, not a param.
+        assert_eq!(body.locals[Local(0)].name, None);
+        assert_eq!(body.locals[Local(0)].ty, void_ty);
+        assert!(!body.locals[Local(0)].is_param);
+
+        // Locals 1, 2: parameters in source order.
+        assert_eq!(body.locals[Local(1)].name, Some(a));
+        assert_eq!(body.locals[Local(1)].ty, int_ty);
+        assert!(body.locals[Local(1)].is_param);
+        assert_eq!(body.locals[Local(2)].name, Some(b));
+        assert_eq!(body.locals[Local(2)].ty, int_ty);
+        assert!(body.locals[Local(2)].is_param);
+
+        // Local 3: declared user variable — named, not a param.
+        assert_eq!(body.locals[Local(3)].name, Some(c));
+        assert_eq!(body.locals[Local(3)].ty, int_ty);
+        assert!(!body.locals[Local(3)].is_param);
+    }
+
+    /// Temporaries follow user-locals in allocation order.
+    #[test]
+    fn temps_follow_user_locals() {
+        let mut bld = BodyBuilder::new();
+        let _ret = bld.alloc_return_slot(ty(2), DUMMY_SP);
+        let _p = bld.alloc_param(sym(1), ty(1), DUMMY_SP);
+        let user = bld.alloc_user_local(sym(2), ty(1), DUMMY_SP);
+        let t0 = bld.alloc_temp(ty(1), DUMMY_SP);
+        let t1 = bld.alloc_temp(ty(1), DUMMY_SP);
+
+        assert_eq!(user, Local(2));
+        assert_eq!(t0, Local(3));
+        assert_eq!(t1, Local(4));
+
+        bld.terminate(Terminator { kind: TerminatorKind::Return, span: DUMMY_SP });
+        let body = bld.finish();
+        // Temps have no name and are not params.
+        assert_eq!(body.locals[t0].name, None);
+        assert!(!body.locals[t0].is_param);
+        assert_eq!(body.locals[t1].name, None);
+        assert!(!body.locals[t1].is_param);
+    }
+
+    /// `local(ty, Some(name))` -> user-local; `local(ty, None)` -> temp.
+    #[test]
+    fn local_convenience_dispatches_on_name() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_return_slot(ty(2), DUMMY_SP);
+        let named = bld.local(ty(1), Some(sym(7)), DUMMY_SP);
+        let unnamed = bld.local(ty(1), None, DUMMY_SP);
+
+        bld.terminate(Terminator { kind: TerminatorKind::Return, span: DUMMY_SP });
+        let body = bld.finish();
+        assert_eq!(body.locals[named].name, Some(sym(7)));
+        assert!(!body.locals[named].is_param);
+        assert_eq!(body.locals[unnamed].name, None);
+        assert!(!body.locals[unnamed].is_param);
+    }
+
+    /// Calling `alloc_return_slot` twice trips the phase guard (debug only).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_return_slot")]
+    fn double_return_slot_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_return_slot(ty(2), DUMMY_SP);
+        let _ = bld.alloc_return_slot(ty(2), DUMMY_SP);
+    }
+
+    /// `alloc_param` before `alloc_return_slot` is a phase violation.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_param")]
+    fn alloc_param_before_return_slot_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_param(sym(0), ty(1), DUMMY_SP);
+    }
+
+    /// Once a user-local has been allocated, `alloc_param` is rejected.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_param")]
+    fn alloc_param_after_user_local_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_return_slot(ty(2), DUMMY_SP);
+        let _ = bld.alloc_user_local(sym(0), ty(1), DUMMY_SP);
+        let _ = bld.alloc_param(sym(1), ty(1), DUMMY_SP);
+    }
+
+    /// Once a temp has been allocated, `alloc_param` is rejected.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_param")]
+    fn alloc_param_after_temp_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_return_slot(ty(2), DUMMY_SP);
+        let _ = bld.alloc_temp(ty(1), DUMMY_SP);
+        let _ = bld.alloc_param(sym(1), ty(1), DUMMY_SP);
+    }
+
+    /// `alloc_user_local` / `alloc_temp` before the return slot is a phase
+    /// violation.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_user_local")]
+    fn alloc_user_local_before_return_slot_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_user_local(sym(0), ty(1), DUMMY_SP);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "alloc_temp")]
+    fn alloc_temp_before_return_slot_panics() {
+        let mut bld = BodyBuilder::new();
+        let _ = bld.alloc_temp(ty(1), DUMMY_SP);
     }
 
     /// Successors of `SwitchInt` are visited by the reachability walk.

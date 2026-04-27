@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-27
+
 # 08-02: Local allocation
 
 **Phase:** 08-cfg    **Depends on:** 08-01    **Milestone:** M3
