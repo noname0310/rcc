@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-28
+
 # 08-03: Expression → Rvalue
 
 **Phase:** 08-cfg    **Depends on:** 08-02    **Milestone:** M3

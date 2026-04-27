@@ -13,8 +13,10 @@ use rcc_hir::{DefId, Local, TyId};
 use rcc_span::Span;
 
 pub mod build;
+pub mod lower;
 
 pub use build::{build_bodies, BodyBuilder};
+pub use lower::{lower_as_place, lower_as_rvalue, LocalMap, LowerCx};
 
 rcc_data_structures::new_index! {
     /// Basic-block id within a `Body`.
