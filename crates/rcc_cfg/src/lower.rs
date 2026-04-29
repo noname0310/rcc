@@ -26,8 +26,8 @@
 
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
-    Body as HirBody, ConvertKind, FloatKind, HirExprId, HirExprKind, IntRank, Local as HirLocal,
-    Ty, TyCtxt, TyId,
+    Body as HirBody, ConvertKind, FloatKind, HirExprId, HirExprKind, HirStmtId, HirStmtKind,
+    IntRank, Local as HirLocal, Ty, TyCtxt, TyId,
 };
 use rcc_span::Span;
 
@@ -286,6 +286,144 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
             std::mem::discriminant(&expr.kind),
         ),
+    }
+}
+
+/// Lower a HIR statement into the current CFG block.
+///
+/// Task 08-06 introduces the statement scaffolding needed for `if`/`else`
+/// control flow. Statement forms owned by later 08-cfg tasks remain explicit
+/// `todo!` arms.
+///
+/// # Panics
+/// Panics on statement kinds owned by later tasks.
+pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtId) {
+    if builder.is_current_terminated() {
+        return;
+    }
+
+    let stmt = &cx.body.stmts[stmt_id];
+    match &stmt.kind {
+        HirStmtKind::Block(stmts) => {
+            for child in stmts {
+                lower_stmt(builder, cx, *child);
+                if builder.is_current_terminated() {
+                    break;
+                }
+            }
+        }
+        HirStmtKind::Expr(expr) => {
+            let _ = lower_as_rvalue(builder, cx, *expr);
+        }
+        HirStmtKind::If { cond, then_branch, else_branch } => {
+            lower_if(builder, cx, stmt.span, *cond, *then_branch, *else_branch);
+        }
+        HirStmtKind::Return(expr) => {
+            if let Some(expr) = expr {
+                let value = lower_as_rvalue(builder, cx, *expr);
+                builder.push(Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(0), projection: Vec::new() },
+                        rvalue: Rvalue::Use(value),
+                    },
+                    span: stmt.span,
+                });
+            }
+            builder.terminate(Terminator { kind: TerminatorKind::Return, span: stmt.span });
+        }
+        HirStmtKind::Null => {}
+        HirStmtKind::LocalDecl { .. } => {
+            todo!("local declaration statement lowering - see tasks/08-cfg/11-init-lowering.md")
+        }
+        HirStmtKind::While { .. } | HirStmtKind::DoWhile { .. } | HirStmtKind::For { .. } => {
+            todo!("loop lowering - see tasks/08-cfg/07-loop-lowering.md")
+        }
+        HirStmtKind::Switch { .. } | HirStmtKind::Case { .. } | HirStmtKind::Default { .. } => {
+            todo!("switch lowering - see tasks/08-cfg/08-switch-lowering.md")
+        }
+        HirStmtKind::Label { .. } | HirStmtKind::Goto(_) => {
+            todo!("goto/label fixup - see tasks/08-cfg/09-goto-label-fixup.md")
+        }
+        HirStmtKind::Break | HirStmtKind::Continue => {
+            todo!("break/continue lowering - see tasks/08-cfg/07-loop-lowering.md")
+        }
+    }
+}
+
+fn lower_if(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    cond: HirExprId,
+    then_branch: HirStmtId,
+    else_branch: Option<HirStmtId>,
+) {
+    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let then_block = builder.new_block();
+
+    match else_branch {
+        None => {
+            let join_block = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::SwitchInt {
+                    discr: cond_op,
+                    targets: vec![(Some(0), join_block), (None, then_block)],
+                },
+                span,
+            });
+
+            builder.switch_to(then_block);
+            lower_stmt(builder, cx, then_branch);
+            if !builder.is_current_terminated() {
+                builder.goto(join_block, span);
+            }
+
+            builder.switch_to(join_block);
+        }
+        Some(else_branch) => {
+            let else_block = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::SwitchInt {
+                    discr: cond_op,
+                    targets: vec![(Some(0), else_block), (None, then_block)],
+                },
+                span,
+            });
+
+            builder.switch_to(then_block);
+            lower_stmt(builder, cx, then_branch);
+            let then_end = builder.current();
+            let then_terminated = builder.is_current_terminated();
+
+            builder.switch_to(else_block);
+            lower_stmt(builder, cx, else_branch);
+            let else_end = builder.current();
+            let else_terminated = builder.is_current_terminated();
+
+            match (then_terminated, else_terminated) {
+                (true, true) => {}
+                (false, false) => {
+                    let join_block = builder.new_block();
+                    builder.switch_to(then_end);
+                    builder.goto(join_block, span);
+                    builder.switch_to(else_end);
+                    builder.goto(join_block, span);
+                    builder.switch_to(join_block);
+                }
+                (false, true) => {
+                    let join_block = builder.new_block();
+                    builder.switch_to(then_end);
+                    builder.goto(join_block, span);
+                    builder.switch_to(join_block);
+                }
+                (true, false) => {
+                    let join_block = builder.new_block();
+                    builder.switch_to(else_end);
+                    builder.goto(join_block, span);
+                    builder.switch_to(join_block);
+                }
+            }
+        }
     }
 }
 
@@ -671,7 +809,7 @@ mod tests {
     use super::*;
     use crate::{LocalDecl, Terminator, TerminatorKind};
     use rcc_data_structures::IndexVec;
-    use rcc_hir::{HirExpr, ValueCat};
+    use rcc_hir::{HirExpr, HirStmt, ValueCat};
     use rcc_span::DUMMY_SP;
 
     /// Build a minimal HIR `Body` plus matching CFG `BodyBuilder`
@@ -724,10 +862,108 @@ mod tests {
         body.exprs.push(HirExpr { id, ty, value_cat: cat, span: DUMMY_SP, kind })
     }
 
-    /// Helper: finish the builder safely after running the lowering
-    /// (always terminate the entry block first).
+    /// Helper: push a statement into `body.stmts` and return its id.
+    fn push_stmt(body: &mut HirBody, kind: HirStmtKind) -> HirStmtId {
+        let id = HirStmtId(u32::try_from(body.stmts.len()).expect("HirStmtId overflow"));
+        body.stmts.push(HirStmt { id, span: DUMMY_SP, kind })
+    }
+
+    fn block_stmt(body: &mut HirBody, stmts: Vec<HirStmtId>) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Block(stmts))
+    }
+
+    fn assign_local_stmt(body: &mut HirBody, ty: TyId, local: HirLocal, value: i128) -> HirStmtId {
+        let lhs = push_expr(body, ty, ValueCat::LValue, HirExprKind::LocalRef(local));
+        let rhs = push_expr(body, ty, ValueCat::RValue, HirExprKind::IntConst(value));
+        let assign = push_expr(body, ty, ValueCat::RValue, HirExprKind::Assign { lhs, rhs });
+        push_stmt(body, HirStmtKind::Expr(assign))
+    }
+
+    fn return_const_stmt(body: &mut HirBody, ty: TyId, value: i128) -> HirStmtId {
+        let expr = push_expr(body, ty, ValueCat::RValue, HirExprKind::IntConst(value));
+        push_stmt(body, HirStmtKind::Return(Some(expr)))
+    }
+
+    fn if_stmt(
+        body: &mut HirBody,
+        cond: HirExprId,
+        then_branch: HirStmtId,
+        else_branch: Option<HirStmtId>,
+    ) -> HirStmtId {
+        push_stmt(body, HirStmtKind::If { cond, then_branch, else_branch })
+    }
+
+    fn switch_zero_default(
+        block: &crate::BasicBlock,
+    ) -> (crate::BasicBlockId, crate::BasicBlockId) {
+        match &block.terminator.kind {
+            TerminatorKind::SwitchInt { targets, .. } => {
+                assert_eq!(targets.len(), 2, "SwitchInt should have zero/default targets");
+                assert_eq!(targets[0].0, Some(0), "target[0] should be the zero case");
+                assert_eq!(targets[1].0, None, "target[1] should be the default case");
+                (targets[0].1, targets[1].1)
+            }
+            other => panic!("expected SwitchInt, got {other:?}"),
+        }
+    }
+
+    fn goto_target(block: &crate::BasicBlock) -> crate::BasicBlockId {
+        match block.terminator.kind {
+            TerminatorKind::Goto(target) => target,
+            ref other => panic!("expected Goto, got {other:?}"),
+        }
+    }
+
+    fn assert_assign_const(block: &crate::BasicBlock, local: Local, value: i128) {
+        assert_eq!(block.statements.len(), 1, "expected one assignment statement");
+        match &block.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, local);
+                assert!(projection.is_empty());
+                assert_eq!(*v, value);
+            }
+            other => panic!("expected `{local:?} = {value}`, got {other:?}"),
+        }
+    }
+
+    fn assert_switch_discr_local(block: &crate::BasicBlock, local: Local) {
+        match &block.terminator.kind {
+            TerminatorKind::SwitchInt { discr, .. } => {
+                assert!(matches!(
+                    discr,
+                    Operand::Copy(Place { base, projection })
+                        if *base == local && projection.is_empty()
+                ));
+            }
+            other => panic!("expected SwitchInt, got {other:?}"),
+        }
+    }
+
+    fn assert_return_const(block: &crate::BasicBlock, value: i128) {
+        assert_eq!(block.statements.len(), 1, "return value should assign return slot");
+        match &block.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, Local(0));
+                assert!(projection.is_empty());
+                assert_eq!(*v, value);
+            }
+            other => panic!("expected return-slot assignment, got {other:?}"),
+        }
+        assert!(matches!(block.terminator.kind, TerminatorKind::Return));
+    }
+
+    /// Helper: finish the builder safely after running lowering. If the
+    /// current block is still open, terminate it with a synthetic return.
     fn finish(mut b: BodyBuilder) -> crate::Body {
-        b.terminate(Terminator { kind: TerminatorKind::Return, span: DUMMY_SP });
+        if !b.is_current_terminated() {
+            b.terminate(Terminator { kind: TerminatorKind::Return, span: DUMMY_SP });
+        }
         b.finish()
     }
 
@@ -1794,5 +2030,284 @@ mod tests {
 
         // Join is the cursor block — empty after lowering.
         assert!(body.blocks[join_block].statements.is_empty());
+    }
+
+    // Task 08-06: if/else statement lowering.
+
+    #[test]
+    fn if_without_else_branches_then_to_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let root = if_stmt(&mut hir_body, cond, then_stmt, None);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 3, "if without else uses entry + then + join");
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_switch_discr_local(entry, map.lookup(ha));
+        let (join_block, then_block) = switch_zero_default(entry);
+
+        let then_bb = &body.blocks[then_block];
+        assert_assign_const(then_bb, map.lookup(hb), 1);
+        assert_eq!(goto_target(then_bb), join_block);
+
+        let join_bb = &body.blocks[join_block];
+        assert!(join_bb.statements.is_empty());
+        assert!(matches!(join_bb.terminator.kind, TerminatorKind::Return));
+    }
+
+    #[test]
+    fn if_with_else_branches_rejoin() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let else_stmt = assign_local_stmt(&mut hir_body, int_ty, hc, 2);
+        let root = if_stmt(&mut hir_body, cond, then_stmt, Some(else_stmt));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 4, "if/else uses entry + then + else + join");
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_switch_discr_local(entry, map.lookup(ha));
+        let (else_block, then_block) = switch_zero_default(entry);
+
+        let then_bb = &body.blocks[then_block];
+        let else_bb = &body.blocks[else_block];
+        assert_assign_const(then_bb, map.lookup(hb), 1);
+        assert_assign_const(else_bb, map.lookup(hc), 2);
+
+        let then_join = goto_target(then_bb);
+        let else_join = goto_target(else_bb);
+        assert_eq!(then_join, else_join, "both branches must rejoin");
+        assert!(body.blocks[then_join].statements.is_empty());
+        assert!(matches!(body.blocks[then_join].terminator.kind, TerminatorKind::Return));
+    }
+
+    #[test]
+    fn nested_if_preserves_inner_join_before_outer_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let outer_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let inner_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let inner_then = assign_local_stmt(&mut hir_body, int_ty, hc, 2);
+        let inner_if = if_stmt(&mut hir_body, inner_cond, inner_then, None);
+        let root = if_stmt(&mut hir_body, outer_cond, inner_if, None);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 5);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let (outer_join, outer_then) = switch_zero_default(entry);
+        assert_switch_discr_local(entry, map.lookup(ha));
+
+        let outer_then_bb = &body.blocks[outer_then];
+        assert_switch_discr_local(outer_then_bb, map.lookup(hb));
+        let (inner_join, inner_then_block) = switch_zero_default(outer_then_bb);
+
+        let inner_then_bb = &body.blocks[inner_then_block];
+        assert_assign_const(inner_then_bb, map.lookup(hc), 2);
+        assert_eq!(goto_target(inner_then_bb), inner_join);
+
+        assert_eq!(goto_target(&body.blocks[inner_join]), outer_join);
+        assert!(matches!(body.blocks[outer_join].terminator.kind, TerminatorKind::Return));
+    }
+
+    #[test]
+    fn else_if_chain_rejoins_after_inner_if() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let outer_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let inner_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let inner_then = assign_local_stmt(&mut hir_body, int_ty, hc, 2);
+        let inner_if = if_stmt(&mut hir_body, inner_cond, inner_then, None);
+        let root = if_stmt(&mut hir_body, outer_cond, then_stmt, Some(inner_if));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 6);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let (outer_else, outer_then) = switch_zero_default(entry);
+
+        let outer_then_bb = &body.blocks[outer_then];
+        assert_assign_const(outer_then_bb, map.lookup(hb), 1);
+
+        let outer_else_bb = &body.blocks[outer_else];
+        assert_switch_discr_local(outer_else_bb, map.lookup(hb));
+        let (inner_join, inner_then_block) = switch_zero_default(outer_else_bb);
+        assert_assign_const(&body.blocks[inner_then_block], map.lookup(hc), 2);
+        assert_eq!(goto_target(&body.blocks[inner_then_block]), inner_join);
+
+        let outer_join = goto_target(outer_then_bb);
+        assert_eq!(goto_target(&body.blocks[inner_join]), outer_join);
+        assert!(matches!(body.blocks[outer_join].terminator.kind, TerminatorKind::Return));
+    }
+
+    #[test]
+    fn empty_then_block_falls_through_to_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let empty_then = block_stmt(&mut hir_body, Vec::new());
+        let root = if_stmt(&mut hir_body, cond, empty_then, None);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let (join_block, then_block) = switch_zero_default(&body.blocks[crate::BasicBlockId(0)]);
+        let then_bb = &body.blocks[then_block];
+        assert!(then_bb.statements.is_empty());
+        assert_eq!(goto_target(then_bb), join_block);
+    }
+
+    #[test]
+    fn empty_else_block_falls_through_to_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let empty_else = block_stmt(&mut hir_body, Vec::new());
+        let root = if_stmt(&mut hir_body, cond, then_stmt, Some(empty_else));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let (else_block, then_block) = switch_zero_default(&body.blocks[crate::BasicBlockId(0)]);
+        let then_bb = &body.blocks[then_block];
+        let else_bb = &body.blocks[else_block];
+        assert_assign_const(then_bb, map.lookup(hb), 1);
+        assert!(else_bb.statements.is_empty());
+        assert_eq!(goto_target(then_bb), goto_target(else_bb));
+    }
+
+    #[test]
+    fn if_condition_logical_and_uses_short_circuit_blocks() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogAnd, lhs: a, rhs: b },
+        );
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hc, 3);
+        let root = if_stmt(&mut hir_body, cond, then_stmt, None);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 5);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let result_local = match &entry.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(0), .. })),
+            } => {
+                assert!(projection.is_empty());
+                *base
+            }
+            other => panic!("expected && preinit, got {other:?}"),
+        };
+        let (short_circuit_join, rhs_block) = switch_zero_default(entry);
+
+        let rhs_bb = &body.blocks[rhs_block];
+        assert_eq!(goto_target(rhs_bb), short_circuit_join);
+
+        let sc_join_bb = &body.blocks[short_circuit_join];
+        assert_switch_discr_local(sc_join_bb, result_local);
+        let (if_join, then_block) = switch_zero_default(sc_join_bb);
+        assert_assign_const(&body.blocks[then_block], map.lookup(hc), 3);
+        assert_eq!(goto_target(&body.blocks[then_block]), if_join);
+    }
+
+    #[test]
+    fn if_condition_logical_or_uses_short_circuit_blocks() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogOr, lhs: a, rhs: b },
+        );
+        let then_stmt = assign_local_stmt(&mut hir_body, int_ty, hc, 4);
+        let root = if_stmt(&mut hir_body, cond, then_stmt, None);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 5);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let result_local = match &entry.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), .. })),
+            } => {
+                assert!(projection.is_empty());
+                *base
+            }
+            other => panic!("expected || preinit, got {other:?}"),
+        };
+        let (rhs_block, short_circuit_join) = switch_zero_default(entry);
+
+        let rhs_bb = &body.blocks[rhs_block];
+        assert_eq!(goto_target(rhs_bb), short_circuit_join);
+
+        let sc_join_bb = &body.blocks[short_circuit_join];
+        assert_switch_discr_local(sc_join_bb, result_local);
+        let (if_join, then_block) = switch_zero_default(sc_join_bb);
+        assert_assign_const(&body.blocks[then_block], map.lookup(hc), 4);
+        assert_eq!(goto_target(&body.blocks[then_block]), if_join);
+    }
+
+    #[test]
+    fn if_else_both_arms_return_omits_join_block() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let then_ret = return_const_stmt(&mut hir_body, int_ty, 1);
+        let else_ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let root = if_stmt(&mut hir_body, cond, then_ret, Some(else_ret));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 3, "both returning arms must not allocate a join");
+        let (else_block, then_block) = switch_zero_default(&body.blocks[crate::BasicBlockId(0)]);
+        assert_return_const(&body.blocks[then_block], 1);
+        assert_return_const(&body.blocks[else_block], 0);
     }
 }
