@@ -15,10 +15,14 @@
 //!   inner multiply, fed into the outer add.
 //! * `*p` ⇒ a [`Place`] with a single `Projection::Deref` step.
 //!
-//! Out of scope (deferred): short-circuit `&&` / `||`, the ternary
-//! `a ? b : c`, calls (those terminate a block), `++` / `--`, compound
-//! literals, `sizeof` over an expression. Each such arm panics with a
-//! `todo!` carrying the task id that owns it.
+//! Short-circuit `&&` / `||` and the ternary `a ? b : c` are handled
+//! by [`lower_short_circuit`] / [`lower_ternary`] (task 08-05): these
+//! terminate the current block with a `SwitchInt` and continue lowering
+//! at a fresh join block.
+//!
+//! Out of scope (deferred): calls (those terminate a block), `++` /
+//! `--`, compound literals, `sizeof` over an expression. Each such arm
+//! panics with a `todo!` carrying the task id that owns it.
 
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
@@ -29,7 +33,7 @@ use rcc_span::Span;
 
 use crate::{
     BinOp, BodyBuilder, CastKind, Const, ConstKind, Local, Operand, Place, Projection, Rvalue,
-    Statement, StatementKind, UnOp,
+    Statement, StatementKind, Terminator, TerminatorKind, UnOp,
 };
 
 /// Translation table from HIR local ids to CFG local ids.
@@ -127,6 +131,12 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let local = cx.locals.lookup(*hir_local);
             Operand::Copy(Place { base: local, projection: Vec::new() })
         }
+        HirExprKind::Binary { op: HirBinOp::LogAnd, lhs, rhs } => {
+            lower_short_circuit(builder, cx, ty, span, /* is_and */ true, *lhs, *rhs)
+        }
+        HirExprKind::Binary { op: HirBinOp::LogOr, lhs, rhs } => {
+            lower_short_circuit(builder, cx, ty, span, /* is_and */ false, *lhs, *rhs)
+        }
         HirExprKind::Binary { op, lhs, rhs } => {
             let lhs_op = lower_as_rvalue(builder, cx, *lhs);
             let rhs_op = lower_as_rvalue(builder, cx, *rhs);
@@ -222,9 +232,8 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             // block; that is the territory of task 08-10.
             todo!("call lowering — see tasks/08-cfg/10-call-lowering.md")
         }
-        HirExprKind::Cond { .. } => {
-            // Ternary is handled by the short-circuit pass.
-            todo!("ternary lowering — see tasks/08-cfg/05-short-circuit-lowering.md")
+        HirExprKind::Cond { cond, then_expr, else_expr } => {
+            lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
         }
     }
 }
@@ -277,6 +286,172 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
             std::mem::discriminant(&expr.kind),
         ),
+    }
+}
+
+/// Lower a short-circuit `&&` (`is_and == true`) or `||` operator.
+///
+/// Emits the canonical 3-block diamond:
+///
+/// ```text
+/// current:
+///   result_temp := <short-circuit answer>   ; 0 for &&, 1 for ||
+///   discr = lower(lhs)
+///   switch_int discr {
+///     case 0:  short_circuit_target,    ; join for &&, rhs for ||
+///     default: long_path_target,        ; rhs for &&, join for ||
+///   }
+///
+/// rhs:
+///   rhs_op = lower(rhs)
+///   result_temp := rhs_op != 0           ; normalise to 0/1
+///   goto join
+///
+/// join:
+///   ; cursor lands here; subsequent statements append to this block
+/// ```
+///
+/// The pre-initialisation in `current` is what makes the short-circuit
+/// path correct: `&&` yields `0` when `lhs == 0`, `||` yields `1` when
+/// `lhs != 0`, and in both cases the join is reached without re-writing
+/// the temp.
+fn lower_short_circuit(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    ty: rcc_hir::TyId,
+    span: Span,
+    is_and: bool,
+    lhs: rcc_hir::HirExprId,
+    rhs: rcc_hir::HirExprId,
+) -> Operand {
+    // Allocate the result temp and pre-initialise it to the short-circuit
+    // answer (`0` for `&&`, `1` for `||`).
+    let result_local = builder.alloc_temp(ty, span);
+    let init_value: i128 = if is_and { 0 } else { 1 };
+    push_assign(
+        builder,
+        span,
+        result_local,
+        Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(init_value), ty })),
+    );
+
+    // Evaluate lhs. The recursion may itself emit blocks (e.g. nested
+    // short-circuit / ternary); the cursor afterwards is wherever lhs's
+    // evaluation ended, which is the block we terminate with the branch.
+    let lhs_op = lower_as_rvalue(builder, cx, lhs);
+
+    // Allocate the rhs and join blocks (cursor unchanged).
+    let rhs_block = builder.new_block();
+    let join_block = builder.new_block();
+
+    // Branch on lhs.
+    //   &&: zero -> join (skip rhs, keep result = 0); non-zero -> rhs.
+    //   ||: zero -> rhs (need to inspect rhs);        non-zero -> join (keep 1).
+    let (zero_target, default_target) =
+        if is_and { (join_block, rhs_block) } else { (rhs_block, join_block) };
+    builder.terminate(Terminator {
+        kind: TerminatorKind::SwitchInt {
+            discr: lhs_op,
+            targets: vec![(Some(0), zero_target), (None, default_target)],
+        },
+        span,
+    });
+
+    // Lower rhs in rhs_block, normalise to 0/1 via `rhs_op != 0`, and join.
+    builder.switch_to(rhs_block);
+    let rhs_op = lower_as_rvalue(builder, cx, rhs);
+    let rhs_ty = cx.body.exprs[rhs].ty;
+    let rhs_zero = scalar_zero(cx.tcx, rhs_ty);
+    push_assign(builder, span, result_local, Rvalue::BinaryOp(BinOp::Ne, rhs_op, rhs_zero));
+    // Use the cursor (might differ from rhs_block if rhs itself emitted
+    // sub-blocks); the goto terminates whatever current is.
+    builder.goto(join_block, span);
+
+    // Continue lowering at the join block.
+    builder.switch_to(join_block);
+
+    Operand::Copy(Place { base: result_local, projection: Vec::new() })
+}
+
+/// Lower a ternary `cond ? then_expr : else_expr`.
+///
+/// Emits 4 blocks (current + then + else + join):
+///
+/// ```text
+/// current:
+///   cond_op = lower(cond)
+///   switch_int cond_op {
+///     case 0:  else_block,
+///     default: then_block,
+///   }
+///
+/// then_block:
+///   result_temp := lower(then_expr)
+///   goto join
+///
+/// else_block:
+///   result_temp := lower(else_expr)
+///   goto join
+///
+/// join:
+///   ; cursor
+/// ```
+fn lower_ternary(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    ty: rcc_hir::TyId,
+    span: Span,
+    cond: rcc_hir::HirExprId,
+    then_expr: rcc_hir::HirExprId,
+    else_expr: rcc_hir::HirExprId,
+) -> Operand {
+    // Lower the controlling expression in the current block.
+    let cond_op = lower_as_rvalue(builder, cx, cond);
+
+    // Allocate the result slot and the three new blocks.
+    let result_local = builder.alloc_temp(ty, span);
+    let then_block = builder.new_block();
+    let else_block = builder.new_block();
+    let join_block = builder.new_block();
+
+    // Branch on cond: zero -> else, non-zero -> then.
+    builder.terminate(Terminator {
+        kind: TerminatorKind::SwitchInt {
+            discr: cond_op,
+            targets: vec![(Some(0), else_block), (None, then_block)],
+        },
+        span,
+    });
+
+    // Then arm.
+    builder.switch_to(then_block);
+    let then_op = lower_as_rvalue(builder, cx, then_expr);
+    push_assign(builder, span, result_local, Rvalue::Use(then_op));
+    builder.goto(join_block, span);
+
+    // Else arm.
+    builder.switch_to(else_block);
+    let else_op = lower_as_rvalue(builder, cx, else_expr);
+    push_assign(builder, span, result_local, Rvalue::Use(else_op));
+    builder.goto(join_block, span);
+
+    // Continue at join.
+    builder.switch_to(join_block);
+
+    Operand::Copy(Place { base: result_local, projection: Vec::new() })
+}
+
+/// Build a typed scalar zero suitable for `BinOp::Ne` against `ty`.
+/// `Float` / `Complex` types get `ConstKind::Float(0.0)`; everything
+/// else (integers, pointers — null is `0` in C99) gets
+/// `ConstKind::Int(0)`. The returned const carries `ty` so codegen can
+/// pick `icmp ne` vs `fcmp` etc. from the operand classifier.
+fn scalar_zero(tcx: &rcc_hir::TyCtxt, ty: rcc_hir::TyId) -> Operand {
+    match tcx.get(ty) {
+        rcc_hir::Ty::Float(_) | rcc_hir::Ty::Complex(_) => {
+            Operand::Const(Const { kind: ConstKind::Float(0.0), ty })
+        }
+        _ => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
     }
 }
 
@@ -1384,5 +1559,240 @@ mod tests {
     fn _suppress_unused_imports() {
         let _ = (LocalDecl { name: None, ty: TyId(0), is_param: false, span: DUMMY_SP },);
         let _: IndexVec<crate::BasicBlockId, crate::BasicBlock> = IndexVec::new();
+    }
+
+    // ── Task 08-05: short-circuit + ternary lowering ────────────────────
+
+    /// Acceptance: `a && b` lowers to a 3-block diamond.
+    ///
+    /// Layout:
+    ///   bb0 (entry): `result := 0; switch a { 0 -> join, _ -> rhs }`
+    ///   bb1 (rhs):   `result := b != 0; goto join`
+    ///   bb2 (join):  current cursor after lowering
+    ///
+    /// Verifies the spec acceptance:
+    /// > Lowered CFG visits `rhs` block only when `a` is non-zero for `&&`.
+    #[test]
+    fn short_circuit_and_diamond() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let aandb = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogAnd, lhs: a, rhs: b },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let result = lower_as_rvalue(&mut builder, &cx, aandb);
+        let body = finish(builder);
+
+        // 3 blocks total: entry + rhs + join.
+        assert_eq!(body.blocks.len(), 3, "&& must produce exactly 3 blocks");
+
+        // Returned operand names the result temp.
+        let result_local = match result {
+            Operand::Copy(Place { base, projection }) if projection.is_empty() => base,
+            other => panic!("expected Copy of result temp, got {other:?}"),
+        };
+
+        // Entry: pre-init `result := 0`, then SwitchInt on `a`.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_eq!(entry.statements.len(), 1, "entry: pre-init result := 0");
+        match &entry.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(0), .. })),
+            } => {
+                assert!(projection.is_empty());
+                assert_eq!(*base, result_local);
+            }
+            other => panic!("expected `result := 0`, got {other:?}"),
+        }
+
+        let (zero_target, default_target) = match &entry.terminator.kind {
+            TerminatorKind::SwitchInt { discr, targets } => {
+                assert!(
+                    matches!(discr, Operand::Copy(Place { base, .. }) if *base == map.lookup(ha))
+                );
+                assert_eq!(targets.len(), 2, "SwitchInt should have (0, ...) and default");
+                assert_eq!(targets[0].0, Some(0), "first target is the zero case");
+                assert_eq!(targets[1].0, None, "second target is the default");
+                (targets[0].1, targets[1].1)
+            }
+            other => panic!("expected SwitchInt, got {other:?}"),
+        };
+
+        // For `&&`: zero-case is the join (short-circuit), default is rhs.
+        let join_block = zero_target;
+        let rhs_block = default_target;
+        assert_ne!(join_block, rhs_block, "join and rhs must be distinct blocks");
+
+        // RHS block: `result := b != 0; goto join`.
+        let rhs_bb = &body.blocks[rhs_block];
+        assert_eq!(rhs_bb.statements.len(), 1);
+        match &rhs_bb.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::BinaryOp(BinOp::Ne, lhs_op, rhs_op),
+            } => {
+                assert!(projection.is_empty());
+                assert_eq!(*base, result_local);
+                assert!(
+                    matches!(lhs_op, Operand::Copy(Place { base, .. }) if *base == map.lookup(hb))
+                );
+                assert!(matches!(rhs_op, Operand::Const(Const { kind: ConstKind::Int(0), .. })));
+            }
+            other => panic!("expected `result := b != 0`, got {other:?}"),
+        }
+        assert!(
+            matches!(rhs_bb.terminator.kind, TerminatorKind::Goto(t) if t == join_block),
+            "rhs block must goto join"
+        );
+
+        // Join: cursor lands here after lowering; `finish()` emits the
+        // synthetic Return so the test helper is happy. No statements
+        // are added by the lowering itself.
+        let join_bb = &body.blocks[join_block];
+        assert!(join_bb.statements.is_empty(), "join must be empty after lowering");
+    }
+
+    /// `a || b` lowers to the mirror diamond: pre-init = 1, zero -> rhs,
+    /// non-zero -> join.
+    #[test]
+    fn short_circuit_or_diamond() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let aorb = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogOr, lhs: a, rhs: b },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _result = lower_as_rvalue(&mut builder, &cx, aorb);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 3, "|| must produce exactly 3 blocks");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+
+        // Entry: `result := 1` (the short-circuit answer for ||).
+        match &entry.statements[0].kind {
+            StatementKind::Assign {
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), .. })),
+                ..
+            } => {}
+            other => panic!("expected `result := 1`, got {other:?}"),
+        }
+
+        // SwitchInt: 0 -> rhs, default -> join (mirror of &&).
+        match &entry.terminator.kind {
+            TerminatorKind::SwitchInt { targets, .. } => {
+                assert_eq!(targets[0].0, Some(0));
+                assert_eq!(targets[1].0, None);
+                let rhs_block = targets[0].1;
+                let join_block = targets[1].1;
+                assert_ne!(rhs_block, join_block);
+                let rhs_bb = &body.blocks[rhs_block];
+                assert!(
+                    matches!(rhs_bb.terminator.kind, TerminatorKind::Goto(t) if t == join_block),
+                    "rhs block must goto join"
+                );
+            }
+            other => panic!("expected SwitchInt, got {other:?}"),
+        }
+    }
+
+    /// Acceptance: ternary `a ? b : c` lowers to 4 blocks
+    /// (entry + then + else + join).
+    #[test]
+    fn ternary_lowers_to_four_blocks() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let c = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hc));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Cond { cond: a, then_expr: b, else_expr: c },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let result = lower_as_rvalue(&mut builder, &cx, cond);
+        let body = finish(builder);
+
+        // 4 blocks: entry + then + else + join.
+        assert_eq!(body.blocks.len(), 4, "?: must produce exactly 4 blocks");
+
+        let result_local = match result {
+            Operand::Copy(Place { base, projection }) if projection.is_empty() => base,
+            other => panic!("expected Copy(result_temp), got {other:?}"),
+        };
+
+        // Entry: SwitchInt on cond, with case 0 -> else and default -> then.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let (else_block, then_block) = match &entry.terminator.kind {
+            TerminatorKind::SwitchInt { discr, targets } => {
+                assert!(
+                    matches!(discr, Operand::Copy(Place { base, .. }) if *base == map.lookup(ha))
+                );
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].0, Some(0), "case 0 routes to else branch");
+                assert_eq!(targets[1].0, None, "default routes to then branch");
+                (targets[0].1, targets[1].1)
+            }
+            other => panic!("expected SwitchInt, got {other:?}"),
+        };
+        assert_ne!(else_block, then_block);
+
+        // Then block: `result := Copy(b); goto join`.
+        let then_bb = &body.blocks[then_block];
+        assert_eq!(then_bb.statements.len(), 1);
+        match &then_bb.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Copy(Place { base: src_base, .. })),
+            } => {
+                assert!(projection.is_empty());
+                assert_eq!(*base, result_local);
+                assert_eq!(*src_base, map.lookup(hb));
+            }
+            other => panic!("expected `result := Copy(b)`, got {other:?}"),
+        }
+        let join_block = match then_bb.terminator.kind {
+            TerminatorKind::Goto(t) => t,
+            ref other => panic!("expected goto join, got {other:?}"),
+        };
+
+        // Else block: `result := Copy(c); goto join` (same join as then).
+        let else_bb = &body.blocks[else_block];
+        assert_eq!(else_bb.statements.len(), 1);
+        match &else_bb.statements[0].kind {
+            StatementKind::Assign {
+                rvalue: Rvalue::Use(Operand::Copy(Place { base: src_base, .. })),
+                ..
+            } => {
+                assert_eq!(*src_base, map.lookup(hc));
+            }
+            other => panic!("expected `result := Copy(c)`, got {other:?}"),
+        }
+        assert!(
+            matches!(else_bb.terminator.kind, TerminatorKind::Goto(t) if t == join_block),
+            "else block must goto same join as then"
+        );
+
+        // Join is the cursor block — empty after lowering.
+        assert!(body.blocks[join_block].statements.is_empty());
     }
 }
