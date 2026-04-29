@@ -977,6 +977,407 @@ mod tests {
         let _ = lower_as_place(&mut builder, &cx, id);
     }
 
+    // ── Task 08-04: place projection tests ──────────────────────────────
+
+    /// 1. Local variable: `lower_as_place` on `LocalRef` returns
+    ///    `Place { base, projection: [] }` with no temporaries.
+    #[test]
+    fn place_local_variable() {
+        let tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+
+        let mut hir_body = HirBody::default();
+        let hx = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cx_local = builder.alloc_user_local(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hx, cx_local);
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hx));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, x);
+        assert_eq!(place.base, cx_local);
+        assert!(place.projection.is_empty(), "local variable must have no projections");
+        let _body = finish(builder);
+    }
+
+    /// 2. Pointer dereference: `*p` → `Place { base: p, proj: [Deref] }`.
+    ///    (More targeted variant of `acceptance_deref_lvalue`.)
+    #[test]
+    fn place_deref_pointer() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let int_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(int_ty)));
+
+        let mut hir_body = HirBody::default();
+        let hp = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ptr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cp = builder.alloc_user_local(rcc_span::Symbol(1), int_ptr_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hp, cp);
+
+        let p = push_expr(&mut hir_body, int_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let star_p = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::Deref(p));
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, star_p);
+
+        assert_eq!(place.base, cp);
+        assert_eq!(place.projection.len(), 1);
+        assert!(matches!(place.projection[0], Projection::Deref));
+        let _body = finish(builder);
+    }
+
+    /// 3. Struct field: `s.x` → `Place { base: s, proj: [Field(0)] }`.
+    ///    (Dedicated test distinct from `field_projection` which uses
+    ///    field_index 2.)
+    #[test]
+    fn place_struct_field() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let rec_ty = tcx.intern(Ty::Record(rcc_hir::DefId(0)));
+
+        let mut hir_body = HirBody::default();
+        let hs = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: rec_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cs = builder.alloc_user_local(rcc_span::Symbol(1), rec_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hs, cs);
+
+        let s = push_expr(&mut hir_body, rec_ty, ValueCat::LValue, HirExprKind::LocalRef(hs));
+        let s_dot_x = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Field { base: s, field_index: 0 },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, s_dot_x);
+
+        assert_eq!(place.base, cs);
+        assert_eq!(place.projection.len(), 1);
+        assert!(matches!(place.projection[0], Projection::Field(0)));
+        let _body = finish(builder);
+    }
+
+    /// 4. Pointer field access: `p->x` lowers to
+    ///    `Place { base: p, proj: [Deref, Field(0)] }`.
+    ///
+    ///    In HIR `p->x` is represented as `Field { base: Deref(p), field_index: 0 }`.
+    ///    The lowering chains the Deref projection from the inner expression
+    ///    and appends the Field projection, producing a single Place.
+    #[test]
+    fn place_pointer_field() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let rec_ty = tcx.intern(Ty::Record(rcc_hir::DefId(0)));
+        let rec_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(rec_ty)));
+
+        let mut hir_body = HirBody::default();
+        let hp = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: rec_ptr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cp = builder.alloc_user_local(rcc_span::Symbol(1), rec_ptr_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hp, cp);
+
+        // HIR: `*p` (lvalue, Record)
+        let p = push_expr(&mut hir_body, rec_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let deref_p = push_expr(&mut hir_body, rec_ty, ValueCat::LValue, HirExprKind::Deref(p));
+        // HIR: `(*p).x` → Field { base: Deref(p), field_index: 0 }
+        let arrow_x = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Field { base: deref_p, field_index: 0 },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, arrow_x);
+
+        // Single Place: base = p, projection = [Deref, Field(0)].
+        assert_eq!(place.base, cp, "base must be the pointer local");
+        assert_eq!(place.projection.len(), 2, "p->x needs exactly two projections");
+        assert!(matches!(place.projection[0], Projection::Deref), "first projection must be Deref");
+        assert!(
+            matches!(place.projection[1], Projection::Field(0)),
+            "second projection must be Field(0)"
+        );
+        let _body = finish(builder);
+    }
+
+    /// 5. Array index: `a[i]` → `Place { base: a, proj: [Index(i)] }`.
+    ///
+    ///    In HIR, after array-to-pointer decay, this is
+    ///    `Index { base: Convert(ArrayToPtr, LocalRef(a)), index: LocalRef(i) }`.
+    ///    The `Convert` is a no-op for the Place lowering; the base stays
+    ///    as the array local and the index becomes an `Operand`.
+    #[test]
+    fn place_array_index() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let arr_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(int_ty),
+            len: Some(3),
+            is_vla: false,
+        });
+
+        let mut hir_body = HirBody::default();
+        // `a` — array of 3 ints.
+        let ha = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: arr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        // `i` — index integer.
+        let hi = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(1), arr_ty, DUMMY_SP);
+        let ci = builder.alloc_user_local(rcc_span::Symbol(2), int_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(ha, ca);
+        map.insert(hi, ci);
+
+        // HIR: `a` (lvalue) wrapped in ArrayToPtr decay, then indexed.
+        let a_ref = push_expr(&mut hir_body, arr_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let a_decayed = push_expr(
+            &mut hir_body,
+            tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(int_ty))),
+            ValueCat::RValue,
+            HirExprKind::Convert { operand: a_ref, kind: ConvertKind::ArrayToPtr },
+        );
+        let i_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hi));
+        let a_sub_i = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Index { base: a_decayed, index: i_ref },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, a_sub_i);
+
+        assert_eq!(place.base, ca, "base must be the array local");
+        assert_eq!(place.projection.len(), 1, "a[i] needs exactly one projection");
+        match &place.projection[0] {
+            Projection::Index(Operand::Copy(Place { base, projection })) => {
+                assert!(projection.is_empty(), "index operand must be a bare local");
+                assert_eq!(*base, ci, "index operand must be local i");
+            }
+            other => panic!("expected Projection::Index(Copy(i)), got {other:?}"),
+        }
+        let _body = finish(builder);
+    }
+
+    /// 6. Nested projection: `p->field[2].x` lowers to a single
+    ///    `Place { base: p, proj: [Deref, Field(0), Index(2), Field(1)] }`.
+    ///
+    ///    HIR shape (simplified, no Convert wrappers):
+    ///    ```text
+    ///    Field {
+    ///        base: Index {
+    ///            base: Field {
+    ///                base: Deref(LocalRef(p)),  // p->field
+    ///                field_index: 0,
+    ///            },
+    ///            index: IntConst(2),            // [2]
+    ///        },
+    ///        field_index: 1,                     // .x
+    ///    }
+    ///    ```
+    #[test]
+    fn place_nested_projection() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let rec_ty = tcx.intern(Ty::Record(rcc_hir::DefId(0)));
+        let rec_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(rec_ty)));
+        // field 0 of the record is `int[4]`.
+        let arr_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(int_ty),
+            len: Some(4),
+            is_vla: false,
+        });
+
+        let mut hir_body = HirBody::default();
+        let hp = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: rec_ptr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cp = builder.alloc_user_local(rcc_span::Symbol(1), rec_ptr_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hp, cp);
+
+        // Build HIR bottom-up:
+        // `p`
+        let p_ref =
+            push_expr(&mut hir_body, rec_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        // `*p`
+        let deref_p = push_expr(&mut hir_body, rec_ty, ValueCat::LValue, HirExprKind::Deref(p_ref));
+        // `(*p).field` (field 0, type arr_ty)
+        let p_arrow_field = push_expr(
+            &mut hir_body,
+            arr_ty,
+            ValueCat::LValue,
+            HirExprKind::Field { base: deref_p, field_index: 0 },
+        );
+        // `2` (constant index)
+        let idx = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(2));
+        // `(*p).field[2]` (element type int)
+        let subscript = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Index { base: p_arrow_field, index: idx },
+        );
+        // `(*p).field[2].x` (field 1)
+        let final_access = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Field { base: subscript, field_index: 1 },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, final_access);
+
+        // Must be a single Place with four chained projections.
+        assert_eq!(place.base, cp, "base must be the pointer local");
+        assert_eq!(place.projection.len(), 4, "p->field[2].x needs exactly four projections");
+        assert!(matches!(place.projection[0], Projection::Deref), "proj[0] must be Deref");
+        assert!(matches!(place.projection[1], Projection::Field(0)), "proj[1] must be Field(0)");
+        match &place.projection[2] {
+            Projection::Index(Operand::Const(Const { kind: ConstKind::Int(v), .. })) => {
+                assert_eq!(*v, 2, "proj[2] index must be constant 2");
+            }
+            other => panic!("expected Projection::Index(Const(2)), got {other:?}"),
+        }
+        assert!(matches!(place.projection[3], Projection::Field(1)), "proj[3] must be Field(1)");
+
+        let body = finish(builder);
+        // Index(2) is a constant operand — no temp needed. Only the
+        // return slot + `p` local.
+        assert_eq!(body.locals.len(), 2, "no temps for constant-index projection");
+    }
+
+    /// 7. Assignment LHS with projection: `*p = 42` emits
+    ///    `Assign { place: Place { p, [Deref] }, rvalue: Use(Const(42)) }`.
+    #[test]
+    fn place_assign_lhs_deref() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let int_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(int_ty)));
+
+        let mut hir_body = HirBody::default();
+        let hp = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ptr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cp = builder.alloc_user_local(rcc_span::Symbol(1), int_ptr_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hp, cp);
+
+        // LHS: `*p`.
+        let p_ref =
+            push_expr(&mut hir_body, int_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let star_p = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::Deref(p_ref));
+        // RHS: `42`.
+        let rhs = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(42));
+        // `*p = 42`
+        let assign = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Assign { lhs: star_p, rhs },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _ = lower_as_rvalue(&mut builder, &cx, assign);
+        let body = finish(builder);
+
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(stmts.len(), 1, "assignment must emit exactly one statement");
+        match &stmts[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, cp, "LHS base must be the pointer local");
+                assert_eq!(projection.len(), 1, "LHS must have one projection");
+                assert!(matches!(projection[0], Projection::Deref), "LHS projection must be Deref");
+                assert_eq!(*v, 42, "RHS must be constant 42");
+            }
+            other => panic!("expected `*p = Const(42)`, got {other:?}"),
+        }
+    }
+
+    /// 8. Non-lvalue expression in place position panics.
+    ///    `Binary { Add, a, b }` is an rvalue; `lower_as_place` must
+    ///    reject it.
+    #[test]
+    #[should_panic(expected = "is not an lvalue")]
+    fn place_rejects_binary_rvalue() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let sum = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::Add, lhs: a, rhs: b },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _ = lower_as_place(&mut builder, &cx, sum);
+    }
+
     // Suppress `IndexVec` unused-import lint when no test path
     // references the type directly.
     #[allow(dead_code)]

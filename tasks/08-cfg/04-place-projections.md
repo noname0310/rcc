@@ -1,3 +1,5 @@
+> ✓ done — 2026-04-29
+
 # 08-04: Place projections
 
 **Phase:** 08-cfg    **Depends on:** 08-03    **Milestone:** M3
