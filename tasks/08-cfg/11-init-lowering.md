@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-11: Aggregate initializer lowering
 
 **Phase:** 08-cfg    **Depends on:** 08-04, 06-11    **Milestone:** M4

@@ -345,9 +345,7 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
     }
     match &stmt.kind {
         HirStmtKind::Block(stmts) => {
-            for child in stmts {
-                lower_stmt(builder, cx, *child);
-            }
+            lower_block_stmts(builder, cx, stmts);
         }
         HirStmtKind::Expr(expr) => {
             let _ = lower_as_rvalue(builder, cx, *expr);
@@ -369,8 +367,8 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             builder.terminate(Terminator { kind: TerminatorKind::Return, span: stmt.span });
         }
         HirStmtKind::Null => {}
-        HirStmtKind::LocalDecl { .. } => {
-            todo!("local declaration statement lowering - see tasks/08-cfg/11-init-lowering.md")
+        HirStmtKind::LocalDecl { local, init } => {
+            lower_local_decl(builder, cx, stmt.span, *local, *init);
         }
         HirStmtKind::While { cond, body } => {
             lower_while(builder, cx, stmt.span, *cond, *body);
@@ -1034,6 +1032,153 @@ fn push_assign(builder: &mut BodyBuilder, span: Span, local: Local, rvalue: Rval
         },
         span,
     });
+}
+
+/// Lower a `Block(stmts)` statement list, applying the aggregate-init
+/// recogniser: a `LocalDecl` of an array/record type without an inline
+/// initialiser is materialised as a single `place := ZeroInit` store,
+/// and the immediately-following run of zero-leaf assignments emitted
+/// by `rcc_hir_lower::lower_initializer` is dropped (those leaves are
+/// already covered by the zero-fill).
+///
+/// `int a[1000] = {0};` therefore lowers to one `a := ZeroInit` and no
+/// per-element stores; `int a[5] = {1, 2};` lowers to a `ZeroInit`
+/// followed by two non-zero leaf stores `a[0] = 1; a[1] = 2;`. Any
+/// other statement is forwarded to `lower_stmt`.
+fn lower_block_stmts(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmts: &[HirStmtId]) {
+    let mut i = 0;
+    while i < stmts.len() {
+        let cur_id = stmts[i];
+        lower_stmt(builder, cx, cur_id);
+        i += 1;
+
+        // After lowering a `LocalDecl(aggregate, init=None)` we know
+        // its CFG side has just emitted a `ZeroInit` store. The HIR
+        // initialiser walker emits one leaf assignment per array slot
+        // / record field that follows immediately; zero-valued leaves
+        // are subsumed by the `ZeroInit` and can be dropped. Non-zero
+        // leaves still need to be lowered. The recogniser only spans
+        // the contiguous run of leaf assignments rooted at this local
+        // — anything else (including the user's own subsequent stores
+        // at a different statement) flows through the outer loop.
+        if let HirStmtKind::LocalDecl { local: hir_local, init: None } = cx.body.stmts[cur_id].kind
+        {
+            let ty = cx.body.locals[hir_local].ty;
+            if is_aggregate_ty(cx.tcx, ty) {
+                while i < stmts.len() && is_leaf_assign_for_hir_local(cx, stmts[i], hir_local) {
+                    if !is_zero_const_assign(cx, stmts[i]) {
+                        lower_stmt(builder, cx, stmts[i]);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Lower a `HirStmtKind::LocalDecl { local, init }`.
+///
+/// The CFG local has already been allocated by the body-builder pre-pass;
+/// `LocalMap::lookup` resolves the HIR id. Three cases:
+///
+/// 1. `init = Some(expr)` — emit a single `cfg_local := <expr>` assign.
+/// 2. `init = None` and `ty` is an aggregate (array / struct / union) —
+///    emit `cfg_local := ZeroInit`. The trailing per-leaf stores from
+///    `rcc_hir_lower::lower_initializer` are recognised and dropped at
+///    the `Block` level (see [`lower_block_stmts`]).
+/// 3. `init = None` and `ty` is scalar — emit nothing; the slot remains
+///    uninitialised, matching C99 §6.7.8p10.
+fn lower_local_decl(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    hir_local: HirLocal,
+    init: Option<HirExprId>,
+) {
+    let cfg_local = cx.locals.lookup(hir_local);
+    let ty = cx.body.locals[hir_local].ty;
+    if let Some(init_expr) = init {
+        let value = lower_as_rvalue(builder, cx, init_expr);
+        push_assign(builder, span, cfg_local, Rvalue::Use(value));
+    } else if is_aggregate_ty(cx.tcx, ty) {
+        builder.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: cfg_local, projection: Vec::new() },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::ZeroInit, ty })),
+            },
+            span,
+        });
+    }
+}
+
+/// `true` for C aggregate types (array / struct / union). Enums are
+/// scalars at the CFG level (their underlying integer type is what is
+/// stored), so they do not count.
+fn is_aggregate_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Array { .. } | Ty::Record(_))
+}
+
+/// `true` if `stmt_id` is `HirStmtKind::Expr(Assign { lhs, .. })` whose
+/// `lhs` is an lvalue chain rooted at `hir_local`. Used by
+/// [`lower_block_stmts`] to bound the run of HIR-walker-emitted leaf
+/// assignments associated with the preceding aggregate `LocalDecl`.
+fn is_leaf_assign_for_hir_local(cx: &LowerCx<'_>, stmt_id: HirStmtId, hir_local: HirLocal) -> bool {
+    let HirStmtKind::Expr(expr_id) = cx.body.stmts[stmt_id].kind else {
+        return false;
+    };
+    let HirExprKind::Assign { lhs, .. } = cx.body.exprs[expr_id].kind else {
+        return false;
+    };
+    is_lvalue_rooted_at(cx, lhs, hir_local)
+}
+
+/// `true` if `stmt_id` is `Assign { rhs: <zero> }` (any lvalue). The
+/// caller has already verified the lvalue root with
+/// [`is_leaf_assign_for_hir_local`].
+fn is_zero_const_assign(cx: &LowerCx<'_>, stmt_id: HirStmtId) -> bool {
+    let HirStmtKind::Expr(expr_id) = cx.body.stmts[stmt_id].kind else {
+        return false;
+    };
+    let HirExprKind::Assign { rhs, .. } = cx.body.exprs[expr_id].kind else {
+        return false;
+    };
+    is_zero_const_expr(cx, rhs)
+}
+
+/// `true` if `expr_id` is an lvalue chain (`Field` / `Index` / `Deref`,
+/// transparently passing through `Convert` wrappers inserted by typeck)
+/// whose root is `LocalRef(hir_local)`.
+fn is_lvalue_rooted_at(cx: &LowerCx<'_>, expr_id: HirExprId, hir_local: HirLocal) -> bool {
+    let mut cur = expr_id;
+    loop {
+        match &cx.body.exprs[cur].kind {
+            HirExprKind::LocalRef(l) => return *l == hir_local,
+            HirExprKind::Field { base, .. } | HirExprKind::Index { base, .. } => {
+                cur = *base;
+            }
+            HirExprKind::Deref(operand) | HirExprKind::Convert { operand, .. } => {
+                cur = *operand;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// `true` if `expr_id` evaluates to numeric zero. `Convert` and `Cast`
+/// wrappers around the constant are stepped through so the recogniser
+/// still fires after typeck has inserted implicit conversions.
+fn is_zero_const_expr(cx: &LowerCx<'_>, expr_id: HirExprId) -> bool {
+    let mut cur = expr_id;
+    loop {
+        match &cx.body.exprs[cur].kind {
+            HirExprKind::IntConst(0) => return true,
+            HirExprKind::FloatConst(f) if *f == 0.0 => return true,
+            HirExprKind::Convert { operand, .. } | HirExprKind::Cast { operand, .. } => {
+                cur = *operand;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Materialise an [`Operand`] as a [`Place`]. If the operand is already
@@ -4246,5 +4391,296 @@ mod tests {
             _ => None,
         });
         assert_eq!(call_term, Some(2), "variadic call must pass both args");
+    }
+
+    // ------------------------------------------------------------------
+    // Aggregate-init lowering (task 08-cfg/11)
+    // ------------------------------------------------------------------
+
+    /// Push an `HirExprKind::LocalRef` lvalue.
+    fn local_ref_expr(body: &mut HirBody, ty: TyId, local: HirLocal) -> HirExprId {
+        push_expr(body, ty, ValueCat::LValue, HirExprKind::LocalRef(local))
+    }
+
+    /// Push an `HirExprKind::Index` lvalue: `base[idx]`.
+    fn index_expr(body: &mut HirBody, elem_ty: TyId, base: HirExprId, idx: i128) -> HirExprId {
+        let int_ty = body.exprs[base].ty; // for the integer index node only
+        let _ = int_ty;
+        let index =
+            push_expr(body, body.exprs[base].ty, ValueCat::RValue, HirExprKind::IntConst(idx));
+        push_expr(body, elem_ty, ValueCat::LValue, HirExprKind::Index { base, index })
+    }
+
+    /// Push `target = value` (as `HirStmtKind::Expr(Assign)`).
+    fn assign_index_const_stmt(
+        body: &mut HirBody,
+        elem_ty: TyId,
+        local_ty: TyId,
+        local: HirLocal,
+        idx: i128,
+        value: i128,
+    ) -> HirStmtId {
+        let base = local_ref_expr(body, local_ty, local);
+        let lhs = index_expr(body, elem_ty, base, idx);
+        let rhs = push_expr(body, elem_ty, ValueCat::RValue, HirExprKind::IntConst(value));
+        let assign = push_expr(body, elem_ty, ValueCat::RValue, HirExprKind::Assign { lhs, rhs });
+        push_stmt(body, HirStmtKind::Expr(assign))
+    }
+
+    /// Push a `LocalDecl { local, init: None }` statement.
+    fn local_decl_stmt(body: &mut HirBody, local: HirLocal) -> HirStmtId {
+        push_stmt(body, HirStmtKind::LocalDecl { local, init: None })
+    }
+
+    /// Push a `LocalDecl { local, init: Some(expr) }` statement.
+    fn local_decl_with_init_stmt(
+        body: &mut HirBody,
+        local: HirLocal,
+        init: HirExprId,
+    ) -> HirStmtId {
+        push_stmt(body, HirStmtKind::LocalDecl { local, init: Some(init) })
+    }
+
+    /// Build a fresh CFG body with one `int[N]` user-local already
+    /// allocated (`Local(1)`). Returns the builder, the HIR body, the
+    /// type context, the local-map (HIR `a` ↦ CFG `Local(1)`), the HIR
+    /// local id, the array `TyId`, and the element `TyId`.
+    fn one_array_local(len: u64) -> (BodyBuilder, HirBody, TyCtxt, LocalMap, HirLocal, TyId, TyId) {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let arr_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(int_ty),
+            len: Some(len),
+            is_vla: false,
+        });
+
+        let mut hir_body = HirBody::default();
+        let ha = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: arr_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(1), arr_ty, DUMMY_SP);
+
+        let mut map = LocalMap::new();
+        map.insert(ha, ca);
+
+        (builder, hir_body, tcx, map, ha, arr_ty, int_ty)
+    }
+
+    /// Inspect the `n`-th statement of the entry block as an `Assign`
+    /// and pull out its `Place.projection` and the integer rhs (or
+    /// `None` for a `ZeroInit` rvalue).
+    fn entry_stmt_at(body: &crate::Body, n: usize) -> &Statement {
+        &body.blocks[crate::BasicBlockId(0)].statements[n]
+    }
+
+    fn assert_zero_init_at(stmt: &Statement, expected_local: Local) {
+        match &stmt.kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::ZeroInit, .. })),
+            } => {
+                assert_eq!(*base, expected_local);
+                assert!(projection.is_empty(), "ZeroInit must store to the bare aggregate place");
+            }
+            other => panic!("expected `local := ZeroInit`, got {other:?}"),
+        }
+    }
+
+    /// Acceptance: `int a[5] = {1, 2};` lowers to one `a := ZeroInit`
+    /// and exactly two leaf stores (`a[0]=1`, `a[1]=2`); the
+    /// trailing zero-fill leaves emitted by the HIR initialiser
+    /// walker are dropped.
+    #[test]
+    fn aggregate_dense_partial_init() {
+        let (mut builder, mut hir_body, tcx, map, ha, arr_ty, int_ty) = one_array_local(5);
+
+        // Build the HIR sequence the initializer walker emits for
+        // `int a[5] = {1, 2}`: LocalDecl + a[0]=1 + a[1]=2 + a[2]=0
+        // + a[3]=0 + a[4]=0.
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let s0 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 0, 1);
+        let s1 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 1, 2);
+        let s2 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 2, 0);
+        let s3 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 3, 0);
+        let s4 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 4, 0);
+        let root = block_stmt(&mut hir_body, vec![decl, s0, s1, s2, s3, s4]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_a = map.lookup(ha);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(
+            stmts.len(),
+            3,
+            "expected `ZeroInit + 2 leaf stores`, got {} statements",
+            stmts.len()
+        );
+        assert_zero_init_at(entry_stmt_at(&body, 0), cfg_a);
+        // `a[0] = 1`
+        match &stmts[1].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), .. })),
+            } => {
+                assert_eq!(*base, cfg_a);
+                assert_eq!(projection.len(), 1);
+                assert!(matches!(
+                    projection[0],
+                    Projection::Index(Operand::Const(Const { kind: ConstKind::Int(0), .. }))
+                ));
+            }
+            other => panic!("expected `a[0] = 1`, got {other:?}"),
+        }
+        // `a[1] = 2`
+        match &stmts[2].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(2), .. })),
+            } => {
+                assert_eq!(*base, cfg_a);
+                assert!(matches!(
+                    projection[0],
+                    Projection::Index(Operand::Const(Const { kind: ConstKind::Int(1), .. }))
+                ));
+            }
+            other => panic!("expected `a[1] = 2`, got {other:?}"),
+        }
+    }
+
+    /// Acceptance: `int a[1000] = {0};` lowers to one `a := ZeroInit`
+    /// and zero leaf stores (per task 08-cfg/11).
+    #[test]
+    fn aggregate_all_zero_init() {
+        let (mut builder, mut hir_body, tcx, map, ha, arr_ty, int_ty) = one_array_local(1000);
+
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let mut leaves: Vec<HirStmtId> = (0..1000)
+            .map(|i| assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, i, 0))
+            .collect();
+        let mut all = vec![decl];
+        all.append(&mut leaves);
+        let root = block_stmt(&mut hir_body, all);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_a = map.lookup(ha);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected one `ZeroInit` and zero leaf stores, got {} statements",
+            stmts.len()
+        );
+        assert_zero_init_at(&stmts[0], cfg_a);
+    }
+
+    /// Acceptance: `int a[5] = { [2] = 5 };` (designated) lowers to
+    /// one `ZeroInit` and a single non-zero store at index `2`.
+    #[test]
+    fn aggregate_designated_single_store() {
+        let (mut builder, mut hir_body, tcx, map, ha, arr_ty, int_ty) = one_array_local(5);
+
+        // The HIR walker emits zeros at indices 0,1,3,4 plus the
+        // explicit `a[2] = 5`.
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let s0 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 0, 0);
+        let s1 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 1, 0);
+        let s2 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 2, 5);
+        let s3 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 3, 0);
+        let s4 = assign_index_const_stmt(&mut hir_body, int_ty, arr_ty, ha, 4, 0);
+        let root = block_stmt(&mut hir_body, vec![decl, s0, s1, s2, s3, s4]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_a = map.lookup(ha);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(
+            stmts.len(),
+            2,
+            "expected `ZeroInit + 1 leaf store`, got {} statements",
+            stmts.len()
+        );
+        assert_zero_init_at(&stmts[0], cfg_a);
+        match &stmts[1].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(5), .. })),
+            } => {
+                assert_eq!(*base, cfg_a);
+                assert_eq!(projection.len(), 1);
+                assert!(matches!(
+                    projection[0],
+                    Projection::Index(Operand::Const(Const { kind: ConstKind::Int(2), .. }))
+                ));
+            }
+            other => panic!("expected `a[2] = 5`, got {other:?}"),
+        }
+    }
+
+    /// `int x = 42;` (scalar with init) lowers to a single `x := 42`
+    /// store; no aggregate machinery kicks in.
+    #[test]
+    fn scalar_local_decl_with_init() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+        let value = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(42));
+        let decl = local_decl_with_init_stmt(&mut hir_body, ha, value);
+        let root = block_stmt(&mut hir_body, vec![decl]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(stmts.len(), 1);
+        assert_assign_const(&body.blocks[crate::BasicBlockId(0)], map.lookup(ha), 42);
+    }
+
+    /// `int x;` (scalar, no init) emits no statements — the slot is
+    /// allocated but its value remains indeterminate.
+    #[test]
+    fn scalar_local_decl_uninit() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let root = block_stmt(&mut hir_body, vec![decl]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert!(stmts.is_empty(), "scalar uninit decl must not emit any statement");
+    }
+
+    /// `int a[5];` (aggregate, no init list) is conservatively
+    /// materialised as `a := ZeroInit`. C99 §6.7.8p10 makes the value
+    /// indeterminate, but zero is a valid refinement and matches the
+    /// behaviour required when a later initialiser walker leaves no
+    /// trailing leaves.
+    #[test]
+    fn aggregate_local_decl_uninit_zeroes() {
+        let (mut builder, mut hir_body, tcx, map, ha, _arr_ty, _int_ty) = one_array_local(3);
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let root = block_stmt(&mut hir_body, vec![decl]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(stmts.len(), 1);
+        assert_zero_init_at(&stmts[0], map.lookup(ha));
     }
 }
