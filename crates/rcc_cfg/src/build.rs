@@ -54,6 +54,20 @@ enum AllocPhase {
     Locals,
 }
 
+/// Loop context for break/continue target resolution.
+///
+/// Pushed onto a per-body stack when entering a loop construct;
+/// `break` emits `Goto(break_target)`, `continue` emits
+/// `Goto(cont_target)`. For `while`/`do-while` the continue target
+/// is the header; for `for` it is the step block.
+#[derive(Debug, Clone)]
+pub struct LoopCtx {
+    /// Block that `continue` jumps to.
+    pub cont_target: BasicBlockId,
+    /// Block that `break` jumps to (the loop exit).
+    pub break_target: BasicBlockId,
+}
+
 /// Mutable cursor used by lowering code to incrementally build a [`Body`].
 ///
 /// The builder owns:
@@ -76,6 +90,9 @@ pub struct BodyBuilder {
     /// Tracks how far the local-allocation pipeline has advanced. See
     /// [`AllocPhase`] for the staged convention.
     phase: AllocPhase,
+    /// Stack of enclosing loop contexts. `break` / `continue` targets
+    /// are resolved by peeking the top of this stack.
+    loop_stack: Vec<LoopCtx>,
 }
 
 impl Default for BodyBuilder {
@@ -101,6 +118,7 @@ impl BodyBuilder {
             states,
             current: entry,
             phase: AllocPhase::ReturnSlot,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -288,6 +306,31 @@ impl BodyBuilder {
     #[must_use]
     pub fn is_terminated(&self, bb: BasicBlockId) -> bool {
         self.states[bb].terminated
+    }
+
+    /// Push a new loop context onto the stack.
+    ///
+    /// Called when entering a `while`, `do-while`, or `for` loop.
+    /// `cont_target` is the block `continue` should jump to (header
+    /// for while/do-while, step block for for). `break_target` is the
+    /// loop exit block.
+    pub fn push_loop(&mut self, cont_target: BasicBlockId, break_target: BasicBlockId) {
+        self.loop_stack.push(LoopCtx { cont_target, break_target });
+    }
+
+    /// Pop the current loop context.
+    ///
+    /// # Panics
+    /// Panics if the loop stack is empty (i.e., not inside a loop).
+    pub fn pop_loop(&mut self) {
+        self.loop_stack.pop().expect("pop_loop: no loop context to pop");
+    }
+
+    /// Get the current loop context (top of stack), or `None` if not
+    /// inside a loop.
+    #[must_use]
+    pub fn current_loop(&self) -> Option<&LoopCtx> {
+        self.loop_stack.last()
     }
 
     /// Convenience: terminate the current block with a plain `Goto(target)`.

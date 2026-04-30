@@ -14,7 +14,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [04-place-projections](04-place-projections.md)
 - [x] [05-short-circuit-lowering](05-short-circuit-lowering.md)
 - [x] [06-if-else-lowering](06-if-else-lowering.md)
-- [ ] [07-loop-lowering](07-loop-lowering.md)
+- [x] [07-loop-lowering](07-loop-lowering.md)
 - [ ] [08-switch-lowering](08-switch-lowering.md)
 - [ ] [09-goto-label-fixup](09-goto-label-fixup.md)
 - [ ] [10-call-lowering](10-call-lowering.md)

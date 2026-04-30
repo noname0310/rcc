@@ -1,3 +1,5 @@
+> ✅ done — 2026-04-30
+
 # 08-07: Loop lowering
 
 **Phase:** 08-cfg    **Depends on:** 08-06    **Milestone:** M3

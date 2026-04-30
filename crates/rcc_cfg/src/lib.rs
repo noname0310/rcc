@@ -15,7 +15,7 @@ use rcc_span::Span;
 pub mod build;
 pub mod lower;
 
-pub use build::{build_bodies, BodyBuilder};
+pub use build::{build_bodies, BodyBuilder, LoopCtx};
 pub use lower::{lower_as_place, lower_as_rvalue, lower_stmt, LocalMap, LowerCx};
 
 rcc_data_structures::new_index! {

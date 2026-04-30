@@ -335,8 +335,14 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::LocalDecl { .. } => {
             todo!("local declaration statement lowering - see tasks/08-cfg/11-init-lowering.md")
         }
-        HirStmtKind::While { .. } | HirStmtKind::DoWhile { .. } | HirStmtKind::For { .. } => {
-            todo!("loop lowering - see tasks/08-cfg/07-loop-lowering.md")
+        HirStmtKind::While { cond, body } => {
+            lower_while(builder, cx, stmt.span, *cond, *body);
+        }
+        HirStmtKind::DoWhile { body, cond } => {
+            lower_do_while(builder, cx, stmt.span, *body, *cond);
+        }
+        HirStmtKind::For { init, cond, step, body } => {
+            lower_for(builder, cx, stmt.span, *init, *cond, *step, *body);
         }
         HirStmtKind::Switch { .. } | HirStmtKind::Case { .. } | HirStmtKind::Default { .. } => {
             todo!("switch lowering - see tasks/08-cfg/08-switch-lowering.md")
@@ -344,8 +350,13 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::Label { .. } | HirStmtKind::Goto(_) => {
             todo!("goto/label fixup - see tasks/08-cfg/09-goto-label-fixup.md")
         }
-        HirStmtKind::Break | HirStmtKind::Continue => {
-            todo!("break/continue lowering - see tasks/08-cfg/07-loop-lowering.md")
+        HirStmtKind::Break => {
+            let loop_ctx = builder.current_loop().expect("break statement outside of a loop");
+            builder.goto(loop_ctx.break_target, stmt.span);
+        }
+        HirStmtKind::Continue => {
+            let loop_ctx = builder.current_loop().expect("continue statement outside of a loop");
+            builder.goto(loop_ctx.cont_target, stmt.span);
         }
     }
 }
@@ -577,6 +588,223 @@ fn lower_ternary(
     builder.switch_to(join_block);
 
     Operand::Copy(Place { base: result_local, projection: Vec::new() })
+}
+
+/// Lower a `while (cond) body` loop.
+///
+/// Emits the canonical loop structure:
+///
+/// ```text
+/// current:
+///   goto header
+///
+/// header:
+///   cond_op = lower(cond)
+///   switch_int cond_op {
+///     case 0:  exit,
+///     default: body_bb,
+///   }
+///
+/// body_bb:
+///   lower(body)
+///   goto header    ; back edge
+///
+/// exit:
+///   ; cursor lands here
+/// ```
+///
+/// `continue` targets the header; `break` targets the exit block.
+fn lower_while(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    cond: HirExprId,
+    body: HirStmtId,
+) {
+    let header = builder.new_block();
+    let exit = builder.new_block();
+
+    // Current block → header.
+    builder.goto(header, span);
+
+    // Loop context: continue → header, break → exit.
+    builder.push_loop(header, exit);
+
+    // Header: evaluate condition and branch.
+    builder.switch_to(header);
+    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let body_bb = builder.new_block();
+    builder.terminate(Terminator {
+        kind: TerminatorKind::SwitchInt {
+            discr: cond_op,
+            targets: vec![(Some(0), exit), (None, body_bb)],
+        },
+        span,
+    });
+
+    // Body.
+    builder.switch_to(body_bb);
+    lower_stmt(builder, cx, body);
+    if !builder.is_current_terminated() {
+        builder.goto(header, span); // back edge
+    }
+
+    builder.pop_loop();
+    builder.switch_to(exit);
+}
+
+/// Lower a `do body while (cond)` loop.
+///
+/// Emits the canonical loop structure:
+///
+/// ```text
+/// current:
+///   goto body_bb
+///
+/// body_bb:
+///   lower(body)
+///   goto cond_bb    ; fall-through to condition
+///
+/// cond_bb:
+///   cond_op = lower(cond)
+///   switch_int cond_op {
+///     case 0:  exit,
+///     default: body_bb,    ; back edge
+///   }
+///
+/// exit:
+///   ; cursor lands here
+/// ```
+///
+/// `continue` targets the condition block; `break` targets the exit block.
+fn lower_do_while(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    body: HirStmtId,
+    cond: HirExprId,
+) {
+    let body_bb = builder.new_block();
+    let cond_bb = builder.new_block();
+    let exit = builder.new_block();
+
+    // Current block → body.
+    builder.goto(body_bb, span);
+
+    // Loop context: continue → cond_bb, break → exit.
+    builder.push_loop(cond_bb, exit);
+
+    // Body.
+    builder.switch_to(body_bb);
+    lower_stmt(builder, cx, body);
+    if !builder.is_current_terminated() {
+        builder.goto(cond_bb, span); // fall-through to condition
+    }
+
+    // Condition.
+    builder.switch_to(cond_bb);
+    let cond_op = lower_as_rvalue(builder, cx, cond);
+    builder.terminate(Terminator {
+        kind: TerminatorKind::SwitchInt {
+            discr: cond_op,
+            targets: vec![(Some(0), exit), (None, body_bb)],
+        },
+        span,
+    });
+
+    builder.pop_loop();
+    builder.switch_to(exit);
+}
+
+/// Lower a `for (init; cond; step) body` loop.
+///
+/// Emits the canonical loop structure:
+///
+/// ```text
+/// current:
+///   lower(init)      ; if present
+///   goto header
+///
+/// header:
+///   cond_op = lower(cond)    ; if present
+///   switch_int cond_op {     ; or goto body_bb if no condition
+///     case 0:  exit,
+///     default: body_bb,
+///   }
+///
+/// body_bb:
+///   lower(body)
+///   goto step_bb     ; fall-through to step
+///
+/// step_bb:
+///   lower(step)      ; if present
+///   goto header      ; back edge
+///
+/// exit:
+///   ; cursor lands here
+/// ```
+///
+/// `continue` targets the step block; `break` targets the exit block.
+fn lower_for(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    init: Option<HirStmtId>,
+    cond: Option<HirExprId>,
+    step: Option<HirExprId>,
+    body: HirStmtId,
+) {
+    // Lower init if present (runs in the current block).
+    if let Some(init_stmt) = init {
+        lower_stmt(builder, cx, init_stmt);
+    }
+
+    let header = builder.new_block();
+    let step_bb = builder.new_block();
+    let exit = builder.new_block();
+
+    // Current block → header.
+    builder.goto(header, span);
+
+    // Loop context: continue → step_bb, break → exit.
+    builder.push_loop(step_bb, exit);
+
+    // Header: evaluate condition (if present) and branch.
+    builder.switch_to(header);
+    let body_bb = builder.new_block();
+    match cond {
+        Some(cond_expr) => {
+            let cond_op = lower_as_rvalue(builder, cx, cond_expr);
+            builder.terminate(Terminator {
+                kind: TerminatorKind::SwitchInt {
+                    discr: cond_op,
+                    targets: vec![(Some(0), exit), (None, body_bb)],
+                },
+                span,
+            });
+        }
+        None => {
+            // Infinite loop: no condition, unconditionally jump to body.
+            builder.goto(body_bb, span);
+        }
+    }
+
+    // Body.
+    builder.switch_to(body_bb);
+    lower_stmt(builder, cx, body);
+    if !builder.is_current_terminated() {
+        builder.goto(step_bb, span); // fall-through to step
+    }
+
+    // Step.
+    builder.switch_to(step_bb);
+    if let Some(step_expr) = step {
+        let _ = lower_as_rvalue(builder, cx, step_expr);
+    }
+    builder.goto(header, span); // back edge
+
+    builder.pop_loop();
+    builder.switch_to(exit);
 }
 
 /// Build a typed scalar zero suitable for `BinOp::Ne` against `ty`.
@@ -2309,5 +2537,625 @@ mod tests {
         let (else_block, then_block) = switch_zero_default(&body.blocks[crate::BasicBlockId(0)]);
         assert_return_const(&body.blocks[then_block], 1);
         assert_return_const(&body.blocks[else_block], 0);
+    }
+
+    // ── Task 08-07: loop lowering ──────────────────────────────────────
+
+    fn while_stmt(body: &mut HirBody, cond: HirExprId, loop_body: HirStmtId) -> HirStmtId {
+        push_stmt(body, HirStmtKind::While { cond, body: loop_body })
+    }
+
+    fn do_while_stmt(body: &mut HirBody, loop_body: HirStmtId, cond: HirExprId) -> HirStmtId {
+        push_stmt(body, HirStmtKind::DoWhile { body: loop_body, cond })
+    }
+
+    fn for_stmt(
+        body: &mut HirBody,
+        init: Option<HirStmtId>,
+        cond: Option<HirExprId>,
+        step: Option<HirExprId>,
+        loop_body: HirStmtId,
+    ) -> HirStmtId {
+        push_stmt(body, HirStmtKind::For { init, cond, step, body: loop_body })
+    }
+
+    fn break_stmt(body: &mut HirBody) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Break)
+    }
+
+    fn continue_stmt(body: &mut HirBody) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Continue)
+    }
+
+    /// `while (a) { b = 1; }` lowers to entry → header → body → exit.
+    ///
+    /// Expected layout:
+    ///   bb0 (entry):  goto bb1 (header)
+    ///   bb1 (header): switch a { 0 → exit, default → body }
+    ///   bb2 (body):   b := 1; goto bb1 (back edge)
+    ///   bb3 (exit):   (cursor)
+    #[test]
+    fn simple_while_loop() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let root = while_stmt(&mut hir_body, cond, body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 4, "while uses entry + header + body + exit");
+
+        // bb0 (entry): goto header.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header = goto_target(entry);
+
+        // bb1 (header): SwitchInt on a → exit or body.
+        let header_bb = &body.blocks[header];
+        assert_switch_discr_local(header_bb, map.lookup(ha));
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        // bb2 (body): b := 1; goto header (back edge).
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hb), 1);
+        assert_eq!(goto_target(body_bb), header, "body must back-edge to header");
+
+        // bb3 (exit): cursor.
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// `while (a) {}` — empty body must still form a valid back edge.
+    #[test]
+    fn while_loop_empty_body() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let empty_body = block_stmt(&mut hir_body, Vec::new());
+        let root = while_stmt(&mut hir_body, cond, empty_body);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 4);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header = goto_target(entry);
+        let header_bb = &body.blocks[header];
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        let body_bb = &body.blocks[body_block];
+        assert!(body_bb.statements.is_empty(), "empty body must have no statements");
+        assert_eq!(goto_target(body_bb), header, "empty body must back-edge to header");
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// `do { b = 1; } while (a);` — body executes before condition.
+    ///
+    /// Expected layout:
+    ///   bb0 (entry):  goto bb1 (body)
+    ///   bb1 (body):   b := 1; goto bb2 (cond)
+    ///   bb2 (cond):   switch a { 0 → exit, default → body (back edge) }
+    ///   bb3 (exit):   (cursor)
+    #[test]
+    fn simple_do_while_loop() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let root = do_while_stmt(&mut hir_body, body_stmt, cond);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 4, "do-while uses entry + body + cond + exit");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let body_block = goto_target(entry);
+
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hb), 1);
+        let cond_block = goto_target(body_bb);
+
+        let cond_bb = &body.blocks[cond_block];
+        assert_switch_discr_local(cond_bb, map.lookup(ha));
+        let (exit_block, back_target) = switch_zero_default(cond_bb);
+        assert_eq!(back_target, body_block, "cond true must loop back to body");
+
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// `for (i = 0; i < 10; i = i + 1) { b = 1; }` — full for loop.
+    ///
+    /// Expected layout:
+    ///   bb0 (entry + init): i := 0; goto header
+    ///   bb1 (header):       switch (i < 10) { 0 → exit, default → body }
+    ///   bb2 (body):         b := 1; goto step
+    ///   bb3 (step):         i := i + 1; goto header (back edge)
+    ///   bb4 (exit):         (cursor)
+    #[test]
+    fn for_loop_with_init_cond_step() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // init: i = 0
+        let init_stmt = assign_local_stmt(&mut hir_body, int_ty, ha, 0);
+
+        // cond: i < 10
+        let i_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let ten = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(10));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::Lt, lhs: i_ref, rhs: ten },
+        );
+
+        // step: i = i + 1 (a simple assignment for testing)
+        let step_lhs =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let step_rhs = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(1));
+        let step_expr = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Assign { lhs: step_lhs, rhs: step_rhs },
+        );
+
+        // body: b = 1
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+
+        let root = for_stmt(&mut hir_body, Some(init_stmt), Some(cond), Some(step_expr), body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // 5 blocks: entry+init, header, body, step, exit.
+        assert_eq!(body.blocks.len(), 5, "for loop uses entry + header + body + step + exit");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        // Entry should have init code (i := 0) and goto header.
+        assert!(!entry.statements.is_empty(), "entry must contain init code");
+        let header = goto_target(entry);
+
+        // Header: SwitchInt on i < 10.
+        let header_bb = &body.blocks[header];
+        assert!(matches!(header_bb.terminator.kind, TerminatorKind::SwitchInt { .. }));
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        // Body: b := 1; goto step.
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hb), 1);
+        let step_block = goto_target(body_bb);
+
+        // Step: has step code and back edge to header.
+        let step_bb = &body.blocks[step_block];
+        assert!(!step_bb.statements.is_empty(), "step block must contain step code");
+        assert_eq!(goto_target(step_bb), header, "step must back-edge to header");
+
+        // Exit.
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// `for (;;) { b = 1; }` — infinite loop (no init, cond, or step).
+    ///
+    /// Expected layout:
+    ///   bb0 (entry):  goto header
+    ///   bb1 (header): goto body (no condition)
+    ///   bb2 (body):   b := 1; goto step
+    ///   bb3 (step):   goto header (back edge)
+    ///   bb4 (exit):   (cursor — only reachable via break)
+    #[test]
+    fn for_infinite_loop() {
+        let (mut builder, mut hir_body, tcx, map, [_ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let root = for_stmt(&mut hir_body, None, None, None, body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 5, "for(;;) uses entry + header + body + step + exit");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header = goto_target(entry);
+
+        // Header: unconditional goto body (no SwitchInt).
+        let header_bb = &body.blocks[header];
+        let body_block = goto_target(header_bb);
+        assert!(
+            matches!(header_bb.terminator.kind, TerminatorKind::Goto(_)),
+            "infinite loop header must be unconditional Goto"
+        );
+
+        // Body: b := 1; goto step.
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hb), 1);
+        let step_block = goto_target(body_bb);
+
+        // Step: goto header (back edge).
+        let step_bb = &body.blocks[step_block];
+        assert_eq!(goto_target(step_bb), header, "step must back-edge to header");
+    }
+
+    /// Nested loops: `while (a) { while (b) { body; } }`
+    ///
+    /// Verifies that the inner loop's exit flows into the outer loop's
+    /// body continuation and the outer back edge is correct.
+    #[test]
+    fn nested_while_loops() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // Inner: while (b) { c = 1; }
+        let inner_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let inner_body = assign_local_stmt(&mut hir_body, int_ty, hc, 1);
+        let inner_while = while_stmt(&mut hir_body, inner_cond, inner_body);
+
+        // Outer: while (a) { <inner> }
+        let outer_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let root = while_stmt(&mut hir_body, outer_cond, inner_while);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Blocks: entry + outer_header + outer_body(=inner) + inner_header + inner_body +
+        //         inner_exit + outer_exit = 6 or 7 depending on structure.
+        // entry → outer_header → (outer_exit | outer_body)
+        // outer_body → inner_header → (inner_exit | inner_body)
+        // inner_body → inner_header (back edge)
+        // inner_exit → outer_header (back edge)
+        // outer_exit → cursor
+        assert!(body.blocks.len() >= 6, "nested loops must produce at least 6 blocks");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let outer_header_id = goto_target(entry);
+        let outer_header = &body.blocks[outer_header_id];
+        assert_switch_discr_local(outer_header, map.lookup(ha));
+        let (outer_exit, outer_body_id) = switch_zero_default(outer_header);
+
+        let outer_body = &body.blocks[outer_body_id];
+        // Outer body → inner header.
+        let inner_header_id = goto_target(outer_body);
+        let inner_header = &body.blocks[inner_header_id];
+        assert_switch_discr_local(inner_header, map.lookup(hb));
+        let (inner_exit, inner_body_id) = switch_zero_default(inner_header);
+
+        // Inner body → inner header (back edge).
+        let inner_body = &body.blocks[inner_body_id];
+        assert_assign_const(inner_body, map.lookup(hc), 1);
+        assert_eq!(goto_target(inner_body), inner_header_id, "inner body must loop back");
+
+        // Inner exit → outer header (back edge).
+        let inner_exit_bb = &body.blocks[inner_exit];
+        assert_eq!(
+            goto_target(inner_exit_bb),
+            outer_header_id,
+            "inner exit must loop back to outer header"
+        );
+
+        // Outer exit.
+        assert!(body.blocks[outer_exit].statements.is_empty());
+    }
+
+    /// `while (a && b) { body; }` — loop condition with short-circuit &&.
+    ///
+    /// Verifies that the short-circuit diamond is nested inside the
+    /// header and the loop structure remains correct.
+    #[test]
+    fn while_condition_short_circuit_and() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogAnd, lhs: a, rhs: b },
+        );
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hc, 1);
+        let root = while_stmt(&mut hir_body, cond, body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Blocks: entry + sc_init + sc_rhs + sc_join(=header with SwitchInt) + body + exit = 6
+        assert_eq!(body.blocks.len(), 6, "while(a && b) must produce 6 blocks");
+
+        // Entry → short-circuit init block.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let sc_init = goto_target(entry);
+
+        // Short-circuit init: result := 0, SwitchInt on a.
+        let sc_init_bb = &body.blocks[sc_init];
+        let (sc_join, sc_rhs) = switch_zero_default(sc_init_bb);
+
+        // SC rhs: result := b != 0, goto sc_join.
+        let sc_rhs_bb = &body.blocks[sc_rhs];
+        assert_eq!(goto_target(sc_rhs_bb), sc_join);
+
+        // SC join (= inner condition): SwitchInt on result → exit or body.
+        let sc_join_bb = &body.blocks[sc_join];
+        assert!(matches!(sc_join_bb.terminator.kind, TerminatorKind::SwitchInt { .. }));
+        let (exit_block, body_block) = switch_zero_default(sc_join_bb);
+
+        // Body: c := 1; back edge to sc_init (= the while header).
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hc), 1);
+        assert_eq!(goto_target(body_bb), sc_init, "body must back-edge to the while header");
+
+        // Exit.
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// `while (a || b) { body; }` — loop condition with short-circuit ||.
+    #[test]
+    fn while_condition_short_circuit_or() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let b = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let cond = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::LogOr, lhs: a, rhs: b },
+        );
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hc, 1);
+        let root = while_stmt(&mut hir_body, cond, body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert_eq!(body.blocks.len(), 6, "while(a || b) must produce 6 blocks");
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let sc_init = goto_target(entry);
+        let sc_init_bb = &body.blocks[sc_init];
+        // For ||: 0 → rhs, default → join.
+        let (sc_rhs, sc_join) = switch_zero_default(sc_init_bb);
+
+        let sc_rhs_bb = &body.blocks[sc_rhs];
+        assert_eq!(goto_target(sc_rhs_bb), sc_join);
+
+        let sc_join_bb = &body.blocks[sc_join];
+        let (exit_block, body_block) = switch_zero_default(sc_join_bb);
+
+        let body_bb = &body.blocks[body_block];
+        assert_assign_const(body_bb, map.lookup(hc), 1);
+        assert_eq!(goto_target(body_bb), sc_init, "body must back-edge to the while header");
+
+        assert!(body.blocks[exit_block].statements.is_empty());
+    }
+
+    /// Back edge structure: verify that every loop body's terminator
+    /// points back to the header (not to itself or to the exit).
+    #[test]
+    fn back_edge_points_to_header() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 42);
+        let root = while_stmt(&mut hir_body, cond, body_stmt);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (_exit, body_id) = switch_zero_default(header_bb);
+
+        let body_bb = &body.blocks[body_id];
+        let back_target = goto_target(body_bb);
+        assert_eq!(back_target, header_id, "back edge must target the header");
+        assert_ne!(back_target, body_id, "back edge must not target itself");
+    }
+
+    /// Loop exit block is the join point after the loop.
+    #[test]
+    fn loop_exit_block_is_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let body_stmt = assign_local_stmt(&mut hir_body, int_ty, hb, 1);
+        let while_s = while_stmt(&mut hir_body, cond, body_stmt);
+
+        // After the loop, assign b = 2 in the exit block.
+        let after_assign = assign_local_stmt(&mut hir_body, int_ty, hb, 2);
+        let root = block_stmt(&mut hir_body, vec![while_s, after_assign]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // The exit block must contain the post-loop assignment.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (exit_block, _body_block) = switch_zero_default(header_bb);
+
+        let exit_bb = &body.blocks[exit_block];
+        assert_assign_const(exit_bb, map.lookup(hb), 2);
+    }
+
+    /// `break` in a while loop targets the exit block.
+    #[test]
+    fn break_targets_exit_block() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let brk = break_stmt(&mut hir_body);
+        let root = while_stmt(&mut hir_body, cond, brk);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        // Body block: break → exit.
+        let body_bb = &body.blocks[body_block];
+        assert_eq!(goto_target(body_bb), exit_block, "break must target exit");
+    }
+
+    /// `continue` in a while loop targets the header block.
+    #[test]
+    fn continue_targets_header_in_while() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let cont = continue_stmt(&mut hir_body);
+        let root = while_stmt(&mut hir_body, cond, cont);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (_exit, body_block) = switch_zero_default(header_bb);
+
+        let body_bb = &body.blocks[body_block];
+        assert_eq!(goto_target(body_bb), header_id, "continue must target header in while");
+    }
+
+    /// `continue` in a for loop targets the step block.
+    #[test]
+    fn continue_targets_step_in_for() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let step_expr =
+            push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(1));
+        let cont = continue_stmt(&mut hir_body);
+        let root = for_stmt(&mut hir_body, None, Some(cond), Some(step_expr), cont);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        let body_bb = &body.blocks[body_block];
+        let step_id = goto_target(body_bb);
+
+        // Continue from body must target the step block.
+        // But in our implementation, body → step via goto (always).
+        // The continue_stmt is a bare stmt, so the body block has:
+        //   goto step (from continue)
+        // and we need to verify the step → header back edge.
+        let step_bb = &body.blocks[step_id];
+        assert_eq!(goto_target(step_bb), header_id, "step must back-edge to header");
+
+        // Also verify break in for targets exit.
+        // We already tested continue; let's also verify body → step path.
+        // For a for loop body with only `continue`, the body block's
+        // terminator should be goto step.
+        assert_eq!(
+            step_id,
+            goto_target(body_bb),
+            "for-loop body with continue must goto step block"
+        );
+
+        let _ = exit_block;
+    }
+
+    /// `break` in a for loop targets the exit block.
+    #[test]
+    fn break_targets_exit_in_for() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let brk = break_stmt(&mut hir_body);
+        let root = for_stmt(&mut hir_body, None, Some(cond), None, brk);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (exit_block, body_block) = switch_zero_default(header_bb);
+
+        let body_bb = &body.blocks[body_block];
+        assert_eq!(goto_target(body_bb), exit_block, "break in for must target exit");
+    }
+
+    /// Nested loop break/continue: break targets the inner exit, not outer.
+    #[test]
+    fn nested_loop_break_targets_inner_exit() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // Inner: while (b) { break; }
+        let inner_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let brk = break_stmt(&mut hir_body);
+        let inner_while = while_stmt(&mut hir_body, inner_cond, brk);
+
+        // Outer: while (a) { <inner>; c = 2; }
+        let outer_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let after_inner = assign_local_stmt(&mut hir_body, int_ty, hc, 2);
+        let outer_body = block_stmt(&mut hir_body, vec![inner_while, after_inner]);
+        let root = while_stmt(&mut hir_body, outer_cond, outer_body);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Find blocks.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let outer_header_id = goto_target(entry);
+        let outer_header = &body.blocks[outer_header_id];
+        let (outer_exit, outer_body_id) = switch_zero_default(outer_header);
+
+        // Outer body → inner header.
+        let outer_body_bb = &body.blocks[outer_body_id];
+        let inner_header_id = goto_target(outer_body_bb);
+        let inner_header = &body.blocks[inner_header_id];
+        let (inner_exit, inner_body_id) = switch_zero_default(inner_header);
+
+        // Inner body: break → inner_exit (not outer_exit).
+        let inner_body_bb = &body.blocks[inner_body_id];
+        assert_eq!(
+            goto_target(inner_body_bb),
+            inner_exit,
+            "break in inner loop must target inner exit, not outer exit"
+        );
+        assert_ne!(inner_exit, outer_exit, "inner and outer exit must be different blocks");
     }
 }
