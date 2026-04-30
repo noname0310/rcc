@@ -1,3 +1,5 @@
+> ✅ done — 2026-04-30
+
 # 08-09: `goto` and label fixup
 
 **Phase:** 08-cfg    **Depends on:** 08-01    **Milestone:** M3

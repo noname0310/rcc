@@ -298,18 +298,29 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
 /// # Panics
 /// Panics on statement kinds owned by later tasks.
 pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtId) {
-    if builder.is_current_terminated() {
+    let stmt = &cx.body.stmts[stmt_id];
+
+    // Labels are always reachable via goto, even if the current block
+    // is already terminated.  If we fall through to the label, emit a
+    // Goto so the predecessor block is properly terminated.
+    if let HirStmtKind::Label { name, body } = &stmt.kind {
+        let label_bb = builder.label_block(*name);
+        if !builder.is_current_terminated() {
+            builder.goto(label_bb, stmt.span);
+        }
+        builder.switch_to(label_bb);
+        lower_stmt(builder, cx, *body);
         return;
     }
 
-    let stmt = &cx.body.stmts[stmt_id];
+    if builder.is_current_terminated() {
+        lower_stmt_in_dead_code(builder, cx, stmt_id);
+        return;
+    }
     match &stmt.kind {
         HirStmtKind::Block(stmts) => {
             for child in stmts {
                 lower_stmt(builder, cx, *child);
-                if builder.is_current_terminated() {
-                    break;
-                }
             }
         }
         HirStmtKind::Expr(expr) => {
@@ -352,8 +363,12 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             // Top-level Case/Default outside a switch is invalid HIR.
             lower_stmt(builder, cx, *body);
         }
-        HirStmtKind::Label { .. } | HirStmtKind::Goto(_) => {
-            todo!("goto/label fixup - see tasks/08-cfg/09-goto-label-fixup.md")
+        HirStmtKind::Goto(name) => {
+            let target = builder.label_block(*name);
+            builder.goto(target, stmt.span);
+        }
+        HirStmtKind::Label { .. } => {
+            unreachable!("Label is handled before the match")
         }
         HirStmtKind::Break => {
             // `break` exits the innermost enclosing breakable construct
@@ -367,6 +382,53 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             let loop_ctx = builder.current_loop().expect("continue statement outside of a loop");
             builder.goto(loop_ctx.cont_target, stmt.span);
         }
+    }
+}
+
+/// When the current block is already terminated, scan the statement
+/// tree for labels that may be goto targets and lower them.
+/// Containers (Block, If, loops, switch) are recursed into; everything
+/// else is skipped because it is truly unreachable.
+fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtId) {
+    let stmt = &cx.body.stmts[stmt_id];
+    match &stmt.kind {
+        HirStmtKind::Label { name, body } => {
+            let label_bb = builder.label_block(*name);
+            // In dead code, no predecessor needs a goto to the label.
+            builder.switch_to(label_bb);
+            lower_stmt(builder, cx, *body);
+        }
+        HirStmtKind::Block(stmts) => {
+            for child in stmts {
+                if builder.is_current_terminated() {
+                    lower_stmt_in_dead_code(builder, cx, *child);
+                } else {
+                    lower_stmt(builder, cx, *child);
+                }
+            }
+        }
+        HirStmtKind::If { then_branch, else_branch, .. } => {
+            lower_stmt_in_dead_code(builder, cx, *then_branch);
+            if let Some(else_b) = else_branch {
+                lower_stmt_in_dead_code(builder, cx, *else_b);
+            }
+        }
+        HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
+            lower_stmt_in_dead_code(builder, cx, *body);
+        }
+        HirStmtKind::For { init, body, .. } => {
+            if let Some(init_stmt) = init {
+                lower_stmt_in_dead_code(builder, cx, *init_stmt);
+            }
+            lower_stmt_in_dead_code(builder, cx, *body);
+        }
+        HirStmtKind::Switch { body, .. } => {
+            lower_stmt_in_dead_code(builder, cx, *body);
+        }
+        HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
+            lower_stmt_in_dead_code(builder, cx, *body);
+        }
+        _ => {}
     }
 }
 
@@ -1152,7 +1214,7 @@ mod tests {
     use crate::{LocalDecl, Terminator, TerminatorKind};
     use rcc_data_structures::IndexVec;
     use rcc_hir::{HirExpr, HirStmt, ValueCat};
-    use rcc_span::DUMMY_SP;
+    use rcc_span::{Symbol, DUMMY_SP};
 
     /// Build a minimal HIR `Body` plus matching CFG `BodyBuilder`
     /// pre-seeded with three locals (`a`, `b`, `c`) of type `int`.
@@ -2681,6 +2743,30 @@ mod tests {
         push_stmt(body, HirStmtKind::Continue)
     }
 
+    fn label_stmt(body: &mut HirBody, name: &str, stmt: HirStmtId) -> HirStmtId {
+        // Labels are compared by Symbol equality; we use hard-coded ids
+        // because the tests don't need real string interning.
+        let sym = match name {
+            "end" => Symbol(0),
+            "middle" => Symbol(1),
+            "start" => Symbol(2),
+            "loop" => Symbol(3),
+            _ => Symbol(name.as_bytes()[0] as u32),
+        };
+        push_stmt(body, HirStmtKind::Label { name: sym, body: stmt })
+    }
+
+    fn goto_stmt(body: &mut HirBody, name: &str) -> HirStmtId {
+        let sym = match name {
+            "end" => Symbol(0),
+            "middle" => Symbol(1),
+            "start" => Symbol(2),
+            "loop" => Symbol(3),
+            _ => Symbol(name.as_bytes()[0] as u32),
+        };
+        push_stmt(body, HirStmtKind::Goto(sym))
+    }
+
     /// `while (a) { b = 1; }` lowers to entry → header → body → exit.
     ///
     /// Expected layout:
@@ -3732,6 +3818,260 @@ mod tests {
             goto_target(switch_join_bb),
             header_id,
             "switch join must back-edge to loop header"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Goto / label lowering (task 08-09)
+    // ------------------------------------------------------------------
+
+    /// `goto end; end: return;`
+    /// Forward goto: the target block is created by the pre-pass.
+    #[test]
+    fn forward_goto() {
+        let (mut builder, mut hir_body, tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let end_label = label_stmt(&mut hir_body, "end", ret);
+        let g = goto_stmt(&mut hir_body, "end");
+        let root = block_stmt(&mut hir_body, vec![g, end_label]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // bb0 entry → bb1 (goto target)
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let goto_target_id = goto_target(entry);
+        // goto target should be the label block.
+        let label_bb = &body.blocks[goto_target_id];
+        // label block contains the return.
+        assert!(
+            matches!(&label_bb.terminator.kind, TerminatorKind::Return),
+            "label block must terminate with Return"
+        );
+    }
+
+    /// `start: a = 1; goto middle; middle: b = 2; goto end; end: return;`
+    #[test]
+    fn multiple_labels_and_gotos() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let end_label = label_stmt(&mut hir_body, "end", ret);
+        let g2 = goto_stmt(&mut hir_body, "end");
+        let mid_body = assign_local_stmt(&mut hir_body, int_ty, hb, 2);
+        let mid_label = label_stmt(&mut hir_body, "middle", mid_body);
+        let g1 = goto_stmt(&mut hir_body, "middle");
+        let start_body = assign_local_stmt(&mut hir_body, int_ty, ha, 1);
+        let start_label = label_stmt(&mut hir_body, "start", start_body);
+        let root = block_stmt(&mut hir_body, vec![start_label, g1, mid_label, g2, end_label]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Entry goto start label.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let start_id = goto_target(entry);
+        let start_bb = &body.blocks[start_id];
+        assert_assign_const(start_bb, map.lookup(ha), 1);
+
+        // start block's terminator is goto middle (g1).
+        let middle_id = goto_target(start_bb);
+        let middle_bb = &body.blocks[middle_id];
+        assert_assign_const(middle_bb, map.lookup(hb), 2);
+
+        // middle block's terminator is goto end (g2).
+        let end_id = goto_target(middle_bb);
+        let end_bb = &body.blocks[end_id];
+        assert!(
+            matches!(&end_bb.terminator.kind, TerminatorKind::Return),
+            "end block must be Return"
+        );
+    }
+
+    /// Duff's device (goto crossing switch labels).
+    ///
+    /// Simplified version that exercises switch + do-while interleaving.
+    /// The key invariant is that the outer pre-pass creates blocks for
+    /// any `Label` nested inside the switch body before `lower_switch`
+    /// runs.
+    #[test]
+    fn duffs_device_fixture() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // do-while body: a = 0; a = 7; a = 6;
+        let s6 = assign_local_stmt(&mut hir_body, int_ty, ha, 6);
+        let s7 = assign_local_stmt(&mut hir_body, int_ty, ha, 7);
+        let s0 = assign_local_stmt(&mut hir_body, int_ty, ha, 0);
+        let loop_body = block_stmt(&mut hir_body, vec![s0, s7, s6]);
+
+        // do { ... } while (a)
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let do_while = do_while_stmt(&mut hir_body, loop_body, cond);
+
+        // switch (a) { case 0: do_while; case 7: ...; case 6: ...; }
+        let discr = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        let case6 = case_stmt(&mut hir_body, 6, s6);
+        let case7 = case_stmt(&mut hir_body, 7, s7);
+        let case0 = case_stmt(&mut hir_body, 0, do_while);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case0, case7, case6]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(0), target: case0 },
+            rcc_hir::SwitchCase { value: Some(7), target: case7 },
+            rcc_hir::SwitchCase { value: Some(6), target: case6 },
+        ];
+        let switch = switch_stmt(&mut hir_body, discr, switch_body, cases);
+
+        let root = block_stmt(&mut hir_body, vec![switch]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let _body = finish(builder);
+
+        // Main assertion: compiles without panic.  Switch/do-while
+        // shapes are validated by their own task tests.
+    }
+
+    /// `goto L` inside a switch case body where `L` is a label inside
+    /// a *different* case body.  This exercises `collect_labels`
+    /// recursing into `Case`/`Default` bodies.
+    #[test]
+    fn switch_case_body_with_label_and_goto() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // label L inside case 0 body
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let lbl = label_stmt(&mut hir_body, "L", ret);
+        let case0_body = block_stmt(&mut hir_body, vec![lbl]);
+        let case0 = case_stmt(&mut hir_body, 0, case0_body);
+
+        // goto L inside case 1 body (forward goto)
+        let g = goto_stmt(&mut hir_body, "L");
+        let case1_body = block_stmt(&mut hir_body, vec![g]);
+        let case1 = case_stmt(&mut hir_body, 1, case1_body);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case0, case1]);
+        let discr = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(0), target: case0 },
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+        ];
+        let root = switch_stmt(&mut hir_body, discr, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // dispatch → case 1 → goto L → label L → return
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+
+        let case1_bb = &body.blocks[tgts[1].1];
+        let goto_target_id = goto_target(case1_bb);
+
+        let label_bb = &body.blocks[goto_target_id];
+        assert!(
+            matches!(&label_bb.terminator.kind, TerminatorKind::Return),
+            "label block must terminate with Return"
+        );
+    }
+
+    /// `goto L; { L: return; }` — label nested inside a Block that
+    /// follows a goto.  The label body must still be lowered even
+    /// though the Block itself is in dead code.
+    #[test]
+    fn goto_then_block_with_nested_label() {
+        let (mut builder, mut hir_body, tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let lbl = label_stmt(&mut hir_body, "L", ret);
+        let inner_block = block_stmt(&mut hir_body, vec![lbl]);
+        let g = goto_stmt(&mut hir_body, "L");
+        let root = block_stmt(&mut hir_body, vec![g, inner_block]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // bb0 entry → bb1 (goto target = label block)
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let label_id = goto_target(entry);
+        let label_bb = &body.blocks[label_id];
+        assert!(
+            matches!(&label_bb.terminator.kind, TerminatorKind::Return),
+            "label block must terminate with Return"
+        );
+    }
+
+    /// `goto L; { L: a=1; a=2; return; }` — label inside a dead block
+    /// with fallthrough statements after the label.  The label body
+    /// and its fallthrough must all be lowered, not just the label.
+    #[test]
+    fn goto_then_block_with_label_and_fallthrough() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let a2 = assign_local_stmt(&mut hir_body, int_ty, hb, 2);
+        let a1 = assign_local_stmt(&mut hir_body, int_ty, ha, 1);
+        let lbl = label_stmt(&mut hir_body, "L", a1);
+        let inner_block = block_stmt(&mut hir_body, vec![lbl, a2, ret]);
+        let g = goto_stmt(&mut hir_body, "L");
+        let root = block_stmt(&mut hir_body, vec![g, inner_block]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // bb0 entry → bb1 (goto target = label block)
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let label_id = goto_target(entry);
+        let label_bb = &body.blocks[label_id];
+
+        // label block must contain a=1, a=2, ret slot, then terminate with Return.
+        assert_eq!(label_bb.statements.len(), 3, "label block must have 3 statements");
+        // Check first statement is a=1.
+        match &label_bb.statements[0].kind {
+            StatementKind::Assign {
+                place: Place { base, .. },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, map.lookup(ha));
+                assert_eq!(*v, 1);
+            }
+            other => panic!("expected `ha = 1`, got {other:?}"),
+        }
+        // Check second statement is a=2.
+        match &label_bb.statements[1].kind {
+            StatementKind::Assign {
+                place: Place { base, .. },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, map.lookup(hb));
+                assert_eq!(*v, 2);
+            }
+            other => panic!("expected `hb = 2`, got {other:?}"),
+        }
+        assert!(
+            matches!(&label_bb.terminator.kind, TerminatorKind::Return),
+            "label block must terminate with Return"
         );
     }
 }

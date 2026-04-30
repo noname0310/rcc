@@ -96,6 +96,9 @@ pub struct BodyBuilder {
     /// Stack of enclosing breakable constructs (loops and switches).
     /// `break` targets the top of this stack, preserving nesting order.
     break_stack: Vec<BasicBlockId>,
+    /// Label name → block id map. Populated by a pre-pass so forward
+    /// `goto` can be resolved in a single lowering pass.
+    label_map: FxHashMap<Symbol, BasicBlockId>,
 }
 
 impl Default for BodyBuilder {
@@ -123,6 +126,7 @@ impl BodyBuilder {
             phase: AllocPhase::ReturnSlot,
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
+            label_map: FxHashMap::default(),
         }
     }
 
@@ -362,6 +366,63 @@ impl BodyBuilder {
     /// Convenience: terminate the current block with a plain `Goto(target)`.
     pub fn goto(&mut self, target: BasicBlockId, span: Span) {
         self.terminate(Terminator { kind: TerminatorKind::Goto(target), span });
+    }
+
+    /// Register a label → block mapping. Called by the pre-pass that
+    /// scans the HIR for `Label` statements before lowering begins.
+    pub fn insert_label(&mut self, name: Symbol, block: BasicBlockId) {
+        self.label_map.insert(name, block);
+    }
+
+    /// Look up the block id for a label name.
+    ///
+    /// # Panics
+    /// Panics if the label was not registered by the pre-pass.
+    #[must_use]
+    pub fn label_block(&self, name: Symbol) -> BasicBlockId {
+        self.label_map.get(&name).copied().unwrap_or_else(|| panic!("unknown label: {name:?}"))
+    }
+
+    /// Pre-pass: scan the HIR body for `Label` statements and create an
+    /// empty block for each one.  This lets forward `goto` resolve to a
+    /// [`BasicBlockId`] during the single lowering pass that follows.
+    pub fn collect_labels(&mut self, hir_body: &rcc_hir::Body, stmt_id: rcc_hir::HirStmtId) {
+        use rcc_hir::HirStmtKind;
+        let stmt = &hir_body.stmts[stmt_id];
+        match &stmt.kind {
+            HirStmtKind::Label { name, body } => {
+                let bb = self.new_block();
+                self.insert_label(*name, bb);
+                self.collect_labels(hir_body, *body);
+            }
+            HirStmtKind::Block(stmts) => {
+                for &s in stmts {
+                    self.collect_labels(hir_body, s);
+                }
+            }
+            HirStmtKind::If { then_branch, else_branch, .. } => {
+                self.collect_labels(hir_body, *then_branch);
+                if let Some(else_b) = else_branch {
+                    self.collect_labels(hir_body, *else_b);
+                }
+            }
+            HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
+                self.collect_labels(hir_body, *body);
+            }
+            HirStmtKind::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    self.collect_labels(hir_body, *init_stmt);
+                }
+                self.collect_labels(hir_body, *body);
+            }
+            HirStmtKind::Switch { body, .. } => {
+                self.collect_labels(hir_body, *body);
+            }
+            HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
+                self.collect_labels(hir_body, *body);
+            }
+            _ => {}
+        }
     }
 
     /// Finish the body.
