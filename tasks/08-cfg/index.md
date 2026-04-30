@@ -17,7 +17,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [07-loop-lowering](07-loop-lowering.md)
 - [x] [08-switch-lowering](08-switch-lowering.md)
 - [x] [09-goto-label-fixup](09-goto-label-fixup.md)
-- [ ] [10-call-lowering](10-call-lowering.md)
+- [x] [10-call-lowering](10-call-lowering.md)
 - [ ] [11-init-lowering](11-init-lowering.md)
 - [ ] [12-storage-live-dead](12-storage-live-dead.md)
 - [ ] [13-vla-lowering](13-vla-lowering.md)

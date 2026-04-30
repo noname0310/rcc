@@ -1,3 +1,5 @@
+> ✅ done — 2026-04-30
+
 # 08-10: Call lowering
 
 **Phase:** 08-cfg    **Depends on:** 08-03    **Milestone:** M3

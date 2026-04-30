@@ -227,10 +227,36 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             // lvalue, viewed as an rvalue (C99 §6.5.16p3).
             Operand::Copy(dest)
         }
-        HirExprKind::Call { .. } => {
-            // Call lowering needs a terminator + fresh continuation
-            // block; that is the territory of task 08-10.
-            todo!("call lowering — see tasks/08-cfg/10-call-lowering.md")
+        HirExprKind::Call { callee, args } => {
+            // Evaluate callee and arguments left-to-right.
+            let callee_op = lower_as_rvalue(builder, cx, *callee);
+            let arg_ops: Vec<Operand> =
+                args.iter().map(|a| lower_as_rvalue(builder, cx, *a)).collect();
+
+            // Void calls produce no value.
+            let is_void = matches!(cx.tcx.get(ty), Ty::Void);
+
+            let (destination, result) = if is_void {
+                (None, Operand::Const(Const { kind: ConstKind::Int(0), ty }))
+            } else {
+                let dest_local = builder.alloc_temp(ty, span);
+                let dest = Place { base: dest_local, projection: Vec::new() };
+                (Some(dest.clone()), Operand::Copy(dest))
+            };
+
+            // Create successor block and emit the Call terminator.
+            let successor = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::Call {
+                    callee: callee_op,
+                    args: arg_ops,
+                    destination,
+                    target: Some(successor),
+                },
+                span,
+            });
+            builder.switch_to(successor);
+            result
         }
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
@@ -1212,6 +1238,7 @@ fn _unused_imports() {
 mod tests {
     use super::*;
     use crate::{LocalDecl, Terminator, TerminatorKind};
+    use rcc_data_structures::Idx;
     use rcc_data_structures::IndexVec;
     use rcc_hir::{HirExpr, HirStmt, ValueCat};
     use rcc_span::{Symbol, DUMMY_SP};
@@ -4073,5 +4100,151 @@ mod tests {
             matches!(&label_bb.terminator.kind, TerminatorKind::Return),
             "label block must terminate with Return"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Call lowering helpers (task 08-10)
+    // ------------------------------------------------------------------
+
+    /// Create a `DefRef` expression pointing at an arbitrary [`DefId`].
+    fn def_ref_expr(body: &mut HirBody, ty: TyId, def: rcc_hir::DefId) -> HirExprId {
+        push_expr(body, ty, ValueCat::RValue, HirExprKind::DefRef(def))
+    }
+
+    /// Create a `Call` expression.
+    fn call_expr(
+        body: &mut HirBody,
+        ret_ty: TyId,
+        callee: HirExprId,
+        args: Vec<HirExprId>,
+    ) -> HirExprId {
+        push_expr(body, ret_ty, ValueCat::RValue, HirExprKind::Call { callee, args })
+    }
+
+    /// Non-void call: `f(1)` returns a value into a fresh temporary.
+    #[test]
+    fn call_non_void_basic() {
+        let (mut builder, mut hir_body, mut tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // callee: arbitrary DefId (say a function f) with a function type
+        let func_ty = tcx.intern(rcc_hir::Ty::Func {
+            ret: int_ty,
+            params: Vec::new(),
+            variadic: false,
+            proto: true,
+        });
+        let func_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(func_ty)));
+        let callee_def = rcc_hir::DefId::new(42);
+        let callee = def_ref_expr(&mut hir_body, func_ptr_ty, callee_def);
+
+        // arg: literal 1
+        let arg = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(1));
+
+        // f(1)
+        let call = call_expr(&mut hir_body, int_ty, callee, vec![arg]);
+
+        // Lower as rvalue — must produce an Operand without panicking.
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let result = lower_as_rvalue(&mut builder, &cx, call);
+
+        // The result should be Copy(dest) where dest is a new temporary.
+        match result {
+            Operand::Copy(Place { .. }) => {
+                // Finish the builder to get the Body.
+                let body = finish(builder);
+                // Find the block that has the Call terminator.
+                let has_call = body
+                    .blocks
+                    .iter()
+                    .any(|bb| matches!(&bb.terminator.kind, TerminatorKind::Call { .. }));
+                assert!(has_call, "body must contain a Call terminator");
+            }
+            other => panic!("expected Copy(Place), got {other:?}"),
+        }
+    }
+
+    /// Void call: `g(42)` where g returns void — destination is None.
+    #[test]
+    fn call_void_basic() {
+        let (mut builder, mut hir_body, mut tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let func_ty = tcx.intern(rcc_hir::Ty::Func {
+            ret: tcx.void,
+            params: Vec::new(),
+            variadic: false,
+            proto: true,
+        });
+        let func_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(func_ty)));
+        let callee_def = rcc_hir::DefId::new(99);
+        let callee = def_ref_expr(&mut hir_body, func_ptr_ty, callee_def);
+
+        let arg = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(42));
+        let call = call_expr(&mut hir_body, tcx.void, callee, vec![arg]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let result = lower_as_rvalue(&mut builder, &cx, call);
+
+        // Void calls return a dummy Int(0) operand.
+        match result {
+            Operand::Const(Const { kind: ConstKind::Int(0), .. }) => {}
+            other => panic!("expected dummy Int(0), got {other:?}"),
+        }
+
+        let body = finish(builder);
+        // The Call terminator must have destination = None.
+        let call_term = body.blocks.iter().find_map(|bb| match &bb.terminator.kind {
+            TerminatorKind::Call { destination, .. } => Some(destination),
+            _ => None,
+        });
+        assert!(call_term.is_some(), "body must contain a Call terminator");
+        assert!(call_term.unwrap().is_none(), "void call must have None destination");
+    }
+
+    /// Variadic call: `printf(fmt, x)` — args passed through as-is.
+    #[test]
+    fn call_variadic() {
+        let (mut builder, mut hir_body, mut tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // printf type: int(const char*, ...) (simplified)
+        let char_ty = tcx.intern(rcc_hir::Ty::Int { rank: IntRank::Char, signed: true });
+        let char_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(char_ty)));
+        let func_ty = tcx.intern(rcc_hir::Ty::Func {
+            ret: int_ty,
+            params: vec![char_ptr_ty],
+            variadic: true,
+            proto: true,
+        });
+        let func_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(func_ty)));
+        let callee_def = rcc_hir::DefId::new(7);
+        let callee = def_ref_expr(&mut hir_body, func_ptr_ty, callee_def);
+
+        // args: a string literal (as DefRef) and an int
+        let fmt_arg = push_expr(
+            &mut hir_body,
+            char_ptr_ty,
+            ValueCat::RValue,
+            HirExprKind::StringRef(rcc_hir::DefId::new(100)),
+        );
+        let int_arg = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(7));
+
+        let call = call_expr(&mut hir_body, int_ty, callee, vec![fmt_arg, int_arg]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let result = lower_as_rvalue(&mut builder, &cx, call);
+
+        match result {
+            Operand::Copy(Place { .. }) => {}
+            other => panic!("expected Copy(Place), got {other:?}"),
+        }
+
+        let body = finish(builder);
+        let call_term = body.blocks.iter().find_map(|bb| match &bb.terminator.kind {
+            TerminatorKind::Call { args, .. } => Some(args.len()),
+            _ => None,
+        });
+        assert_eq!(call_term, Some(2), "variadic call must pass both args");
     }
 }
