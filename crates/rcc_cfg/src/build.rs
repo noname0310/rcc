@@ -90,9 +90,12 @@ pub struct BodyBuilder {
     /// Tracks how far the local-allocation pipeline has advanced. See
     /// [`AllocPhase`] for the staged convention.
     phase: AllocPhase,
-    /// Stack of enclosing loop contexts. `break` / `continue` targets
-    /// are resolved by peeking the top of this stack.
+    /// Stack of enclosing loop contexts. `continue` target is resolved
+    /// by peeking the top of this stack.
     loop_stack: Vec<LoopCtx>,
+    /// Stack of enclosing breakable constructs (loops and switches).
+    /// `break` targets the top of this stack, preserving nesting order.
+    break_stack: Vec<BasicBlockId>,
 }
 
 impl Default for BodyBuilder {
@@ -119,6 +122,7 @@ impl BodyBuilder {
             current: entry,
             phase: AllocPhase::ReturnSlot,
             loop_stack: Vec::new(),
+            break_stack: Vec::new(),
         }
     }
 
@@ -316,6 +320,7 @@ impl BodyBuilder {
     /// loop exit block.
     pub fn push_loop(&mut self, cont_target: BasicBlockId, break_target: BasicBlockId) {
         self.loop_stack.push(LoopCtx { cont_target, break_target });
+        self.break_stack.push(break_target);
     }
 
     /// Pop the current loop context.
@@ -324,6 +329,7 @@ impl BodyBuilder {
     /// Panics if the loop stack is empty (i.e., not inside a loop).
     pub fn pop_loop(&mut self) {
         self.loop_stack.pop().expect("pop_loop: no loop context to pop");
+        self.break_stack.pop().expect("pop_loop: break_stack mismatch");
     }
 
     /// Get the current loop context (top of stack), or `None` if not
@@ -331,6 +337,26 @@ impl BodyBuilder {
     #[must_use]
     pub fn current_loop(&self) -> Option<&LoopCtx> {
         self.loop_stack.last()
+    }
+
+    /// Push a breakable construct (switch join block) onto the break stack.
+    pub fn push_switch(&mut self, join_block: BasicBlockId) {
+        self.break_stack.push(join_block);
+    }
+
+    /// Pop the current switch context from the break stack.
+    ///
+    /// # Panics
+    /// Panics if the break stack is empty.
+    pub fn pop_switch(&mut self) {
+        self.break_stack.pop().expect("pop_switch: no switch context to pop");
+    }
+
+    /// Get the current break target (top of stack), or `None` if not
+    /// inside a breakable construct.
+    #[must_use]
+    pub fn current_break_target(&self) -> Option<BasicBlockId> {
+        self.break_stack.last().copied()
     }
 
     /// Convenience: terminate the current block with a plain `Goto(target)`.

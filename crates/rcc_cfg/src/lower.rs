@@ -32,8 +32,8 @@ use rcc_hir::{
 use rcc_span::Span;
 
 use crate::{
-    BinOp, BodyBuilder, CastKind, Const, ConstKind, Local, Operand, Place, Projection, Rvalue,
-    Statement, StatementKind, Terminator, TerminatorKind, UnOp,
+    BasicBlockId, BinOp, BodyBuilder, CastKind, Const, ConstKind, Local, Operand, Place,
+    Projection, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnOp,
 };
 
 /// Translation table from HIR local ids to CFG local ids.
@@ -344,15 +344,24 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::For { init, cond, step, body } => {
             lower_for(builder, cx, stmt.span, *init, *cond, *step, *body);
         }
-        HirStmtKind::Switch { .. } | HirStmtKind::Case { .. } | HirStmtKind::Default { .. } => {
-            todo!("switch lowering - see tasks/08-cfg/08-switch-lowering.md")
+        HirStmtKind::Switch { cond, body, cases } => {
+            lower_switch(builder, cx, stmt.span, *cond, *body, cases);
+        }
+        HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
+            // Reached via `lower_switch` -> `lower_stmt(case.target)`.
+            // Top-level Case/Default outside a switch is invalid HIR.
+            lower_stmt(builder, cx, *body);
         }
         HirStmtKind::Label { .. } | HirStmtKind::Goto(_) => {
             todo!("goto/label fixup - see tasks/08-cfg/09-goto-label-fixup.md")
         }
         HirStmtKind::Break => {
-            let loop_ctx = builder.current_loop().expect("break statement outside of a loop");
-            builder.goto(loop_ctx.break_target, stmt.span);
+            // `break` exits the innermost enclosing breakable construct
+            // (loop or switch).  The break stack preserves nesting order.
+            let break_target = builder
+                .current_break_target()
+                .expect("break statement outside of a loop or switch");
+            builder.goto(break_target, stmt.span);
         }
         HirStmtKind::Continue => {
             let loop_ctx = builder.current_loop().expect("continue statement outside of a loop");
@@ -805,6 +814,111 @@ fn lower_for(
 
     builder.pop_loop();
     builder.switch_to(exit);
+}
+
+/// Lower a `switch (cond) { case ...: ... default: ... }` statement.
+///
+/// The HIR `Switch` node carries a pre-collected `cases` table that maps
+/// each `case` value (or `None` for `default`) to the corresponding
+/// [`Case`](`/`Default`) statement id.
+///
+/// Emits the canonical switch structure:
+///
+/// ```text
+/// current:
+///   discr = lower(cond)
+///   goto dispatch
+///
+/// dispatch:
+///   switch_int discr {
+///     case val_0: bb_case_0,
+///     case val_1: bb_case_1,
+///     ...
+///     default:    bb_default,   ; or join if no default
+///   }
+///
+/// bb_case_0:
+///   lower(case_body_0)
+///   goto bb_case_1    ; fallthrough (if not terminated)
+///
+/// bb_case_1:
+///   lower(case_body_1)
+///   goto join         ; fallthrough (if not terminated)
+///
+/// ...
+///
+/// join:
+///   ; cursor lands here
+/// ```
+///
+/// `break` inside a switch targets the join block.
+fn lower_switch(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    cond: HirExprId,
+    _body: HirStmtId,
+    cases: &[rcc_hir::SwitchCase],
+) {
+    // Evaluate the discriminant.
+    let discr = lower_as_rvalue(builder, cx, cond);
+
+    // Current block → dispatch block.
+    let dispatch = builder.new_block();
+    builder.goto(dispatch, span);
+
+    builder.switch_to(dispatch);
+
+    if cases.is_empty() {
+        // No cases: unconditional jump to join.
+        let join = builder.new_block();
+        builder.goto(join, span);
+        builder.switch_to(join);
+        return;
+    }
+
+    // Create a block for each case.
+    let case_blocks: Vec<BasicBlockId> = cases.iter().map(|_| builder.new_block()).collect();
+
+    // Join block (break target) — created after case blocks so IDs are
+    // predictable and tests can assert on them.
+    let join = builder.new_block();
+
+    // Push switch context so `break` targets the join block.
+    builder.push_switch(join);
+
+    // Build dispatch targets: (value, block) pairs.
+    // C99 allows `default:` anywhere; we normalise it to the last
+    // position so codegen can always treat `targets.last()` as the
+    // default arm.  `cases` is assumed to be in source order (typeck
+    // guarantees this).
+    let mut targets: Vec<(Option<i128>, BasicBlockId)> = Vec::with_capacity(cases.len() + 1);
+    let mut default_block: Option<BasicBlockId> = None;
+    for (case, &block) in cases.iter().zip(&case_blocks) {
+        match case.value {
+            Some(v) => targets.push((Some(v), block)),
+            None => default_block = Some(block), // multiple defaults rejected by typeck
+        }
+    }
+    targets.push((None, default_block.unwrap_or(join)));
+
+    builder.terminate(Terminator { kind: TerminatorKind::SwitchInt { discr, targets }, span });
+
+    // Lower each case body and wire fallthroughs.
+    for (i, case) in cases.iter().enumerate() {
+        let block = case_blocks[i];
+        builder.switch_to(block);
+        lower_stmt(builder, cx, case.target);
+
+        // Fallthrough: if not terminated, go to the next case block or join.
+        if !builder.is_current_terminated() {
+            let fallthrough = if i + 1 < case_blocks.len() { case_blocks[i + 1] } else { join };
+            builder.goto(fallthrough, span);
+        }
+    }
+
+    builder.pop_switch();
+    builder.switch_to(join);
 }
 
 /// Build a typed scalar zero suitable for `BinOp::Ne` against `ty`.
@@ -3157,5 +3271,467 @@ mod tests {
             "break in inner loop must target inner exit, not outer exit"
         );
         assert_ne!(inner_exit, outer_exit, "inner and outer exit must be different blocks");
+    }
+
+    // ── Task 08-08: switch lowering ─────────────────────────────────────
+
+    /// Helper: push a `Case { value, body }` statement.
+    fn case_stmt(body: &mut HirBody, value: i128, case_body: HirStmtId) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Case { value: Some(value), body: case_body })
+    }
+
+    /// Helper: push a `Default { body }` statement.
+    fn default_stmt(body: &mut HirBody, default_body: HirStmtId) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Default { body: default_body })
+    }
+
+    /// Helper: push a `Switch { cond, body, cases }` statement.
+    fn switch_stmt(
+        body: &mut HirBody,
+        cond: HirExprId,
+        switch_body: HirStmtId,
+        cases: Vec<rcc_hir::SwitchCase>,
+    ) -> HirStmtId {
+        push_stmt(body, HirStmtKind::Switch { cond, body: switch_body, cases })
+    }
+
+    /// Helper: extract SwitchInt targets as a Vec<(Option<i128>, BasicBlockId)>.
+    fn switch_targets(block: &crate::BasicBlock) -> &[(Option<i128>, crate::BasicBlockId)] {
+        match &block.terminator.kind {
+            TerminatorKind::SwitchInt { targets, .. } => targets,
+            other => panic!("expected SwitchInt, got {other:?}"),
+        }
+    }
+
+    /// `switch (x) { case 1: a=10; break; case 2: b=20; default: c=30; }`
+    ///
+    /// Expected layout:
+    ///   bb0 (entry):    goto bb1 (dispatch)
+    ///   bb1 (dispatch): switch x { 1→bb2, 2→bb3, None→bb4 }
+    ///   bb2 (case 1):   a=10; goto bb5 (join, via break)
+    ///   bb3 (case 2):   b=20; goto bb4 (fallthrough to default)
+    ///   bb4 (default):  c=30; goto bb5 (fallthrough to join)
+    ///   bb5 (join):     (cursor)
+    #[test]
+    fn switch_basic_with_default() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        // case 1: a = 10; break;
+        let case1_body = assign_local_stmt(&mut hir_body, int_ty, ha, 10);
+        let brk = break_stmt(&mut hir_body);
+        let case1_inner = block_stmt(&mut hir_body, vec![case1_body, brk]);
+        let case1 = case_stmt(&mut hir_body, 1, case1_inner);
+
+        // case 2: b = 20;
+        let case2_body = assign_local_stmt(&mut hir_body, int_ty, hb, 20);
+        let case2 = case_stmt(&mut hir_body, 2, case2_body);
+
+        // default: c = 30;
+        let def_body = assign_local_stmt(&mut hir_body, int_ty, hc, 30);
+        let def = default_stmt(&mut hir_body, def_body);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case1, case2, def]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+            rcc_hir::SwitchCase { value: Some(2), target: case2 },
+            rcc_hir::SwitchCase { value: None, target: def },
+        ];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // bb0 (entry) → dispatch.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+
+        // bb1 (dispatch): SwitchInt with 3 targets.
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+        assert_eq!(tgts.len(), 3, "dispatch must have 3 targets");
+        assert_eq!(tgts[0], (Some(1), crate::BasicBlockId(2)), "target[0] = case 1");
+        assert_eq!(tgts[1], (Some(2), crate::BasicBlockId(3)), "target[1] = case 2");
+        assert_eq!(tgts[2], (None, crate::BasicBlockId(4)), "target[2] = default");
+
+        // bb2 (case 1): a=10; break → join.
+        let case1_bb = &body.blocks[crate::BasicBlockId(2)];
+        assert_assign_const(case1_bb, map.lookup(ha), 10);
+        let join_id = goto_target(case1_bb);
+
+        // bb3 (case 2): b=20; fallthrough → default.
+        let case2_bb = &body.blocks[crate::BasicBlockId(3)];
+        assert_assign_const(case2_bb, map.lookup(hb), 20);
+        assert_eq!(
+            goto_target(case2_bb),
+            crate::BasicBlockId(4),
+            "case 2 must fallthrough to default"
+        );
+
+        // bb4 (default): c=30; fallthrough → join.
+        let default_bb = &body.blocks[crate::BasicBlockId(4)];
+        assert_assign_const(default_bb, map.lookup(hc), 30);
+        assert_eq!(goto_target(default_bb), join_id, "default must fallthrough to join");
+
+        // bb5 (join): empty, cursor lands here.
+        assert!(body.blocks[join_id].statements.is_empty());
+    }
+
+    /// Fallthrough: `case 1: case 2: a=5; break;` — case 1 falls through
+    /// to case 2's body.
+    #[test]
+    fn switch_case_fallthrough() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        // case 1: (empty body — falls through)
+        let case1_inner = push_stmt(&mut hir_body, HirStmtKind::Null);
+        let case1 = case_stmt(&mut hir_body, 1, case1_inner);
+
+        // case 2: a=5; break;
+        let case2_body = assign_local_stmt(&mut hir_body, int_ty, ha, 5);
+        let brk = break_stmt(&mut hir_body);
+        let case2_inner = block_stmt(&mut hir_body, vec![case2_body, brk]);
+        let case2 = case_stmt(&mut hir_body, 2, case2_inner);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case1, case2]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+            rcc_hir::SwitchCase { value: Some(2), target: case2 },
+        ];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+        assert_eq!(tgts.len(), 3, "dispatch must have 3 targets (1, 2, default→join)");
+
+        // case 1 block: empty body, falls through to case 2.
+        let case1_bb = &body.blocks[tgts[0].1];
+        assert!(case1_bb.statements.is_empty(), "case 1 body is empty");
+        assert_eq!(goto_target(case1_bb), tgts[1].1, "case 1 must fallthrough to case 2");
+
+        // case 2 block: a=5; break → join.
+        let case2_bb = &body.blocks[tgts[1].1];
+        assert_assign_const(case2_bb, map.lookup(ha), 5);
+        let join_id = goto_target(case2_bb);
+        assert_eq!(join_id, crate::BasicBlockId(4), "break must target join");
+    }
+
+    /// Nested switch: inner `break` targets inner join, not outer join.
+    #[test]
+    fn switch_nested_inner_break_targets_inner_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // Outer switch discriminant.
+        let outer_x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        // Inner switch discriminant.
+        let inner_x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+
+        // Inner case 1: c=99; break; (break targets inner join)
+        let inner_case_body = assign_local_stmt(&mut hir_body, int_ty, hc, 99);
+        let inner_brk = break_stmt(&mut hir_body);
+        let inner_case_inner = block_stmt(&mut hir_body, vec![inner_case_body, inner_brk]);
+        let inner_case = case_stmt(&mut hir_body, 1, inner_case_inner);
+
+        // Inner switch body.
+        let inner_body = block_stmt(&mut hir_body, vec![inner_case]);
+        let inner_cases = vec![rcc_hir::SwitchCase { value: Some(1), target: inner_case }];
+        let inner_switch = switch_stmt(&mut hir_body, inner_x, inner_body, inner_cases);
+
+        // Outer case 1: contains the inner switch.
+        let outer_case = case_stmt(&mut hir_body, 1, inner_switch);
+
+        // Outer switch body.
+        let outer_body = block_stmt(&mut hir_body, vec![outer_case]);
+        let outer_cases = vec![rcc_hir::SwitchCase { value: Some(1), target: outer_case }];
+        let root = switch_stmt(&mut hir_body, outer_x, outer_body, outer_cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Outer dispatch.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let outer_dispatch_id = goto_target(entry);
+        let outer_dispatch_bb = &body.blocks[outer_dispatch_id];
+        let outer_tgts = switch_targets(outer_dispatch_bb);
+        assert_eq!(outer_tgts.len(), 2, "outer dispatch: 1 target + default→join");
+
+        // Outer case 1 block → inner dispatch.
+        let outer_case1_bb = &body.blocks[outer_tgts[0].1];
+        let inner_dispatch_id = goto_target(outer_case1_bb);
+        let inner_dispatch_bb = &body.blocks[inner_dispatch_id];
+        let inner_tgts = switch_targets(inner_dispatch_bb);
+        assert_eq!(inner_tgts.len(), 2, "inner dispatch: 1 target + default→join");
+
+        // Inner case 1: c=99; break → inner join (not outer join).
+        let inner_case1_bb = &body.blocks[inner_tgts[0].1];
+        assert_assign_const(inner_case1_bb, map.lookup(hc), 99);
+        let inner_join_id = goto_target(inner_case1_bb);
+
+        // Inner join is NOT the outer join.
+        let outer_join_id = outer_tgts[1].1; // default → outer join
+        assert_ne!(
+            inner_join_id, outer_join_id,
+            "inner break must target inner join, not outer join"
+        );
+    }
+
+    /// Default-only switch: `switch (x) { default: a=1; }`
+    #[test]
+    fn switch_default_only() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        let def_body = assign_local_stmt(&mut hir_body, int_ty, ha, 1);
+        let def = default_stmt(&mut hir_body, def_body);
+
+        let switch_body = block_stmt(&mut hir_body, vec![def]);
+        let cases = vec![rcc_hir::SwitchCase { value: None, target: def }];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+
+        // Default-only: dispatch has 1 target (None → default block).
+        assert_eq!(tgts.len(), 1, "default-only switch should have 1 target");
+        assert_eq!(tgts[0].0, None, "target should be default");
+
+        // Default block: a=1; fallthrough to join.
+        let default_bb = &body.blocks[tgts[0].1];
+        assert_assign_const(default_bb, map.lookup(ha), 1);
+        let join_id = goto_target(default_bb);
+        assert!(body.blocks[join_id].statements.is_empty());
+    }
+
+    /// No default: `switch (x) { case 1: a=10; }` — unmatched → join.
+    #[test]
+    fn switch_no_default_unmatched_goes_to_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        let case1_body = assign_local_stmt(&mut hir_body, int_ty, ha, 10);
+        let case1 = case_stmt(&mut hir_body, 1, case1_body);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case1]);
+        let cases = vec![rcc_hir::SwitchCase { value: Some(1), target: case1 }];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+
+        // 1 explicit case + auto-added default → join.
+        assert_eq!(tgts.len(), 2, "dispatch must have 2 targets");
+        assert_eq!(tgts[0].0, Some(1), "target[0] = case 1");
+        assert_eq!(tgts[1].0, None, "target[1] = default (→join)");
+
+        // Case 1 block: a=10; fallthrough to join.
+        let case1_bb = &body.blocks[tgts[0].1];
+        assert_assign_const(case1_bb, map.lookup(ha), 10);
+        let join_id = goto_target(case1_bb);
+
+        // Default target is the join block.
+        assert_eq!(tgts[1].1, join_id, "default target must be the join block");
+    }
+
+    /// `break` inside a switch targets the switch join, not a loop exit.
+    #[test]
+    fn break_in_switch_targets_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        // case 1: b=42; break;
+        let case_body = assign_local_stmt(&mut hir_body, int_ty, hb, 42);
+        let brk = break_stmt(&mut hir_body);
+        let case_inner = block_stmt(&mut hir_body, vec![case_body, brk]);
+        let case1 = case_stmt(&mut hir_body, 1, case_inner);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case1]);
+        let cases = vec![rcc_hir::SwitchCase { value: Some(1), target: case1 }];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+
+        // case 1 block: b=42; break → join.
+        let case1_bb = &body.blocks[tgts[0].1];
+        assert_assign_const(case1_bb, map.lookup(hb), 42);
+        let break_target = goto_target(case1_bb);
+        // break_target must be the join block (default target in dispatch).
+        assert_eq!(break_target, tgts[1].1, "break in switch must target the join block");
+    }
+
+    /// Regression: `default:` in the middle of the case list.
+    /// `switch (x) { case 1: ; default: a=1; case 2: b=2; }`
+    ///
+    /// targets must be `[(Some(1), c1), (Some(2), c2), (None, def)]`
+    /// — default is always the last entry.
+    /// fallthrough: c1 → def → c2 → join.
+    #[test]
+    fn switch_default_in_middle_is_last_target() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        // case 1: (empty)
+        let case1_inner = push_stmt(&mut hir_body, HirStmtKind::Null);
+        let case1 = case_stmt(&mut hir_body, 1, case1_inner);
+
+        // default: a = 1;
+        let def_body = assign_local_stmt(&mut hir_body, int_ty, ha, 1);
+        let def = default_stmt(&mut hir_body, def_body);
+
+        // case 2: b = 2;
+        let case2_body = assign_local_stmt(&mut hir_body, int_ty, hb, 2);
+        let case2 = case_stmt(&mut hir_body, 2, case2_body);
+
+        // Source order: case 1, default, case 2.
+        let switch_body = block_stmt(&mut hir_body, vec![case1, def, case2]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+            rcc_hir::SwitchCase { value: None, target: def },
+            rcc_hir::SwitchCase { value: Some(2), target: case2 },
+        ];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch_id = goto_target(entry);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+
+        // default must be last: [(1, c1), (2, c2), (None, def)].
+        assert_eq!(tgts.len(), 3, "dispatch must have 3 targets");
+        assert_eq!(tgts[0].0, Some(1), "target[0] = case 1");
+        assert_eq!(tgts[1].0, Some(2), "target[1] = case 2");
+        assert_eq!(tgts[2].0, None, "target[2] = default (must be last)");
+
+        // Fallthrough order follows source: case 1 → default → case 2 → join.
+        let case1_bb = &body.blocks[tgts[0].1];
+        assert!(case1_bb.statements.is_empty(), "case 1 body is empty");
+        let def_block_id = tgts[2].1;
+        assert_eq!(goto_target(case1_bb), def_block_id, "case 1 must fallthrough to default");
+
+        let def_bb = &body.blocks[def_block_id];
+        assert_assign_const(def_bb, map.lookup(ha), 1);
+        let case2_block_id = tgts[1].1;
+        assert_eq!(goto_target(def_bb), case2_block_id, "default must fallthrough to case 2");
+
+        let case2_bb = &body.blocks[case2_block_id];
+        assert_assign_const(case2_bb, map.lookup(hb), 2);
+        let join_id = goto_target(case2_bb);
+        assert!(body.blocks[join_id].statements.is_empty(), "join must be empty");
+    }
+
+    /// `break` inside a switch that is inside a loop must target the
+    /// switch join, NOT the loop exit.
+    #[test]
+    fn break_in_switch_inside_loop_targets_switch_join() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // Loop condition: a != 0 (arbitrary).
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        // switch (a) { case 1: b=42; break; }
+        let discr = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let case_body = assign_local_stmt(&mut hir_body, int_ty, hb, 42);
+        let brk = break_stmt(&mut hir_body);
+        let case_inner = block_stmt(&mut hir_body, vec![case_body, brk]);
+        let case1 = case_stmt(&mut hir_body, 1, case_inner);
+
+        let switch_body = block_stmt(&mut hir_body, vec![case1]);
+        let cases = vec![rcc_hir::SwitchCase { value: Some(1), target: case1 }];
+        let switch_stmt = switch_stmt(&mut hir_body, discr, switch_body, cases);
+
+        // while (a) { switch(a) { case 1: b=42; break; } }
+        let loop_body = block_stmt(&mut hir_body, vec![switch_stmt]);
+        let root = while_stmt(&mut hir_body, cond, loop_body);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        // Expected blocks:
+        // bb0 entry → bb1 header
+        // bb1 header: switch a { 0→bb2 exit, default→bb3 body }
+        // bb3 body: switch(a) dispatch → ...
+        //   dispatch: switch a { 1→bb4 case1, default→bb5 switch_join }
+        // bb4 case1: b=42; break → bb5 (switch join, NOT bb2 loop exit)
+        // bb5 switch_join: goto bb1 (back edge to loop header)
+        // bb2 exit: (cursor)
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (loop_exit, loop_body_id) = switch_zero_default(header_bb);
+
+        // Loop body contains the switch.
+        let loop_body_bb = &body.blocks[loop_body_id];
+        let dispatch_id = goto_target(loop_body_bb);
+        let dispatch_bb = &body.blocks[dispatch_id];
+        let tgts = switch_targets(dispatch_bb);
+        assert_eq!(tgts.len(), 2, "dispatch: 1 case + default→join");
+
+        // case 1 block: b=42; break.
+        let case1_bb = &body.blocks[tgts[0].1];
+        assert_assign_const(case1_bb, map.lookup(hb), 42);
+        let break_target = goto_target(case1_bb);
+
+        // break_target must be the SWITCH join (tgts[1].1), not the loop exit.
+        let switch_join_id = tgts[1].1;
+        assert_eq!(
+            break_target, switch_join_id,
+            "break inside switch must target switch join, not loop exit"
+        );
+        assert_ne!(break_target, loop_exit, "break inside switch must NOT target loop exit");
+
+        // Switch join falls through back to loop header.
+        let switch_join_bb = &body.blocks[switch_join_id];
+        assert_eq!(
+            goto_target(switch_join_bb),
+            header_id,
+            "switch join must back-edge to loop header"
+        );
     }
 }
