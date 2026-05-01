@@ -2442,6 +2442,21 @@ fn regression_gate_return_constraints_report_typeck_errors() {
 }
 
 #[test]
+fn regression_gate_coercion_failures_report_typeck_errors_before_cfg() {
+    for (name, src) in [
+        ("incompatible_pointer_assignment", "void f(void) { char *p; int *q; p = q; }"),
+        ("integer_pointer_initializer", "void f(void) { int *p = 42; }"),
+    ] {
+        let (_hir, _tcx, cap, _sess) = lower_and_typeck_snippet(src);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
+            "{name} should emit E0082, got {:?}",
+            cap.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
     let (hir, tcx, cap, _sess) = lower_and_typeck_snippet(
         "typedef unsigned long Size; struct S { int x; }; typedef struct S S; S sg; enum E { A = 7 }; enum E eg; Size sz;",

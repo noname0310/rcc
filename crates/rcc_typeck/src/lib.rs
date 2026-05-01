@@ -306,7 +306,11 @@ fn visit_stmt_with_context(
                 let e2 = rvalue_decayed(e2, body, tcx);
                 // Coerce the initializer to the declared local type.
                 let want = body.locals[local].ty;
-                coerce_to(e2, want, body, tcx, session)
+                match coerce_to(e2, want, body, tcx, session) {
+                    CoerceResult::Noop(expr)
+                    | CoerceResult::Converted(expr)
+                    | CoerceResult::Error(expr) => expr,
+                }
             });
             HirStmtKind::LocalDecl { local, init: init2 }
         }
@@ -537,7 +541,11 @@ pub fn visit_expr(
             let rhs2 = rvalue_decayed(rhs2, body, tcx);
             // Coerce RHS to LHS's type.
             let lhs_ty = body.exprs[lhs2].ty;
-            let rhs2 = coerce_to(rhs2, lhs_ty, body, tcx, session);
+            let rhs2 = match coerce_to(rhs2, lhs_ty, body, tcx, session) {
+                CoerceResult::Noop(expr)
+                | CoerceResult::Converted(expr)
+                | CoerceResult::Error(expr) => expr,
+            };
             body.exprs[expr_id].ty = lhs_ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Assign { lhs: lhs2, rhs: rhs2 };
@@ -645,6 +653,13 @@ fn push_int_promote(body: &mut Body, expr: HirExprId, dst: TyId) -> HirExprId {
     id
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CoerceResult {
+    Noop(HirExprId),
+    Converted(HirExprId),
+    Error(HirExprId),
+}
+
 /// Coerce `expr` to type `dst` for a context that requires assignment-
 /// compatibility (initializer, simple assignment RHS, function call
 /// argument, return). Inserts the appropriate `Convert` wrapper.
@@ -652,47 +667,109 @@ fn push_int_promote(body: &mut Body, expr: HirExprId, dst: TyId) -> HirExprId {
 /// Diagnostics for the constraint-violating cases of [`AssignError`] are
 /// emitted here; the bare-conversion case (arithmetic widening, pointer
 /// adjustments, null-pointer-constant, `_Bool` from a pointer) is
-/// silent. Narrowing is currently silent too — W0008 is the future
-/// home for that warning (task 07-11).
+/// silent. Narrowing remains accepted and currently silent; W0008's
+/// current policy is pinned by the tests until the warning gets a richer
+/// source-level message.
 fn coerce_to(
     expr: HirExprId,
     dst: TyId,
     body: &mut Body,
     tcx: &mut TyCtxt,
     session: &mut Session,
-) -> HirExprId {
+) -> CoerceResult {
     let src_ty = body.exprs[expr].ty;
     if src_ty == dst {
-        return expr;
+        return CoerceResult::Noop(expr);
     }
     // Skip coercion when either side is the error sentinel — there is
     // already a diagnostic upstream.
     if src_ty == tcx.error || dst == tcx.error {
-        return expr;
+        return CoerceResult::Error(expr);
     }
+
+    match is_assignable(tcx, body, dst, src_ty, expr) {
+        Ok(()) | Err(AssignError::Narrowing) => {}
+        Err(AssignError::QualifierLoss) => {
+            emit_pointer_conversion_error(
+                session,
+                body.exprs[expr].span,
+                ConvertError::QualifierLoss,
+            );
+            return CoerceResult::Error(mark_expr_error(body, tcx, expr));
+        }
+        Err(AssignError::Incompatible) => {
+            if is_pointer(tcx, dst) || is_pointer(tcx, src_ty) {
+                emit_pointer_conversion_error(
+                    session,
+                    body.exprs[expr].span,
+                    ConvertError::Incompatible,
+                );
+            } else {
+                emit_assignment_conversion_error(
+                    session,
+                    body.exprs[expr].span,
+                    "expression is not assignable to the required type",
+                );
+            }
+            return CoerceResult::Error(mark_expr_error(body, tcx, expr));
+        }
+    }
+
     // Arithmetic ↔ arithmetic: dispatch through `push_arithmetic_convert`
     // so real ↔ complex conversions land on the right ConvertKind and
     // emit W0012 when complex-to-real drops the imaginary part. Real ↔
     // real continues to use the UsualArithmetic-style wrapper. Narrowing
     // diagnostics for real arithmetic remain deferred to W0008.
     if is_arithmetic(tcx, src_ty) && is_arithmetic(tcx, dst) {
-        return push_arithmetic_convert(body, session, tcx, expr, dst);
+        let new_id = push_arithmetic_convert(body, session, tcx, expr, dst);
+        return if new_id == expr {
+            CoerceResult::Noop(expr)
+        } else {
+            CoerceResult::Converted(new_id)
+        };
     }
-    // Pointer-shaped destination: try `pointer_convert`. Errors are
-    // silent here (07-11 wires up E0081/E0082). On error fall through
-    // and leave the expr untouched.
+    // Pointer-shaped destination: diagnostics are emitted here, not
+    // deferred to CFG/codegen.
     if matches!(*tcx.get(dst), Ty::Ptr(_)) {
-        if let Ok(new_id) = pointer_convert(tcx, body, expr, dst) {
-            return new_id;
+        match pointer_convert(tcx, body, expr, dst) {
+            Ok(new_id) => {
+                return if new_id == expr {
+                    CoerceResult::Noop(expr)
+                } else {
+                    CoerceResult::Converted(new_id)
+                };
+            }
+            Err(err) => {
+                emit_pointer_conversion_error(session, body.exprs[expr].span, err);
+                return CoerceResult::Error(mark_expr_error(body, tcx, expr));
+            }
         }
     }
     // `_Bool` ← pointer / arithmetic. We emit a UsualArithmetic-flavoured
     // convert for now; the dedicated `BoolFromPtr` ConvertKind is task
     // 07-11.
     if dst == tcx.bool_ {
-        return push_arith_convert(body, expr, dst);
+        return CoerceResult::Converted(push_arith_convert(body, expr, dst));
     }
+    CoerceResult::Noop(expr)
+}
+
+fn mark_expr_error(body: &mut Body, tcx: &TyCtxt, expr: HirExprId) -> HirExprId {
+    body.exprs[expr].ty = tcx.error;
     expr
+}
+
+fn emit_assignment_conversion_error(session: &mut Session, span: rcc_span::Span, msg: &str) {
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0081).emit();
+}
+
+fn emit_pointer_conversion_error(session: &mut Session, span: rcc_span::Span, err: ConvertError) {
+    let msg = match err {
+        ConvertError::Incompatible => "incompatible pointer conversion",
+        ConvertError::QualifierLoss => "implicit pointer conversion discards qualifiers",
+        ConvertError::IntegerPointerMix => "integer-pointer conversion requires a cast",
+    };
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0082).emit();
 }
 
 /// Diagnostic-emitting type-checker for `HirExprKind::Binary`. Updates
@@ -857,26 +934,10 @@ fn type_return(
                 return Some(expr);
             }
 
-            match is_assignable(tcx, body, return_ty, body.exprs[expr].ty, expr) {
-                Ok(()) | Err(AssignError::Narrowing) => {
-                    Some(coerce_to(expr, return_ty, body, tcx, session))
-                }
-                Err(AssignError::QualifierLoss) => {
-                    invalid_return(
-                        session,
-                        body.exprs[expr].span,
-                        "return expression discards pointer qualifiers",
-                    );
-                    Some(expr)
-                }
-                Err(AssignError::Incompatible) => {
-                    invalid_return(
-                        session,
-                        body.exprs[expr].span,
-                        "return expression is not assignable to function return type",
-                    );
-                    Some(expr)
-                }
+            match coerce_to(expr, return_ty, body, tcx, session) {
+                CoerceResult::Noop(expr)
+                | CoerceResult::Converted(expr)
+                | CoerceResult::Error(expr) => Some(expr),
             }
         }
     }
@@ -1118,7 +1179,11 @@ fn type_call(
         // task 07-11's job).
         for (i, arg) in args.iter_mut().enumerate() {
             if let Some(param_ty) = params.get(i) {
-                *arg = coerce_to(*arg, *param_ty, body, tcx, session);
+                *arg = match coerce_to(*arg, *param_ty, body, tcx, session) {
+                    CoerceResult::Noop(expr)
+                    | CoerceResult::Converted(expr)
+                    | CoerceResult::Error(expr) => expr,
+                };
             } else if variadic {
                 *arg = default_arg_promote(*arg, body, tcx);
             }
@@ -4528,6 +4593,113 @@ mod tests {
             cap.diagnostics()
         );
         assert!(!session.handler.has_errors());
+    }
+
+    #[test]
+    fn coercion_assignment_incompatible_pointer_emits_e0082_and_marks_rhs_error() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let mut body = Body::default();
+        let p = push_local(&mut body, Some(session.interner.intern("p")), char_ptr, false);
+        let q = push_local(&mut body, Some(session.interner.intern("q")), int_ptr, false);
+        let lhs = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(p));
+        let rhs = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(q));
+        let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+        set_root_expr(&mut body, assign);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let HirExprKind::Assign { rhs: checked_rhs, .. } = body.exprs[assign].kind else {
+            panic!("expected assignment expression");
+        };
+        assert_eq!(body.exprs[checked_rhs].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
+            "expected E0082, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn coercion_initializer_integer_pointer_mix_emits_e0082_unless_null_pointer_constant() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let mut body = Body::default();
+        let p = push_local(&mut body, Some(session.interner.intern("p")), int_ptr, false);
+        let init = push_kind(&mut body, tcx.error, HirExprKind::IntConst(42));
+        let stmt = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::LocalDecl { local: p, init: Some(init) },
+        });
+        body.stmts[stmt].id = stmt;
+        body.root = Some(stmt);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[init].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
+            "expected E0082, got {:?}",
+            cap.diagnostics()
+        );
+
+        let (mut session, _cap) = Session::for_test();
+        let mut ok_body = Body::default();
+        let p = push_local(&mut ok_body, None, int_ptr, false);
+        let zero = push_kind(&mut ok_body, tcx.error, HirExprKind::IntConst(0));
+        let stmt = ok_body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::LocalDecl { local: p, init: Some(zero) },
+        });
+        ok_body.stmts[stmt].id = stmt;
+        ok_body.root = Some(stmt);
+
+        check_body(&mut ok_body, &mut tcx, &mut session);
+
+        let HirStmtKind::LocalDecl { init: Some(init), .. } = ok_body.stmts[stmt].kind else {
+            panic!("expected initializer");
+        };
+        assert_eq!(ok_body.exprs[init].ty, int_ptr);
+        assert!(!session.handler.has_errors());
+    }
+
+    #[test]
+    fn coercion_call_argument_error_is_not_silent() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![char_ptr],
+            variadic: false,
+            proto: true,
+        });
+        let fn_ptr = tcx.intern(Ty::Ptr(Qual::plain(fn_ty)));
+        let mut body = Body::default();
+        let f = push_local(&mut body, Some(session.interner.intern("f")), fn_ptr, false);
+        let q = push_local(&mut body, Some(session.interner.intern("q")), int_ptr, false);
+        let callee = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(f));
+        let arg = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(q));
+        let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![arg] });
+        set_root_expr(&mut body, call);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+            panic!("expected call expression");
+        };
+        assert_eq!(body.exprs[args[0]].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
+            "expected E0082, got {:?}",
+            cap.diagnostics()
+        );
     }
 
     /// Acceptance: `1 + 2.0` — IntConst is wrapped in `Convert(IntToFloat, f64)`

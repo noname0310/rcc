@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 07-15: Make coercion failures diagnostic, not silent
 
 **Phase:** 07-typeck    **Depends on:** 07-14    **Milestone:** M3 pre-codegen stabilization

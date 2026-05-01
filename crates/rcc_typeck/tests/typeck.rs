@@ -680,11 +680,9 @@ fn fixture_e0080_binary_lhs() {
 // ─── 9b. E0081 / E0082 — surfaced via is_assignable / pointer_convert ─────
 
 // E0081 (incompatible types in assignment) and E0082 (incompatible
-// pointer conversion) are not yet wired into the surface diagnostic
-// channel (07-07 explicitly defers them to 07-11+). The classifiers
-// already produce the right `AssignError` / `ConvertError` outcomes;
-// the fixtures below pin those down so a later patch that wires the
-// emit path won't silently regress.
+// pointer conversion) are emitted by the surface coercion helper as of
+// 07-15. The fixtures below still pin the lower-level classifier
+// outcomes so the diagnostic path keeps using the right reason.
 
 #[test]
 fn fixture_e0081_struct_a_assigned_struct_b() {
