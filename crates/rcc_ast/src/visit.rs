@@ -161,7 +161,9 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, s: &Stmt) {
             v.visit_expr(value);
             v.visit_stmt(body);
         }
-        StmtKind::Default { body } | StmtKind::Label { body, .. } => v.visit_stmt(body),
+        StmtKind::Default { body }
+        | StmtKind::Attributed { stmt: body, .. }
+        | StmtKind::Label { body, .. } => v.visit_stmt(body),
         StmtKind::Return(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);

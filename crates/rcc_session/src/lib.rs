@@ -118,6 +118,13 @@ pub struct Options {
     /// use of the construct emits W0014 as a strict-C99 compatibility
     /// warning.
     pub gnu_range_designators: bool,
+
+    /// Enable GNU `__attribute__((...))` syntax without a warning.
+    ///
+    /// The parser preserves attributes for later phase-14 semantic
+    /// handling. When this flag is false, syntax still parses but each
+    /// attribute group emits W0015 as a strict-C99 compatibility warning.
+    pub gnu_attributes: bool,
 }
 
 impl Default for Options {
@@ -136,6 +143,7 @@ impl Default for Options {
             gnu_permissive_paste: false,
             gnu_statement_expressions: false,
             gnu_range_designators: false,
+            gnu_attributes: false,
         }
     }
 }

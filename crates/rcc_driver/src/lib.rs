@@ -50,6 +50,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_permissive_paste: false,
         gnu_statement_expressions: false,
         gnu_range_designators: false,
+        gnu_attributes: false,
     }
 }
 

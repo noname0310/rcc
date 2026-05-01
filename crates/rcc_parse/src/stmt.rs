@@ -107,6 +107,14 @@ use crate::Parser;
 /// is left on the offending token).
 pub fn parse_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
     let tok = p.peek()?;
+    if crate::attr::peek_attribute(p) {
+        let start = tok.span;
+        let attrs = crate::attr::parse_attributes(p);
+        let stmt = parse_stmt(p)?;
+        let span = start.to(stmt.span);
+        let id = p.fresh_id();
+        return Some(Stmt { id, kind: StmtKind::Attributed { attrs, stmt: Box::new(stmt) }, span });
+    }
     match &tok.kind {
         TokenKind::Punct(Punct::LBrace) => {
             let block = parse_block(p)?;
@@ -344,7 +352,7 @@ fn parse_for_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
                 return None;
             }
         };
-        Some(e)
+        Some(Box::new(e))
     };
     let _ = expect_semi(p, cond_fallback, "expected `;` after `for` condition");
 
@@ -360,7 +368,7 @@ fn parse_for_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
                     return None;
                 }
             };
-            Some(e)
+            Some(Box::new(e))
         };
 
     // Past this point the scope is pushed, so every early return
@@ -635,7 +643,7 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
 /// first; if the cursor is not at the start of a declaration, it
 /// falls through to the statement path.
 pub fn parse_block_item(p: &mut Parser<'_>) -> Option<BlockItem> {
-    if looks_like_decl(p) {
+    if looks_like_decl(p) || crate::attr::peek_attribute(p) {
         let before = p.cursor;
         if let Some(decl) = crate::decl::parse_declaration(p) {
             return Some(BlockItem::Decl(decl));

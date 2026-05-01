@@ -1,5 +1,7 @@
 # 05-38: Attribute syntax surface
 
+> ✓ done — 2026-05-01
+
 **Phase:** 05-parse    **Depends on:** 05-37    **Milestone:** M5 blocker
 
 ## Goal
@@ -33,6 +35,15 @@ grammar surgery.
 - Attribute payload is preserved enough for phase 14 semantics to
   validate argument count and type.
 - Existing strict C99 fixtures remain green.
+
+## Notes
+- The AST now preserves GNU attributes on `DeclSpecs`, `Declarator`,
+  `RecordSpec`, `EnumSpec`, `Enumerator`, and `StmtKind::Attributed`.
+- Strict C99 mode parses attributes but emits W0015 unless
+  `Options::gnu_attributes` is enabled.
+- Attribute semantics remain deferred to
+  `tasks/14-lang-extensions/07-attribute-syntax.md` and the
+  attribute-specific follow-up tasks.
 
 ## References
 - `tasks/14-lang-extensions/07-attribute-syntax.md`.

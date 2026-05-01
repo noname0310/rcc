@@ -63,6 +63,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0028, E0028_DESC),
     (E0029, E0029_DESC),
     (E0030, E0030_DESC),
+    (E0031, E0031_DESC),
     (E0040, E0040_DESC),
     (E0041, E0041_DESC),
     (E0060, E0060_DESC),
@@ -100,6 +101,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0012, W0012_DESC),
     (W0013, W0013_DESC),
     (W0014, W0014_DESC),
+    (W0015, W0015_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -284,6 +286,10 @@ const E0029_DESC: &str = "`#line` argument out of range";
 /// constructs can still be diagnosed independently.
 pub const E0030: &str = "E0030";
 const E0030_DESC: &str = "unexpected token";
+
+/// Malformed GNU `__attribute__((...))` syntax.
+pub const E0031: &str = "E0031";
+const E0031_DESC: &str = "malformed attribute syntax";
 
 /// Integer literal is too large to fit in the widest representable type.
 ///
@@ -757,6 +763,14 @@ const W0013_DESC: &str = "GNU statement expression extension";
 /// `Options::gnu_range_designators` is enabled.
 pub const W0014: &str = "W0014";
 const W0014_DESC: &str = "GNU initializer range designator extension";
+
+/// GNU `__attribute__((...))` accepted in strict C99 mode.
+///
+/// The parser preserves the syntax for later extension semantics, but
+/// C99 does not define attributes. This warning is suppressed when
+/// `Options::gnu_attributes` is enabled.
+pub const W0015: &str = "W0015";
+const W0015_DESC: &str = "GNU attribute syntax extension";
 
 #[cfg(test)]
 mod tests {

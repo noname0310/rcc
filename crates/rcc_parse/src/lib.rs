@@ -16,6 +16,7 @@ use rcc_lexer::PpToken;
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
+mod attr;
 mod decl;
 mod expr;
 mod init;

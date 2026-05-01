@@ -90,6 +90,13 @@ pub struct Options {
     pub output:        Option<PathBuf>,
     pub opt_level:     OptLevel,
     pub include_gpl_tests: bool,
+    pub gnu_va_args_elision: bool,
+    pub gnu_permissive_redefinition: bool,
+    pub gnu_named_variadic: bool,
+    pub gnu_permissive_paste: bool,
+    pub gnu_statement_expressions: bool,
+    pub gnu_range_designators: bool,
+    pub gnu_attributes: bool,
 }
 
 pub struct Session {
@@ -158,14 +165,21 @@ pub struct TranslationUnit { pub decls: Vec<ExternalDecl>, pub span: Span }
 pub enum ExternalDecl { Function(FunctionDef), Decl(Decl) }
 pub struct Decl;
 pub struct FunctionDef;
-pub struct DeclSpecs;
+pub struct DeclSpecs { pub attrs: Vec<Attribute>, /* ... */ }
 pub enum StorageClass { Typedef, Extern, Static, Auto, Register }
 pub struct TypeQuals { pub const_: bool, pub volatile: bool, pub restrict: bool }
 pub struct FuncSpecs { pub inline: bool }
 pub enum TypeSpec { Void, Char, Short, Int, Long, Float, Double, Signed, Unsigned, Bool, Complex, Imaginary, TypedefName(Symbol), Record(RecordSpec), Enum(EnumSpec) }
-pub struct RecordSpec; pub enum RecordKind { Struct, Union }
-pub struct EnumSpec;  pub struct Enumerator;
-pub struct Declarator; pub enum DerivedDeclarator { Pointer(TypeQuals), Array(ArrayDeclarator), Function(FunctionDeclarator) }
+pub struct RecordSpec { pub attrs: Vec<Attribute>, /* ... */ }
+pub enum RecordKind { Struct, Union }
+pub struct EnumSpec { pub attrs: Vec<Attribute>, /* ... */ }
+pub struct Enumerator { pub attrs: Vec<Attribute>, /* ... */ }
+pub struct Declarator { pub attrs: Vec<Attribute>, /* ... */ }
+pub struct Attribute { pub name: Symbol, pub args: Vec<AttributeArg>, pub span: Span }
+pub struct AttributeArg { pub tokens: Vec<AttributeToken>, pub span: Span }
+pub struct AttributeToken { pub kind: AttributeTokenKind, pub span: Span }
+pub enum AttributeTokenKind { Symbol(Symbol), Int(u128), Float(f64), Char(u32), String(Vec<u8>), Punct(Symbol) }
+pub enum DerivedDeclarator { Pointer(TypeQuals), Array(ArrayDeclarator), Function(FunctionDeclarator) }
 pub struct TypeName;
 pub enum Initializer { Expr(Expr), List(Vec<(Vec<Designator>, Initializer)>) }
 pub enum Designator {
@@ -174,7 +188,7 @@ pub enum Designator {
     Range { lo: Box<Expr>, hi: Box<Expr> },
 }
 pub struct Block; pub enum BlockItem { Decl(Decl), Stmt(Stmt) }
-pub struct Stmt; pub enum StmtKind { /* ... */ }
+pub struct Stmt; pub enum StmtKind { Attributed { attrs: Vec<Attribute>, stmt: Box<Stmt> }, /* ... */ }
 pub struct Expr; pub enum ExprKind { /* ... */ }
 pub enum BinOp; pub enum UnOp; pub enum AssignOp;
 ```

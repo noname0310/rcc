@@ -86,7 +86,7 @@ fn intern(sess: &mut Session, s: &str) -> Symbol {
 }
 
 fn named(name: Symbol, derived: Vec<DerivedDeclarator>) -> Declarator {
-    Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP }
+    Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP, attrs: Vec::new() }
 }
 
 fn ptr() -> DerivedDeclarator {
@@ -157,7 +157,12 @@ fn func_void_params() -> DerivedDeclarator {
 fn param_int() -> ParamDecl {
     ParamDecl {
         specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
-        declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+        declarator: Declarator {
+            name: None,
+            derived: Vec::new(),
+            span: DUMMY_SP,
+            attrs: Vec::new(),
+        },
         span: DUMMY_SP,
     }
 }
@@ -184,7 +189,7 @@ fn record_spec(
     tag: Option<Symbol>,
     fields: Option<Vec<FieldDecl>>,
 ) -> RecordSpec {
-    RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP }
+    RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP, attrs: Vec::new() }
 }
 
 fn named_field(name: Symbol, type_specs: Vec<TypeSpec>) -> FieldDecl {
@@ -195,6 +200,7 @@ fn named_field(name: Symbol, type_specs: Vec<TypeSpec>) -> FieldDecl {
                 name: Some((name, DUMMY_SP)),
                 derived: Vec::new(),
                 span: DUMMY_SP,
+                attrs: Vec::new(),
             }),
             bit_width: None,
         }],
@@ -210,6 +216,7 @@ fn bitfield_field(name: Option<Symbol>, type_specs: Vec<TypeSpec>, width: Expr) 
                 name: Some((n, DUMMY_SP)),
                 derived: Vec::new(),
                 span: DUMMY_SP,
+                attrs: Vec::new(),
             }),
             bit_width: Some(width),
         }],
@@ -224,10 +231,16 @@ fn enum_spec(tag: Option<Symbol>, variants: Vec<(Symbol, Option<Expr>)>) -> Enum
         enumerators: Some(
             variants
                 .into_iter()
-                .map(|(name, value)| rcc_ast::Enumerator { name, value, span: DUMMY_SP })
+                .map(|(name, value)| rcc_ast::Enumerator {
+                    name,
+                    value,
+                    span: DUMMY_SP,
+                    attrs: Vec::new(),
+                })
                 .collect(),
         ),
         span: DUMMY_SP,
+        attrs: Vec::new(),
     }
 }
 
@@ -1058,8 +1071,8 @@ fn stmt_for_init_declaration_creates_local() {
     };
     let s = stmt_of(StmtKind::For {
         init: Some(Box::new(BlockItem::Decl(init_decl))),
-        cond: Some(cond),
-        step: Some(step),
+        cond: Some(Box::new(cond)),
+        step: Some(Box::new(step)),
         body: Box::new(stmt_of(StmtKind::Null)),
     });
     let id = lower_stmt(&s, &mut body, &mut scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);

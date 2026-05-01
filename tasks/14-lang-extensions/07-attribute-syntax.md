@@ -1,17 +1,16 @@
-# 14-07: `__attribute__` syntax parsing
+# 14-07: `__attribute__` semantic validation
 
 **Phase:** 14-lang-extensions    **Depends on:** 05-38    **Milestone:** M5
 
 ## Goal
-Validate and wire the GCC-style `__attribute__((...))` parser surface
+Validate and wire the GCC-style `__attribute__((...))` AST surface
 introduced by task 05-38 into the extension-policy and semantic
 pipeline.
 
 ## Scope
-- In: extension-mode diagnostics, attachment-site validation, and
-  semantic handoff for attributes already represented in the AST by
-  task 05-38. Multiple comma-separated attributes inside one
-  `__attribute__((...))`.
+- In: extension-mode diagnostics, attachment-site validation,
+  normalisation of attribute names/arguments, and semantic handoff for
+  attributes already represented in the AST by task 05-38.
 - Out: initial parser surface for attachment sites (task 05-38);
   semantic handling of any specific attribute (task 14-08).
 
@@ -19,15 +18,16 @@ pipeline.
 - Attribute validation scaffolding attached to the AST nodes from
   task 05-38.
 - Tests that the parser surface feeds the phase-14 semantic layer.
-- Tests: parse `__attribute__((packed))`,
-  `__attribute__((aligned(16)))`,
-  `__attribute__((section("text"), unused))`.
+- Tests that `packed`, `aligned(16)`, `section("text")`, and `unused`
+  are preserved as normalised attribute records before specific
+  semantics run.
 
 ## Acceptance
-- `int x __attribute__((aligned(16)));` parses successfully and
-  the AST carries the attribute.
-- `__attribute__((a, b(1,2)))` produces two `Attribute` nodes.
-- Malformed attributes produce a diagnostic.
+- The semantic layer receives `Attribute` records from declaration
+  specifiers, declarators, tags, enumerators, and statements.
+- Unknown attributes have a documented policy (ignore with warning,
+  preserve for codegen, or reject).
+- Site validation diagnostics do not require parser changes.
 
 ## References
 - GCC attribute syntax documentation.

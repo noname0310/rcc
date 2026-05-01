@@ -437,6 +437,18 @@ int main(void) {
 }
 ```
 
+## E0031 — malformed attribute syntax
+
+GNU `__attribute__((...))` syntax requires the double-parenthesized
+wrapper and a comma-separated list of attribute names:
+
+```c
+int x __attribute__((aligned(16));  // error[E0031]: missing `)`
+```
+
+The parser reports malformed wrappers locally, then recovers so the
+surrounding declaration can still be checked.
+
 ## E0040 — integer literal too large
 
 The magnitude of an integer constant exceeds the range of `u128`, the
@@ -1135,3 +1147,15 @@ The parser preserves the range as a distinct AST designator so later
 initializer lowering can expand it or diagnose overlap and ordering
 rules. Enable `Options::gnu_range_designators` to accept the syntax
 without this compatibility warning.
+
+## W0015 — GNU attribute syntax extension
+
+`__attribute__((...))` is a GNU C extension, not C99 syntax:
+
+```c
+int x __attribute__((aligned(16)));  // warning[W0015] in strict C99 mode
+```
+
+The parser preserves the attribute name and raw argument tokens for
+phase-14 semantic checks. Enable `Options::gnu_attributes` to accept
+the syntax without this compatibility warning.

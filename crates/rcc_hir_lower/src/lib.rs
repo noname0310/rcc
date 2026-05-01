@@ -488,6 +488,9 @@ fn collect_labels_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Se
         StmtKind::Default { body } => {
             collect_labels_in_stmt(body, resolver, session);
         }
+        StmtKind::Attributed { stmt, .. } => {
+            collect_labels_in_stmt(stmt, resolver, session);
+        }
         // Terminal statements — no sub-statements to recurse into.
         StmtKind::Expr(_)
         | StmtKind::Goto(_)
@@ -555,6 +558,9 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
         }
         StmtKind::Default { body } => {
             check_gotos_in_stmt(body, resolver, session);
+        }
+        StmtKind::Attributed { stmt, .. } => {
+            check_gotos_in_stmt(stmt, resolver, session);
         }
         // Terminal statements — no sub-statements to recurse into.
         StmtKind::Expr(_)
@@ -663,6 +669,9 @@ pub fn lower_stmt(
         StmtKind::Default { body: body_stmt } => {
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Default { body: body_id }
+        }
+        StmtKind::Attributed { stmt, .. } => {
+            return lower_stmt(stmt, body, scope, crate_, tcx, resolver, session);
         }
         StmtKind::Label { name, body: body_stmt } => {
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
@@ -3886,7 +3895,12 @@ mod tests {
 
     /// Helper: build a minimal declarator with just a name.
     fn named_declarator(name: Symbol) -> Declarator {
-        Declarator { name: Some((name, DUMMY_SP)), derived: Vec::new(), span: DUMMY_SP }
+        Declarator {
+            name: Some((name, DUMMY_SP)),
+            derived: Vec::new(),
+            span: DUMMY_SP,
+            attrs: Vec::new(),
+        }
     }
 
     /// Helper: default DeclSpecs (no storage class, empty type specs).
@@ -3953,6 +3967,7 @@ mod tests {
                     tag: Some(tag),
                     fields: Some(Vec::new()),
                     span: DUMMY_SP,
+                    attrs: Vec::new(),
                 }));
                 s
             },
@@ -3972,6 +3987,7 @@ mod tests {
                     tag: Some(tag),
                     enumerators: Some(Vec::new()),
                     span: DUMMY_SP,
+                    attrs: Vec::new(),
                 }));
                 s
             },
@@ -4187,6 +4203,7 @@ mod tests {
                         tag: Some(tag),
                         fields: Some(Vec::new()),
                         span: DUMMY_SP,
+                        attrs: Vec::new(),
                     }));
                     s
                 },
@@ -4217,6 +4234,7 @@ mod tests {
                         tag: Some(tag),
                         fields: None, // no definition
                         span: DUMMY_SP,
+                        attrs: Vec::new(),
                     }));
                     s
                 },
@@ -5049,7 +5067,7 @@ mod tests {
 
     /// Helper: make a declarator with a name and a derived chain.
     fn make_declarator(name: Symbol, derived: Vec<DerivedDeclarator>) -> Declarator {
-        Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP }
+        Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP, attrs: Vec::new() }
     }
 
     /// Helper: make a pointer derived declarator with no qualifiers.
@@ -5101,7 +5119,12 @@ mod tests {
     fn param(type_specs: Vec<TypeSpec>) -> ParamDecl {
         ParamDecl {
             specs: DeclSpecs { type_specs, ..DeclSpecs::default() },
-            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            declarator: Declarator {
+                name: None,
+                derived: Vec::new(),
+                span: DUMMY_SP,
+                attrs: Vec::new(),
+            },
             span: DUMMY_SP,
         }
     }
@@ -5531,6 +5554,7 @@ mod tests {
                 name: Some((sym(&mut sess, "arr"), DUMMY_SP)),
                 derived: vec![incomplete_array()],
                 span: DUMMY_SP,
+                attrs: Vec::new(),
             },
             span: DUMMY_SP,
         };
@@ -5567,6 +5591,7 @@ mod tests {
                         name: Some((n, DUMMY_SP)),
                         derived,
                         span: DUMMY_SP,
+                        attrs: Vec::new(),
                     }),
                     bit_width,
                 })
@@ -5624,7 +5649,7 @@ mod tests {
         tag: Option<Symbol>,
         fields: Option<Vec<FieldDecl>>,
     ) -> RecordSpec {
-        RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP }
+        RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP, attrs: Vec::new() }
     }
 
     #[test]
@@ -5964,10 +5989,16 @@ mod tests {
             tag,
             enumerators: variants.map(|vs| {
                 vs.into_iter()
-                    .map(|(name, value)| rcc_ast::Enumerator { name, value, span: DUMMY_SP })
+                    .map(|(name, value)| rcc_ast::Enumerator {
+                        name,
+                        value,
+                        span: DUMMY_SP,
+                        attrs: Vec::new(),
+                    })
                     .collect()
             }),
             span: DUMMY_SP,
+            attrs: Vec::new(),
         }
     }
 
@@ -6535,8 +6566,8 @@ mod tests {
 
         let for_stmt = stmt(StmtKind::For {
             init: Some(init_item),
-            cond: Some(cond),
-            step: Some(step),
+            cond: Some(Box::new(cond)),
+            step: Some(Box::new(step)),
             body: Box::new(body_stmt),
         });
 
@@ -7338,7 +7369,12 @@ mod tests {
         let (mut sess, _cap) = Session::for_test();
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
-            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            declarator: Declarator {
+                name: None,
+                derived: Vec::new(),
+                span: DUMMY_SP,
+                attrs: Vec::new(),
+            },
             span: DUMMY_SP,
         };
         let e = Expr {
@@ -7375,7 +7411,12 @@ mod tests {
 
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
-            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            declarator: Declarator {
+                name: None,
+                derived: Vec::new(),
+                span: DUMMY_SP,
+                attrs: Vec::new(),
+            },
             span: DUMMY_SP,
         };
         let st = Expr { id: NodeId(0), kind: ExprKind::SizeofType(ty_name), span: DUMMY_SP };
@@ -7388,7 +7429,12 @@ mod tests {
         let (mut sess, _cap) = Session::for_test();
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
-            declarator: Declarator { name: None, derived: Vec::new(), span: DUMMY_SP },
+            declarator: Declarator {
+                name: None,
+                derived: Vec::new(),
+                span: DUMMY_SP,
+                attrs: Vec::new(),
+            },
             span: DUMMY_SP,
         };
         let e = Expr {
@@ -7532,8 +7578,12 @@ mod tests {
             star: false,
             size: Some(int_lit(len_text, sess)),
         })];
-        let declarator =
-            rcc_ast::Declarator { name: Some((name, DUMMY_SP)), derived, span: DUMMY_SP };
+        let declarator = rcc_ast::Declarator {
+            name: Some((name, DUMMY_SP)),
+            derived,
+            span: DUMMY_SP,
+            attrs: Vec::new(),
+        };
         let init_items: Vec<(Vec<rcc_ast::Designator>, rcc_ast::Initializer)> =
             items.into_iter().map(|i| (Vec::new(), i)).collect();
         let decl = Decl {
@@ -7602,6 +7652,7 @@ mod tests {
                     name: Some((a, DUMMY_SP)),
                     derived,
                     span: DUMMY_SP,
+                    attrs: Vec::new(),
                 },
                 init: Some(rcc_ast::Initializer::List(vec![(
                     vec![rcc_ast::Designator::Index(int_lit("2", &mut sess))],

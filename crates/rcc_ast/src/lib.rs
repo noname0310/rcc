@@ -88,6 +88,8 @@ pub struct DeclSpecs {
     pub quals: TypeQuals,
     /// Function specifier(s), e.g. `inline`.
     pub func_specs: FuncSpecs,
+    /// GNU attributes written in declaration-specifier position.
+    pub attrs: Vec<Attribute>,
 }
 
 /// Storage class keywords.
@@ -171,6 +173,8 @@ pub struct RecordSpec {
     pub fields: Option<Vec<FieldDecl>>,
     /// Span.
     pub span: Span,
+    /// GNU attributes attached to the record specifier.
+    pub attrs: Vec<Attribute>,
 }
 
 /// `struct` vs `union`.
@@ -213,6 +217,8 @@ pub struct EnumSpec {
     pub enumerators: Option<Vec<Enumerator>>,
     /// Span.
     pub span: Span,
+    /// GNU attributes attached to the enum specifier.
+    pub attrs: Vec<Attribute>,
 }
 
 /// A single `NAME [= expr]` enumerator.
@@ -224,6 +230,8 @@ pub struct Enumerator {
     pub value: Option<Expr>,
     /// Full span.
     pub span: Span,
+    /// GNU attributes attached to this enumerator.
+    pub attrs: Vec<Attribute>,
 }
 
 /// A declarator: name + derived-declarator chain.
@@ -236,6 +244,54 @@ pub struct Declarator {
     pub derived: Vec<DerivedDeclarator>,
     /// Full span.
     pub span: Span,
+    /// GNU attributes attached to this declarator.
+    pub attrs: Vec<Attribute>,
+}
+
+/// GNU-style attribute payload.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    /// Attribute name, e.g. `packed`, `aligned`, `section`.
+    pub name: Symbol,
+    /// Comma-separated argument payloads inside `name(...)`.
+    pub args: Vec<AttributeArg>,
+    /// Full span covering the attribute item.
+    pub span: Span,
+}
+
+/// One comma-delimited attribute argument.
+#[derive(Debug, Clone)]
+pub struct AttributeArg {
+    /// Raw parser-level tokens preserved for phase-14 semantic checks.
+    pub tokens: Vec<AttributeToken>,
+    /// Span of this argument.
+    pub span: Span,
+}
+
+/// Parser-level token preserved inside an attribute argument.
+#[derive(Debug, Clone)]
+pub struct AttributeToken {
+    /// Token payload.
+    pub kind: AttributeTokenKind,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Token categories preserved for attribute arguments.
+#[derive(Debug, Clone)]
+pub enum AttributeTokenKind {
+    /// Identifier or keyword spelling.
+    Symbol(Symbol),
+    /// Integer literal value.
+    Int(u128),
+    /// Floating literal value.
+    Float(f64),
+    /// Character literal value.
+    Char(u32),
+    /// String-literal bytes after phase-7 decoding.
+    String(Vec<u8>),
+    /// Punctuator spelling, interned in the session.
+    Punct(Symbol),
 }
 
 /// One step in a declarator's derivation chain.
@@ -382,9 +438,9 @@ pub enum StmtKind {
         /// `init` may be an expression statement OR a declaration (C99).
         init: Option<Box<BlockItem>>,
         /// Loop condition.
-        cond: Option<Expr>,
+        cond: Option<Box<Expr>>,
         /// Loop step.
-        step: Option<Expr>,
+        step: Option<Box<Expr>>,
         /// Body.
         body: Box<Stmt>,
     },
@@ -394,6 +450,8 @@ pub enum StmtKind {
     Case { value: Expr, body: Box<Stmt> },
     /// `default: stmt`
     Default { body: Box<Stmt> },
+    /// GNU attributes attached to a following statement.
+    Attributed { attrs: Vec<Attribute>, stmt: Box<Stmt> },
     /// `label: stmt`
     Label { name: Symbol, body: Box<Stmt> },
     /// `goto label;`
@@ -674,6 +732,7 @@ impl Default for DeclSpecs {
             type_specs: Vec::new(),
             quals: TypeQuals::default(),
             func_specs: FuncSpecs::default(),
+            attrs: Vec::new(),
         }
     }
 }

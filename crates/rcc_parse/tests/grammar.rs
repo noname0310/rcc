@@ -38,6 +38,19 @@ fn parse_snippet_with_options(
     (ast, diags, cap)
 }
 
+fn parse_ok_with_session(src: &str, opts: Options) -> (TranslationUnit, Vec<Diagnostic>, Session) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(opts, handler);
+    let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<test>"), Arc::from(src));
+    let pp_tokens = preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens);
+    let diags = cap.diagnostics();
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(errors.is_empty(), "expected zero errors, got {errors:#?}\nsource: {src}");
+    (ast.expect("parse returned None"), diags, sess)
+}
+
 /// Parse `src` and assert it produces a valid AST with zero errors.
 fn parse_ok(src: &str) -> TranslationUnit {
     let (ast, diags, _) = parse_snippet(src);
@@ -324,6 +337,113 @@ fn ctestsuite_00214_reduced_statement_expression_fixture_parses() {
     parse_ok(
         "void f(void) { int __ret = 42; ({ if (__builtin_expect(!!(0), 0)) { int x = !!(__ret); } __ret; }); }",
     );
+}
+
+#[test]
+fn gnu_attribute_declaration_specifier_warns_in_default_mode() {
+    let src = "__attribute__((noreturn)) void f(void);";
+    let (tu, diags, sess) = parse_ok_with_session(src, Options::default());
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0015)),
+        "expected W0015 for GNU attribute in strict mode, got {diags:#?}"
+    );
+    let ExternalDecl::Decl(decl) = &tu.decls[0] else {
+        panic!("expected declaration");
+    };
+    assert_attr_name(&sess, &decl.specs.attrs[0], "noreturn");
+}
+
+#[test]
+fn gnu_attribute_option_suppresses_warning() {
+    let src = "__attribute__((noreturn)) void f(void);";
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (_tu, diags) = parse_ok_with_options(src, opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0015)),
+        "gnu option should suppress W0015, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_attribute_declarator_payloads_are_preserved() {
+    let src = "int x __attribute__((aligned(16), section(\"text\"), unused));";
+    let (tu, _diags, sess) = parse_ok_with_session(src, Options::default());
+    let ExternalDecl::Decl(decl) = &tu.decls[0] else {
+        panic!("expected declaration");
+    };
+    let attrs = &decl.inits[0].declarator.attrs;
+    assert_eq!(attrs.len(), 3);
+    assert_attr_name(&sess, &attrs[0], "aligned");
+    assert_eq!(attrs[0].args.len(), 1);
+    assert!(matches!(attrs[0].args[0].tokens[0].kind, AttributeTokenKind::Int(16)));
+    assert_attr_name(&sess, &attrs[1], "section");
+    assert!(
+        matches!(&attrs[1].args[0].tokens[0].kind, AttributeTokenKind::String(bytes) if bytes == b"text")
+    );
+    assert_attr_name(&sess, &attrs[2], "unused");
+}
+
+#[test]
+fn gnu_attribute_record_field_enum_function_and_statement_sites_parse() {
+    let src = r#"
+        struct __attribute__((packed)) S {
+            int x __attribute__((aligned(4)));
+        };
+        enum __attribute__((packed)) E {
+            A __attribute__((unused)) = 1
+        };
+        int f(void) __attribute__((noreturn)) {
+            __attribute__((unused));
+            return 0;
+        }
+    "#;
+    let (tu, _diags, sess) = parse_ok_with_session(src, Options::default());
+    let ExternalDecl::Decl(record_decl) = &tu.decls[0] else {
+        panic!("expected record declaration");
+    };
+    let TypeSpec::Record(record) = &record_decl.specs.type_specs[0] else {
+        panic!("expected record spec");
+    };
+    assert_attr_name(&sess, &record.attrs[0], "packed");
+    let field = &record.fields.as_ref().unwrap()[0];
+    let field_decl = field.declarators[0].declarator.as_ref().unwrap();
+    assert_attr_name(&sess, &field_decl.attrs[0], "aligned");
+
+    let ExternalDecl::Decl(enum_decl) = &tu.decls[1] else {
+        panic!("expected enum declaration");
+    };
+    let TypeSpec::Enum(en) = &enum_decl.specs.type_specs[0] else {
+        panic!("expected enum spec");
+    };
+    assert_attr_name(&sess, &en.attrs[0], "packed");
+    assert_attr_name(&sess, &en.enumerators.as_ref().unwrap()[0].attrs[0], "unused");
+
+    let ExternalDecl::Function(func) = &tu.decls[2] else {
+        panic!("expected function definition");
+    };
+    assert_attr_name(&sess, &func.declarator.attrs[0], "noreturn");
+    let BlockItem::Stmt(stmt) = &func.body.items[0] else {
+        panic!("expected attributed statement");
+    };
+    assert!(matches!(stmt.kind, StmtKind::Attributed { .. }));
+}
+
+#[test]
+fn gnu_attribute_type_name_site_parses() {
+    parse_ok("void f(void) { sizeof(int __attribute__((aligned(4)))); }");
+}
+
+#[test]
+fn gnu_attribute_malformed_parentheses_reports_error() {
+    let errs = parse_err("int x __attribute__((aligned(16));");
+    assert!(
+        errs.iter().any(|d| d.code == Some(rcc_errors::codes::E0031)),
+        "expected E0031, got {errs:#?}"
+    );
+}
+
+fn assert_attr_name(sess: &Session, attr: &Attribute, expected: &str) {
+    assert_eq!(sess.interner.get(attr.name), expected);
 }
 
 // ═══════════════════════════════════════════════════════════════════

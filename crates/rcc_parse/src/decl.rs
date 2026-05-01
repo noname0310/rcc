@@ -136,6 +136,16 @@ pub fn parse_decl_specs(p: &mut Parser<'_>) -> Option<DeclSpecs> {
 
     while let Some(tok) = p.peek() {
         let tok_span = tok.span;
+        if crate::attr::peek_attribute(p) {
+            let attrs = crate::attr::parse_attributes(p);
+            let attr_end = attrs.last().map(|a| a.span).unwrap_or(tok_span);
+            specs.attrs.extend(attrs);
+            if first_span.is_none() {
+                first_span = Some(tok_span);
+            }
+            last_span = attr_end;
+            continue;
+        }
 
         match &tok.kind {
             TokenKind::Keyword(kw) => {
@@ -610,6 +620,7 @@ fn specifier_conflict(p: &mut Parser<'_>, msg: impl Into<String>, span: Span) {
 pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordSpec {
     let kw_span = p.cur_span();
     p.bump(); // struct/union
+    let attrs = crate::attr::parse_attributes(p);
 
     let tag = match p.peek() {
         Some(t) => match t.kind {
@@ -643,7 +654,7 @@ pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordS
     }
 
     let id = p.fresh_id();
-    RecordSpec { id, kind, tag: tag.map(|(sym, _)| sym), fields, span: kw_span.to(end_span) }
+    RecordSpec { id, kind, tag: tag.map(|(sym, _)| sym), fields, span: kw_span.to(end_span), attrs }
 }
 
 /// Parse a `{ field-decl* }` struct/union body. Cursor must be on
@@ -793,6 +804,7 @@ fn parse_field_declarator(p: &mut Parser<'_>) -> FieldDeclarator {
 pub(crate) fn parse_enum_spec(p: &mut Parser<'_>) -> EnumSpec {
     let kw_span = p.cur_span();
     p.bump(); // enum
+    let attrs = crate::attr::parse_attributes(p);
 
     let tag = match p.peek() {
         Some(t) => match t.kind {
@@ -822,7 +834,7 @@ pub(crate) fn parse_enum_spec(p: &mut Parser<'_>) -> EnumSpec {
     }
 
     let id = p.fresh_id();
-    EnumSpec { id, tag: tag.map(|(sym, _)| sym), enumerators, span: kw_span.to(end_span) }
+    EnumSpec { id, tag: tag.map(|(sym, _)| sym), enumerators, span: kw_span.to(end_span), attrs }
 }
 
 /// Parse a `{ enumerator-list , }` body. Cursor must be on `{`.
@@ -924,17 +936,19 @@ fn parse_enumerator(p: &mut Parser<'_>) -> Option<Enumerator> {
         }
     };
 
+    let mut attrs = crate::attr::parse_attributes(p);
     let value = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Eq))) {
         p.bump();
         crate::expr::parse_assignment_expression(p)
     } else {
         None
     };
+    attrs.extend(crate::attr::parse_attributes(p));
     let end = match &value {
         Some(e) => e.span,
-        None => name_span,
+        None => attrs.last().map(|a| a.span).unwrap_or(name_span),
     };
-    Some(Enumerator { name: sym, value, span: name_span.to(end) })
+    Some(Enumerator { name: sym, value, span: name_span.to(end), attrs })
 }
 
 /// Recovery: advance the cursor until a top-level `;` or `}` is
@@ -1493,6 +1507,7 @@ fn parse_declarator_in_ctx(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<Declarato
     let pointer_prefix = parse_pointer_prefix(p);
     let (name, mut chain) = parse_declarator_atom(p, ctx)?;
     parse_declarator_suffixes(p, &mut chain);
+    let attrs = crate::attr::parse_attributes(p);
     // Pointer prefix modifiers wrap the *whole* direct-declarator from
     // the outside in the source but fold INSIDE of its suffixes in the
     // inside-out type, so they append after the direct-declarator's
@@ -1502,7 +1517,7 @@ fn parse_declarator_in_ctx(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<Declarato
     chain.extend(pointer_prefix.into_iter().rev());
     let span =
         if p.cursor == start_cursor { start } else { start.to(last_consumed_span(p, start)) };
-    Some(Declarator { name, derived: chain, span })
+    Some(Declarator { name, derived: chain, span, attrs })
 }
 
 /// Consume zero or more `*` pointer tokens together with any
@@ -3034,8 +3049,12 @@ mod tests {
         let mut parser = Parser::new(&mut sess, tokens);
 
         let specs = DeclSpecs { storage: Some(StorageClass::Typedef), ..DeclSpecs::default() };
-        let abstract_decl =
-            Declarator { name: None, derived: Vec::new(), span: rcc_span::DUMMY_SP };
+        let abstract_decl = Declarator {
+            name: None,
+            derived: Vec::new(),
+            span: rcc_span::DUMMY_SP,
+            attrs: Vec::new(),
+        };
 
         let before = parser.scopes.depth();
         declare_declarator_name(&mut parser, &specs, &abstract_decl);
