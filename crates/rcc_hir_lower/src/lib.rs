@@ -656,7 +656,7 @@ pub fn lower_stmt(
             // existing integer-constant evaluator. Non-foldable
             // expressions fall through as `None`; the switch-collection
             // pass (task 06-10 / typeck) can emit its own diagnostic.
-            let folded = eval_enum_value_as_i128(value, &session.interner);
+            let folded = eval_enum_value_as_i128(value);
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Case { value: folded, body: body_id }
         }
@@ -948,7 +948,7 @@ fn lower_block_decl(
             session,
         );
         if let Some(init) = &init_decl.init {
-            ty = complete_initializer_type(ty, init, tcx, session);
+            ty = complete_initializer_type(ty, init, tcx);
         }
         if is_incomplete_array_ty(ty, tcx) {
             emit_incomplete_array_at_block_scope(init_decl.declarator.span, session);
@@ -1050,7 +1050,7 @@ fn lower_top_level_vla_len(
         return None;
     };
     let size_expr = arr_decl.size.as_ref()?;
-    if eval_const_expr_as_u64(size_expr, &session.interner).is_some() {
+    if eval_const_expr_as_u64(size_expr).is_some() {
         return None;
     }
 
@@ -1075,21 +1075,16 @@ fn push_local_ref(local: Local, ty: TyId, span: Span, body: &mut Body) -> HirExp
     id
 }
 
-fn complete_initializer_type(
-    ty: TyId,
-    init: &rcc_ast::Initializer,
-    tcx: &mut TyCtxt,
-    session: &Session,
-) -> TyId {
+fn complete_initializer_type(ty: TyId, init: &rcc_ast::Initializer, tcx: &mut TyCtxt) -> TyId {
     let Ty::Array { elem, len: None, is_vla: false } = tcx.get(ty).clone() else {
         return ty;
     };
 
     let completed_len = match init {
         rcc_ast::Initializer::Expr(e) if is_string_array_initializer(ty, e, tcx) => {
-            string_initializer_len(e, session)
+            string_initializer_len(e)
         }
-        rcc_ast::Initializer::List(items) => Some(array_initializer_list_len(items, session)),
+        rcc_ast::Initializer::List(items) => Some(array_initializer_list_len(items)),
         _ => None,
     };
 
@@ -1110,17 +1105,12 @@ fn emit_incomplete_array_at_block_scope(span: Span, session: &mut Session) {
         .emit();
 }
 
-fn array_initializer_list_len(
-    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
-    session: &Session,
-) -> u64 {
+fn array_initializer_list_len(items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)]) -> u64 {
     let mut cursor = 0u64;
     let mut max_len = 0u64;
     for (desigs, _) in items {
         let idx = match desigs.first() {
-            Some(rcc_ast::Designator::Index(e)) => {
-                eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor)
-            }
+            Some(rcc_ast::Designator::Index(e)) => eval_const_expr_as_u64(e).unwrap_or(cursor),
             _ => cursor,
         };
         max_len = max_len.max(idx.saturating_add(1));
@@ -1130,7 +1120,7 @@ fn array_initializer_list_len(
 }
 
 fn is_string_array_initializer(ty: TyId, expr: &rcc_ast::Expr, tcx: &TyCtxt) -> bool {
-    matches!(expr.kind, rcc_ast::ExprKind::StringLit { .. }) && is_char_array_ty(ty, tcx)
+    matches!(&expr.kind, rcc_ast::ExprKind::StringLit(_)) && is_char_array_ty(ty, tcx)
 }
 
 fn is_char_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
@@ -1144,12 +1134,11 @@ fn is_char_like_ty(ty: TyId, tcx: &TyCtxt) -> bool {
     matches!(tcx.get(ty), Ty::Int { rank: IntRank::Char, .. })
 }
 
-fn string_initializer_len(expr: &rcc_ast::Expr, session: &Session) -> Option<u64> {
-    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+fn string_initializer_len(expr: &rcc_ast::Expr) -> Option<u64> {
+    let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
         return None;
     };
-    let s = session.interner.get(text);
-    Some((string_content_char_count(strip_string_literal_quotes(s)) + 1) as u64)
+    Some((lit.bytes.len() + 1) as u64)
 }
 
 /// Flatten a brace-enclosed initialiser (`Initializer::List`) into a
@@ -1197,7 +1186,7 @@ pub fn lower_initializer(
     match init {
         rcc_ast::Initializer::Expr(e) => {
             if is_string_array_initializer(target_ty, e, tcx) {
-                lower_string_array_initializer(target, target_ty, e, span, body, tcx, session, out);
+                lower_string_array_initializer(target, target_ty, e, span, body, tcx, out);
                 return;
             }
             // Scalar initialiser.
@@ -1220,17 +1209,15 @@ fn lower_string_array_initializer(
     span: Span,
     body: &mut Body,
     tcx: &mut TyCtxt,
-    session: &Session,
     out: &mut Vec<HirStmtId>,
 ) {
-    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+    let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
         return;
     };
     let Ty::Array { elem, len, .. } = tcx.get(target_ty).clone() else {
         return;
     };
-    let s = session.interner.get(text);
-    let mut values = decode_string_literal_values(strip_string_literal_quotes(s));
+    let mut values: Vec<i128> = lit.bytes.iter().map(|&b| i128::from(b)).collect();
     values.push(0);
     let write_len = len.unwrap_or(values.len() as u64);
     for i in 0..write_len {
@@ -1284,10 +1271,10 @@ fn lower_global_initializer_into(
 ) {
     match init {
         rcc_ast::Initializer::Expr(e) if is_string_array_initializer(target_ty, e, tcx) => {
-            lower_global_string_array_initializer(target_ty, e, span, path, tcx, session, out);
+            lower_global_string_array_initializer(target_ty, e, span, path, tcx, out);
         }
         rcc_ast::Initializer::Expr(e) => {
-            let value = lower_global_init_expr(e, crate_, tcx, resolver, session);
+            let value = lower_global_init_expr(e, crate_, tcx, resolver);
             out.push(GlobalInitEntry { path, value, span: e.span });
         }
         rcc_ast::Initializer::List(items) => {
@@ -1316,7 +1303,7 @@ fn lower_global_initializer_list(
             for (desigs, sub_init) in items {
                 let (idx, nested_desigs) = match desigs.split_first() {
                     Some((rcc_ast::Designator::Index(e), rest)) => {
-                        (eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor), rest)
+                        (eval_const_expr_as_u64(e).unwrap_or(cursor), rest)
                     }
                     Some((rcc_ast::Designator::Field(_), _)) => {
                         emit_invalid_initializer_designator(
@@ -1436,17 +1423,15 @@ fn lower_global_string_array_initializer(
     span: Span,
     path: Vec<GlobalInitDesignator>,
     tcx: &TyCtxt,
-    session: &Session,
     out: &mut Vec<GlobalInitEntry>,
 ) {
-    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+    let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
         return;
     };
     let Ty::Array { len, .. } = tcx.get(target_ty).clone() else {
         return;
     };
-    let s = session.interner.get(text);
-    let mut values = decode_string_literal_values(strip_string_literal_quotes(s));
+    let mut values: Vec<i128> = lit.bytes.iter().map(|&b| i128::from(b)).collect();
     values.push(0);
     let write_len = len.unwrap_or(values.len() as u64);
     for i in 0..write_len {
@@ -1466,25 +1451,15 @@ fn lower_global_init_expr(
     crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
-    session: &mut Session,
 ) -> GlobalInitValue {
     match &expr.kind {
-        rcc_ast::ExprKind::IntLit { .. } => eval_const_expr_as_u64(expr, &session.interner)
-            .map(|v| GlobalInitValue::Int(i128::from(v)))
-            .unwrap_or(GlobalInitValue::Error),
-        rcc_ast::ExprKind::CharLit { text } => {
-            let s = session.interner.get(*text);
-            decode_first_char_value(s)
-                .map(|v| GlobalInitValue::Int(i128::from(v)))
-                .unwrap_or(GlobalInitValue::Error)
+        rcc_ast::ExprKind::IntLit(lit) => {
+            i128::try_from(lit.value).map(GlobalInitValue::Int).unwrap_or(GlobalInitValue::Error)
         }
-        rcc_ast::ExprKind::FloatLit { text } => {
-            let s = session.interner.get(*text);
-            let trimmed = s.trim_end_matches(['f', 'F', 'l', 'L']);
-            trimmed.parse::<f64>().map(GlobalInitValue::Float).unwrap_or(GlobalInitValue::Error)
-        }
-        rcc_ast::ExprKind::StringLit { text } => {
-            let def_id = intern_string_literal(*text, expr.span, crate_, tcx, resolver, session);
+        rcc_ast::ExprKind::CharLit(lit) => GlobalInitValue::Int(i128::from(lit.value)),
+        rcc_ast::ExprKind::FloatLit(lit) => GlobalInitValue::Float(lit.value),
+        rcc_ast::ExprKind::StringLit(lit) => {
+            let def_id = intern_string_literal(lit, expr.span, crate_, tcx, resolver);
             GlobalInitValue::StringLiteral(def_id)
         }
         _ => GlobalInitValue::Error,
@@ -1573,7 +1548,7 @@ fn lower_array_initializer(
         // element-level initialiser walker.
         let (idx, nested_desigs) = match desigs.split_first() {
             Some((rcc_ast::Designator::Index(e), rest)) => {
-                let i = eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor);
+                let i = eval_const_expr_as_u64(e).unwrap_or(cursor);
                 (i, rest)
             }
             Some((rcc_ast::Designator::Field(_), _)) => {
@@ -1983,27 +1958,13 @@ pub fn lower_expr(
     session: &mut Session,
 ) -> HirExprId {
     let kind: HirExprKind = match &expr.kind {
-        rcc_ast::ExprKind::IntLit { .. } => {
-            let value = eval_const_expr_as_u64(expr, &session.interner).unwrap_or(0);
-            HirExprKind::IntConst(i128::from(value))
+        rcc_ast::ExprKind::IntLit(lit) => {
+            HirExprKind::IntConst(i128::try_from(lit.value).unwrap_or(i128::MAX))
         }
-        rcc_ast::ExprKind::FloatLit { text } => {
-            let s = session.interner.get(*text);
-            // Strip the common float suffixes before parsing.
-            let trimmed = s.trim_end_matches(['f', 'F', 'l', 'L']);
-            let value = trimmed.parse::<f64>().unwrap_or(0.0);
-            HirExprKind::FloatConst(value)
-        }
-        rcc_ast::ExprKind::CharLit { text } => {
-            // The token text is the full source slice, e.g. `'a'`,
-            // `'\n'`, `L'\x41'`. We only need the first character's
-            // numeric value for the HIR; typeck promotes it to `int`.
-            let s = session.interner.get(*text);
-            let value = decode_first_char_value(s).unwrap_or(0);
-            HirExprKind::IntConst(i128::from(value))
-        }
-        rcc_ast::ExprKind::StringLit { text } => {
-            let def_id = intern_string_literal(*text, expr.span, crate_, tcx, resolver, session);
+        rcc_ast::ExprKind::FloatLit(lit) => HirExprKind::FloatConst(lit.value),
+        rcc_ast::ExprKind::CharLit(lit) => HirExprKind::IntConst(i128::from(lit.value)),
+        rcc_ast::ExprKind::StringLit(lit) => {
+            let def_id = intern_string_literal(lit, expr.span, crate_, tcx, resolver);
             HirExprKind::StringRef(def_id)
         }
         rcc_ast::ExprKind::Paren(inner) => {
@@ -2187,32 +2148,24 @@ pub fn lower_expr(
 /// source text in `resolver.strings`. If present, returns the cached
 /// `DefId`. Otherwise creates a new `DefKind::Global` with
 /// `linkage: Internal` and an `array-of-char` type whose length is
-/// the decoded string length plus one (for the trailing NUL required
-/// by C99 §6.4.5p6).
+/// the decoded byte length plus one (for the trailing NUL required by
+/// C99 §6.4.5p6).
 ///
 /// The type is interned as `char[N]` via `TyCtxt::intern` so string
 /// literals with identical text share the same type id.
 fn intern_string_literal(
-    text: Symbol,
+    lit: &rcc_ast::StringLiteral,
     span: Span,
     crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
-    session: &mut Session,
 ) -> DefId {
+    let text = lit.text;
     if let Some(&existing) = resolver.strings.get(&text) {
         return existing;
     }
 
-    // Decode the literal's content length. Handles simple escape
-    // sequences (`\n`, `\t`, `\\`, `\"`, `\0`, octal, hex) at a
-    // coarse grain: every escape counts as one character. The value
-    // used by codegen will be recomputed from the final decoded byte
-    // buffer; this length is enough to build a well-formed
-    // `array-of-char` type for typeck.
-    let s = session.interner.get(text);
-    let content = strip_string_literal_quotes(s);
-    let len = string_content_char_count(content) + 1; // +1 for NUL
+    let len = lit.bytes.len() + 1; // +1 for NUL
 
     let char_ty = tcx.char_;
     let array_ty =
@@ -2236,6 +2189,7 @@ fn intern_string_literal(
 /// Strip the surrounding quotes and any encoding prefix (`L`, `u`,
 /// `U`, `u8`) from a C string literal's source text. Returns the
 /// slice between the quotes or `""` if the input is malformed.
+#[cfg(test)]
 fn strip_string_literal_quotes(s: &str) -> &str {
     // Drop any encoding prefix before the opening quote.
     let after_prefix = s.strip_prefix("u8").or_else(|| s.strip_prefix('u')).unwrap_or(s);
@@ -2248,47 +2202,7 @@ fn strip_string_literal_quotes(s: &str) -> &str {
     inner.strip_suffix('"').unwrap_or(inner)
 }
 
-/// Count logical characters in the (quote-stripped) body of a C
-/// string literal. Each `\x`-prefixed escape counts as one character
-/// regardless of how many digits follow; a bare `\` followed by any
-/// non-digit also counts as one character. Multi-byte UTF-8 sequences
-/// are counted per-byte, which matches how codegen lays them out in
-/// a `char[]`.
-fn string_content_char_count(content: &str) -> usize {
-    let bytes = content.as_bytes();
-    let mut i = 0usize;
-    let mut count = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            // Single-char escape. Skip the escape character and the
-            // next byte; octal / hex escapes with multiple digits are
-            // still only one logical char.
-            i += 2;
-            // Octal escape: up to three digits total.
-            if i > 1 && bytes[i - 1].is_ascii_digit() && bytes[i - 1] < b'8' {
-                let mut consumed = 1;
-                while consumed < 3
-                    && i < bytes.len()
-                    && bytes[i].is_ascii_digit()
-                    && bytes[i] < b'8'
-                {
-                    i += 1;
-                    consumed += 1;
-                }
-            } else if i > 1 && (bytes[i - 1] == b'x' || bytes[i - 1] == b'X') {
-                // Hex escape: consume further hex digits.
-                while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
-                    i += 1;
-                }
-            }
-        } else {
-            i += 1;
-        }
-        count += 1;
-    }
-    count
-}
-
+#[cfg(test)]
 fn decode_string_literal_values(content: &str) -> Vec<i128> {
     let bytes = content.as_bytes();
     let mut i = 0usize;
@@ -2386,6 +2300,7 @@ fn decode_string_literal_values(content: &str) -> Vec<i128> {
 ///
 /// Returns `None` if the input does not look like a char literal;
 /// the caller then substitutes 0 so later passes keep working.
+#[cfg(test)]
 fn decode_first_char_value(s: &str) -> Option<i32> {
     // Drop any encoding prefix.
     let after_prefix = s
@@ -3019,7 +2934,7 @@ fn apply_declarator_with_context_in_scope(
                     (None, true)
                 } else if let Some(ref size_expr) = arr_decl.size {
                     // Try to evaluate as a constant integer.
-                    match eval_const_expr_as_u64(size_expr, &session.interner) {
+                    match eval_const_expr_as_u64(size_expr) {
                         Some(n) => (Some(n), false),
                         None => (None, scope != DeclScope::File),
                     }
@@ -3273,23 +3188,10 @@ fn lower_builtin_specs_to_base_ty(
 ///
 /// Handles only integer literals for now. A full `ConstEval` lives in
 /// `rcc_typeck` and will be wired in later.
-fn eval_const_expr_as_u64(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<u64> {
+fn eval_const_expr_as_u64(expr: &rcc_ast::Expr) -> Option<u64> {
     match &expr.kind {
-        rcc_ast::ExprKind::IntLit { text } => {
-            // The text is the raw literal string. Parse it.
-            // Handle hex (0x), octal (0), and decimal.
-            let s = interner.get(*text);
-            // Strip any suffix (u, U, l, L, ll, LL, etc.)
-            let s = s.trim_end_matches(['u', 'U', 'l', 'L']);
-            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                u64::from_str_radix(hex, 16).ok()
-            } else if s.starts_with('0') && s.len() > 1 {
-                u64::from_str_radix(s, 8).ok()
-            } else {
-                s.parse::<u64>().ok()
-            }
-        }
-        rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_u64(inner, interner),
+        rcc_ast::ExprKind::IntLit(lit) => u64::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_u64(inner),
         _ => None,
     }
 }
@@ -3321,19 +3223,17 @@ fn int_type_bit_width(ty: TyId, tcx: &TyCtxt) -> Option<u32> {
 /// minus in front of a literal so that `-1` (a common "bad width" case)
 /// can be detected and diagnosed instead of silently underflowing.
 /// Returns `None` when the expression is not a recognised constant.
-fn eval_bit_width(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<i64> {
+fn eval_bit_width(expr: &rcc_ast::Expr) -> Option<i64> {
     match &expr.kind {
-        rcc_ast::ExprKind::IntLit { .. } => {
-            eval_const_expr_as_u64(expr, interner).and_then(|u| i64::try_from(u).ok())
+        rcc_ast::ExprKind::IntLit(_) => {
+            eval_const_expr_as_u64(expr).and_then(|u| i64::try_from(u).ok())
         }
-        rcc_ast::ExprKind::Paren(inner) => eval_bit_width(inner, interner),
+        rcc_ast::ExprKind::Paren(inner) => eval_bit_width(inner),
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
-            let inner = eval_bit_width(operand, interner)?;
+            let inner = eval_bit_width(operand)?;
             inner.checked_neg()
         }
-        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
-            eval_bit_width(operand, interner)
-        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => eval_bit_width(operand),
         _ => None,
     }
 }
@@ -3349,15 +3249,15 @@ fn eval_bit_width(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option
 ///
 /// Returns `None` on unrecognised shapes; the caller then emits a
 /// diagnostic on behalf of the broken enumerator.
-fn eval_enum_value_as_i128(expr: &rcc_ast::Expr, interner: &rcc_span::Interner) -> Option<i128> {
+fn eval_enum_value_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
     match &expr.kind {
-        rcc_ast::ExprKind::IntLit { .. } => eval_const_expr_as_u64(expr, interner).map(i128::from),
-        rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner, interner),
+        rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner),
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
-            eval_enum_value_as_i128(operand, interner).and_then(i128::checked_neg)
+            eval_enum_value_as_i128(operand).and_then(i128::checked_neg)
         }
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
-            eval_enum_value_as_i128(operand, interner)
+            eval_enum_value_as_i128(operand)
         }
         _ => None,
     }
@@ -3400,7 +3300,7 @@ pub fn lower_enum(
 
     for enumerator in enumerators {
         let value = if let Some(value_expr) = &enumerator.value {
-            match eval_enum_value_as_i128(value_expr, &session.interner) {
+            match eval_enum_value_as_i128(value_expr) {
                 Some(v) => v,
                 None => {
                     session
@@ -3613,7 +3513,7 @@ fn validate_bit_width(
     tcx: &TyCtxt,
     session: &mut Session,
 ) -> (bool, Option<u32>) {
-    let value = match eval_bit_width(width_expr, &session.interner) {
+    let value = match eval_bit_width(width_expr) {
         Some(v) => v,
         None => {
             session
@@ -3864,7 +3764,7 @@ fn finalize_file_scope_def_types(
                 session,
             );
             if let Some(init) = &init_decl.init {
-                ty = complete_initializer_type(ty, init, tcx, session);
+                ty = complete_initializer_type(ty, init, tcx);
             }
             let global_init = init_decl.init.as_ref().map(|init| {
                 lower_global_initializer(
@@ -5120,12 +5020,11 @@ mod tests {
 
     /// Helper: make an array derived declarator with a constant size.
     fn array(size: u64, sess: &mut Session) -> DerivedDeclarator {
-        let text = sym(sess, &size.to_string());
         DerivedDeclarator::Array(ArrayDeclarator {
             quals: TypeQuals::default(),
             has_static: false,
             star: false,
-            size: Some(Expr { id: NodeId(0), kind: ExprKind::IntLit { text }, span: DUMMY_SP }),
+            size: Some(int_lit(&size.to_string(), sess)),
         })
     }
 
@@ -5640,7 +5539,27 @@ mod tests {
     /// Helper: int literal constant expression with given text.
     fn int_lit(text: &str, sess: &mut Session) -> Expr {
         let s = sym(sess, text);
-        Expr { id: NodeId(0), kind: ExprKind::IntLit { text: s }, span: DUMMY_SP }
+        let value = parse_int_lit_value(text);
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::IntLit(rcc_ast::IntLiteral {
+                text: s,
+                value,
+                suffix: rcc_ast::IntSuffix::None,
+            }),
+            span: DUMMY_SP,
+        }
+    }
+
+    fn parse_int_lit_value(text: &str) -> u128 {
+        let s = text.trim_end_matches(['u', 'U', 'l', 'L']);
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u128::from_str_radix(hex, 16).unwrap()
+        } else if s.starts_with('0') && s.len() > 1 {
+            u128::from_str_radix(s, 8).unwrap()
+        } else {
+            s.parse::<u128>().unwrap()
+        }
     }
 
     /// Helper: unary `-n` constant expression.
@@ -6768,26 +6687,75 @@ mod tests {
     /// (quotes included). Example: `string_lit(&mut sess, "\"hi\"")`.
     fn string_lit(sess: &mut Session, raw: &str) -> Expr {
         let s = sym(sess, raw);
-        Expr { id: NodeId(0), kind: ExprKind::StringLit { text: s }, span: DUMMY_SP }
+        let bytes = decode_string_literal_values(strip_string_literal_quotes(raw))
+            .into_iter()
+            .map(|v| v as u8)
+            .collect();
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::StringLit(rcc_ast::StringLiteral {
+                text: s,
+                bytes,
+                encoding: rcc_ast::LiteralEncoding::None,
+            }),
+            span: DUMMY_SP,
+        }
     }
 
     /// Helper: build a `CharLit` expression from the raw source text
     /// (quotes included). Example: `char_lit(&mut sess, "'a'")`.
     fn char_lit(sess: &mut Session, raw: &str) -> Expr {
         let s = sym(sess, raw);
-        Expr { id: NodeId(0), kind: ExprKind::CharLit { text: s }, span: DUMMY_SP }
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::CharLit(rcc_ast::CharLiteral {
+                text: s,
+                value: decode_first_char_value(raw).unwrap_or(0) as u32,
+                encoding: rcc_ast::LiteralEncoding::None,
+            }),
+            span: DUMMY_SP,
+        }
     }
 
     /// Helper: build a `FloatLit` expression.
     fn float_lit(sess: &mut Session, raw: &str) -> Expr {
         let s = sym(sess, raw);
-        Expr { id: NodeId(0), kind: ExprKind::FloatLit { text: s }, span: DUMMY_SP }
+        let suffix = if raw.ends_with('f') || raw.ends_with('F') {
+            rcc_ast::FloatSuffix::F
+        } else if raw.ends_with('l') || raw.ends_with('L') {
+            rcc_ast::FloatSuffix::L
+        } else {
+            rcc_ast::FloatSuffix::None
+        };
+        let value = raw.trim_end_matches(['f', 'F', 'l', 'L']).parse::<f64>().unwrap();
+        Expr {
+            id: NodeId(0),
+            kind: ExprKind::FloatLit(rcc_ast::FloatLiteral { text: s, value, suffix }),
+            span: DUMMY_SP,
+        }
     }
 
     #[test]
     fn expr_int_literal_lowers_to_int_const() {
         let (mut sess, _cap) = Session::for_test();
         let e = int_lit("42", &mut sess);
+        let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+    }
+
+    #[test]
+    fn expr_int_literal_uses_ast_payload_not_source_text() {
+        let (mut sess, _cap) = Session::for_test();
+        let misleading_text = sym(&mut sess, "0");
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::IntLit(rcc_ast::IntLiteral {
+                text: misleading_text,
+                value: 42,
+                suffix: rcc_ast::IntSuffix::None,
+            }),
+            span: DUMMY_SP,
+        };
         let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
         assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
     }
@@ -7460,10 +7428,10 @@ mod tests {
         // Count AST nodes recursively.
         fn count_ast(e: &Expr) -> usize {
             match &e.kind {
-                ExprKind::IntLit { .. }
-                | ExprKind::FloatLit { .. }
-                | ExprKind::CharLit { .. }
-                | ExprKind::StringLit { .. }
+                ExprKind::IntLit(_)
+                | ExprKind::FloatLit(_)
+                | ExprKind::CharLit(_)
+                | ExprKind::StringLit(_)
                 | ExprKind::Ident(_) => 1,
                 ExprKind::Binary { lhs, rhs, .. } => 1 + count_ast(lhs) + count_ast(rhs),
                 ExprKind::Unary { operand, .. } => 1 + count_ast(operand),

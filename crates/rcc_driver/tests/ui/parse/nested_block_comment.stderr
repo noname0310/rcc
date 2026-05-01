@@ -13,8 +13,3 @@ Error: expected identifier or `(` in declarator
    │
  1 │ /* outer /* inner */ still outside */
 ───╯
-Error: expected identifier or `(` in declarator
-   ╭─[ crates/rcc_driver/tests/ui/parse/nested_block_comment.c:1:37 ]
-   │
- 1 │ /* outer /* inner */ still outside */
-───╯

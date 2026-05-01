@@ -10,6 +10,7 @@ phases.
 | Area | Status | Downstream owner |
 |---|---:|---|
 | Phase-7 token conversion, keyword classification, literal decoding, adjacent string concatenation | complete | HIR/typeck consume AST literal nodes |
+| Decoded integer, float, character, and string literal payloads in AST | complete | HIR lowering consumes payload fields directly |
 | Primary, postfix, unary, cast, `sizeof`, compound literal, binary, conditional, assignment, comma expressions | complete | HIR/typeck validate lvalues, conversions, and constant-expression rules |
 | Labels, compound blocks, expression statements, `if`, `switch`, loops, jumps | complete | HIR validates labels, jump targets, switch constraints |
 | Block declarations and `for` declaration init | complete | HIR preserves lexical scope and storage |
@@ -34,7 +35,6 @@ phases.
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-34 | Decoded literal AST payloads | Typeck/codegen currently risk re-decoding source text |
 | 05-35 | Builtin type-argument syntax | `__builtin_offsetof(type, member)` and `__builtin_types_compatible_p(t1, t2)` are not ordinary calls |
 | 05-36 | GNU statement expressions `({ ... })` | c-testsuite `00213`/`00214` and real GNU-flavoured sources need expression-valued blocks |
 | 05-37 | GNU range designators `[lo ... hi]` | c-testsuite `00216` needs range initializer syntax before HIR can expand it |

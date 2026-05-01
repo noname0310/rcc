@@ -102,27 +102,6 @@
 //! compound literals) are parsed by the postfix / unary layers above
 //! the Pratt loop.
 //!
-//! ## AST shape trade-off
-//!
-//! The current `ExprKind::IntLit { text: Symbol }` variants carry the
-//! raw source spelling as an interned symbol rather than the already-
-//! decoded `IntLiteral` / `FloatLiteral` / `CharLiteral` / `StringLiteral`
-//! value that the phase-7 `Token` now holds. Two options were on the
-//! table when wiring this task:
-//!
-//! 1. Keep the AST text-only and let typeck re-decode.
-//! 2. Evolve the AST variants to carry the decoded payload.
-//!
-//! Option 2 is cleaner long-term (decoding happens once, errors are
-//! attached at the single right span, typeck just reads fields), but it
-//! reshapes five AST variants plus every downstream match — out of
-//! scope for "primary expressions". This task takes **option 1**: the
-//! parser re-interns the source slice behind the token's span and
-//! stores the resulting `Symbol` in the AST, preserving decoded values
-//! inside the `Token` stream that the postfix/unary tasks will thread
-//! through. Parser blocker task 05-34 tracks migrating the AST to the
-//! decoded shape now that the broader expression grammar is in place.
-//!
 //! ## Parenthesised-expression
 //!
 //! `( expression )` is parsed by [`parse_primary`] with its inner
@@ -159,20 +138,20 @@
 //! [`parse_assignment_expression`] is the `min_bp = COMMA_R_BP`
 //! entry (leaves comma to the caller).
 //!
-//! ## TODO
-//!
-//! - [ ] 05-34: migrate `ExprKind::{Int,Float,Char,String}Lit` to
-//!   carry decoded payloads (`IntLiteral`, `FloatLiteral`,
-//!   `CharLiteral`, `StringLiteral`) instead of `text: Symbol`.
-
-use rcc_ast::{AssignOp, BinOp, Expr, ExprKind, UnOp};
-use rcc_lexer::Punct;
+use rcc_ast::{
+    AssignOp, BinOp, CharLiteral as AstCharLiteral, Expr, ExprKind,
+    FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, IntLiteral as AstIntLiteral,
+    IntSuffix as AstIntSuffix, LiteralEncoding, StringLiteral as AstStringLiteral, UnOp,
+};
+use rcc_lexer::{Punct, StringEncoding};
 use rcc_span::{Span, Symbol};
 
 use crate::decl::parse_type_name;
 use crate::init::parse_initializer;
 use crate::keywords::Keyword;
-use crate::token::TokenKind;
+use crate::token::{
+    CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, TokenKind,
+};
 use crate::Parser;
 
 /// Parse a C99 §6.5.1 *primary-expression*.
@@ -199,33 +178,29 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             let id = p.fresh_id();
             Some(Expr { id, kind: ExprKind::Ident(sym), span })
         }
-        TokenKind::IntLit(_) => {
-            // AST is still text-based for literals; re-intern the source
-            // slice covered by the token. The decoded `IntLiteral`
-            // value stays inside the `Token` and will be threaded to
-            // typeck once the AST evolves.
-            let sym = intern_span_text(p, span);
+        TokenKind::IntLit(lit) => {
+            let lit = ast_int_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
-            Some(Expr { id, kind: ExprKind::IntLit { text: sym }, span })
+            Some(Expr { id, kind: ExprKind::IntLit(lit), span })
         }
-        TokenKind::FloatLit(_) => {
-            let sym = intern_span_text(p, span);
+        TokenKind::FloatLit(lit) => {
+            let lit = ast_float_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
-            Some(Expr { id, kind: ExprKind::FloatLit { text: sym }, span })
+            Some(Expr { id, kind: ExprKind::FloatLit(lit), span })
         }
-        TokenKind::CharLit(_) => {
-            let sym = intern_span_text(p, span);
+        TokenKind::CharLit(lit) => {
+            let lit = ast_char_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
-            Some(Expr { id, kind: ExprKind::CharLit { text: sym }, span })
+            Some(Expr { id, kind: ExprKind::CharLit(lit), span })
         }
-        TokenKind::StringLit(_) => {
-            let sym = intern_span_text(p, span);
+        TokenKind::StringLit(lit) => {
+            let lit = ast_string_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
-            Some(Expr { id, kind: ExprKind::StringLit { text: sym }, span })
+            Some(Expr { id, kind: ExprKind::StringLit(lit), span })
         }
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
@@ -1182,6 +1157,59 @@ fn intern_span_text(p: &mut Parser<'_>, span: rcc_span::Span) -> Symbol {
     p.session.interner.intern(&text)
 }
 
+fn ast_int_literal(p: &mut Parser<'_>, span: Span, lit: IntLiteral) -> AstIntLiteral {
+    AstIntLiteral {
+        text: intern_span_text(p, span),
+        value: lit.value,
+        suffix: match lit.suffix {
+            IntSuffix::None => AstIntSuffix::None,
+            IntSuffix::U => AstIntSuffix::U,
+            IntSuffix::L => AstIntSuffix::L,
+            IntSuffix::UL => AstIntSuffix::UL,
+            IntSuffix::LL => AstIntSuffix::LL,
+            IntSuffix::ULL => AstIntSuffix::ULL,
+        },
+    }
+}
+
+fn ast_float_literal(p: &mut Parser<'_>, span: Span, lit: FloatLiteral) -> AstFloatLiteral {
+    AstFloatLiteral {
+        text: intern_span_text(p, span),
+        value: lit.value,
+        suffix: match lit.suffix {
+            FloatSuffix::None => AstFloatSuffix::None,
+            FloatSuffix::F => AstFloatSuffix::F,
+            FloatSuffix::L => AstFloatSuffix::L,
+        },
+    }
+}
+
+fn ast_char_literal(p: &mut Parser<'_>, span: Span, lit: CharLiteral) -> AstCharLiteral {
+    AstCharLiteral {
+        text: intern_span_text(p, span),
+        value: lit.value,
+        encoding: ast_literal_encoding(lit.encoding),
+    }
+}
+
+fn ast_string_literal(p: &mut Parser<'_>, span: Span, lit: StringLiteral) -> AstStringLiteral {
+    AstStringLiteral {
+        text: intern_span_text(p, span),
+        bytes: lit.bytes,
+        encoding: ast_literal_encoding(lit.encoding),
+    }
+}
+
+fn ast_literal_encoding(enc: StringEncoding) -> LiteralEncoding {
+    match enc {
+        StringEncoding::None => LiteralEncoding::None,
+        StringEncoding::Utf8 => LiteralEncoding::Utf8,
+        StringEncoding::Utf16 => LiteralEncoding::Utf16,
+        StringEncoding::Utf32 => LiteralEncoding::Utf32,
+        StringEncoding::Wide => LiteralEncoding::Wide,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,15 +1243,11 @@ mod tests {
 
     #[test]
     fn integer_literal_parses_to_intlit() {
-        // `42` → ExprKind::IntLit { text: "42" }, span covers the digits,
-        // and the decoded value is still reachable through the token.
+        // `42` → ExprKind::IntLit with raw spelling + decoded payload.
         let src = "42";
         let (mut sess, fid, _cap) = mk_session(src);
         let pps = [pp(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, 2)];
         let tokens = convert(&mut sess, &pps);
-        // Decoded value must be on the token stream (this is the
-        // "reachable" side of the acceptance: the parser preserves the
-        // raw text, but the post-phase-7 token carries the u128 value).
         match &tokens[0].kind {
             TokenKind::IntLit(lit) => assert_eq!(lit.value, 42),
             other => panic!("expected IntLit, got {other:?}"),
@@ -1231,8 +1255,10 @@ mod tests {
         let mut parser = Parser::new(&mut sess, tokens);
         let e = parse_primary(&mut parser).expect("42 parses");
         match e.kind {
-            ExprKind::IntLit { text } => {
-                assert_eq!(parser.session.interner.get(text), "42");
+            ExprKind::IntLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "42");
+                assert_eq!(lit.value, 42);
+                assert_eq!(lit.suffix, AstIntSuffix::None);
             }
             other => panic!("expected IntLit, got {other:?}"),
         }
@@ -1240,6 +1266,24 @@ mod tests {
         assert_eq!(e.span.hi.0, 2);
         // Cursor advanced past the consumed token.
         assert_eq!(parser.cursor, 1);
+    }
+
+    #[test]
+    fn integer_literal_suffix_reaches_ast_payload() {
+        let src = "42UL";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let pps = [pp(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, 4)];
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_primary(&mut parser).expect("42UL parses");
+        match e.kind {
+            ExprKind::IntLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "42UL");
+                assert_eq!(lit.value, 42);
+                assert_eq!(lit.suffix, AstIntSuffix::UL);
+            }
+            other => panic!("expected IntLit, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1272,8 +1316,32 @@ mod tests {
         let mut parser = Parser::new(&mut sess, tokens);
         let e = parse_primary(&mut parser).expect(r#""hi" parses"#);
         match e.kind {
-            ExprKind::StringLit { text } => {
-                assert_eq!(parser.session.interner.get(text), "\"hi\"");
+            ExprKind::StringLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "\"hi\"");
+                assert_eq!(lit.bytes, b"hi");
+                assert_eq!(lit.encoding, LiteralEncoding::None);
+            }
+            other => panic!("expected StringLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adjacent_string_literals_reach_ast_as_concatenated_payload() {
+        let src = "\"a\" \"b\"";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let pps = [
+            pp(PpTokenKind::StringLit { enc: StringEncoding::None }, fid, 0, 3),
+            pp(PpTokenKind::Whitespace, fid, 3, 4),
+            pp(PpTokenKind::StringLit { enc: StringEncoding::None }, fid, 4, 7),
+        ];
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_primary(&mut parser).expect("adjacent strings parse");
+        match e.kind {
+            ExprKind::StringLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "\"a\" \"b\"");
+                assert_eq!(lit.bytes, b"ab");
+                assert_eq!(lit.encoding, LiteralEncoding::None);
             }
             other => panic!("expected StringLit, got {other:?}"),
         }
@@ -1289,8 +1357,28 @@ mod tests {
         let mut parser = Parser::new(&mut sess, tokens);
         let e = parse_primary(&mut parser).expect("'a' parses");
         match e.kind {
-            ExprKind::CharLit { text } => {
-                assert_eq!(parser.session.interner.get(text), "'a'");
+            ExprKind::CharLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "'a'");
+                assert_eq!(lit.value, u32::from(b'a'));
+                assert_eq!(lit.encoding, LiteralEncoding::None);
+            }
+            other => panic!("expected CharLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn char_literal_encoding_reaches_ast_payload() {
+        let src = "L'a'";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let pps = [pp(PpTokenKind::CharConst { enc: StringEncoding::Wide }, fid, 0, 4)];
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_primary(&mut parser).expect("wide char parses");
+        match e.kind {
+            ExprKind::CharLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "L'a'");
+                assert_eq!(lit.value, u32::from(b'a'));
+                assert_eq!(lit.encoding, LiteralEncoding::Wide);
             }
             other => panic!("expected CharLit, got {other:?}"),
         }
@@ -1298,16 +1386,36 @@ mod tests {
 
     #[test]
     fn float_literal_parses_to_floatlit() {
-        // `3.14` → ExprKind::FloatLit.
-        let src = "3.14";
+        // `2.5` → ExprKind::FloatLit.
+        let src = "2.5";
+        let (mut sess, fid, _cap) = mk_session(src);
+        let pps = [pp(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, 3)];
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_primary(&mut parser).expect("2.5 parses");
+        match e.kind {
+            ExprKind::FloatLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "2.5");
+                assert_eq!(lit.value, 2.5);
+                assert_eq!(lit.suffix, AstFloatSuffix::None);
+            }
+            other => panic!("expected FloatLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn float_literal_suffix_reaches_ast_payload() {
+        let src = "1.5f";
         let (mut sess, fid, _cap) = mk_session(src);
         let pps = [pp(PpTokenKind::PpNumber(PpNumberKind::Float), fid, 0, 4)];
         let tokens = convert(&mut sess, &pps);
         let mut parser = Parser::new(&mut sess, tokens);
-        let e = parse_primary(&mut parser).expect("3.14 parses");
+        let e = parse_primary(&mut parser).expect("1.5f parses");
         match e.kind {
-            ExprKind::FloatLit { text } => {
-                assert_eq!(parser.session.interner.get(text), "3.14");
+            ExprKind::FloatLit(lit) => {
+                assert_eq!(parser.session.interner.get(lit.text), "1.5f");
+                assert_eq!(lit.value, 1.5);
+                assert_eq!(lit.suffix, AstFloatSuffix::F);
             }
             other => panic!("expected FloatLit, got {other:?}"),
         }
@@ -1332,8 +1440,9 @@ mod tests {
         let e = parse_primary(&mut parser).expect("(42) parses");
         match e.kind {
             ExprKind::Paren(inner) => match inner.kind {
-                ExprKind::IntLit { text } => {
-                    assert_eq!(parser.session.interner.get(text), "42");
+                ExprKind::IntLit(lit) => {
+                    assert_eq!(parser.session.interner.get(lit.text), "42");
+                    assert_eq!(lit.value, 42);
                 }
                 other => panic!("inner must be IntLit, got {other:?}"),
             },
@@ -1376,7 +1485,7 @@ mod tests {
             ExprKind::Paren(inner) => *inner,
             other => panic!("level 3 must be Paren, got {other:?}"),
         };
-        assert!(matches!(l3.kind, ExprKind::IntLit { .. }));
+        assert!(matches!(l3.kind, ExprKind::IntLit(_)));
         // Span of the outermost Paren must cover the whole source.
         assert_eq!(e.span.lo.0, 0);
         assert_eq!(e.span.hi.0, 8);
@@ -1440,7 +1549,7 @@ mod tests {
         let tokens = convert(&mut sess, &pps);
         let mut parser = Parser::new(&mut sess, tokens);
         let e = parse_primary(&mut parser).expect("recovery returns the inner expr");
-        assert!(matches!(e.kind, ExprKind::IntLit { .. }));
+        assert!(matches!(e.kind, ExprKind::IntLit(_)));
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("expected `)`"));
@@ -1815,7 +1924,7 @@ mod tests {
             cur = *lhs;
         }
         assert_eq!(depth, n, "expected {n} left-leaning Add nodes, got {depth}");
-        assert!(matches!(cur.kind, ExprKind::IntLit { .. }));
+        assert!(matches!(cur.kind, ExprKind::IntLit(_)));
     }
 
     #[test]
@@ -1922,7 +2031,7 @@ mod tests {
             ExprKind::Index { base, index } => (*base, *index),
             other => panic!("level 2 must be Index, got {other:?}"),
         };
-        assert!(matches!(idx_index.kind, ExprKind::IntLit { .. }), "index must be `0`");
+        assert!(matches!(idx_index.kind, ExprKind::IntLit(_)), "index must be `0`");
         // Next: Arrow(.., c).
         let (arr_base, arr_field) = match idx_base.kind {
             ExprKind::Arrow { base, field } => (*base, field),
@@ -2863,7 +2972,7 @@ mod tests {
                             Initializer::Expr(inner) => {
                                 assert_eq!(
                                     sess.interner.get(match &inner.kind {
-                                        ExprKind::IntLit { text } => *text,
+                                        ExprKind::IntLit(lit) => lit.text,
                                         other => panic!("expected IntLit, got {other:?}"),
                                     }),
                                     "0"

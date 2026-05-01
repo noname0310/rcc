@@ -42,7 +42,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [31-parser-recovery-contract](31-parser-recovery-contract.md)
 - [x] [32-parser-doc-feature-sync](32-parser-doc-feature-sync.md)
 - [x] [33-type-name-validation-contract](33-type-name-validation-contract.md)
-- [ ] [34-decoded-literal-ast-payloads](34-decoded-literal-ast-payloads.md)
+- [x] [34-decoded-literal-ast-payloads](34-decoded-literal-ast-payloads.md)
 - [ ] [35-builtin-type-argument-syntax](35-builtin-type-argument-syntax.md)
 - [ ] [36-gnu-statement-expression-syntax](36-gnu-statement-expression-syntax.md)
 - [ ] [37-gnu-range-designator-syntax](37-gnu-range-designator-syntax.md)

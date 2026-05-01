@@ -408,19 +408,109 @@ pub struct Expr {
     pub span: Span,
 }
 
+/// Decoded integer literal payload carried by the AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntLiteral {
+    /// Original source spelling, retained for diagnostics and display.
+    pub text: Symbol,
+    /// Numeric value decoded during parser phase 7.
+    pub value: u128,
+    /// Literal suffix.
+    pub suffix: IntSuffix,
+}
+
+/// Integer-literal suffix.
+///
+/// Variant spellings mirror the C source suffix set.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IntSuffix {
+    /// No suffix.
+    None,
+    /// `u`/`U`.
+    U,
+    /// `l`/`L`.
+    L,
+    /// `ul`/`uL`/...
+    UL,
+    /// `ll`/`LL`.
+    LL,
+    /// `ull`/`uLL`.
+    ULL,
+}
+
+/// Decoded floating literal payload carried by the AST.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloatLiteral {
+    /// Original source spelling, retained for diagnostics and display.
+    pub text: Symbol,
+    /// Parsed value.
+    pub value: f64,
+    /// Literal suffix.
+    pub suffix: FloatSuffix,
+}
+
+/// Floating-literal suffix.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FloatSuffix {
+    /// No suffix, i.e. `double`.
+    None,
+    /// `f`/`F`, i.e. `float`.
+    F,
+    /// `l`/`L`, i.e. `long double`.
+    L,
+}
+
+/// Literal source encoding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LiteralEncoding {
+    /// No prefix.
+    None,
+    /// `u8`.
+    Utf8,
+    /// `u`.
+    Utf16,
+    /// `U`.
+    Utf32,
+    /// `L`.
+    Wide,
+}
+
+/// Decoded character literal payload carried by the AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharLiteral {
+    /// Original source spelling, retained for diagnostics and display.
+    pub text: Symbol,
+    /// Decoded code-point value.
+    pub value: u32,
+    /// Literal encoding prefix.
+    pub encoding: LiteralEncoding,
+}
+
+/// Decoded string literal payload carried by the AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringLiteral {
+    /// Original source spelling, retained for diagnostics and display.
+    pub text: Symbol,
+    /// Decoded bytes, without the trailing C NUL.
+    pub bytes: Vec<u8>,
+    /// Literal encoding prefix after adjacent string concatenation.
+    pub encoding: LiteralEncoding,
+}
+
 /// Expression discriminant.
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     /// Identifier reference (resolved later).
     Ident(Symbol),
-    /// Integer literal (raw text retained for suffix decoding).
-    IntLit { text: Symbol },
+    /// Integer literal.
+    IntLit(IntLiteral),
     /// Floating literal.
-    FloatLit { text: Symbol },
+    FloatLit(FloatLiteral),
     /// Character constant.
-    CharLit { text: Symbol },
+    CharLit(CharLiteral),
     /// String literal(s). Adjacent concatenation is already done.
-    StringLit { text: Symbol },
+    StringLit(StringLiteral),
     /// `a op b`
     Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// Prefix or postfix unary.

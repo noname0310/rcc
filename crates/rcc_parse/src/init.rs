@@ -339,7 +339,7 @@ mod tests {
 
     fn intlit_text(e: &Expr, sess: &Session) -> String {
         match &e.kind {
-            ExprKind::IntLit { text } => sess.interner.get(*text).to_string(),
+            ExprKind::IntLit(lit) => sess.interner.get(lit.text).to_string(),
             other => panic!("expected IntLit, got {other:?}"),
         }
     }

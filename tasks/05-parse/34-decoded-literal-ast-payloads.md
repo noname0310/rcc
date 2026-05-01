@@ -1,5 +1,7 @@
 # 05-34: Decoded literal AST payloads
 
+> ✓ done — 2026-05-01
+
 **Phase:** 05-parse    **Depends on:** 05-33    **Milestone:** M2.1
 
 ## Goal

@@ -210,9 +210,9 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             v.visit_initializer(init.as_ref());
         }
         ExprKind::Ident(_)
-        | ExprKind::IntLit { .. }
-        | ExprKind::FloatLit { .. }
-        | ExprKind::CharLit { .. }
-        | ExprKind::StringLit { .. } => {}
+        | ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_) => {}
     }
 }

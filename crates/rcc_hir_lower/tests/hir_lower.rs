@@ -99,7 +99,15 @@ fn const_ptr() -> DerivedDeclarator {
 
 fn int_lit(text: &str, sess: &mut Session) -> Expr {
     let s = intern(sess, text);
-    Expr { id: NodeId(0), kind: ExprKind::IntLit { text: s }, span: DUMMY_SP }
+    Expr {
+        id: NodeId(0),
+        kind: ExprKind::IntLit(rcc_ast::IntLiteral {
+            text: s,
+            value: text.parse::<u128>().unwrap(),
+            suffix: rcc_ast::IntSuffix::None,
+        }),
+        span: DUMMY_SP,
+    }
 }
 
 fn array_size(size: u64, sess: &mut Session) -> DerivedDeclarator {
