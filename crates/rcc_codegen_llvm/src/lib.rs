@@ -18,7 +18,7 @@ use rcc_session::Session;
 
 pub mod layout;
 
-pub use layout::LayoutCx;
+pub use layout::{LayoutCx, BASELINE_POINTER_LAYOUT};
 
 /// Error returned from codegen.
 #[derive(Debug)]
@@ -249,7 +249,7 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rcc_hir::{Field, Qual, RecordKind};
+    use rcc_hir::{DefKind, Field, IntRank, Qual, RecordKind};
     use rcc_session::Session;
     use rcc_span::{Symbol, DUMMY_SP};
 
@@ -300,6 +300,90 @@ mod tests {
             layout_of_with_defs(&tcx, &defs, record_ty),
             LayoutCx::with_defs(&tcx, &defs).layout_of(record_ty)
         );
+    }
+
+    #[test]
+    fn scalar_layout_table_matches_lp64_sysv_baseline() {
+        let mut tcx = TyCtxt::new();
+        let ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let cases = [
+            ("_Bool", tcx.bool_, Layout { size: 1, align: 1 }),
+            ("char", tcx.char_, Layout { size: 1, align: 1 }),
+            ("signed char", tcx.schar, Layout { size: 1, align: 1 }),
+            ("unsigned char", tcx.uchar, Layout { size: 1, align: 1 }),
+            ("short", tcx.short, Layout { size: 2, align: 2 }),
+            ("unsigned short", tcx.ushort, Layout { size: 2, align: 2 }),
+            ("int", tcx.int, Layout { size: 4, align: 4 }),
+            ("unsigned int", tcx.uint, Layout { size: 4, align: 4 }),
+            ("long", tcx.long, Layout { size: 8, align: 8 }),
+            ("unsigned long", tcx.ulong, Layout { size: 8, align: 8 }),
+            ("long long", tcx.long_long, Layout { size: 8, align: 8 }),
+            ("unsigned long long", tcx.ulong_long, Layout { size: 8, align: 8 }),
+            ("float", tcx.float, Layout { size: 4, align: 4 }),
+            ("double", tcx.double, Layout { size: 8, align: 8 }),
+            ("long double", tcx.long_double, Layout { size: 16, align: 16 }),
+            ("void *", ptr, BASELINE_POINTER_LAYOUT),
+        ];
+        let layouts = LayoutCx::new(&tcx);
+
+        for (name, ty, expected) in cases {
+            assert_eq!(layout_of(&tcx, ty), Ok(expected), "{name}");
+            assert_eq!(layouts.layout_of(ty), Ok(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn signed_and_unsigned_integer_ranks_share_layouts() {
+        let tcx = TyCtxt::new();
+        let cases = [
+            (IntRank::Char, tcx.schar, tcx.uchar),
+            (IntRank::Short, tcx.short, tcx.ushort),
+            (IntRank::Int, tcx.int, tcx.uint),
+            (IntRank::Long, tcx.long, tcx.ulong),
+            (IntRank::LongLong, tcx.long_long, tcx.ulong_long),
+        ];
+
+        for (rank, signed, unsigned) in cases {
+            assert_eq!(layout_of(&tcx, signed), layout_of(&tcx, unsigned), "{rank:?}");
+        }
+    }
+
+    #[test]
+    fn enum_layout_follows_resolved_representation_or_int_fallback() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let enum_def = defs.push(Def {
+            id: DefId(0),
+            name: Symbol(2),
+            span: DUMMY_SP,
+            kind: DefKind::Enum { repr: tcx.ulong, variants: Vec::new() },
+        });
+        defs[enum_def].id = enum_def;
+        let enum_ty = tcx.intern(Ty::Enum(enum_def));
+
+        assert_eq!(
+            LayoutCx::with_defs(&tcx, &defs).layout_of(enum_ty),
+            Ok(Layout { size: 8, align: 8 })
+        );
+        assert_eq!(LayoutCx::new(&tcx).layout_of(enum_ty), Ok(Layout { size: 4, align: 4 }));
+    }
+
+    #[test]
+    fn layoutcx_rejects_error_type() {
+        let tcx = TyCtxt::new();
+
+        assert!(matches!(
+            layout_of(&tcx, tcx.error),
+            Err(LayoutError::Unsized { reason: "error type has no layout", .. })
+        ));
+    }
+
+    #[test]
+    fn pointer_layout_matches_module_data_layout_baseline() {
+        assert_eq!(BASELINE_POINTER_LAYOUT, Layout { size: 8, align: 8 });
+
+        #[cfg(feature = "llvm")]
+        assert!(backend::BASELINE_DATA_LAYOUT.contains("-p270:32:32-p271:32:32-p272:64:64"));
     }
 
     #[cfg(not(feature = "llvm"))]
