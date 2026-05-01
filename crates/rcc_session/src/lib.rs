@@ -111,6 +111,13 @@ pub struct Options {
     /// With this option off, use of the construct emits W0013 as a
     /// strict-C99 compatibility warning.
     pub gnu_statement_expressions: bool,
+    /// Enable GNU initializer range designators `[lo ... hi]` without a warning.
+    ///
+    /// The parser accepts the syntax in all modes so initializer
+    /// lowering can see an explicit range node. With this option off,
+    /// use of the construct emits W0014 as a strict-C99 compatibility
+    /// warning.
+    pub gnu_range_designators: bool,
 }
 
 impl Default for Options {
@@ -128,6 +135,7 @@ impl Default for Options {
             gnu_named_variadic: false,
             gnu_permissive_paste: false,
             gnu_statement_expressions: false,
+            gnu_range_designators: false,
         }
     }
 }

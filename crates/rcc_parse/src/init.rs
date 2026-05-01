@@ -54,6 +54,7 @@
 //! does not poison the remainder of the declaration.
 
 use rcc_ast::{Designator, Initializer};
+use rcc_errors::codes;
 use rcc_lexer::Punct;
 
 use crate::expr::parse_assignment_expression;
@@ -220,8 +221,28 @@ fn parse_designator_chain(p: &mut Parser<'_>) -> Vec<Designator> {
             Punct::LBracket => {
                 let lb_span = op_span;
                 p.bump();
-                let Some(expr) = parse_assignment_expression(p) else {
+                let Some(lo) = parse_assignment_expression(p) else {
                     break;
+                };
+                let designator = if matches!(
+                    p.peek().map(|t| &t.kind),
+                    Some(TokenKind::Punct(Punct::Ellipsis))
+                ) {
+                    if !p.session.opts.gnu_range_designators {
+                        p.session
+                            .handler
+                            .struct_warn(lb_span, "GNU range designator is not part of C99")
+                            .code(codes::W0014)
+                            .note("parsing it as an extension so initializer lowering can diagnose semantics")
+                            .emit();
+                    }
+                    p.bump(); // `...`
+                    let Some(hi) = parse_assignment_expression(p) else {
+                        break;
+                    };
+                    Designator::Range { lo: Box::new(lo), hi: Box::new(hi) }
+                } else {
+                    Designator::Index(lo)
                 };
                 match p.peek() {
                     Some(t) if matches!(t.kind, TokenKind::Punct(Punct::RBracket)) => {
@@ -236,7 +257,7 @@ fn parse_designator_chain(p: &mut Parser<'_>) -> Vec<Designator> {
                             .emit();
                     }
                 }
-                chain.push(Designator::Index(expr));
+                chain.push(designator);
             }
             _ => break,
         }
@@ -311,8 +332,9 @@ mod tests {
     use super::*;
     use crate::phase7::convert;
     use rcc_ast::{Expr, ExprKind};
+    use rcc_errors::Level;
     use rcc_lexer::{PpToken, Tokenizer};
-    use rcc_session::Session;
+    use rcc_session::{Options, Session};
     use rcc_span::FileId;
     use std::sync::Arc;
 
@@ -324,7 +346,15 @@ mod tests {
     }
 
     fn parse_init_str(src: &str) -> (Initializer, Vec<rcc_errors::Diagnostic>, Session) {
+        parse_init_str_with_options(src, Options::default())
+    }
+
+    fn parse_init_str_with_options(
+        src: &str,
+        opts: Options,
+    ) -> (Initializer, Vec<rcc_errors::Diagnostic>, Session) {
         let (mut sess, fid, cap) = mk_session(src);
+        sess.opts = opts;
         let pps: Vec<PpToken> = Tokenizer::new(fid, src).collect();
         let tokens = convert(&mut sess, &pps);
         let mut parser = Parser::new(&mut sess, tokens);
@@ -335,6 +365,15 @@ mod tests {
             "initializer parser must consume every token of {src:?}",
         );
         (init, cap.diagnostics(), sess)
+    }
+
+    fn parse_init_str_lossy(src: &str) -> Vec<rcc_errors::Diagnostic> {
+        let (mut sess, fid, cap) = mk_session(src);
+        let pps: Vec<PpToken> = Tokenizer::new(fid, src).collect();
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let _ = parse_initializer(&mut parser);
+        cap.diagnostics()
     }
 
     fn intlit_text(e: &Expr, sess: &Session) -> String {
@@ -463,6 +502,105 @@ mod tests {
             }
             other => panic!("expected List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn gnu_range_designator_warns_in_strict_mode() {
+        let (init, diags, sess) = parse_init_str("{ [1 ... 5] = 9 }");
+        assert!(
+            diags.iter().any(|d| d.code == Some(codes::W0014)),
+            "expected W0014 for range designator in strict mode, got {diags:#?}"
+        );
+        match init {
+            Initializer::List(items) => {
+                assert_eq!(items.len(), 1);
+                let (chain, sub) = &items[0];
+                assert_eq!(chain.len(), 1);
+                match &chain[0] {
+                    Designator::Range { lo, hi } => {
+                        assert_eq!(intlit_text(lo, &sess), "1");
+                        assert_eq!(intlit_text(hi, &sess), "5");
+                    }
+                    other => panic!("expected Range(1...5), got {other:?}"),
+                }
+                match sub {
+                    Initializer::Expr(e) => assert_eq!(intlit_text(e, &sess), "9"),
+                    other => panic!("expected Expr(9), got {other:?}"),
+                }
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gnu_range_designator_option_suppresses_warning() {
+        let opts = Options { gnu_range_designators: true, ..Options::default() };
+        let (init, diags, sess) = parse_init_str_with_options("{ [1 ... 5] = 9 }", opts);
+        assert!(
+            diags.iter().all(|d| d.code != Some(codes::W0014)),
+            "gnu option should suppress W0014, got {diags:#?}"
+        );
+        match init {
+            Initializer::List(items) => match &items[0].0[0] {
+                Designator::Range { lo, hi } => {
+                    assert_eq!(intlit_text(lo, &sess), "1");
+                    assert_eq!(intlit_text(hi, &sess), "5");
+                }
+                other => panic!("expected Range(1...5), got {other:?}"),
+            },
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gnu_range_designator_can_be_nested_after_field() {
+        let opts = Options { gnu_range_designators: true, ..Options::default() };
+        let (init, diags, sess) = parse_init_str_with_options("{ .x[1 ... 3] = 7 }", opts);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match init {
+            Initializer::List(items) => {
+                let (chain, sub) = &items[0];
+                assert_eq!(chain.len(), 2);
+                match &chain[0] {
+                    Designator::Field(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                    other => panic!("chain[0]: expected Field(x), got {other:?}"),
+                }
+                match &chain[1] {
+                    Designator::Range { lo, hi } => {
+                        assert_eq!(intlit_text(lo, &sess), "1");
+                        assert_eq!(intlit_text(hi, &sess), "3");
+                    }
+                    other => panic!("chain[1]: expected Range(1...3), got {other:?}"),
+                }
+                match sub {
+                    Initializer::Expr(e) => assert_eq!(intlit_text(e, &sess), "7"),
+                    other => panic!("expected Expr(7), got {other:?}"),
+                }
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_index_designator_stays_index_not_range() {
+        let (init, diags, sess) = parse_init_str("{ [1] = 2 }");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match init {
+            Initializer::List(items) => match &items[0].0[0] {
+                Designator::Index(e) => assert_eq!(intlit_text(e, &sess), "1"),
+                other => panic!("expected Index(1), got {other:?}"),
+            },
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_range_designator_is_diagnosed() {
+        let diags = parse_init_str_lossy("{ [1 ... ] = 9 }");
+        assert!(
+            diags.iter().any(|d| d.level == Level::Error),
+            "expected range syntax error, got {diags:#?}"
+        );
     }
 
     #[test]

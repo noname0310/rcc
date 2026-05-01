@@ -1119,3 +1119,19 @@ The parser preserves the statement-expression AST so HIR/CFG work can
 diagnose labels, gotos, lifetimes, and result type rules later. Enable
 `Options::gnu_statement_expressions` to accept the syntax without this
 compatibility warning.
+
+---
+
+## W0014 — GNU initializer range designator extension
+
+`[lo ... hi] = value` is a GNU designated-initializer extension that
+initializes a contiguous range of array elements:
+
+```c
+int a[8] = { [1 ... 5] = 9 };  // warning[W0014] in strict C99 mode
+```
+
+The parser preserves the range as a distinct AST designator so later
+initializer lowering can expand it or diagnose overlap and ordering
+rules. Enable `Options::gnu_range_designators` to accept the syntax
+without this compatibility warning.

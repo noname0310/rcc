@@ -19,7 +19,7 @@ phases.
 | GCC/Clang builtin type-argument syntax (`__builtin_offsetof`, `__builtin_types_compatible_p`) | complete | Phase 15 lowers layout and type-compatibility semantics |
 | GNU statement expressions `({ ... })` | complete | HIR/CFG validate result type, lifetime, and label/codegen semantics |
 | Struct/union fields, bit-fields, enum enumerators | complete | HIR/typeck evaluate layout, duplicate names, enum values |
-| Initializer lists and C99 field/index designators | complete | HIR/typeck flatten and type-check initializers |
+| Initializer lists, C99 field/index designators, and GNU range designator syntax | complete | HIR/typeck flatten and type-check initializers; `06-24` owns range expansion |
 | Function definitions, prototypes, variadic functions, K&R definitions | complete | HIR/typeck validate parameter types and obsolete-style semantics |
 | Parser recovery after malformed declarations/statements | complete | Diagnostics own final wording |
 
@@ -32,12 +32,12 @@ phases.
 | Duplicate labels, duplicate `case`, multiple `default` | Accepts syntax | HIR/typeck validates per function/switch |
 | Invalid type combinations that require semantic context | Emits local specifier diagnostics where possible | HIR/typeck validates complete type constraints |
 | K&R-style definitions | Parses and emits obsolete-style warning | HIR/typeck validate parameter declarations |
+| GNU initializer range designators `[lo ... hi]` | Preserves a distinct range designator and warns in strict C99 mode | HIR lowering expands ranges and overlap semantics in `06-24` |
 
 ## Parser Blockers Still Open
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-37 | GNU range designators `[lo ... hi]` | c-testsuite `00216` needs range initializer syntax before HIR can expand it |
 | 05-38 | GCC `__attribute__((...))` parser surface | Phase 14 attribute semantics need stable AST attachment sites |
 | 05-39 | GCC inline asm parser surface | Inline asm codegen needs parsed templates, constraints, and clobbers |
 | 05-40 | C11 `_Generic` | C11 compatibility tests need generic-selection syntax before type matching |

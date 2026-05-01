@@ -314,6 +314,8 @@ pub enum Designator {
     Field(Symbol),
     /// `[expr]`
     Index(Expr),
+    /// GNU `[lo ... hi]` initializer range designator.
+    Range { lo: Box<Expr>, hi: Box<Expr> },
 }
 
 /// Member-designator component accepted by `__builtin_offsetof`.

@@ -31,6 +31,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [21-initializer-string-and-completeness](21-initializer-string-and-completeness.md)
 - [x] [22-switch-case-collection](22-switch-case-collection.md)
 - [x] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)
+- [ ] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
 
 ## Downstream
 
@@ -48,3 +49,5 @@ real source programs can still lose type information before typeck/CFG:
   real HIR defs.
 - cast / `sizeof(type)` / compound literals drop their `TypeName`.
 - real-source `switch` statements lower with an empty `cases` table.
+- GNU range designators now parse as distinct AST nodes; lowering must
+  expand them rather than silently collapsing to one array element.

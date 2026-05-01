@@ -99,6 +99,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0011, W0011_DESC),
     (W0012, W0012_DESC),
     (W0013, W0013_DESC),
+    (W0014, W0014_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -747,6 +748,15 @@ const W0012_DESC: &str = "imaginary part discarded in complex-to-real conversion
 /// warning unless `Options::gnu_statement_expressions` is enabled.
 pub const W0013: &str = "W0013";
 const W0013_DESC: &str = "GNU statement expression extension";
+
+/// GNU initializer range designator accepted in strict C99 mode.
+///
+/// `[lo ... hi] = value` is a GNU C designated-initializer extension
+/// that initialises a contiguous subrange. The parser accepts it as an
+/// explicit range node and emits this warning unless
+/// `Options::gnu_range_designators` is enabled.
+pub const W0014: &str = "W0014";
+const W0014_DESC: &str = "GNU initializer range designator extension";
 
 #[cfg(test)]
 mod tests {

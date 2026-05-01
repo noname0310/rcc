@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 05-37: GNU range designator syntax
 
 **Phase:** 05-parse    **Depends on:** 05-36    **Milestone:** M5 blocker
@@ -25,6 +27,12 @@ index designators.
 - AST `Designator::Range` or equivalent.
 - Parser tests for scalar, array, and nested range designators.
 - HIR-lower follow-up note if range expansion remains deferred.
+
+## Notes
+- Parser work is complete: `[lo ... hi]` is preserved as
+  `Designator::Range` and strict C99 mode emits W0014.
+- Range expansion remains intentionally deferred to
+  `tasks/06-hir-lower/24-gnu-range-designator-lowering.md`.
 
 ## Acceptance
 - `int a[8] = { [1 ... 5] = 9 };` parses in extension mode.

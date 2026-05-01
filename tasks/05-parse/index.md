@@ -45,7 +45,7 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [34-decoded-literal-ast-payloads](34-decoded-literal-ast-payloads.md)
 - [x] [35-builtin-type-argument-syntax](35-builtin-type-argument-syntax.md)
 - [x] [36-gnu-statement-expression-syntax](36-gnu-statement-expression-syntax.md)
-- [ ] [37-gnu-range-designator-syntax](37-gnu-range-designator-syntax.md)
+- [x] [37-gnu-range-designator-syntax](37-gnu-range-designator-syntax.md)
 - [ ] [38-attribute-syntax-surface](38-attribute-syntax-surface.md)
 - [ ] [39-inline-asm-syntax-surface](39-inline-asm-syntax-surface.md)
 - [ ] [40-c11-generic-selection-syntax](40-c11-generic-selection-syntax.md)

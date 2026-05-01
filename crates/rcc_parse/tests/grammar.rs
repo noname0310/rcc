@@ -503,6 +503,36 @@ fn s6_7_8_chained_designator() {
 }
 
 #[test]
+fn gnu_range_designator_warns_in_default_mode() {
+    let src = "int a[8] = { [1 ... 5] = 9 };";
+    let (_tu, diags) = parse_ok_with_options(src, Options::default());
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0014)),
+        "expected W0014 for GNU range designator in strict mode, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_range_designator_option_suppresses_warning() {
+    let src = "int a[8] = { [1 ... 5] = 9 };";
+    let opts = Options { gnu_range_designators: true, ..Options::default() };
+    let (_tu, diags) = parse_ok_with_options(src, opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0014)),
+        "gnu option should suppress W0014, got {diags:#?}"
+    );
+}
+
+#[test]
+fn ctestsuite_00216_reduced_range_initializer_fixture_parses() {
+    parse_ok(
+        "struct T { unsigned char s[16]; unsigned char a; }; \
+         void f(void) { int elt = 0x42; \
+         struct T lt2 = { { [1 ... 5] = 9, [6 ... 10] = elt, [4 ... 7] = elt + 1 }, 1 }; }",
+    );
+}
+
+#[test]
 fn s6_7_8_deeply_nested_init() {
     parse_ok("int a[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}};");
 }

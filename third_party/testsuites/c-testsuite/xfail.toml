@@ -35,7 +35,7 @@ reason = "anonymous union/struct members (C11 extension, not yet supported)"
 
 [[xfail]]
 id     = "c-testsuite::00216"
-reason = "GNU range designators `[lo ... hi]` and anonymous aggregate extensions — parser task 05-37, aggregate follow-up"
+reason = "anonymous aggregate extensions and GNU range initializer lowering semantics — aggregate/HIR follow-up"
 
 [[xfail]]
 id     = "c-testsuite::00219"

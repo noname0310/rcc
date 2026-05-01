@@ -1111,6 +1111,9 @@ fn array_initializer_list_len(items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initi
     for (desigs, _) in items {
         let idx = match desigs.first() {
             Some(rcc_ast::Designator::Index(e)) => eval_const_expr_as_u64(e).unwrap_or(cursor),
+            Some(rcc_ast::Designator::Range { hi, .. }) => {
+                eval_const_expr_as_u64(hi).unwrap_or(cursor)
+            }
             _ => cursor,
         };
         max_len = max_len.max(idx.saturating_add(1));
@@ -1232,6 +1235,14 @@ fn emit_invalid_initializer_designator(span: Span, message: &str, session: &mut 
     session.handler.struct_err(span, message.to_string()).code(rcc_errors::codes::E0079).emit();
 }
 
+fn emit_deferred_range_designator(span: Span, session: &mut Session) {
+    emit_invalid_initializer_designator(
+        span,
+        "GNU initializer range designator lowering is not implemented yet",
+        session,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_global_initializer(
     target_ty: TyId,
@@ -1305,6 +1316,10 @@ fn lower_global_initializer_list(
                     Some((rcc_ast::Designator::Index(e), rest)) => {
                         (eval_const_expr_as_u64(e).unwrap_or(cursor), rest)
                     }
+                    Some((rcc_ast::Designator::Range { .. }, _)) => {
+                        emit_deferred_range_designator(span, session);
+                        continue;
+                    }
                     Some((rcc_ast::Designator::Field(_), _)) => {
                         emit_invalid_initializer_designator(
                             span,
@@ -1367,6 +1382,14 @@ fn lower_global_initializer_list(
                         emit_invalid_initializer_designator(
                             span,
                             "array designator cannot initialize a record object",
+                            session,
+                        );
+                        continue;
+                    }
+                    Some((rcc_ast::Designator::Range { .. }, _)) => {
+                        emit_invalid_initializer_designator(
+                            span,
+                            "range designator cannot initialize a record object",
                             session,
                         );
                         continue;
@@ -1551,6 +1574,10 @@ fn lower_array_initializer(
                 let i = eval_const_expr_as_u64(e).unwrap_or(cursor);
                 (i, rest)
             }
+            Some((rcc_ast::Designator::Range { .. }, _)) => {
+                emit_deferred_range_designator(span, session);
+                continue;
+            }
             Some((rcc_ast::Designator::Field(_), _)) => {
                 emit_invalid_initializer_designator(
                     span,
@@ -1664,6 +1691,14 @@ fn lower_record_initializer(
                 emit_invalid_initializer_designator(
                     span,
                     "array designator cannot initialize a record object",
+                    session,
+                );
+                continue;
+            }
+            Some((rcc_ast::Designator::Range { .. }, _)) => {
+                emit_invalid_initializer_designator(
+                    span,
+                    "range designator cannot initialize a record object",
                     session,
                 );
                 continue;

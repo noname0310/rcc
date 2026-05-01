@@ -49,6 +49,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_named_variadic: false,
         gnu_permissive_paste: false,
         gnu_statement_expressions: false,
+        gnu_range_designators: false,
     }
 }
 

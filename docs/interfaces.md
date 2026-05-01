@@ -168,7 +168,11 @@ pub struct EnumSpec;  pub struct Enumerator;
 pub struct Declarator; pub enum DerivedDeclarator { Pointer(TypeQuals), Array(ArrayDeclarator), Function(FunctionDeclarator) }
 pub struct TypeName;
 pub enum Initializer { Expr(Expr), List(Vec<(Vec<Designator>, Initializer)>) }
-pub enum Designator { Field(Symbol), Index(Expr) }
+pub enum Designator {
+    Field(Symbol),
+    Index(Expr),
+    Range { lo: Box<Expr>, hi: Box<Expr> },
+}
 pub struct Block; pub enum BlockItem { Decl(Decl), Stmt(Stmt) }
 pub struct Stmt; pub enum StmtKind { /* ... */ }
 pub struct Expr; pub enum ExprKind { /* ... */ }
