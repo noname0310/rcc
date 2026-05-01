@@ -31,6 +31,7 @@ pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> 
     let mut crate_ = HirCrate::default();
     let mut resolver = Resolver::default();
     assign_def_ids(ast, tcx, session, &mut crate_, &mut resolver);
+    finalize_file_scope_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
     crate_
 }
@@ -2930,6 +2931,84 @@ fn assign_def_ids(
     }
 }
 
+fn finalize_file_scope_def_types(
+    ast: &TranslationUnit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    let mut seen_ordinary_defs = FxHashMap::default();
+
+    for ext_decl in &ast.decls {
+        let ExternalDecl::Decl(decl) = ext_decl else {
+            continue;
+        };
+        let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
+
+        for init_decl in &decl.inits {
+            let Some((name, _span)) = init_decl.declarator.name else {
+                continue;
+            };
+            let ordinal = seen_file_scope_ordinary_def(&mut seen_ordinary_defs, name, is_typedef);
+            let Some(def_id) = find_file_scope_ordinary_def(crate_, name, is_typedef, ordinal)
+            else {
+                continue;
+            };
+
+            let ty = lower_type_from_parts(
+                &decl.specs,
+                &init_decl.declarator,
+                DeclScope::File,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+
+            match &mut crate_.defs[def_id].kind {
+                DefKind::Typedef(slot) => *slot = ty,
+                DefKind::Global { ty: slot, .. } => *slot = ty,
+                _ => {}
+            }
+        }
+    }
+}
+
+fn seen_file_scope_ordinary_def(
+    seen: &mut FxHashMap<(Symbol, bool), usize>,
+    name: Symbol,
+    is_typedef: bool,
+) -> usize {
+    let entry = seen.entry((name, is_typedef)).or_insert(0);
+    let ordinal = *entry;
+    *entry += 1;
+    ordinal
+}
+
+fn find_file_scope_ordinary_def(
+    crate_: &HirCrate,
+    name: Symbol,
+    is_typedef: bool,
+    ordinal: usize,
+) -> Option<DefId> {
+    let mut seen = 0;
+    for (id, def) in crate_.defs.iter_enumerated() {
+        if def.name != name || !matches_file_scope_ordinary_kind(&def.kind, is_typedef) {
+            continue;
+        }
+        if seen == ordinal {
+            return Some(id);
+        }
+        seen += 1;
+    }
+    None
+}
+
+fn matches_file_scope_ordinary_kind(kind: &DefKind, is_typedef: bool) -> bool {
+    matches!((kind, is_typedef), (DefKind::Typedef(_), true) | (DefKind::Global { .. }, false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3082,6 +3161,45 @@ mod tests {
         let hir = lower(&ast, &mut tcx, &mut sess);
         assert_eq!(hir.defs.len(), 1);
         assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(_)));
+    }
+
+    #[test]
+    fn file_scope_typedef_placeholder_is_finalized() {
+        let (mut sess, _cap) = Session::for_test();
+        let name = sym(&mut sess, "uint32");
+        let ast = TranslationUnit { decls: vec![make_typedef(name)], span: DUMMY_SP };
+        let mut tcx = TyCtxt::new();
+        let hir = lower(&ast, &mut tcx, &mut sess);
+        assert_eq!(hir.defs.len(), 1);
+        assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(ty) if ty == tcx.int));
+    }
+
+    #[test]
+    fn forward_typedef_name_stays_error() {
+        let (mut sess, cap) = Session::for_test();
+        let t = sym(&mut sess, "T");
+        let u = sym(&mut sess, "U");
+        let ast = TranslationUnit {
+            decls: vec![ExternalDecl::Decl(Decl {
+                id: NodeId(0),
+                span: DUMMY_SP,
+                specs: {
+                    let mut s = default_specs();
+                    s.storage = Some(StorageClass::Typedef);
+                    s.type_specs.push(TypeSpec::TypedefName(t));
+                    s
+                },
+                inits: vec![InitDeclarator { declarator: named_declarator(u), init: None }],
+            })],
+            span: DUMMY_SP,
+        };
+        let mut tcx = TyCtxt::new();
+        let hir = lower(&ast, &mut tcx, &mut sess);
+        assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(ty) if ty == tcx.error));
+        assert!(
+            cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+            "unresolved typedef-name should emit an error"
+        );
     }
 
     #[test]

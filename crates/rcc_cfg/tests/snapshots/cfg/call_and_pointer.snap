@@ -6,7 +6,7 @@ fn def#1() -> int {
     _0: int;
     _1: int name#12;
     _2: int*;
-    _3: <error>;
+    _3: int;
 
   bb0:
     StorageLive(_1);

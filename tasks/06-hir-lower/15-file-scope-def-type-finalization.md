@@ -1,5 +1,7 @@
 # 06-15: finalize file-scope typedef and global definition types
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 06-14    **Milestone:** M5 stabilization
 
 ## Goal
@@ -38,4 +40,3 @@ Fill the `DefKind::Typedef(tcx.error)` and
 - `assign_def_ids` currently creates file-scope placeholders only.
 - `rcc_typeck::def_snapshot` assumes `Global` and `Typedef` carry real
   types.
-

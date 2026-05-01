@@ -1286,6 +1286,66 @@ fn snippet_typedef_chain_resolves() {
 }
 
 #[test]
+fn snippet_file_scope_typedef_and_global_types_are_finalized() {
+    let (hir, tcx) = lower_snippet("typedef int T; T g;");
+    assert_eq!(hir.defs.len(), 2);
+    assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(ty) if ty == tcx.int));
+    assert!(matches!(hir.defs[DefId(1)].kind, DefKind::Global { ty, .. } if ty == tcx.int));
+}
+
+#[test]
+fn snippet_file_scope_multiple_declarators_get_distinct_types() {
+    let (hir, tcx) = lower_snippet("int *p, a[3];");
+    assert_eq!(hir.defs.len(), 2);
+
+    let DefKind::Global { ty: p_ty, .. } = hir.defs[DefId(0)].kind else {
+        panic!("expected p global");
+    };
+    match tcx.get(p_ty) {
+        Ty::Ptr(pointee) => assert_eq!(pointee.ty, tcx.int),
+        other => panic!("expected p to be pointer-to-int, got {other:?}"),
+    }
+
+    let DefKind::Global { ty: a_ty, .. } = hir.defs[DefId(1)].kind else {
+        panic!("expected a global");
+    };
+    match tcx.get(a_ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected a to be int[3], got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_extern_then_definition_globals_are_both_typed() {
+    let (hir, tcx) = lower_snippet("extern int x; int x;");
+    let tys: Vec<TyId> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tys.len(), 2);
+    assert!(tys.iter().all(|ty| *ty == tcx.int));
+}
+
+#[test]
+fn snippet_function_declaration_global_has_function_type() {
+    let (hir, tcx) = lower_snippet("int f(int);");
+    let DefKind::Global { ty, .. } = hir.defs[DefId(0)].kind else {
+        panic!("expected file-scope function declaration as ordinary global def");
+    };
+    match tcx.get(ty) {
+        Ty::Func { ret, params, variadic: false, proto: true } => {
+            assert_eq!(*ret, tcx.int);
+            assert_eq!(params.as_slice(), &[tcx.int]);
+        }
+        other => panic!("expected function type, got {other:?}"),
+    }
+}
+
+#[test]
 fn snippet_struct_global_yields_two_defs() {
     // `struct P { int x; int y; } origin;` — one tag def + one global.
     let (hir, _tcx) = lower_snippet("struct P { int x; int y; } origin;");
