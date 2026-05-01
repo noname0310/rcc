@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 05-31: Parser recovery contract
 
 **Phase:** 05-parse    **Depends on:** 05-30    **Milestone:** M2.1

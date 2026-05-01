@@ -56,26 +56,26 @@ pub fn parse(session: &mut Session, tokens: Vec<PpToken>) -> Option<TranslationU
         match decl::parse_external_decl(&mut parser) {
             Some(d) => decls.push(d),
             None => {
+                // A failed parse may already have consumed a prefix
+                // of a declaration (for example `int * ;`). Recovery
+                // must still run so the next valid external
+                // declaration is not parsed from the middle of the
+                // malformed one.
+                if parser.session.handler.error_count() == err_before {
+                    let at = parser.cur_span();
+                    parser
+                        .session
+                        .handler
+                        .struct_err(at, "unexpected token at file scope")
+                        .code(rcc_errors::codes::E0030)
+                        .emit();
+                }
+                parser.recover_to_sync();
+                // If recover_to_sync didn't advance (e.g. stuck on a
+                // stray `}` at file scope), force-skip one token to
+                // guarantee progress and prevent infinite loops.
                 if parser.cursor == before {
-                    // Emit a diagnostic (if none was already emitted
-                    // at this position) and skip to the next sync
-                    // point so downstream constructs still get parsed.
-                    if parser.session.handler.error_count() == err_before {
-                        let at = parser.cur_span();
-                        parser
-                            .session
-                            .handler
-                            .struct_err(at, "unexpected token at file scope")
-                            .code(rcc_errors::codes::E0030)
-                            .emit();
-                    }
-                    parser.recover_to_sync();
-                    // If recover_to_sync didn't advance (e.g. stuck on
-                    // a stray `}` at file scope), force-skip one token
-                    // to guarantee progress and prevent infinite loops.
-                    if parser.cursor == before {
-                        parser.bump();
-                    }
+                    parser.bump();
                 }
             }
         }
@@ -162,6 +162,10 @@ impl<'a> Parser<'a> {
     /// iteration of the enclosing parse loop starts from a reasonable
     /// position. `;` is consumed (the statement is over); `}` is
     /// **not** consumed (the caller's block-loop needs to see it).
+    /// Callers must invoke this even if the failed child parser
+    /// consumed some tokens; otherwise a partially parsed declaration
+    /// can leave the cursor before its terminator and corrupt the next
+    /// valid item.
     pub fn recover_to_sync(&mut self) {
         while let Some(tok) = self.peek() {
             match tok.kind {

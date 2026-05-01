@@ -655,6 +655,67 @@ fn neg_recovery_still_parses_rest() {
     assert!(!tu.decls.is_empty(), "after recovery, at least one decl should survive");
 }
 
+#[test]
+fn recovery_file_scope_bad_declaration_keeps_following_decl() {
+    let (ast, diags, _) = parse_snippet("int *; int y;");
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(!errors.is_empty(), "expected an error for missing declarator");
+    let tu = ast.expect("parse still returns a translation unit");
+    assert_eq!(tu.decls.len(), 1, "only the valid following declaration should survive");
+    assert!(matches!(tu.decls[0], ExternalDecl::Decl(_)));
+}
+
+#[test]
+fn recovery_block_bad_declaration_keeps_following_decl() {
+    let (ast, diags, _) = parse_snippet("void f(void) { int *; int y; y = 1; }");
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(!errors.is_empty(), "expected an error for missing block declarator");
+    let tu = ast.expect("parse still returns a translation unit");
+    let ExternalDecl::Function(f) = &tu.decls[0] else {
+        panic!("expected function definition");
+    };
+    let decls = f.body.items.iter().filter(|item| matches!(item, BlockItem::Decl(_))).count();
+    assert_eq!(decls, 1, "the valid `int y;` declaration should survive");
+}
+
+#[test]
+fn recovery_for_bad_init_does_not_leak_scope() {
+    let src = "void f(void) { typedef int T; for (int T = ; ; ) ; T x; }";
+    let (ast, diags, _) = parse_snippet(src);
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(!errors.is_empty(), "expected an initializer error");
+    let tu = ast.expect("parse still returns a translation unit");
+    let ExternalDecl::Function(f) = &tu.decls[0] else {
+        panic!("expected function definition");
+    };
+    let decls = f.body.items.iter().filter(|item| matches!(item, BlockItem::Decl(_))).count();
+    assert_eq!(
+        decls, 2,
+        "outer typedef and following `T x;` should both be declarations; \
+         the `for` init's ordinary `T` must not leak"
+    );
+}
+
+#[test]
+fn recovery_parameter_list_keeps_following_external_decl() {
+    let (ast, diags, _) = parse_snippet("int f(int x, int [; int g;");
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(!errors.is_empty(), "expected a malformed parameter diagnostic");
+    let tu = ast.expect("parse still returns a translation unit");
+    assert_eq!(tu.decls.len(), 2, "malformed parameter list must not hide `int g;`");
+}
+
+#[test]
+fn recovery_kr_decl_list_attempts_function_body() {
+    let (ast, diags, _) = parse_snippet("int f(a) int *; { return 1; } int g;");
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(!errors.is_empty(), "expected a malformed K&R parameter declaration diagnostic");
+    let tu = ast.expect("parse still returns a translation unit");
+    assert_eq!(tu.decls.len(), 2, "bad K&R decl list must not discard the function body");
+    assert!(matches!(tu.decls[0], ExternalDecl::Function(_)));
+    assert!(matches!(tu.decls[1], ExternalDecl::Decl(_)));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Additional coverage — complex productions
 // ═══════════════════════════════════════════════════════════════════

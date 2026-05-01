@@ -595,7 +595,7 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
                 let err_before = p.session.handler.error_count();
                 if let Some(item) = parse_block_item(p) {
                     items.push(item);
-                } else if p.cursor == before {
+                } else {
                     // parse_block_item could not make sense of the
                     // current token. Emit a diagnostic (if none was
                     // already emitted at this position) and skip to
@@ -610,6 +610,14 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
                             .emit();
                     }
                     p.recover_to_sync();
+                    if p.cursor == before
+                        && !matches!(
+                            p.peek().map(|t| &t.kind),
+                            Some(TokenKind::Punct(Punct::RBrace)) | None
+                        )
+                    {
+                        p.bump();
+                    }
                 }
             }
         }
@@ -636,8 +644,12 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
 /// falls through to the statement path.
 pub fn parse_block_item(p: &mut Parser<'_>) -> Option<BlockItem> {
     if looks_like_decl(p) {
+        let before = p.cursor;
         if let Some(decl) = crate::decl::parse_declaration(p) {
             return Some(BlockItem::Decl(decl));
+        }
+        if p.cursor != before {
+            return None;
         }
     }
     let stmt = parse_stmt(p)?;

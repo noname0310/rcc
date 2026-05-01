@@ -1065,6 +1065,8 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
         // Parse K&R declaration list (declarations before `{`).
         let mut kr_decls = Vec::new();
         while !matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace)) | None) {
+            let before = p.cursor;
+            let err_before = p.session.handler.error_count();
             if let Some(decl) = parse_declaration(p) {
                 // Validate: every name in this declaration must appear
                 // in the identifier list.
@@ -1085,7 +1087,25 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
                 }
                 kr_decls.push(decl);
             } else {
-                break;
+                if p.session.handler.error_count() == err_before {
+                    p.session
+                        .handler
+                        .struct_err(
+                            p.cur_span(),
+                            "expected K&R parameter declaration or function body",
+                        )
+                        .code(codes::E0030)
+                        .emit();
+                }
+                recover_kr_decl_list(p);
+                if p.cursor == before
+                    && !matches!(
+                        p.peek().map(|t| &t.kind),
+                        Some(TokenKind::Punct(Punct::LBrace)) | None
+                    )
+                {
+                    p.bump();
+                }
             }
         }
 
@@ -1236,6 +1256,21 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
 
     let id = p.fresh_id();
     Some(Decl { id, span: start.to(end), specs, inits })
+}
+
+fn recover_kr_decl_list(p: &mut Parser<'_>) {
+    while let Some(tok) = p.peek() {
+        match tok.kind {
+            TokenKind::Punct(Punct::Semi) => {
+                p.bump();
+                return;
+            }
+            TokenKind::Punct(Punct::LBrace) => return,
+            _ => {
+                p.bump();
+            }
+        }
+    }
 }
 
 /// Dead-code guard: re-export for potential callers within the crate.
