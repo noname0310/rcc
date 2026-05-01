@@ -37,6 +37,24 @@ pub struct FieldLayout {
     pub storage_align: u32,
 }
 
+/// Layout metadata for an array type.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ArrayLayout {
+    /// Element layout.
+    pub elem: Layout,
+    /// Array object alignment, inherited from the element type.
+    pub align: u32,
+    /// Constant element count for fixed arrays.
+    pub len: Option<u64>,
+    /// Static byte size for fixed arrays.
+    ///
+    /// This is `None` for VLA sentinels because their allocation size is
+    /// computed at runtime, even though their element alignment is known.
+    pub static_size: Option<u64>,
+    /// Whether the array is a VLA.
+    pub is_vla: bool,
+}
+
 /// Error returned when a type has no compile-time object layout.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LayoutError {
@@ -126,6 +144,11 @@ impl<'tcx> LayoutCx<'tcx> {
         self.record_layout_details(ty, *def, &mut Vec::new())
     }
 
+    /// Compute array layout details, including the VLA alignment sentinel.
+    pub fn array_layout_of(&self, ty: TyId) -> LayoutResult<ArrayLayout> {
+        self.array_layout_details(ty, &mut Vec::new())
+    }
+
     fn layout_of_inner(&self, ty: TyId, record_stack: &mut Vec<DefId>) -> LayoutResult<Layout> {
         match self.tcx.get(ty) {
             Ty::Void => Err(LayoutError::Unsized { ty, reason: "void is not an object type" }),
@@ -142,11 +165,12 @@ impl<'tcx> LayoutCx<'tcx> {
             Ty::Func { .. } => {
                 Err(LayoutError::Unsized { ty, reason: "function types have no object size" })
             }
-            Ty::Array { elem, len: Some(len), is_vla: false } => {
-                let elem_layout = self.layout_of_inner(elem.ty, record_stack)?;
-                let size =
-                    elem_layout.size.checked_mul(*len).ok_or(LayoutError::SizeOverflow { ty })?;
-                Ok(Layout { size, align: elem_layout.align })
+            Ty::Array { len: Some(_), is_vla: false, .. } => {
+                let array = self.array_layout_details(ty, record_stack)?;
+                Ok(Layout {
+                    size: array.static_size.expect("fixed array has static size"),
+                    align: array.align,
+                })
             }
             Ty::Array { is_vla: true, .. } => {
                 Err(LayoutError::Unsized { ty, reason: "VLA size is runtime-dependent" })
@@ -158,6 +182,37 @@ impl<'tcx> LayoutCx<'tcx> {
             Ty::Enum(def) => self.enum_layout(*def),
             Ty::Error => Err(LayoutError::Unsized { ty, reason: "error type has no layout" }),
         }
+    }
+
+    fn array_layout_details(
+        &self,
+        ty: TyId,
+        record_stack: &mut Vec<DefId>,
+    ) -> LayoutResult<ArrayLayout> {
+        let Ty::Array { elem, len, is_vla } = self.tcx.get(ty) else {
+            return Err(LayoutError::Unsized { ty, reason: "not an array type" });
+        };
+        let elem_layout = self.layout_of_inner(elem.ty, record_stack)?;
+        if *is_vla {
+            return Ok(ArrayLayout {
+                elem: elem_layout,
+                align: elem_layout.align,
+                len: *len,
+                static_size: None,
+                is_vla: true,
+            });
+        }
+        let Some(len) = len else {
+            return Err(LayoutError::Unsized { ty, reason: "incomplete array has no object size" });
+        };
+        let size = elem_layout.size.checked_mul(*len).ok_or(LayoutError::SizeOverflow { ty })?;
+        Ok(ArrayLayout {
+            elem: elem_layout,
+            align: elem_layout.align,
+            len: Some(*len),
+            static_size: Some(size),
+            is_vla: false,
+        })
     }
 
     fn record_layout_details(

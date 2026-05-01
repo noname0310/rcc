@@ -3,7 +3,7 @@
 //! LLVM codegen intentionally reuses `rcc_hir::LayoutCx` so that
 //! `sizeof`, CFG lowering, and backend object layout cannot silently drift.
 
-pub use rcc_hir::{Layout, LayoutCx, LayoutError, LayoutResult};
+pub use rcc_hir::{ArrayLayout, Layout, LayoutCx, LayoutError, LayoutResult};
 
 /// Pointer layout for the baseline LP64 / SysV x86-64 target.
 ///

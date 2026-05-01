@@ -16,7 +16,7 @@ use rcc_span::{Span, Symbol};
 pub mod layout;
 pub mod ty;
 
-pub use layout::{LayoutCx, LayoutError, LayoutResult};
+pub use layout::{ArrayLayout, LayoutCx, LayoutError, LayoutResult};
 pub use ty::{FloatKind, IntRank, Layout, Qual, Ty, TyCtxt, TyId};
 
 rcc_data_structures::new_index! {

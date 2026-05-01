@@ -11,7 +11,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [01-codegen-context-module-target](01-codegen-context-module-target.md)
 - [x] [02-layoutcx-scalars](02-layoutcx-scalars.md)
 - [x] [03-layoutcx-records](03-layoutcx-records.md)
-- [ ] [04-layoutcx-arrays](04-layoutcx-arrays.md)
+- [x] [04-layoutcx-arrays](04-layoutcx-arrays.md)
 - [ ] [05-llvm-type-lowering](05-llvm-type-lowering.md)
 - [ ] [06-function-and-global-declarations](06-function-and-global-declarations.md)
 - [ ] [07-sysv-abi-params](07-sysv-abi-params.md)

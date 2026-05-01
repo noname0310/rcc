@@ -483,6 +483,78 @@ mod tests {
     }
 
     #[test]
+    fn array_layout_reports_fixed_scalar_size_and_align() {
+        let mut tcx = TyCtxt::new();
+        let arr =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.short), len: Some(7), is_vla: false });
+
+        let layout = LayoutCx::new(&tcx).array_layout_of(arr).unwrap();
+
+        assert_eq!(layout.static_size, Some(14));
+        assert_eq!(layout.align, 2);
+        assert_eq!(layout.elem, Layout { size: 2, align: 2 });
+        assert_eq!(layout_of(&tcx, arr), Ok(Layout { size: 14, align: 2 }));
+    }
+
+    #[test]
+    fn array_layout_reports_record_element_stride() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let record =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.char_), field(tcx.long)]);
+        let record_ty = tcx.intern(Ty::Record(record));
+        let arr =
+            tcx.intern(Ty::Array { elem: Qual::plain(record_ty), len: Some(3), is_vla: false });
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).array_layout_of(arr).unwrap();
+
+        assert_eq!(layout.elem, Layout { size: 16, align: 8 });
+        assert_eq!(layout.static_size, Some(48));
+        assert_eq!(layout.align, 8);
+    }
+
+    #[test]
+    fn array_layout_rejects_incomplete_non_fam_arrays() {
+        let mut tcx = TyCtxt::new();
+        let arr = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: false });
+
+        assert!(matches!(
+            LayoutCx::new(&tcx).array_layout_of(arr),
+            Err(LayoutError::Unsized { reason: "incomplete array has no object size", .. })
+        ));
+    }
+
+    #[test]
+    fn array_layout_checks_fixed_array_size_overflow() {
+        let mut tcx = TyCtxt::new();
+        let len = u64::MAX / 8 + 1;
+        let arr =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.long), len: Some(len), is_vla: false });
+
+        assert!(matches!(
+            LayoutCx::new(&tcx).array_layout_of(arr),
+            Err(LayoutError::SizeOverflow { ty }) if ty == arr
+        ));
+    }
+
+    #[test]
+    fn array_layout_vla_sentinel_reports_alignment_without_static_size() {
+        let mut tcx = TyCtxt::new();
+        let vla = tcx.intern(Ty::Array { elem: Qual::plain(tcx.double), len: None, is_vla: true });
+
+        let layout = LayoutCx::new(&tcx).array_layout_of(vla).unwrap();
+
+        assert_eq!(layout.elem, Layout { size: 8, align: 8 });
+        assert_eq!(layout.align, 8);
+        assert_eq!(layout.static_size, None);
+        assert!(layout.is_vla);
+        assert!(matches!(
+            layout_of(&tcx, vla),
+            Err(LayoutError::Unsized { reason: "VLA size is runtime-dependent", .. })
+        ));
+    }
+
+    #[test]
     fn layoutcx_rejects_error_type() {
         let tcx = TyCtxt::new();
 
