@@ -5,23 +5,63 @@
 //! `&mut BodyBuilder` and append at the *current* block.
 
 use rcc_data_structures::{FxHashMap, IndexVec};
-use rcc_hir::{DefId, HirCrate, Local, TyCtxt, TyId};
+use rcc_hir::{DefId, DefKind, HirCrate, Local, Ty, TyCtxt, TyId};
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
+use crate::lower::{lower_stmt, LocalMap, LowerCx};
 use crate::{
     BasicBlock, BasicBlockId, Body, LocalDecl, Statement, StatementKind, Terminator, TerminatorKind,
 };
 
 /// Build CFG bodies for every function in `hir`. Returns a `DefId -> Body` map.
 ///
-/// M3 scope: interface only.
 pub fn build_bodies(
     _session: &mut Session,
-    _tcx: &TyCtxt,
-    _hir: &HirCrate,
+    tcx: &TyCtxt,
+    hir: &HirCrate,
 ) -> FxHashMap<DefId, Body> {
-    FxHashMap::default()
+    let mut out = FxHashMap::default();
+    for (&def_id, hir_body) in &hir.bodies {
+        let Some(def) = hir.defs.get(def_id) else {
+            continue;
+        };
+        let DefKind::Function { ty: fn_ty, .. } = def.kind else {
+            continue;
+        };
+        let ret_ty = match tcx.get(fn_ty) {
+            Ty::Func { ret, .. } => *ret,
+            _ => tcx.void,
+        };
+
+        let mut builder = BodyBuilder::new();
+        builder.set_def(def_id);
+        builder.alloc_return_slot(ret_ty, def.span);
+
+        let mut local_map = LocalMap::new();
+        for (hir_local, decl) in hir_body.locals.iter_enumerated().filter(|(_, decl)| decl.is_param)
+        {
+            let cfg_local = builder.alloc_param_decl(decl.name, decl.ty, decl.span);
+            local_map.insert(hir_local, cfg_local);
+        }
+        for (hir_local, decl) in
+            hir_body.locals.iter_enumerated().filter(|(_, decl)| !decl.is_param)
+        {
+            let cfg_local = builder.local(decl.ty, decl.name, decl.span);
+            local_map.insert(hir_local, cfg_local);
+        }
+
+        if let Some(root) = hir_body.root {
+            builder.collect_labels(hir_body, root);
+            let cx = LowerCx::new(hir_body, tcx, &local_map);
+            lower_stmt(&mut builder, &cx, root);
+        }
+        if !builder.is_current_terminated() {
+            builder.terminate(Terminator { kind: TerminatorKind::Return, span: def.span });
+        }
+        out.insert(def_id, builder.finish());
+    }
+    out
 }
 
 /// Per-block bookkeeping while a body is under construction.
@@ -273,6 +313,11 @@ impl BodyBuilder {
     /// In debug builds, panics if the return slot was not allocated yet, or
     /// if a user-local / temp has already been allocated.
     pub fn alloc_param(&mut self, name: Symbol, ty: TyId, span: Span) -> Local {
+        self.alloc_param_decl(Some(name), ty, span)
+    }
+
+    /// Allocate a parameter slot with an optional source name.
+    pub fn alloc_param_decl(&mut self, name: Option<Symbol>, ty: TyId, span: Span) -> Local {
         debug_assert_eq!(
             self.phase,
             AllocPhase::Params,
@@ -280,7 +325,7 @@ impl BodyBuilder {
              and do not interleave alloc_user_local/alloc_temp before parameters)",
             self.phase
         );
-        self.locals.push(LocalDecl { name: Some(name), ty, vla_len: None, is_param: true, span })
+        self.locals.push(LocalDecl { name, ty, vla_len: None, is_param: true, span })
     }
 
     /// Allocate a user-declared local. Closes the parameter run on the first

@@ -1,5 +1,10 @@
 # 08-14: `--emit=mir` pretty printer
 
+> **Status:** done. CFG bodies now have a stable MIR-style text dump
+> through `rcc_cfg::pretty::dump_body`, and the driver prints it for
+> `--emit=mir`. Snapshot coverage lives under
+> `crates/rcc_driver/tests/snapshots/mir/`.
+
 **Phase:** 08-cfg    **Depends on:** 08-01    **Milestone:** M3
 
 ## Goal

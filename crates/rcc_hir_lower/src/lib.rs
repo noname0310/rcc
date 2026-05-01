@@ -27,14 +27,96 @@ use rcc_span::{Span, Symbol};
 
 /// Entry point: lower an AST into a fresh `HirCrate`.
 ///
-/// Currently implements only the first-pass DefId assignment (task 06-01).
-/// Further lowering (name resolution, type flattening, etc.) will be added
-/// in subsequent tasks.
 pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> HirCrate {
     let mut crate_ = HirCrate::default();
     let mut resolver = Resolver::default();
     assign_def_ids(ast, tcx, session, &mut crate_, &mut resolver);
+    lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
     crate_
+}
+
+fn lower_function_bodies(
+    ast: &TranslationUnit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    for ext_decl in &ast.decls {
+        let ExternalDecl::Function(func_def) = ext_decl else {
+            continue;
+        };
+        let Some((name, _)) = func_def.declarator.name else {
+            continue;
+        };
+        let Some(def_id) = resolver.ordinary.get(&name).copied() else {
+            continue;
+        };
+
+        let base = lower_declspecs_to_base_ty(&func_def.specs, tcx, session);
+        let fn_ty = apply_declarator(base, &func_def.declarator, DeclScope::File, tcx, session);
+        let variadic = match tcx.get(fn_ty) {
+            Ty::Func { variadic, .. } => *variadic,
+            _ => false,
+        };
+        if let DefKind::Function { ty, variadic: def_variadic, .. } = &mut crate_.defs[def_id].kind
+        {
+            *ty = fn_ty;
+            *def_variadic = variadic;
+        }
+
+        let mut body = Body::default();
+        let mut scope = ScopeStack::new();
+        scope.push_scope();
+        lower_function_params(&func_def.declarator, &mut body, &mut scope, tcx, session);
+
+        resolver.labels.clear();
+        resolve_labels(&func_def.body, resolver, session);
+        let root_stmt = Stmt {
+            id: func_def.id,
+            kind: StmtKind::Compound(func_def.body.clone()),
+            span: func_def.body.span,
+        };
+        let root = lower_stmt(&root_stmt, &mut body, &mut scope, crate_, tcx, resolver, session);
+        body.root = Some(root);
+        scope.pop_scope();
+        resolver.labels.clear();
+
+        crate_.bodies.insert(def_id, body);
+    }
+}
+
+fn lower_function_params(
+    declarator: &Declarator,
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) {
+    let Some(func_decl) = declarator.derived.iter().find_map(|d| match d {
+        DerivedDeclarator::Function(f) => Some(f),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    for param in &func_decl.params {
+        let param_base = lower_declspecs_to_base_ty(&param.specs, tcx, session);
+        let raw_ty =
+            apply_declarator(param_base, &param.declarator, DeclScope::Param, tcx, session);
+        let ty = adjust_param_type(raw_ty, tcx);
+        let name = param.declarator.name.map(|(sym, _)| sym);
+        let local = body.locals.push(LocalDecl {
+            name,
+            ty,
+            vla_len: None,
+            is_param: true,
+            span: param.span,
+        });
+        if let Some(sym) = name {
+            scope.insert(sym, Binding::Local(local));
+        }
+    }
 }
 
 /// Per-crate resolution tables built while lowering.

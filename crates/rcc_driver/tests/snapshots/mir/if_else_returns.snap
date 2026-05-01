@@ -1,0 +1,20 @@
+---
+source: crates/rcc_driver/tests/emit_mir.rs
+---
+fn def#0() -> int {
+  locals:
+    _0: int;
+    _1: int param name#10;
+
+  bb0:
+    switchInt(copy _1) -> [0: bb2, otherwise: bb1];
+
+  bb1:
+    _0 = 1;
+    return;
+
+  bb2:
+    _0 = 2;
+    return;
+
+}

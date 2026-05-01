@@ -1,0 +1,12 @@
+---
+source: crates/rcc_driver/tests/emit_mir.rs
+---
+fn def#0() -> int {
+  locals:
+    _0: int;
+
+  bb0:
+    _0 = 0;
+    return;
+
+}

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use rcc_cfg::build_bodies;
+use rcc_cfg::{build_bodies, pretty::dump_body};
 use rcc_codegen_llvm::{codegen, CodegenError};
 use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
@@ -80,6 +80,9 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
 
     // 6. Build CFG.
     let bodies = build_bodies(session, &tcx, &hir);
+    if session.opts.emit.contains(&EmitKind::Mir) {
+        emit_mir(&tcx, &bodies);
+    }
 
     // 7. Codegen.
     match codegen(session, &tcx, &hir, &bodies) {
@@ -89,6 +92,19 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
             Ok(())
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+fn emit_mir(tcx: &TyCtxt, bodies: &rcc_data_structures::FxHashMap<rcc_hir::DefId, rcc_cfg::Body>) {
+    let mut ids: Vec<_> = bodies.keys().copied().collect();
+    ids.sort_by_key(|id| id.0);
+    for (idx, id) in ids.iter().enumerate() {
+        if idx > 0 {
+            println!();
+        }
+        if let Some(body) = bodies.get(id) {
+            print!("{}", dump_body(body, tcx));
+        }
     }
 }
 
