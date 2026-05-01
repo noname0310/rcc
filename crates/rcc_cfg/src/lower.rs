@@ -448,17 +448,7 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             lower_stmt(builder, cx, *body);
         }
         HirStmtKind::Goto(name) => {
-            // C99 permits `goto` to leave any number of nested scopes,
-            // but the target's scope depth is not currently tracked
-            // (the `collect_labels` pre-pass only records the block id).
-            // Without that info we can't compute the correct number of
-            // intervening `StorageDead`s, so we conservatively emit
-            // none. Goto-out-of-scope therefore leaves StorageLive/Dead
-            // un-paired on the goto path; the rest of this task's
-            // acceptance (block fall-through + break/continue/return)
-            // is unaffected.
-            let target = builder.label_block(*name);
-            builder.goto(target, stmt.span);
+            builder.goto_label(*name, stmt.span);
         }
         HirStmtKind::Label { .. } => {
             unreachable!("Label is handled before the match")
@@ -5300,6 +5290,61 @@ mod tests {
         assert_eq!(goto_target(body_bb), header_id);
     }
 
+    #[test]
+    fn goto_out_of_block_emits_storage_dead() {
+        let (mut builder, mut hir_body, tcx, map, [_ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // { { int y; goto L; } L: return 0; }
+        let decl_y = local_decl_stmt(&mut hir_body, hb);
+        let go_l = goto_stmt(&mut hir_body, "L");
+        let inner = block_stmt(&mut hir_body, vec![decl_y, go_l]);
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let label = label_stmt(&mut hir_body, "L", ret);
+        let root = block_stmt(&mut hir_body, vec![inner, label]);
+
+        builder.collect_labels(&hir_body, root);
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_y = map.lookup(hb);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_storage_live(&entry.statements[0], cfg_y);
+        assert_storage_dead(&entry.statements[1], cfg_y);
+        let label_id = goto_target(entry);
+        assert!(matches!(body.blocks[label_id].terminator.kind, TerminatorKind::Return));
+    }
+
+    #[test]
+    fn goto_out_of_nested_blocks_emits_storage_dead_in_lifo_order() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // { { int x; { int y; goto L; } } L: return 0; }
+        let decl_x = local_decl_stmt(&mut hir_body, ha);
+        let decl_y = local_decl_stmt(&mut hir_body, hb);
+        let go_l = goto_stmt(&mut hir_body, "L");
+        let inner = block_stmt(&mut hir_body, vec![decl_y, go_l]);
+        let outer = block_stmt(&mut hir_body, vec![decl_x, inner]);
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let label = label_stmt(&mut hir_body, "L", ret);
+        let root = block_stmt(&mut hir_body, vec![outer, label]);
+
+        builder.collect_labels(&hir_body, root);
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_x = map.lookup(ha);
+        let cfg_y = map.lookup(hb);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_storage_live(&entry.statements[0], cfg_x);
+        assert_storage_live(&entry.statements[1], cfg_y);
+        assert_storage_dead(&entry.statements[2], cfg_y);
+        assert_storage_dead(&entry.statements[3], cfg_x);
+    }
+
     /// `for (int i = 0; ...; ...)` brackets the loop variable's
     /// lifetime around the entire loop: `StorageLive(i)` in the
     /// pre-header, `StorageDead(i)` in the post-loop exit block.
@@ -5421,6 +5466,40 @@ mod tests {
             )),
             "plain VLA declarations must not be aggregate-zero-initialized"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "goto into VLA scope")]
+    fn goto_into_vla_scope_is_rejected() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let vla_ty = int_vla_ty(&mut tcx);
+        let mut hir_body = HirBody::default();
+
+        let len_expr = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(4));
+        let ha = add_hir_local(&mut hir_body, vla_ty, Some(len_expr), false);
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(1), vla_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(ha, ca);
+
+        // { goto L; { int a[n]; L: return 0; } }
+        //
+        // Jumping from outside the block to `L` would bypass the VLA
+        // runtime allocation and saved length, so CFG must reject it
+        // instead of lowering a valid-looking edge into the label block.
+        let go_l = goto_stmt(&mut hir_body, "L");
+        let decl_a = local_decl_stmt(&mut hir_body, ha);
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let label = label_stmt(&mut hir_body, "L", ret);
+        let inner = block_stmt(&mut hir_body, vec![decl_a, label]);
+        let root = block_stmt(&mut hir_body, vec![go_l, inner]);
+
+        builder.collect_labels(&hir_body, root);
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
     }
 
     #[test]

@@ -96,6 +96,30 @@ enum AllocPhase {
     Locals,
 }
 
+/// Metadata recorded for a label during the pre-pass.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct LabelInfo {
+    /// Basic block assigned to the label.
+    pub block: BasicBlockId,
+    /// Lexical scope depth at the label location.
+    pub scope_depth: usize,
+    /// Deepest active scope depth that already had a runtime local entry
+    /// before the label. Jumping from a shallower depth would bypass
+    /// `StorageLive` / initializer / VLA-length side effects.
+    pub runtime_scope_depth: Option<usize>,
+    /// Deepest active scope depth that already had a VLA declaration
+    /// before the label. Jumping from a shallower depth violates C99's
+    /// variably-modified-type goto constraint and would bypass runtime
+    /// allocation metadata.
+    pub vla_scope_depth: Option<usize>,
+}
+
+#[derive(Debug, Default, Copy, Clone)]
+struct LabelScopeState {
+    has_runtime_entry: bool,
+    has_vla: bool,
+}
+
 /// Loop context for break/continue target resolution.
 ///
 /// Pushed onto a per-body stack when entering a loop construct;
@@ -160,9 +184,10 @@ pub struct BodyBuilder {
     /// Stack of enclosing breakable constructs (loops and switches).
     /// `break` targets the top of this stack, preserving nesting order.
     break_stack: Vec<BreakCtx>,
-    /// Label name → block id map. Populated by a pre-pass so forward
-    /// `goto` can be resolved in a single lowering pass.
-    label_map: FxHashMap<Symbol, BasicBlockId>,
+    /// Label name → metadata map. Populated by a pre-pass so forward
+    /// `goto` can be resolved in a single lowering pass while preserving
+    /// scope-lifetime information.
+    label_map: FxHashMap<Symbol, LabelInfo>,
     /// Stack of lexical scope frames. Each frame holds the locals
     /// declared in that scope, in declaration order. Pushed by
     /// [`enter_scope`](Self::enter_scope) on block entry, popped by
@@ -559,7 +584,19 @@ impl BodyBuilder {
     /// Register a label → block mapping. Called by the pre-pass that
     /// scans the HIR for `Label` statements before lowering begins.
     pub fn insert_label(&mut self, name: Symbol, block: BasicBlockId) {
-        self.label_map.insert(name, block);
+        self.label_map.insert(
+            name,
+            LabelInfo {
+                block,
+                scope_depth: self.scope_depth(),
+                runtime_scope_depth: None,
+                vla_scope_depth: None,
+            },
+        );
+    }
+
+    fn insert_label_info(&mut self, name: Symbol, info: LabelInfo) {
+        self.label_map.insert(name, info);
     }
 
     /// Look up the block id for a label name.
@@ -568,46 +605,116 @@ impl BodyBuilder {
     /// Panics if the label was not registered by the pre-pass.
     #[must_use]
     pub fn label_block(&self, name: Symbol) -> BasicBlockId {
+        self.label_info(name).block
+    }
+
+    /// Look up the metadata for a label name.
+    ///
+    /// # Panics
+    /// Panics if the label was not registered by the pre-pass.
+    #[must_use]
+    pub fn label_info(&self, name: Symbol) -> LabelInfo {
         self.label_map.get(&name).copied().unwrap_or_else(|| panic!("unknown label: {name:?}"))
+    }
+
+    /// Emit a goto to a named label while preserving lexical lifetime
+    /// markers for scopes exited by the jump.
+    ///
+    /// # Panics
+    /// Panics if the jump enters a scope whose runtime local setup or VLA
+    /// allocation would be bypassed.
+    pub fn goto_label(&mut self, name: Symbol, span: Span) {
+        let info = self.label_info(name);
+        let current_depth = self.scope_depth();
+        if let Some(vla_depth) = info.vla_scope_depth {
+            assert!(
+                current_depth >= vla_depth,
+                "goto into VLA scope: current depth {current_depth}, label depth {}, required VLA \
+                 depth {vla_depth}",
+                info.scope_depth
+            );
+        }
+        if let Some(runtime_depth) = info.runtime_scope_depth {
+            assert!(
+                current_depth >= runtime_depth,
+                "goto into local scope: current depth {current_depth}, label depth {}, required \
+                 runtime depth {runtime_depth}",
+                info.scope_depth
+            );
+        }
+        if current_depth > info.scope_depth {
+            self.emit_storage_deads_to_depth(info.scope_depth, span);
+        }
+        self.goto(info.block, span);
     }
 
     /// Pre-pass: scan the HIR body for `Label` statements and create an
     /// empty block for each one.  This lets forward `goto` resolve to a
     /// [`BasicBlockId`] during the single lowering pass that follows.
     pub fn collect_labels(&mut self, hir_body: &rcc_hir::Body, stmt_id: rcc_hir::HirStmtId) {
+        let mut scopes = Vec::new();
+        self.collect_labels_scoped(hir_body, stmt_id, &mut scopes);
+    }
+
+    fn collect_labels_scoped(
+        &mut self,
+        hir_body: &rcc_hir::Body,
+        stmt_id: rcc_hir::HirStmtId,
+        scopes: &mut Vec<LabelScopeState>,
+    ) {
         use rcc_hir::HirStmtKind;
         let stmt = &hir_body.stmts[stmt_id];
         match &stmt.kind {
             HirStmtKind::Label { name, body } => {
                 let bb = self.new_block();
-                self.insert_label(*name, bb);
-                self.collect_labels(hir_body, *body);
+                self.insert_label_info(
+                    *name,
+                    LabelInfo {
+                        block: bb,
+                        scope_depth: scopes.len(),
+                        runtime_scope_depth: deepest_scope_depth(scopes, |s| s.has_runtime_entry),
+                        vla_scope_depth: deepest_scope_depth(scopes, |s| s.has_vla),
+                    },
+                );
+                self.collect_labels_scoped(hir_body, *body, scopes);
             }
             HirStmtKind::Block(stmts) => {
+                scopes.push(LabelScopeState::default());
                 for &s in stmts {
-                    self.collect_labels(hir_body, s);
+                    self.collect_labels_scoped(hir_body, s, scopes);
                 }
+                scopes.pop().expect("collect_labels: block scope stack underflow");
             }
             HirStmtKind::If { then_branch, else_branch, .. } => {
-                self.collect_labels(hir_body, *then_branch);
+                self.collect_labels_scoped(hir_body, *then_branch, scopes);
                 if let Some(else_b) = else_branch {
-                    self.collect_labels(hir_body, *else_b);
+                    self.collect_labels_scoped(hir_body, *else_b, scopes);
                 }
             }
             HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
-                self.collect_labels(hir_body, *body);
+                self.collect_labels_scoped(hir_body, *body, scopes);
             }
             HirStmtKind::For { init, body, .. } => {
+                scopes.push(LabelScopeState::default());
                 if let Some(init_stmt) = init {
-                    self.collect_labels(hir_body, *init_stmt);
+                    self.collect_labels_scoped(hir_body, *init_stmt, scopes);
                 }
-                self.collect_labels(hir_body, *body);
+                self.collect_labels_scoped(hir_body, *body, scopes);
+                scopes.pop().expect("collect_labels: for scope stack underflow");
             }
             HirStmtKind::Switch { body, .. } => {
-                self.collect_labels(hir_body, *body);
+                self.collect_labels_scoped(hir_body, *body, scopes);
             }
             HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
-                self.collect_labels(hir_body, *body);
+                self.collect_labels_scoped(hir_body, *body, scopes);
+            }
+            HirStmtKind::LocalDecl { local, .. } => {
+                if let Some(scope) = scopes.last_mut() {
+                    scope.has_runtime_entry = true;
+                    if hir_body.locals[*local].vla_len.is_some() {
+                        scope.has_vla = true;
+                    }
+                }
             }
             _ => {}
         }
@@ -632,6 +739,13 @@ impl BodyBuilder {
         );
         Body { def: self.def, locals: self.locals, blocks: self.blocks, ret_ty: self.ret_ty }
     }
+}
+
+fn deepest_scope_depth(
+    scopes: &[LabelScopeState],
+    pred: impl Fn(&LabelScopeState) -> bool,
+) -> Option<usize> {
+    scopes.iter().enumerate().rev().find_map(|(idx, scope)| pred(scope).then_some(idx + 1))
 }
 
 /// Walk the CFG from `BasicBlockId(0)` and return the id of the first

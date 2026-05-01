@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-17: Goto scope lifetime fixup
 
 **Phase:** 08-cfg    **Depends on:** 08-16    **Milestone:** M6 stabilization
