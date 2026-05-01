@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-06: Function and global declarations
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-01, 09-05    **Milestone:** M3

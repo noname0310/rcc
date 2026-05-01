@@ -87,13 +87,15 @@ pub mod backend {
 
     use inkwell::builder::Builder;
     use inkwell::context::Context;
+    use inkwell::module::Linkage as LlvmLinkage;
     use inkwell::module::Module;
     use inkwell::targets::{TargetData, TargetTriple};
     use inkwell::types::{
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
+    use inkwell::values::{FunctionValue, GlobalValue};
     use inkwell::AddressSpace;
-    use rcc_hir::{DefKind, FloatKind, IntRank, Qual, RecordKind};
+    use rcc_hir::{DefKind, FloatKind, IntRank, Linkage as HirLinkage, Qual, RecordKind};
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -115,6 +117,8 @@ pub mod backend {
         tcx: &'a TyCtxt,
         hir: &'a HirCrate,
         bodies: &'a FxHashMap<DefId, Body>,
+        functions: FxHashMap<DefId, FunctionValue<'ctx>>,
+        globals: FxHashMap<DefId, GlobalValue<'ctx>>,
     }
 
     impl<'a, 'ctx> CodegenCx<'a, 'ctx> {
@@ -136,7 +140,19 @@ pub mod backend {
             let target_data = TargetData::create(&data_layout);
             module.set_data_layout(&target_data.get_data_layout());
 
-            Self { context, module, builder, target_triple, data_layout, session, tcx, hir, bodies }
+            Self {
+                context,
+                module,
+                builder,
+                target_triple,
+                data_layout,
+                session,
+                tcx,
+                hir,
+                bodies,
+                functions: FxHashMap::default(),
+                globals: FxHashMap::default(),
+            }
         }
 
         /// Return the inkwell context backing this module.
@@ -199,6 +215,124 @@ pub mod backend {
         /// Build a type-lowering helper sharing this module's context and HIR.
         pub fn type_cx(&self) -> TypeCx<'a, 'ctx> {
             TypeCx::new(self.context, self.tcx, self.hir)
+        }
+
+        /// Declare every HIR function and file-scope object in this LLVM module.
+        pub fn declare_all(&mut self) -> Result<(), CodegenError> {
+            let defs = self.hir.defs.iter_enumerated().map(|(id, _)| id).collect::<Vec<_>>();
+            for def in defs {
+                match self.hir.defs[def].kind {
+                    DefKind::Function { .. } => {
+                        self.declare_function(def)?;
+                    }
+                    DefKind::Global { .. } => {
+                        self.declare_global(def)?;
+                    }
+                    DefKind::Typedef(_)
+                    | DefKind::Record { .. }
+                    | DefKind::Enum { .. }
+                    | DefKind::Enumerator { .. } => {}
+                }
+            }
+            Ok(())
+        }
+
+        /// Declare one HIR function and return the reused or newly-created LLVM value.
+        pub fn declare_function(
+            &mut self,
+            def: DefId,
+        ) -> Result<FunctionValue<'ctx>, CodegenError> {
+            if let Some(&function) = self.functions.get(&def) {
+                return Ok(function);
+            }
+
+            let (name, ty, linkage) = {
+                let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                    CodegenError::Internal(format!("function definition {def:?} is missing"))
+                })?;
+                let DefKind::Function {
+                    ty, has_body, is_static, is_inline, is_extern_inline, ..
+                } = &def_data.kind
+                else {
+                    return Err(CodegenError::Internal(format!(
+                        "definition {def:?} is not a function"
+                    )));
+                };
+                (
+                    self.def_name(def_data),
+                    *ty,
+                    function_linkage(*has_body, *is_static, *is_inline, *is_extern_inline),
+                )
+            };
+            let fn_ty = self.type_cx().fn_type_of(ty)?;
+            let function = self
+                .module
+                .get_function(&name)
+                .unwrap_or_else(|| self.module.add_function(&name, fn_ty, Some(linkage)));
+            function.set_linkage(linkage);
+            self.functions.insert(def, function);
+            Ok(function)
+        }
+
+        /// Declare one HIR file-scope object and return the reused or new LLVM global.
+        pub fn declare_global(&mut self, def: DefId) -> Result<GlobalValue<'ctx>, CodegenError> {
+            if let Some(&global) = self.globals.get(&def) {
+                return Ok(global);
+            }
+
+            let (name, ty, linkage, needs_zero_initializer) = {
+                let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                    CodegenError::Internal(format!("global definition {def:?} is missing"))
+                })?;
+                let DefKind::Global { ty, linkage, init, .. } = &def_data.kind else {
+                    return Err(CodegenError::Internal(format!(
+                        "definition {def:?} is not a global"
+                    )));
+                };
+                let llvm_linkage = global_linkage(*linkage);
+                (
+                    self.def_name(def_data),
+                    *ty,
+                    llvm_linkage,
+                    init.is_some() || llvm_linkage != LlvmLinkage::External,
+                )
+            };
+            let global_ty = self.type_cx().basic_type_of(ty)?;
+            let global = self
+                .module
+                .get_global(&name)
+                .unwrap_or_else(|| self.module.add_global(global_ty, None, &name));
+            global.set_linkage(linkage);
+            if needs_zero_initializer && global.get_initializer().is_none() {
+                let zero = global_ty.const_zero();
+                global.set_initializer(&zero);
+            }
+            self.globals.insert(def, global);
+            Ok(global)
+        }
+
+        /// Return the LLVM function previously declared for a HIR definition.
+        pub fn function_decl(&self, def: DefId) -> Option<FunctionValue<'ctx>> {
+            self.functions.get(&def).copied()
+        }
+
+        /// Return the LLVM global previously declared for a HIR definition.
+        pub fn global_decl(&self, def: DefId) -> Option<GlobalValue<'ctx>> {
+            self.globals.get(&def).copied()
+        }
+
+        /// Return all declared functions keyed by HIR definition id.
+        pub fn function_decls(&self) -> &FxHashMap<DefId, FunctionValue<'ctx>> {
+            &self.functions
+        }
+
+        /// Return all declared globals keyed by HIR definition id.
+        pub fn global_decls(&self) -> &FxHashMap<DefId, GlobalValue<'ctx>> {
+            &self.globals
+        }
+
+        fn def_name(&self, def: &Def) -> String {
+            self.session.interner.get(def.name).to_owned()
         }
     }
 
@@ -399,6 +533,26 @@ pub mod backend {
         }
     }
 
+    fn function_linkage(
+        has_body: bool,
+        is_static: bool,
+        is_inline: bool,
+        is_extern_inline: bool,
+    ) -> LlvmLinkage {
+        match (has_body, is_static, is_inline, is_extern_inline) {
+            (_, true, _, _) => LlvmLinkage::Internal,
+            (true, false, true, false) => LlvmLinkage::AvailableExternally,
+            (_, false, _, _) => LlvmLinkage::External,
+        }
+    }
+
+    fn global_linkage(linkage: HirLinkage) -> LlvmLinkage {
+        match linkage {
+            HirLinkage::Internal => LlvmLinkage::Internal,
+            HirLinkage::External | HirLinkage::None => LlvmLinkage::External,
+        }
+    }
+
     pub(super) fn codegen_impl(
         session: &mut Session,
         tcx: &TyCtxt,
@@ -406,8 +560,8 @@ pub mod backend {
         bodies: &FxHashMap<DefId, Body>,
     ) -> Result<CodegenArtifact, CodegenError> {
         let context = Context::create();
-        let cx = CodegenCx::new(&context, session, tcx, hir, bodies);
-        cx.verify_module()?;
+        let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
+        cx.declare_all()?;
         Ok(CodegenArtifact { ir_text: cx.ir_text() })
     }
 
@@ -467,6 +621,8 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
 #[cfg(test)]
 mod tests {
     use rcc_hir::{DefKind, Field, IntRank, Qual, RecordKind};
+    #[cfg(feature = "llvm")]
+    use rcc_hir::{Linkage, ObjectQuals};
     use rcc_session::Session;
     use rcc_span::{Symbol, DUMMY_SP};
 
@@ -606,6 +762,57 @@ mod tests {
             name: Symbol(3),
             span: DUMMY_SP,
             kind: DefKind::Record { kind, layout: None, fields },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    #[cfg(feature = "llvm")]
+    #[derive(Copy, Clone, Debug, Default)]
+    struct FunctionDefOptions {
+        has_body: bool,
+        is_static: bool,
+        is_inline: bool,
+        is_extern_inline: bool,
+        variadic: bool,
+    }
+
+    #[cfg(feature = "llvm")]
+    fn function_def(
+        defs: &mut IndexVec<DefId, Def>,
+        name: Symbol,
+        ty: TyId,
+        opts: FunctionDefOptions,
+    ) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Function {
+                ty,
+                has_body: opts.has_body,
+                is_static: opts.is_static,
+                is_inline: opts.is_inline,
+                is_extern_inline: opts.is_extern_inline,
+                variadic: opts.variadic,
+            },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    #[cfg(feature = "llvm")]
+    fn global_def(
+        defs: &mut IndexVec<DefId, Def>,
+        name: Symbol,
+        ty: TyId,
+        linkage: Linkage,
+    ) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Global { ty, quals: ObjectQuals::none(), linkage, init: None },
         });
         defs[id].id = id;
         id
@@ -836,6 +1043,109 @@ mod tests {
         assert!(artifact.ir_text.contains("; ModuleID = 'rcc_module'"));
         assert!(artifact.ir_text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
         assert!(artifact.ir_text.contains("target datalayout = "));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_declarations_reuse_later_defined_function_symbol() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let fn_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let caller_name = session.interner.intern("caller");
+        let callee_name = session.interner.intern("callee");
+        let mut defs = IndexVec::new();
+        let caller = function_def(
+            &mut defs,
+            caller_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let callee = function_def(
+            &mut defs,
+            callee_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        let first = cx.declare_function(callee).unwrap();
+        cx.declare_all().unwrap();
+        let second = cx.declare_function(callee).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(cx.function_decl(callee), Some(first));
+        assert!(cx.function_decl(caller).is_some());
+        assert_eq!(cx.module().get_function("callee"), Some(first));
+        assert_eq!(cx.ir_text().matches("@callee").count(), 1);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_declarations_select_static_and_external_linkage() {
+        use inkwell::module::Linkage as LlvmLinkage;
+
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let fn_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let static_fn_name = session.interner.intern("static_fn");
+        let external_fn_name = session.interner.intern("external_fn");
+        let inline_fn_name = session.interner.intern("inline_fn");
+        let extern_inline_fn_name = session.interner.intern("extern_inline_fn");
+        let static_global_name = session.interner.intern("static_global");
+        let external_global_name = session.interner.intern("external_global");
+        let mut defs = IndexVec::new();
+        let static_fn = function_def(
+            &mut defs,
+            static_fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, is_static: true, ..FunctionDefOptions::default() },
+        );
+        let external_fn =
+            function_def(&mut defs, external_fn_name, fn_ty, FunctionDefOptions::default());
+        let inline_fn = function_def(
+            &mut defs,
+            inline_fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, is_inline: true, ..FunctionDefOptions::default() },
+        );
+        let extern_inline_fn = function_def(
+            &mut defs,
+            extern_inline_fn_name,
+            fn_ty,
+            FunctionDefOptions {
+                has_body: true,
+                is_inline: true,
+                is_extern_inline: true,
+                ..FunctionDefOptions::default()
+            },
+        );
+        let static_global = global_def(&mut defs, static_global_name, tcx.int, Linkage::Internal);
+        let external_global =
+            global_def(&mut defs, external_global_name, tcx.int, Linkage::External);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        cx.declare_all().unwrap();
+
+        assert_eq!(cx.function_decl(static_fn).unwrap().get_linkage(), LlvmLinkage::Internal);
+        assert_eq!(cx.function_decl(external_fn).unwrap().get_linkage(), LlvmLinkage::External);
+        assert_eq!(
+            cx.function_decl(inline_fn).unwrap().get_linkage(),
+            LlvmLinkage::AvailableExternally
+        );
+        assert_eq!(
+            cx.function_decl(extern_inline_fn).unwrap().get_linkage(),
+            LlvmLinkage::External
+        );
+        assert_eq!(cx.global_decl(static_global).unwrap().get_linkage(), LlvmLinkage::Internal);
+        assert_eq!(cx.global_decl(external_global).unwrap().get_linkage(), LlvmLinkage::External);
     }
 
     #[cfg(feature = "llvm")]
