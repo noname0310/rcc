@@ -32,6 +32,8 @@ lowered to `BasicBlock` + `Terminator` sequences. Non-SSA —
 | 20 | [`20-cfg-verifier-release-gate.md`](20-cfg-verifier-release-gate.md) | Promote CFG invariants from debug-only to testable verifier. |
 | 21 | [`21-eval-order-conformance-policy.md`](21-eval-order-conformance-policy.md) | Document and test unspecified evaluation-order policy. |
 | 22 | [`22-source-pipeline-edge-fixtures.md`](22-source-pipeline-edge-fixtures.md) | Add full source fixtures for edge cases that unit tests missed. |
+| 23 | [`23-type-aware-cfg-verifier.md`](23-type-aware-cfg-verifier.md) | Reject type-incompatible CFG before LLVM. |
+| 24 | [`24-pre-codegen-contract-fixtures.md`](24-pre-codegen-contract-fixtures.md) | Lock the final source-to-CFG codegen contract. |
 
 ## Exit criteria
 
@@ -43,4 +45,6 @@ lowered to `BasicBlock` + `Terminator` sequences. Non-SSA —
   lowering.
 - `goto`, VLA, `sizeof`, and complex conversions have explicit CFG
   contracts before 09-codegen consumes them.
+- Assignment, return, call, and projection types are verifier-checked
+  before 09-codegen consumes them.
 - `--emit=mir hello.c` matches the checked-in snapshot.

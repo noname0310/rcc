@@ -22,6 +22,8 @@ declarator-flattened HIR. This is where the C 이름 공간 분리 (ordinary
 | 11 | [`11-init-lowering.md`](11-init-lowering.md) | Flatten initializer lists. |
 | 12 | [`12-unit-tests.md`](12-unit-tests.md) | Declarator round-trip table. |
 | 13 | [`13-inline-linkage.md`](13-inline-linkage.md) | C99 `inline` function linkage. |
+| 25 | [`25-member-access-name-preservation.md`](25-member-access-name-preservation.md) | Preserve member names until typeck resolves field indices. |
+| 26 | [`26-object-qualifier-preservation.md`](26-object-qualifier-preservation.md) | Preserve top-level object qualifiers for typeck/codegen. |
 
 ## Exit criteria
 
@@ -29,3 +31,5 @@ declarator-flattened HIR. This is where the C 이름 공간 분리 (ordinary
   - Every `DefRef` / `LocalRef` / `Field` resolves.
   - No declarator appears (all are folded into `Ty`).
   - Every composite (struct / union / enum) has a `DefId`.
+  - Member accesses keep enough information to resolve the exact field.
+  - Object-level `const` / `volatile` qualifiers are not dropped.

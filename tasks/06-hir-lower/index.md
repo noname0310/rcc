@@ -32,6 +32,8 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [22-switch-case-collection](22-switch-case-collection.md)
 - [x] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)
 - [x] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
+- [ ] [25-member-access-name-preservation](25-member-access-name-preservation.md)
+- [ ] [26-object-qualifier-preservation](26-object-qualifier-preservation.md)
 
 ## Downstream
 
@@ -51,3 +53,7 @@ real source programs can still lose type information before typeck/CFG:
 - real-source `switch` statements lower with an empty `cases` table.
 - GNU range designators now parse as distinct AST nodes; lowering must
   expand them rather than silently collapsing to one array element.
+- member access currently loses the requested field name before typeck
+  can resolve the correct field index.
+- declaration-level `const` / `volatile` qualifiers are not preserved
+  for objects, which blocks const-assignment checks and volatile codegen.

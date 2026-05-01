@@ -12,9 +12,9 @@ phase's `index.md` next.
 - [x] [03-lex](03-lex/index.md) — full C99 pp-token lexer
 - [x] [04-preprocess](04-preprocess/index.md) — C preprocessor
 - [x] [05-parse](05-parse/index.md) — recursive-descent + Pratt parser
-- [x] [06-hir-lower](06-hir-lower/index.md) — AST → HIR
-- [x] [07-typeck](07-typeck/index.md) — conversions + const-eval
-- [x] [08-cfg](08-cfg/index.md) — HIR → MIR-style CFG
+- [ ] [06-hir-lower](06-hir-lower/index.md) — AST → HIR
+- [ ] [07-typeck](07-typeck/index.md) — conversions + const-eval
+- [ ] [08-cfg](08-cfg/index.md) — HIR → MIR-style CFG
 - [ ] [09-codegen-llvm](09-codegen-llvm/index.md) — CFG → LLVM IR
 - [ ] [10-driver](10-driver/index.md) — `rcc` binary + test harness
 - [ ] [11-conformance](11-conformance/index.md) — KPI cells per milestone

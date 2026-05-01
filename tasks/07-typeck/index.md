@@ -20,7 +20,33 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [x] [10-init-constness](10-init-constness.md)
 - [x] [11-unit-tests-truth-tables](11-unit-tests-truth-tables.md)
 - [x] [12-complex-arithmetic](12-complex-arithmetic.md)
+- [ ] [13-member-access-resolution](13-member-access-resolution.md)
+- [ ] [14-return-type-coercion](14-return-type-coercion.md)
+- [ ] [15-coerce-to-diagnostics-gate](15-coerce-to-diagnostics-gate.md)
+- [ ] [16-global-initializer-consteval](16-global-initializer-consteval.md)
+- [ ] [17-control-and-conditional-constraints](17-control-and-conditional-constraints.md)
+- [ ] [18-call-prototype-and-varargs-constraints](18-call-prototype-and-varargs-constraints.md)
+- [ ] [19-no-error-type-pre-codegen-gate](19-no-error-type-pre-codegen-gate.md)
+- [ ] [20-object-qualifier-constraints](20-object-qualifier-constraints.md)
 
 ## Downstream
 
 - 08-cfg
+
+## Reopened Review Findings
+
+This phase is reopened before 09-codegen-llvm because the completed
+baseline still allows semantically invalid or placeholder-typed HIR to
+reach CFG:
+
+- member access is not resolved to the actual field type/index.
+- return statements are not checked against the enclosing function's
+  return type.
+- failed pointer/object coercions can fall through without diagnostics.
+- static initializers are checked by helper APIs but not wired into the
+  crate-level pipeline.
+- controlling expressions and `?:` still use permissive placeholder
+  rules in some cases.
+- function calls need prototype/varargs coercion before ABI lowering.
+- codegen needs a final no-`Ty::Error` gate.
+- object qualifiers preserved by HIR must drive const/volatile rules.
