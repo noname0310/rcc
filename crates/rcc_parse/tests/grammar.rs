@@ -446,6 +446,111 @@ fn assert_attr_name(sess: &Session, attr: &Attribute, expected: &str) {
     assert_eq!(sess.interner.get(attr.name), expected);
 }
 
+#[test]
+fn gnu_inline_asm_basic_warns_in_default_mode() {
+    let src = r#"void f(void) { __asm__ volatile ("nop"); }"#;
+    let (tu, diags, _sess) = parse_ok_with_session(src, Options::default());
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0016)),
+        "expected W0016 for GNU inline asm in strict mode, got {diags:#?}"
+    );
+    let asm = inline_asm_stmt(&tu, 0);
+    assert!(asm.quals.volatile);
+    assert_eq!(asm.template.bytes, b"nop");
+    assert!(asm.outputs.is_empty());
+    assert!(asm.inputs.is_empty());
+    assert!(asm.clobbers.is_empty());
+}
+
+#[test]
+fn gnu_inline_asm_option_suppresses_warning() {
+    let src = r#"void f(void) { asm("nop"); }"#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_tu, diags) = parse_ok_with_options(src, opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0016)),
+        "gnu option should suppress W0016, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_inline_asm_extended_operands_and_clobbers_are_preserved() {
+    let src = r#"
+        void f(void) {
+            int out;
+            int in;
+            asm("mov %1, %0" : "=r"(out) : "r"(in) : "cc", "memory");
+        }
+    "#;
+    let (tu, _diags, _sess) = parse_ok_with_session(src, Options::default());
+    let asm = inline_asm_stmt(&tu, 2);
+    assert_eq!(asm.template.bytes, b"mov %1, %0");
+    assert_eq!(asm.outputs.len(), 1);
+    assert_eq!(asm.outputs[0].constraint.bytes, b"=r");
+    assert!(matches!(asm.outputs[0].expr.kind, ExprKind::Ident(_)));
+    assert_eq!(asm.inputs.len(), 1);
+    assert_eq!(asm.inputs[0].constraint.bytes, b"r");
+    assert_eq!(asm.clobbers.len(), 2);
+    assert_eq!(asm.clobbers[0].bytes, b"cc");
+    assert_eq!(asm.clobbers[1].bytes, b"memory");
+}
+
+#[test]
+fn gnu_inline_asm_symbolic_operands_are_preserved() {
+    let src = r#"
+        void f(void) {
+            int out;
+            int in;
+            __asm__ __volatile__ ("add %1, %0" : [dst] "+r"(out) : [src] "r"(in));
+        }
+    "#;
+    let (tu, _diags, sess) = parse_ok_with_session(src, Options::default());
+    let asm = inline_asm_stmt(&tu, 2);
+    assert!(asm.quals.volatile);
+    let (dst, _) = asm.outputs[0].name.expect("output symbolic name");
+    let (src, _) = asm.inputs[0].name.expect("input symbolic name");
+    assert_eq!(sess.interner.get(dst), "dst");
+    assert_eq!(sess.interner.get(src), "src");
+}
+
+#[test]
+fn gnu_inline_asm_malformed_operand_reports_error() {
+    let errs = parse_err(r#"void f(void) { asm("nop" : "r"x); }"#);
+    assert!(
+        errs.iter().any(|d| d.code == Some(rcc_errors::codes::E0032)),
+        "expected E0032, got {errs:#?}"
+    );
+}
+
+#[test]
+fn ordinary_asm_call_is_not_reclassified_without_string_template() {
+    let (tu, diags, _sess) = parse_ok_with_session("void f(void) { asm(x); }", Options::default());
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0016)),
+        "ordinary call should not emit inline-asm warning, got {diags:#?}"
+    );
+    let ExternalDecl::Function(func) = &tu.decls[0] else {
+        panic!("expected function");
+    };
+    let BlockItem::Stmt(stmt) = &func.body.items[0] else {
+        panic!("expected statement");
+    };
+    assert!(matches!(stmt.kind, StmtKind::Expr(Some(_))));
+}
+
+fn inline_asm_stmt(tu: &TranslationUnit, idx: usize) -> &InlineAsm {
+    let ExternalDecl::Function(func) = &tu.decls[0] else {
+        panic!("expected function");
+    };
+    let BlockItem::Stmt(stmt) = &func.body.items[idx] else {
+        panic!("expected statement at body index {idx}");
+    };
+    let StmtKind::InlineAsm(asm) = &stmt.kind else {
+        panic!("expected inline asm statement, got {:?}", stmt.kind);
+    };
+    asm
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // §6.7 — Declarations
 // ═══════════════════════════════════════════════════════════════════

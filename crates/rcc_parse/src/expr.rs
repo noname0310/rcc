@@ -1407,7 +1407,7 @@ fn infix_bp(op: InfixOp) -> (u8, u8) {
 /// `source_map` and holding the guard while mutably borrowing a second
 /// field would deadlock on any concurrent writer — the same idiom that
 /// `phase7::intern_span` follows.
-fn intern_span_text(p: &mut Parser<'_>, span: rcc_span::Span) -> Symbol {
+pub(crate) fn intern_span_text(p: &mut Parser<'_>, span: rcc_span::Span) -> Symbol {
     let text = {
         let sm = p.session.source_map.read().expect("source map poisoned");
         let file = sm.file(span.file);
@@ -1451,7 +1451,11 @@ fn ast_char_literal(p: &mut Parser<'_>, span: Span, lit: CharLiteral) -> AstChar
     }
 }
 
-fn ast_string_literal(p: &mut Parser<'_>, span: Span, lit: StringLiteral) -> AstStringLiteral {
+pub(crate) fn ast_string_literal(
+    p: &mut Parser<'_>,
+    span: Span,
+    lit: StringLiteral,
+) -> AstStringLiteral {
     AstStringLiteral {
         text: intern_span_text(p, span),
         bytes: lit.bytes,
@@ -1459,7 +1463,7 @@ fn ast_string_literal(p: &mut Parser<'_>, span: Span, lit: StringLiteral) -> Ast
     }
 }
 
-fn ast_literal_encoding(enc: StringEncoding) -> LiteralEncoding {
+pub(crate) fn ast_literal_encoding(enc: StringEncoding) -> LiteralEncoding {
     match enc {
         StringEncoding::None => LiteralEncoding::None,
         StringEncoding::Utf8 => LiteralEncoding::Utf8,

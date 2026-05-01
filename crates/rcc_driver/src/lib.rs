@@ -51,6 +51,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_statement_expressions: false,
         gnu_range_designators: false,
         gnu_attributes: false,
+        gnu_inline_asm: false,
     }
 }
 

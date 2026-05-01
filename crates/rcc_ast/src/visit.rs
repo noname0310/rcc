@@ -3,8 +3,8 @@
 
 use crate::{
     Block, BlockItem, Decl, Declarator, EnumSpec, Expr, ExprKind, ExternalDecl, FieldDecl,
-    FunctionDef, InitDeclarator, Initializer, OffsetofDesignator, ParamDecl, RecordSpec, Stmt,
-    StmtKind, TranslationUnit, TypeName,
+    FunctionDef, InitDeclarator, Initializer, InlineAsm, OffsetofDesignator, ParamDecl, RecordSpec,
+    Stmt, StmtKind, TranslationUnit, TypeName,
 };
 
 /// Walk the AST read-only.
@@ -164,12 +164,19 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, s: &Stmt) {
         StmtKind::Default { body }
         | StmtKind::Attributed { stmt: body, .. }
         | StmtKind::Label { body, .. } => v.visit_stmt(body),
+        StmtKind::InlineAsm(asm) => walk_inline_asm(v, asm),
         StmtKind::Return(e) => {
             if let Some(e) = e {
                 v.visit_expr(e);
             }
         }
         StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Null => {}
+    }
+}
+
+fn walk_inline_asm<V: Visitor>(v: &mut V, asm: &InlineAsm) {
+    for op in asm.outputs.iter().chain(&asm.inputs) {
+        v.visit_expr(&op.expr);
     }
 }
 

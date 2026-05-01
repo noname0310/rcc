@@ -22,6 +22,7 @@ phases.
 | Initializer lists, C99 field/index designators, and GNU range designator syntax | complete | HIR/typeck flatten and type-check initializers; `06-24` owns range expansion |
 | Function definitions, prototypes, variadic functions, K&R definitions | complete | HIR/typeck validate parameter types and obsolete-style semantics |
 | GNU `__attribute__((...))` attachment syntax | complete | Phase 14 validates attachment rules and attribute semantics |
+| GNU inline assembly statement syntax | complete | Phase 14 validates operand shape; LLVM codegen lowers to inline asm |
 | Parser recovery after malformed declarations/statements | complete | Diagnostics own final wording |
 
 ## Parsed But Checked Later
@@ -35,12 +36,12 @@ phases.
 | K&R-style definitions | Parses and emits obsolete-style warning | HIR/typeck validate parameter declarations |
 | GNU initializer range designators `[lo ... hi]` | Preserves a distinct range designator and warns in strict C99 mode | HIR lowering expands ranges and overlap semantics in `06-24` |
 | GNU attributes `__attribute__((...))` | Preserves raw attribute names and argument tokens; warns in strict C99 mode | Phase 14 validates allowed sites, argument shape, and attribute effects |
+| GNU inline asm `asm(...)` / `__asm__(...)` | Preserves template, qualifiers, operands, constraints, clobbers, and spans; warns in strict C99 mode | Phase 14 validates constraints; codegen emits LLVM inline asm |
 
 ## Parser Blockers Still Open
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-39 | GCC inline asm parser surface | Inline asm codegen needs parsed templates, constraints, and clobbers |
 | 05-40 | C11 `_Generic` | C11 compatibility tests need generic-selection syntax before type matching |
 | 05-41 | Parser-owned xfail shrink | Remaining parse xfails must be reclassified after the blocker tasks land |
 

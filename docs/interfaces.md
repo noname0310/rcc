@@ -97,6 +97,7 @@ pub struct Options {
     pub gnu_statement_expressions: bool,
     pub gnu_range_designators: bool,
     pub gnu_attributes: bool,
+    pub gnu_inline_asm: bool,
 }
 
 pub struct Session {
@@ -179,6 +180,9 @@ pub struct Attribute { pub name: Symbol, pub args: Vec<AttributeArg>, pub span: 
 pub struct AttributeArg { pub tokens: Vec<AttributeToken>, pub span: Span }
 pub struct AttributeToken { pub kind: AttributeTokenKind, pub span: Span }
 pub enum AttributeTokenKind { Symbol(Symbol), Int(u128), Float(f64), Char(u32), String(Vec<u8>), Punct(Symbol) }
+pub struct InlineAsm { pub quals: InlineAsmQuals, pub template: StringLiteral, pub outputs: Vec<InlineAsmOperand>, pub inputs: Vec<InlineAsmOperand>, pub clobbers: Vec<StringLiteral>, pub span: Span }
+pub struct InlineAsmQuals { pub volatile: bool, pub inline: bool, pub goto: bool }
+pub struct InlineAsmOperand { pub name: Option<(Symbol, Span)>, pub constraint: StringLiteral, pub expr: Expr, pub span: Span }
 pub enum DerivedDeclarator { Pointer(TypeQuals), Array(ArrayDeclarator), Function(FunctionDeclarator) }
 pub struct TypeName;
 pub enum Initializer { Expr(Expr), List(Vec<(Vec<Designator>, Initializer)>) }
@@ -188,7 +192,7 @@ pub enum Designator {
     Range { lo: Box<Expr>, hi: Box<Expr> },
 }
 pub struct Block; pub enum BlockItem { Decl(Decl), Stmt(Stmt) }
-pub struct Stmt; pub enum StmtKind { Attributed { attrs: Vec<Attribute>, stmt: Box<Stmt> }, /* ... */ }
+pub struct Stmt; pub enum StmtKind { Attributed { attrs: Vec<Attribute>, stmt: Box<Stmt> }, InlineAsm(InlineAsm), /* ... */ }
 pub struct Expr; pub enum ExprKind { /* ... */ }
 pub enum BinOp; pub enum UnOp; pub enum AssignOp;
 ```

@@ -294,6 +294,47 @@ pub enum AttributeTokenKind {
     Punct(Symbol),
 }
 
+/// GNU inline assembly statement payload.
+#[derive(Debug, Clone)]
+pub struct InlineAsm {
+    /// Qualifiers written between `asm` and the template.
+    pub quals: InlineAsmQuals,
+    /// Assembly template string.
+    pub template: StringLiteral,
+    /// Output operands in extended asm.
+    pub outputs: Vec<InlineAsmOperand>,
+    /// Input operands in extended asm.
+    pub inputs: Vec<InlineAsmOperand>,
+    /// Clobber strings in extended asm.
+    pub clobbers: Vec<StringLiteral>,
+    /// Full statement span.
+    pub span: Span,
+}
+
+/// GNU inline assembly qualifiers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InlineAsmQuals {
+    /// `volatile` / `__volatile__`.
+    pub volatile: bool,
+    /// `inline` / `__inline__`.
+    pub inline: bool,
+    /// `goto` / `__goto__`.
+    pub goto: bool,
+}
+
+/// One GNU inline assembly operand.
+#[derive(Debug, Clone)]
+pub struct InlineAsmOperand {
+    /// Optional symbolic operand name from `[name]`.
+    pub name: Option<(Symbol, Span)>,
+    /// Constraint string.
+    pub constraint: StringLiteral,
+    /// Parenthesised operand expression.
+    pub expr: Expr,
+    /// Full operand span.
+    pub span: Span,
+}
+
 /// One step in a declarator's derivation chain.
 #[derive(Debug, Clone)]
 pub enum DerivedDeclarator {
@@ -452,6 +493,8 @@ pub enum StmtKind {
     Default { body: Box<Stmt> },
     /// GNU attributes attached to a following statement.
     Attributed { attrs: Vec<Attribute>, stmt: Box<Stmt> },
+    /// GNU inline assembly statement.
+    InlineAsm(InlineAsm),
     /// `label: stmt`
     Label { name: Symbol, body: Box<Stmt> },
     /// `goto label;`

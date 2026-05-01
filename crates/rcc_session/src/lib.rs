@@ -125,6 +125,13 @@ pub struct Options {
     /// handling. When this flag is false, syntax still parses but each
     /// attribute group emits W0015 as a strict-C99 compatibility warning.
     pub gnu_attributes: bool,
+    /// Enable GNU inline assembly syntax without a warning.
+    ///
+    /// The parser preserves `asm` / `__asm` / `__asm__` statements for
+    /// later extension validation and LLVM lowering. When this flag is
+    /// false, syntax still parses but emits W0016 as a strict-C99
+    /// compatibility warning.
+    pub gnu_inline_asm: bool,
 }
 
 impl Default for Options {
@@ -144,6 +151,7 @@ impl Default for Options {
             gnu_statement_expressions: false,
             gnu_range_designators: false,
             gnu_attributes: false,
+            gnu_inline_asm: false,
         }
     }
 }

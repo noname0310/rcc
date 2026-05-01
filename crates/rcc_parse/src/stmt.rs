@@ -86,11 +86,14 @@
 //!   next iteration so the block loop cannot spin forever on the
 //!   offending token.
 
-use rcc_ast::{Block, BlockItem, Stmt, StmtKind};
+use rcc_ast::{
+    Block, BlockItem, InlineAsm, InlineAsmOperand, InlineAsmQuals, Stmt, StmtKind,
+    StringLiteral as AstStringLiteral,
+};
 use rcc_lexer::Punct;
 use rcc_span::{Span, Symbol};
 
-use crate::expr::{parse_assignment_expression, parse_expression};
+use crate::expr::{ast_string_literal, parse_assignment_expression, parse_expression};
 use crate::keywords::Keyword;
 use crate::token::TokenKind;
 use crate::Parser;
@@ -114,6 +117,9 @@ pub fn parse_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
         let span = start.to(stmt.span);
         let id = p.fresh_id();
         return Some(Stmt { id, kind: StmtKind::Attributed { attrs, stmt: Box::new(stmt) }, span });
+    }
+    if peek_inline_asm_stmt(p) {
+        return parse_inline_asm_stmt(p);
     }
     match &tok.kind {
         TokenKind::Punct(Punct::LBrace) => {
@@ -151,6 +157,261 @@ pub fn parse_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
 /// the label arm and falls through to the expression-statement path.
 fn peek_is_label(p: &Parser<'_>) -> bool {
     matches!(p.tokens.get(p.cursor + 1).map(|t| &t.kind), Some(TokenKind::Punct(Punct::Colon)))
+}
+
+fn peek_inline_asm_stmt(p: &Parser<'_>) -> bool {
+    let Some(TokenKind::Ident(sym)) = p.tokens.get(p.cursor).map(|t| &t.kind) else {
+        return false;
+    };
+    let spelling = p.session.interner.get(*sym);
+    if !matches!(spelling, "asm" | "__asm" | "__asm__") {
+        return false;
+    }
+    let mut i = p.cursor + 1;
+    while inline_asm_qualifier_at(p, i).is_some() {
+        i += 1;
+    }
+    let has_lparen =
+        matches!(p.tokens.get(i).map(|t| &t.kind), Some(TokenKind::Punct(Punct::LParen)));
+    if spelling == "asm" {
+        has_lparen && matches!(p.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::StringLit(_)))
+    } else {
+        has_lparen
+    }
+}
+
+fn inline_asm_qualifier_at(p: &Parser<'_>, idx: usize) -> Option<AsmQualifier> {
+    match p.tokens.get(idx).map(|t| &t.kind) {
+        Some(TokenKind::Keyword(Keyword::Volatile)) => Some(AsmQualifier::Volatile),
+        Some(TokenKind::Keyword(Keyword::Inline)) => Some(AsmQualifier::Inline),
+        Some(TokenKind::Keyword(Keyword::Goto)) => Some(AsmQualifier::Goto),
+        Some(TokenKind::Ident(sym)) => match p.session.interner.get(*sym) {
+            "__volatile__" => Some(AsmQualifier::Volatile),
+            "__inline__" => Some(AsmQualifier::Inline),
+            "__goto__" => Some(AsmQualifier::Goto),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Copy, Clone)]
+enum AsmQualifier {
+    Volatile,
+    Inline,
+    Goto,
+}
+
+/// Parse GNU inline assembly:
+///
+/// `asm [qualifiers] ( "template" [ : outputs [ : inputs [ : clobbers ]]] ) ;`
+fn parse_inline_asm_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
+    let start = p.cur_span();
+    p.bump(); // `asm`, `__asm`, or `__asm__`
+    if !p.session.opts.gnu_inline_asm {
+        p.session
+            .handler
+            .struct_warn(start, "GNU inline assembly is not part of C99")
+            .code(rcc_errors::codes::W0016)
+            .note("parsing it as an extension so phase 14 can validate semantics")
+            .emit();
+    }
+
+    let quals = parse_inline_asm_quals(p);
+    let open = expect_punct_code(
+        p,
+        Punct::LParen,
+        "expected `(` after inline assembly keyword",
+        rcc_errors::codes::E0032,
+    )?;
+    let template = parse_asm_string_literal(p, "expected inline assembly template string")?;
+
+    let (outputs, inputs, clobbers) = if eat_punct(p, Punct::Colon) {
+        let outputs = parse_inline_asm_operands(p)?;
+        let inputs =
+            if eat_punct(p, Punct::Colon) { parse_inline_asm_operands(p)? } else { Vec::new() };
+        let clobbers =
+            if eat_punct(p, Punct::Colon) { parse_inline_asm_clobbers(p)? } else { Vec::new() };
+        (outputs, inputs, clobbers)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
+    let close = expect_punct_code(
+        p,
+        Punct::RParen,
+        "expected `)` to close inline assembly statement",
+        rcc_errors::codes::E0032,
+    )
+    .unwrap_or(open);
+    let end = expect_semi_code(
+        p,
+        close,
+        "expected `;` after inline assembly statement",
+        rcc_errors::codes::E0032,
+    );
+    let asm = InlineAsm { quals, template, outputs, inputs, clobbers, span: start.to(end) };
+    let id = p.fresh_id();
+    Some(Stmt { id, kind: StmtKind::InlineAsm(asm), span: start.to(end) })
+}
+
+fn parse_inline_asm_quals(p: &mut Parser<'_>) -> InlineAsmQuals {
+    let mut quals = InlineAsmQuals::default();
+    while let Some(q) = peek_inline_asm_qualifier(p) {
+        p.bump();
+        match q {
+            AsmQualifier::Volatile => quals.volatile = true,
+            AsmQualifier::Inline => quals.inline = true,
+            AsmQualifier::Goto => quals.goto = true,
+        }
+    }
+    quals
+}
+
+fn peek_inline_asm_qualifier(p: &Parser<'_>) -> Option<AsmQualifier> {
+    match p.peek().map(|t| &t.kind) {
+        Some(TokenKind::Keyword(Keyword::Volatile)) => Some(AsmQualifier::Volatile),
+        Some(TokenKind::Keyword(Keyword::Inline)) => Some(AsmQualifier::Inline),
+        Some(TokenKind::Keyword(Keyword::Goto)) => Some(AsmQualifier::Goto),
+        Some(TokenKind::Ident(sym)) => match p.session.interner.get(*sym) {
+            "__volatile__" => Some(AsmQualifier::Volatile),
+            "__inline__" => Some(AsmQualifier::Inline),
+            "__goto__" => Some(AsmQualifier::Goto),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_inline_asm_operands(p: &mut Parser<'_>) -> Option<Vec<InlineAsmOperand>> {
+    let mut operands = Vec::new();
+    if at_inline_asm_list_end(p) {
+        return Some(operands);
+    }
+    loop {
+        operands.push(parse_inline_asm_operand(p)?);
+        if !eat_punct(p, Punct::Comma) {
+            break;
+        }
+        if at_inline_asm_list_end(p) {
+            break;
+        }
+    }
+    Some(operands)
+}
+
+fn parse_inline_asm_operand(p: &mut Parser<'_>) -> Option<InlineAsmOperand> {
+    let start = p.cur_span();
+    let name = if eat_punct(p, Punct::LBracket) {
+        let Some(tok) = p.bump() else {
+            emit_inline_asm_error(p, start, "expected symbolic operand name");
+            return None;
+        };
+        let TokenKind::Ident(sym) = tok.kind else {
+            emit_inline_asm_error(p, tok.span, "expected symbolic operand name");
+            return None;
+        };
+        let _ = expect_punct_code(
+            p,
+            Punct::RBracket,
+            "expected `]` after symbolic operand name",
+            rcc_errors::codes::E0032,
+        )?;
+        Some((sym, tok.span))
+    } else {
+        None
+    };
+    let constraint = parse_asm_string_literal(p, "expected inline assembly operand constraint")?;
+    let _ = expect_punct_code(
+        p,
+        Punct::LParen,
+        "expected `(` before inline assembly operand expression",
+        rcc_errors::codes::E0032,
+    )?;
+    let expr = parse_assignment_expression(p)?;
+    let close = expect_punct_code(
+        p,
+        Punct::RParen,
+        "expected `)` after inline assembly operand expression",
+        rcc_errors::codes::E0032,
+    )?;
+    Some(InlineAsmOperand { name, constraint, expr, span: start.to(close) })
+}
+
+fn parse_inline_asm_clobbers(p: &mut Parser<'_>) -> Option<Vec<AstStringLiteral>> {
+    let mut clobbers = Vec::new();
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+        return Some(clobbers);
+    }
+    loop {
+        clobbers.push(parse_asm_string_literal(p, "expected inline assembly clobber string")?);
+        if !eat_punct(p, Punct::Comma) {
+            break;
+        }
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+            break;
+        }
+    }
+    Some(clobbers)
+}
+
+fn parse_asm_string_literal(p: &mut Parser<'_>, msg: &str) -> Option<AstStringLiteral> {
+    let tok = p.bump()?;
+    let TokenKind::StringLit(lit) = tok.kind else {
+        emit_inline_asm_error(p, tok.span, msg);
+        return None;
+    };
+    Some(ast_string_literal(p, tok.span, lit))
+}
+
+fn at_inline_asm_list_end(p: &Parser<'_>) -> bool {
+    matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Colon | Punct::RParen)))
+}
+
+fn eat_punct(p: &mut Parser<'_>, want: Punct) -> bool {
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(pu)) if *pu == want) {
+        p.bump();
+        true
+    } else {
+        false
+    }
+}
+
+fn expect_punct_code(
+    p: &mut Parser<'_>,
+    want: Punct,
+    msg: &str,
+    code: &'static str,
+) -> Option<Span> {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(pp) if pp == want) => {
+            let s = t.span;
+            p.bump();
+            Some(s)
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), msg).code(code).emit();
+            None
+        }
+    }
+}
+
+fn expect_semi_code(p: &mut Parser<'_>, fallback_end: Span, msg: &str, code: &'static str) -> Span {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Semi)) => {
+            let s = t.span;
+            p.bump();
+            s
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), msg).code(code).emit();
+            fallback_end
+        }
+    }
+}
+
+fn emit_inline_asm_error(p: &mut Parser<'_>, span: Span, msg: &str) {
+    p.session.handler.struct_err(span, msg).code(rcc_errors::codes::E0032).emit();
 }
 
 /// Parse an expression statement: `expression ;`.

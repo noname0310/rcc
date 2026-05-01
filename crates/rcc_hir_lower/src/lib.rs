@@ -493,6 +493,7 @@ fn collect_labels_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Se
         }
         // Terminal statements — no sub-statements to recurse into.
         StmtKind::Expr(_)
+        | StmtKind::InlineAsm(_)
         | StmtKind::Goto(_)
         | StmtKind::Break
         | StmtKind::Continue
@@ -564,6 +565,7 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
         }
         // Terminal statements — no sub-statements to recurse into.
         StmtKind::Expr(_)
+        | StmtKind::InlineAsm(_)
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Return(_)
@@ -606,6 +608,7 @@ pub fn lower_stmt(
             let id = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Expr(id)
         }
+        StmtKind::InlineAsm(_) => HirStmtKind::Null,
         StmtKind::Compound(block) => {
             let ids = lower_block_items(&block.items, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Block(ids)

@@ -1,5 +1,7 @@
 # 05-39: Inline asm syntax surface
 
+> ✓ done — 2026-05-01
+
 **Phase:** 05-parse    **Depends on:** 05-38    **Milestone:** M5 blocker
 
 ## Goal
@@ -32,6 +34,16 @@ work needs to lower them.
 - `asm("mov %1, %0" : "=r"(out) : "r"(in) : "cc")` preserves every
   operand and clobber.
 - Strict C99 mode rejects or warns according to extension policy.
+
+## Notes
+- The AST now preserves GNU inline asm as `StmtKind::InlineAsm` with
+  qualifiers, template, output/input operands, constraints, clobbers,
+  and source spans.
+- Strict C99 mode parses inline asm but emits W0016 unless
+  `Options::gnu_inline_asm` is enabled.
+- Constraint validation and LLVM inline-asm lowering remain deferred to
+  `tasks/14-lang-extensions/09-inline-asm-syntax.md` and follow-up
+  codegen tasks.
 
 ## References
 - `tasks/14-lang-extensions/09-inline-asm-syntax.md`.

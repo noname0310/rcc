@@ -449,6 +449,19 @@ int x __attribute__((aligned(16));  // error[E0031]: missing `)`
 The parser reports malformed wrappers locally, then recovers so the
 surrounding declaration can still be checked.
 
+## E0032 — malformed inline assembly syntax
+
+GNU inline assembly syntax was recognized but its template, operands,
+constraints, clobbers, parentheses, or terminating semicolon were
+malformed:
+
+```c
+asm("nop" : "r"x);  // error[E0032]: missing operand expression parentheses
+```
+
+The parser reports malformed inline asm locally, then recovers at the
+statement boundary so the enclosing block can continue parsing.
+
 ## E0040 — integer literal too large
 
 The magnitude of an integer constant exceeds the range of `u128`, the
@@ -1159,3 +1172,16 @@ int x __attribute__((aligned(16)));  // warning[W0015] in strict C99 mode
 The parser preserves the attribute name and raw argument tokens for
 phase-14 semantic checks. Enable `Options::gnu_attributes` to accept
 the syntax without this compatibility warning.
+
+## W0016 — GNU inline assembly syntax extension
+
+GNU inline assembly is a GNU C extension, not C99 syntax:
+
+```c
+asm volatile ("nop");  // warning[W0016] in strict C99 mode
+```
+
+The parser preserves the template, qualifiers, operands, constraints,
+clobbers, and spans for phase-14 validation and LLVM lowering. Enable
+`Options::gnu_inline_asm` to accept the syntax without this
+compatibility warning.
