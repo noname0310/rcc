@@ -25,10 +25,22 @@ lowered to `BasicBlock` + `Terminator` sequences. Non-SSA —
 | 13 | [`13-vla-lowering.md`](13-vla-lowering.md) | Variable-length arrays. |
 | 14 | [`14-snapshot-mir-emit.md`](14-snapshot-mir-emit.md) | `--emit=mir` dumps. |
 | 15 | [`15-unit-tests.md`](15-unit-tests.md) | MIR snapshot fixture table. |
+| 16 | [`16-inc-dec-lowering.md`](16-inc-dec-lowering.md) | Remove remaining `++` / `--` panic path. |
+| 17 | [`17-goto-scope-lifetimes.md`](17-goto-scope-lifetimes.md) | Make goto paths emit scope-correct lifetime markers. |
+| 18 | [`18-sizeof-layout-service.md`](18-sizeof-layout-service.md) | Replace hard-coded `sizeof` layout with a shared layout query. |
+| 19 | [`19-complex-conversion-rvalues.md`](19-complex-conversion-rvalues.md) | Preserve real/complex conversion semantics in CFG. |
+| 20 | [`20-cfg-verifier-release-gate.md`](20-cfg-verifier-release-gate.md) | Promote CFG invariants from debug-only to testable verifier. |
+| 21 | [`21-eval-order-conformance-policy.md`](21-eval-order-conformance-policy.md) | Document and test unspecified evaluation-order policy. |
+| 22 | [`22-source-pipeline-edge-fixtures.md`](22-source-pipeline-edge-fixtures.md) | Add full source fixtures for edge cases that unit tests missed. |
 
 ## Exit criteria
 
 - Every well-typed HIR function produces a `Body` where every
   `BasicBlock` has a `Terminator` and every `Place` targets a live
   `Local`.
+- No well-typed C99 construct that has already passed parse/HIR/typeck
+  may reach a `todo!`, `unimplemented!`, or semantic placeholder in CFG
+  lowering.
+- `goto`, VLA, `sizeof`, and complex conversions have explicit CFG
+  contracts before 09-codegen consumes them.
 - `--emit=mir hello.c` matches the checked-in snapshot.
