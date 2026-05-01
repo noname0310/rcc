@@ -1220,7 +1220,7 @@ fn expr_ternary_creates_cond_node() {
 }
 
 #[test]
-fn expr_member_access_lowers_to_field() {
+fn expr_member_access_preserves_requested_field_name() {
     // Ad-hoc: synthesise a struct local + `s.a` member access.
     let (mut sess, _cap) = Session::for_test();
     let (mut body, mut scope, mut crate_, mut tcx, mut resolver) = fresh_lower_ctx();
@@ -1252,7 +1252,12 @@ fn expr_member_access_lowers_to_field() {
         span: DUMMY_SP,
     };
     let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
-    assert!(matches!(body.exprs[id].kind, HirExprKind::Field { field_index: 0, .. }));
+    match body.exprs[id].kind {
+        HirExprKind::UnresolvedField { field, .. } => assert_eq!(field, a),
+        ref other => {
+            panic!("expected unresolved member access preserving field name, got {other:?}")
+        }
+    }
 }
 
 #[test]

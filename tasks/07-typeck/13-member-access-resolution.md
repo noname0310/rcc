@@ -20,6 +20,8 @@ expressions with the correct result type and value category.
 ## Deliverables
 - Typeck resolver for preserved member-access names from 06-25.
 - E-code-backed diagnostics for invalid member access.
+- Removal of the temporary CFG compatibility fallback that maps unresolved
+  member accesses to `Projection::Field(0)`.
 - Tests covering `s.a`, `s.b`, `p->b`, union members, missing members,
   and non-record base expressions.
 
@@ -30,6 +32,8 @@ expressions with the correct result type and value category.
   lowers to CFG with `Projection::Field(1)`.
 - `int x; x.y;` emits a typeck diagnostic and does not reach CFG as a
   valid field projection.
+- `rcc_cfg::lower` has no fallback arm that accepts
+  `HirExprKind::UnresolvedField` as a valid projection.
 
 ## References
 - C99 §6.5.2.3.

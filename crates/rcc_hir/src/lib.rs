@@ -356,7 +356,23 @@ pub enum HirExprKind {
     Unary { op: rcc_hir_binop::UnOp, operand: HirExprId },
     /// Call.
     Call { callee: HirExprId, args: Vec<HirExprId> },
-    /// Field access (record + index).
+    /// Unresolved source member access (`s.f` / `p->f`) before typeck has
+    /// resolved the requested name to a concrete record field index.
+    ///
+    /// HIR lowering emits this lossless form so the member `field` symbol is
+    /// still available to `rcc_typeck`. The type checker rewrites successful
+    /// lookups to [`HirExprKind::Field`], which is the resolved projection form
+    /// consumed by CFG and LLVM codegen.
+    UnresolvedField {
+        /// Base record expression. For `p->f`, lowering first inserts a
+        /// [`HirExprKind::Deref`] node and stores that id here.
+        base: HirExprId,
+        /// Requested member name.
+        field: Symbol,
+        /// Best available source span for the member token.
+        field_span: Span,
+    },
+    /// Resolved field access (record + index).
     Field { base: HirExprId, field_index: u32 },
     /// Array/pointer index, lowered to `*(base + index)`.
     Index { base: HirExprId, index: HirExprId },

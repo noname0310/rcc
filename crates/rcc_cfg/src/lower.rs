@@ -244,6 +244,7 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         }
         HirExprKind::CompoundLiteral { .. }
         | HirExprKind::Deref(_)
+        | HirExprKind::UnresolvedField { .. }
         | HirExprKind::Field { .. }
         | HirExprKind::Index { .. } => {
             // These are lvalues; in value position emit a Copy of the
@@ -339,6 +340,17 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             let base_place = lower_as_place(builder, cx, *base);
             let mut projection = base_place.projection;
             projection.push(Projection::Field(*field_index));
+            Place { base: base_place.base, projection }
+        }
+        HirExprKind::UnresolvedField { base, field: _, .. } => {
+            // Compatibility path until task 07-13 resolves preserved member
+            // names in typeck. HIR no longer loses the source name, but older
+            // CFG smoke fixtures still expect pre-resolution member accesses
+            // to lower instead of aborting. 07-13 must replace this fallback
+            // with a hard pre-CFG gate.
+            let base_place = lower_as_place(builder, cx, *base);
+            let mut projection = base_place.projection;
+            projection.push(Projection::Field(0));
             Place { base: base_place.base, projection }
         }
         HirExprKind::Index { base, index } => {

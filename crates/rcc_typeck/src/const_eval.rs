@@ -264,6 +264,7 @@ impl<'a> ConstEval<'a> {
             },
 
             HirExprKind::Call { .. }
+            | HirExprKind::UnresolvedField { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
             | HirExprKind::CompoundLiteral { .. }
@@ -383,6 +384,7 @@ impl<'a> ConstEval<'a> {
                 let total = base_off.checked_add(off)?;
                 Some((base_def, total))
             }
+            HirExprKind::UnresolvedField { .. } => None,
             HirExprKind::Field { base, .. } => {
                 // `&obj.field` — record-layout-dependent. We expose
                 // `(Some(base_def), 0)` and let the codegen pass add
@@ -579,6 +581,7 @@ impl<'a> ConstEval<'a> {
             // array indexing on a non-constant target). Bail with
             // `None`.
             HirExprKind::Call { .. }
+            | HirExprKind::UnresolvedField { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
             | HirExprKind::CompoundLiteral { .. }

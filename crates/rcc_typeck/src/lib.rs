@@ -377,6 +377,17 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::Index { base: base2, index: index2 };
             expr_id
         }
+        HirExprKind::UnresolvedField { base, field, field_span } => {
+            let base2 = visit_expr(base, body, tcx, session, def_info);
+            // Field-name resolution is owned by task 07-13. Until then,
+            // preserve the requested name and compute only the value category
+            // required by generic assignment/lvalue checks.
+            let cat = value_category(body, base2);
+            body.exprs[expr_id].value_cat = cat;
+            body.exprs[expr_id].kind =
+                HirExprKind::UnresolvedField { base: base2, field, field_span };
+            expr_id
+        }
         HirExprKind::Field { base, field_index } => {
             let base2 = visit_expr(base, body, tcx, session, def_info);
             // We don't yet have struct field-resolution machinery in HIR
@@ -1277,6 +1288,7 @@ pub fn decay_if_needed(
 /// | `LocalRef`, `DefRef`                             | lvalue   |
 /// | `Deref(p)` (i.e. `*p`)                           | lvalue   |
 /// | `Index { base, .. }` (`a[i]` lowered to `*(a+i)`)| lvalue   |
+/// | `UnresolvedField { base, .. }`                   | inherits from `base` |
 /// | `Field { base, .. }` (`s.f`, `p->f`)             | inherits from `base` |
 /// | `Convert { kind: LvalueToRvalue }`              | rvalue   |
 /// | `Convert { kind: ArrayToPtr | FuncToPtr }`      | rvalue   |
@@ -1328,7 +1340,9 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
 
         // `s.f` is an lvalue iff `s` is. `p->f` is lowered as
         // `Field { base: Deref(p), .. }`, so this also covers it.
-        HirExprKind::Field { base, .. } => value_category(body, base),
+        HirExprKind::UnresolvedField { base, .. } | HirExprKind::Field { base, .. } => {
+            value_category(body, base)
+        }
     }
 }
 

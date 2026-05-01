@@ -2042,8 +2042,8 @@ fn lower_for_init_decl(
 /// | `Assign { += / -= / …, .. }`      | `Assign { lhs, Binary { op, lhs, rhs } }` (desugared)|
 /// | `Comma`                           | `Comma`                                              |
 /// | `Call`                            | `Call`                                               |
-/// | `Member { a.b }`                  | `Field { base, field_index: 0 }` (index filled later)|
-/// | `Arrow  { a->b }`                 | `Field { base: Deref(a), field_index: 0 }`           |
+/// | `Member { a.b }`                  | `UnresolvedField { base, field: b }`                 |
+/// | `Arrow  { a->b }`                 | `UnresolvedField { base: Deref(a), field: b }`       |
 /// | `Index`                           | `Index`                                              |
 /// | `Cast`                            | `Cast { operand, to }`                               |
 /// | `SizeofExpr`                      | `SizeofExpr` (typed / folded in typeck + CFG)        |
@@ -2164,12 +2164,15 @@ pub fn lower_expr(
             // exhaustive for now without pretending these are ordinary calls.
             HirExprKind::IntConst(0)
         }
-        rcc_ast::ExprKind::Member { base, field: _ } => {
+        rcc_ast::ExprKind::Member { base, field } => {
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
-            // Field-index resolution happens in typeck; placeholder 0.
-            HirExprKind::Field { base: base_id, field_index: 0 }
+            // Field-index resolution happens in typeck; keep the source
+            // member name here so the resolver can choose the correct field.
+            // The AST currently stores only the whole member expression span,
+            // so this is the best available member-token span.
+            HirExprKind::UnresolvedField { base: base_id, field: *field, field_span: expr.span }
         }
-        rcc_ast::ExprKind::Arrow { base, field: _ } => {
+        rcc_ast::ExprKind::Arrow { base, field } => {
             // `a->b` lowers to `(*a).b`. Emit the Deref as its own
             // HIR node so the indirection is explicit.
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
@@ -2182,7 +2185,7 @@ pub fn lower_expr(
             };
             let deref_id = body.exprs.push(deref_expr);
             body.exprs[deref_id].id = deref_id;
-            HirExprKind::Field { base: deref_id, field_index: 0 }
+            HirExprKind::UnresolvedField { base: deref_id, field: *field, field_span: expr.span }
         }
         rcc_ast::ExprKind::Index { base, index } => {
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
@@ -7380,7 +7383,7 @@ mod tests {
     }
 
     #[test]
-    fn expr_member_dot_lowers_to_field() {
+    fn expr_member_dot_preserves_requested_field_name() {
         let (mut sess, _cap) = Session::for_test();
         let field = sym(&mut sess, "x");
         let e = Expr {
@@ -7390,17 +7393,18 @@ mod tests {
         };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
-            HirExprKind::Field { base, field_index } => {
-                assert_eq!(field_index, 0);
+            HirExprKind::UnresolvedField { base, field: member, field_span } => {
+                assert_eq!(member, field);
+                assert_eq!(field_span, DUMMY_SP);
                 assert!(matches!(body.exprs[base].kind, HirExprKind::IntConst(0)));
             }
-            ref other => panic!("expected Field, got {other:?}"),
+            ref other => panic!("expected UnresolvedField, got {other:?}"),
         }
     }
 
     #[test]
-    fn expr_arrow_lowers_to_field_over_deref() {
-        // `p->x` → Field { base: Deref(p), field_index: 0 }.
+    fn expr_arrow_preserves_requested_field_name_over_deref() {
+        // `p->x` → UnresolvedField { base: Deref(p), field: x }.
         let (mut sess, _cap) = Session::for_test();
         let field = sym(&mut sess, "x");
         let e = Expr {
@@ -7410,8 +7414,9 @@ mod tests {
         };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
-            HirExprKind::Field { base, field_index } => {
-                assert_eq!(field_index, 0);
+            HirExprKind::UnresolvedField { base, field: member, field_span } => {
+                assert_eq!(member, field);
+                assert_eq!(field_span, DUMMY_SP);
                 // The base should itself be a Deref node.
                 match body.exprs[base].kind {
                     HirExprKind::Deref(inner) => {
@@ -7420,7 +7425,7 @@ mod tests {
                     ref other => panic!("expected Deref under Field, got {other:?}"),
                 }
             }
-            ref other => panic!("expected Field, got {other:?}"),
+            ref other => panic!("expected UnresolvedField, got {other:?}"),
         }
     }
 

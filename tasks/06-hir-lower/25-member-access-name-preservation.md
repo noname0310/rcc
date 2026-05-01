@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-25: Preserve member-access names for typeck
 
 **Phase:** 06-hir-lower    **Depends on:** 06-24    **Milestone:** M3 pre-codegen stabilization
@@ -15,7 +17,7 @@ CFG and LLVM codegen consume the access.
   expression.
 - In: keep the existing resolved projection form for downstream CFG
   once typeck has resolved the member.
-- Out: bitfield load/store layout; owned by 09-19.
+- Out: bitfield load/store layout; owned by 09-21.
 - Out: anonymous-member recursive lookup semantics beyond the cases
   already represented by HIR record lowering.
 
