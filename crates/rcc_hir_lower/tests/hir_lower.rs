@@ -68,6 +68,19 @@ fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitte
     (hir, tcx, cap)
 }
 
+fn checked_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(Options::default(), handler);
+    let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<checked>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    let mut tcx = TyCtxt::new();
+    let mut hir = lower(&ast, &mut tcx, &mut sess);
+    rcc_typeck::check(&mut sess, &mut tcx, &mut hir);
+    (hir, tcx, cap)
+}
+
 /// Like `lower_snippet`, but keeps the `Session` (with capture emitter)
 /// around so callers can inspect diagnostics. Returns the parsed AST,
 /// not the HIR — this is the entry point for hand-driven lowering of
@@ -1973,6 +1986,123 @@ fn snippet_global_char_array_string_initializer_has_static_payload() {
         })
         .collect();
     assert_eq!(values, vec![104, 105, 0]);
+}
+
+#[test]
+fn snippet_typeck_folds_global_integer_initializer_expr() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("int x = 2 + 3;");
+    let (def_id, def) = hir
+        .defs
+        .iter_enumerated()
+        .find(|(_, d)| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("missing initialized global");
+    let DefKind::Global { init: Some(init), .. } = &def.kind else {
+        panic!("expected initialized global");
+    };
+    assert!(hir.global_init_bodies.contains_key(&def_id));
+    assert_eq!(init.entries.len(), 1);
+    assert!(init.entries[0].expr.is_some());
+    assert!(matches!(init.entries[0].value, GlobalInitValue::Int(5)));
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
+        "constant initializer should not emit E0084"
+    );
+}
+
+#[test]
+fn snippet_typeck_folds_global_address_initializer() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("int x; int *p = &x;");
+    let globals: Vec<_> = hir
+        .defs
+        .iter_enumerated()
+        .filter(|(_, d)| matches!(d.kind, DefKind::Global { .. }))
+        .collect();
+    let (x_def, _) = globals[0];
+    let (_, p_def) = globals
+        .into_iter()
+        .find(|(_, d)| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("missing pointer initializer");
+    let DefKind::Global { init: Some(init), .. } = &p_def.kind else {
+        panic!("expected initialized pointer global");
+    };
+    assert_eq!(init.entries.len(), 1);
+    assert!(matches!(
+        init.entries[0].value,
+        GlobalInitValue::Address { def: Some(base), offset: 0 } if base == x_def
+    ));
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
+        "address initializer should not emit E0084"
+    );
+}
+
+#[test]
+fn snippet_typeck_preserves_global_string_pointer_initializer() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("char *p = \"hi\";");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("missing initialized global");
+    let DefKind::Global { init: Some(init), .. } = &def.kind else {
+        panic!("expected initialized global");
+    };
+    assert_eq!(init.entries.len(), 1);
+    assert!(matches!(init.entries[0].value, GlobalInitValue::StringLiteral(_)));
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
+        "string literal pointer initializer should not emit E0084"
+    );
+}
+
+#[test]
+fn snippet_typeck_reports_nonconstant_global_initializer() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("int f(void); int y = f();");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("missing initialized global");
+    let DefKind::Global { init: Some(init), .. } = &def.kind else {
+        panic!("expected initialized global");
+    };
+    assert!(matches!(init.entries[0].value, GlobalInitValue::Error));
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0084)),
+        "non-constant initializer should emit E0084"
+    );
+}
+
+#[test]
+fn snippet_typeck_folds_aggregate_range_initializer_leaves() {
+    let (hir, _tcx, cap) =
+        checked_snippet_with_diagnostics("int a[4] = { [1 ... 2] = 1 + 2, [3] = 4 };");
+    let def = hir
+        .defs
+        .iter()
+        .find(|d| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("missing initialized global");
+    let DefKind::Global { init: Some(init), .. } = &def.kind else {
+        panic!("expected initialized global");
+    };
+    let values: Vec<_> = init
+        .entries
+        .iter()
+        .map(|entry| {
+            let [GlobalInitDesignator::Index(i)] = entry.path.as_slice() else {
+                panic!("expected index path, got {:?}", entry.path);
+            };
+            let GlobalInitValue::Int(v) = entry.value else {
+                panic!("expected int value, got {:?}", entry.value);
+            };
+            (*i, v)
+        })
+        .collect();
+    assert_eq!(values, vec![(1, 3), (2, 3), (3, 4)]);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
+        "constant aggregate initializer should not emit E0084"
+    );
 }
 
 #[test]

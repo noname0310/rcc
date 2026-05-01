@@ -42,6 +42,9 @@ pub struct HirCrate {
     pub defs: IndexVec<DefId, Def>,
     /// Function bodies, keyed by the `DefId` of the enclosing function.
     pub bodies: FxHashMap<DefId, Body>,
+    /// File-scope initializer expression bodies, keyed by the initialized
+    /// global's `DefId`.
+    pub global_init_bodies: FxHashMap<DefId, Body>,
 }
 
 /// One top-level definition.
@@ -199,6 +202,13 @@ pub struct GlobalInit {
 pub struct GlobalInitEntry {
     /// Designator path from the root object to this leaf.
     pub path: Vec<GlobalInitDesignator>,
+    /// Leaf type after aggregate designator descent.
+    pub ty: TyId,
+    /// HIR expression for this leaf, stored in `HirCrate::global_init_bodies`.
+    ///
+    /// Synthetic byte entries produced from `char[] = "..."` have no source
+    /// expression and keep their lowered integer payload directly in `value`.
+    pub expr: Option<HirExprId>,
     /// Leaf value.
     pub value: GlobalInitValue,
     /// Source span of the initializer leaf.
@@ -221,6 +231,13 @@ pub enum GlobalInitValue {
     Int(i128),
     /// Floating constant.
     Float(f64),
+    /// Relocatable address constant.
+    Address {
+        /// Base definition, or `None` for a null-base pointer constant.
+        def: Option<DefId>,
+        /// Byte offset from the base.
+        offset: i128,
+    },
     /// String literal global.
     StringLiteral(DefId),
     /// Zero-fill marker for a scalar leaf.

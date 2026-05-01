@@ -9,9 +9,9 @@ including aggregate designator paths and zero-fill.
 
 ## Scope
 
-- In: `GlobalInitValue::{Int, Float, StringLiteral, Zero}`, nested array/record
-  constants, union first-active-field policy, string literal interning, and
-  relocatable global addresses.
+- In: `GlobalInitValue::{Int, Float, Address, StringLiteral, Zero}`, nested
+  array/record constants, union first-active-field policy, string literal
+  interning, and relocatable global addresses.
 - In: reject `GlobalInitValue::Error` before emitting invalid IR.
 - Out: TLS (`_Thread_local`) and C11.
 

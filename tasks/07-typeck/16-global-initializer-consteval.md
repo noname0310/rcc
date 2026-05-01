@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 07-16: Global initializer const-eval pipeline
 
 **Phase:** 07-typeck    **Depends on:** 07-15    **Milestone:** M4 pre-global-codegen

@@ -1320,6 +1320,8 @@ fn lower_global_initializer(
     target_ty: TyId,
     init: &rcc_ast::Initializer,
     span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
     crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
@@ -1331,6 +1333,8 @@ fn lower_global_initializer(
         init,
         span,
         Vec::new(),
+        body,
+        scope,
         crate_,
         tcx,
         resolver,
@@ -1346,6 +1350,8 @@ fn lower_global_initializer_into(
     init: &rcc_ast::Initializer,
     span: Span,
     path: Vec<GlobalInitDesignator>,
+    body: &mut Body,
+    scope: &ScopeStack,
     crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
@@ -1357,12 +1363,19 @@ fn lower_global_initializer_into(
             lower_global_string_array_initializer(target_ty, e, span, path, tcx, out);
         }
         rcc_ast::Initializer::Expr(e) => {
+            let expr = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             let value = lower_global_init_expr(e, crate_, tcx, resolver);
-            out.push(GlobalInitEntry { path, value, span: e.span });
+            out.push(GlobalInitEntry {
+                path,
+                ty: target_ty,
+                expr: Some(expr),
+                value,
+                span: e.span,
+            });
         }
         rcc_ast::Initializer::List(items) => {
             lower_global_initializer_list(
-                target_ty, items, span, path, crate_, tcx, resolver, session, out,
+                target_ty, items, span, path, body, scope, crate_, tcx, resolver, session, out,
             );
         }
     }
@@ -1374,6 +1387,8 @@ fn lower_global_initializer_list(
     items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
     span: Span,
     path: Vec<GlobalInitDesignator>,
+    body: &mut Body,
+    scope: &ScopeStack,
     crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
@@ -1418,12 +1433,14 @@ fn lower_global_initializer_list(
                     next_path.push(GlobalInitDesignator::Index(idx));
                     if nested_desigs.is_empty() {
                         lower_global_initializer_into(
-                            elem.ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
+                            elem.ty, sub_init, span, next_path, body, scope, crate_, tcx, resolver,
+                            session, out,
                         );
                     } else {
                         let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
                         lower_global_initializer_list(
-                            elem.ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
+                            elem.ty, &nested, span, next_path, body, scope, crate_, tcx, resolver,
+                            session, out,
                         );
                     }
                 }
@@ -1486,12 +1503,14 @@ fn lower_global_initializer_list(
                 next_path.push(GlobalInitDesignator::Field(field_idx));
                 if nested_desigs.is_empty() {
                     lower_global_initializer_into(
-                        field_ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
+                        field_ty, sub_init, span, next_path, body, scope, crate_, tcx, resolver,
+                        session, out,
                     );
                 } else {
                     let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
                     lower_global_initializer_list(
-                        field_ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
+                        field_ty, &nested, span, next_path, body, scope, crate_, tcx, resolver,
+                        session, out,
                     );
                 }
                 cursor = field_idx.saturating_add(1);
@@ -1510,7 +1529,7 @@ fn lower_global_initializer_list(
                     );
                 }
                 lower_global_initializer_into(
-                    target_ty, nested, span, path, crate_, tcx, resolver, session, out,
+                    target_ty, nested, span, path, body, scope, crate_, tcx, resolver, session, out,
                 );
             }
         }
@@ -1528,7 +1547,7 @@ fn lower_global_string_array_initializer(
     let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
         return;
     };
-    let Ty::Array { len, .. } = tcx.get(target_ty).clone() else {
+    let Ty::Array { elem, len, .. } = tcx.get(target_ty).clone() else {
         return;
     };
     let mut values: Vec<i128> = lit.bytes.iter().map(|&b| i128::from(b)).collect();
@@ -1542,7 +1561,7 @@ fn lower_global_string_array_initializer(
             .copied()
             .map(GlobalInitValue::Int)
             .unwrap_or(GlobalInitValue::Zero);
-        out.push(GlobalInitEntry { path: next_path, value, span });
+        out.push(GlobalInitEntry { path: next_path, ty: elem.ty, expr: None, value, span });
     }
 }
 
@@ -3985,15 +4004,23 @@ fn finalize_file_scope_def_types(
                 ty = complete_initializer_type(ty, init, tcx);
             }
             let global_init = init_decl.init.as_ref().map(|init| {
-                lower_global_initializer(
+                let mut init_body = Body::default();
+                let scope = ScopeStack::new();
+                let global_init = lower_global_initializer(
                     ty,
                     init,
                     init_decl.declarator.span,
+                    &mut init_body,
+                    &scope,
                     crate_,
                     tcx,
                     resolver,
                     session,
-                )
+                );
+                if !init_body.exprs.is_empty() {
+                    crate_.global_init_bodies.insert(def_id, init_body);
+                }
+                global_init
             });
 
             match &mut crate_.defs[def_id].kind {

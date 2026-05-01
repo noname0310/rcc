@@ -9,8 +9,8 @@
 
 use rcc_hir::{
     rcc_hir_binop::{BinOp, UnOp},
-    Body, ConvertKind, DefKind, FloatKind, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmtId,
-    HirStmtKind, IntRank, Qual, Ty, TyCtxt, TyId, ValueCat,
+    Body, ConvertKind, DefId, DefKind, FloatKind, GlobalInit, GlobalInitValue, HirCrate, HirExpr,
+    HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntRank, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::Symbol;
@@ -56,6 +56,88 @@ pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
         if let Some(body) = hir.bodies.get_mut(&def_id) {
             check_body_with_context(body, tcx, session, &def_info, BodyCheckContext { return_ty });
         }
+    }
+
+    check_global_initializers(session, tcx, hir, &def_info);
+}
+
+fn check_global_initializers(
+    session: &mut Session,
+    tcx: &mut TyCtxt,
+    hir: &mut HirCrate,
+    def_info: &rcc_data_structures::FxHashMap<DefId, DefSnapshot>,
+) {
+    let global_ids: Vec<_> = hir
+        .defs
+        .iter_enumerated()
+        .filter_map(|(id, def)| match &def.kind {
+            DefKind::Global { init: Some(_), .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+
+    for def_id in global_ids {
+        let Some(mut init) = global_init_clone(&hir.defs[def_id].kind) else {
+            continue;
+        };
+        if let Some(body) = hir.global_init_bodies.get_mut(&def_id) {
+            type_global_initializer_body(body, &mut init, tcx, session, def_info);
+            let init_exprs: Vec<_> = init.entries.iter().filter_map(|entry| entry.expr).collect();
+            check_init_const(body, &init_exprs, Some(&hir.defs), tcx, session);
+            fold_global_initializer_values(body, &mut init, &hir.defs, tcx, session);
+        }
+        if let DefKind::Global { init: slot, .. } = &mut hir.defs[def_id].kind {
+            *slot = Some(init);
+        }
+    }
+}
+
+fn global_init_clone(kind: &DefKind) -> Option<GlobalInit> {
+    match kind {
+        DefKind::Global { init: Some(init), .. } => Some(init.clone()),
+        _ => None,
+    }
+}
+
+fn type_global_initializer_body(
+    body: &mut Body,
+    init: &mut GlobalInit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<DefId, DefSnapshot>,
+) {
+    for entry in &mut init.entries {
+        let Some(expr) = entry.expr else {
+            continue;
+        };
+        let typed = visit_expr(expr, body, tcx, session, def_info);
+        let value = rvalue_decayed(typed, body, tcx);
+        let coerced = coerce_to(value, entry.ty, body, tcx, session).expr();
+        entry.expr = Some(coerced);
+    }
+}
+
+fn fold_global_initializer_values(
+    body: &Body,
+    init: &mut GlobalInit,
+    defs: &rcc_data_structures::IndexVec<DefId, rcc_hir::Def>,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) {
+    for entry in &mut init.entries {
+        let Some(expr) = entry.expr else {
+            continue;
+        };
+        let mut eval = ConstEval::with_defs_and_session(tcx, Some(body), Some(defs), Some(session));
+        entry.value = match eval.eval_scalar(expr) {
+            Some(ConstScalar::Int(v)) => GlobalInitValue::Int(v),
+            Some(ConstScalar::Float(v)) => GlobalInitValue::Float(v),
+            Some(ConstScalar::Address { def, offset }) => GlobalInitValue::Address { def, offset },
+            None => match entry.value {
+                GlobalInitValue::StringLiteral(def_id) => GlobalInitValue::StringLiteral(def_id),
+                _ => GlobalInitValue::Error,
+            },
+        };
     }
 }
 
@@ -658,6 +740,14 @@ enum CoerceResult {
     Noop(HirExprId),
     Converted(HirExprId),
     Error(HirExprId),
+}
+
+impl CoerceResult {
+    fn expr(self) -> HirExprId {
+        match self {
+            Self::Noop(expr) | Self::Converted(expr) | Self::Error(expr) => expr,
+        }
+    }
 }
 
 /// Coerce `expr` to type `dst` for a context that requires assignment-
