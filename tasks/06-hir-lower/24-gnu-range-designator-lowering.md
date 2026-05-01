@@ -1,5 +1,7 @@
 # 06-24: GNU range designator lowering
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 05-37    **Milestone:** M5 blocker
 
 ## Goal
@@ -35,6 +37,20 @@ silently losing the range semantics that the parser now preserves.
 - Reversed or non-constant bounds emit `E0079` and do not panic.
 - Existing C99 `[N]`, `.field`, and `.field[N]` initializer lowering
   tests remain unchanged.
+
+## Result
+- Local array initializers expand `Designator::Range` into one write per
+  selected index, preserving source order so later initializers override
+  earlier writes.
+- Global array initializers emit one `GlobalInitEntry` per expanded range
+  element, again preserving source order.
+- Incomplete array completion already uses the range upper bound and is
+  covered by a source-pipeline regression test.
+- Invalid range bounds (non-constant, reversed, negative, or out of
+  declared bounds) emit `E0079`.
+- `c-testsuite::00216` no longer names GNU range lowering as a blocker;
+  its remaining parse xfail owners are extension syntax and freestanding
+  headers.
 
 ## References
 - `crates/rcc_ast/src/lib.rs` `Designator::Range`.

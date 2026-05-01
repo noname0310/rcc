@@ -9,6 +9,7 @@
 //! resulting [`HirCrate`] together with its [`TyCtxt`] for assertions
 //! on top-level definitions and the resolver tables.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -820,6 +821,69 @@ fn composite_enum_duplicate_emits_e0078() {
 // Section D — Initializer lowering
 // ═══════════════════════════════════════════════════════════════════════
 
+fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
+    let mut writes = Vec::new();
+    for stmt in body.stmts.iter() {
+        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = &body.exprs[assign].kind else {
+            continue;
+        };
+        let HirExprKind::Index { base, index } = &body.exprs[*lhs].kind else {
+            continue;
+        };
+        if !matches!(&body.exprs[*base].kind, HirExprKind::LocalRef(l) if *l == local) {
+            continue;
+        }
+        let HirExprKind::IntConst(i) = &body.exprs[*index].kind else {
+            continue;
+        };
+        let HirExprKind::IntConst(v) = &body.exprs[*rhs].kind else {
+            continue;
+        };
+        writes.push((*i, *v));
+    }
+    writes
+}
+
+fn local_field_array_int_writes(body: &Body, local: Local, field_index: u32) -> Vec<(i128, i128)> {
+    let mut writes = Vec::new();
+    for stmt in body.stmts.iter() {
+        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = &body.exprs[assign].kind else {
+            continue;
+        };
+        let HirExprKind::Index { base, index } = &body.exprs[*lhs].kind else {
+            continue;
+        };
+        let HirExprKind::Field { base: field_base, field_index: field } = &body.exprs[*base].kind
+        else {
+            continue;
+        };
+        if *field != field_index {
+            continue;
+        }
+        if !matches!(&body.exprs[*field_base].kind, HirExprKind::LocalRef(l) if *l == local) {
+            continue;
+        }
+        let HirExprKind::IntConst(i) = &body.exprs[*index].kind else {
+            continue;
+        };
+        let HirExprKind::IntConst(v) = &body.exprs[*rhs].kind else {
+            continue;
+        };
+        writes.push((*i, *v));
+    }
+    writes
+}
+
+fn last_values_by_index(writes: &[(i128, i128)]) -> BTreeMap<i128, i128> {
+    let mut values = BTreeMap::new();
+    for (idx, value) in writes {
+        values.insert(*idx, *value);
+    }
+    values
+}
+
 #[test]
 fn init_scalar_assigns_rhs_to_target() {
     // int x; x = 7;  — scalar init produces a single Assign.
@@ -947,6 +1011,40 @@ fn init_array_designator_resets_cursor() {
     }
     idx_value.sort();
     assert_eq!(idx_value, vec![(0, 0), (1, 0), (2, 7)]);
+}
+
+#[test]
+fn snippet_gnu_range_designator_lowers_local_array_writes() {
+    let (hir, _tcx) = lower_snippet("void f(void) { int a[8] = { [1 ... 5] = 9 }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let mut writes = local_array_int_writes(body, Local(0));
+    writes.sort();
+    assert_eq!(writes, vec![(0, 0), (1, 9), (2, 9), (3, 9), (4, 9), (5, 9), (6, 0), (7, 0)]);
+}
+
+#[test]
+fn snippet_gnu_range_designator_later_initializer_overrides() {
+    let (hir, _tcx) = lower_snippet("void f(void) { int a[4] = { [1 ... 3] = 1, [2] = 9 }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let writes = local_array_int_writes(body, Local(0));
+    assert_eq!(
+        writes,
+        vec![(1, 1), (2, 1), (3, 1), (2, 9), (0, 0)],
+        "writes must preserve source order so later entries override earlier ones"
+    );
+    let final_values = last_values_by_index(&writes);
+    assert_eq!(final_values.get(&2), Some(&9));
+}
+
+#[test]
+fn snippet_gnu_range_designator_lowers_nested_array_field() {
+    let (hir, _tcx) = lower_snippet(
+        "struct S { int a[4]; int b; }; void f(void) { struct S s = { .a[1 ... 2] = 7 }; }",
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    let mut writes = local_field_array_int_writes(body, Local(0), 0);
+    writes.sort();
+    assert_eq!(writes, vec![(0, 0), (1, 7), (2, 7), (3, 0)]);
 }
 
 #[test]
@@ -1747,6 +1845,16 @@ fn snippet_incomplete_array_designator_completes_from_max_index() {
 }
 
 #[test]
+fn snippet_incomplete_array_range_completes_from_upper_bound() {
+    let (hir, tcx) = lower_snippet("void f(void) { int a[] = { [1 ... 4] = 7 }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(5), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected completed int[5], got {other:?}"),
+    }
+}
+
+#[test]
 fn snippet_incomplete_block_array_without_initializer_still_errors() {
     let (_hir, _tcx, cap) = lower_snippet_with_diagnostics("void f(void) { int a[]; }");
     assert!(
@@ -1762,6 +1870,36 @@ fn snippet_bad_initializer_designator_reports_e0079() {
     assert!(
         cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
         "bad initializer designator should emit E0079"
+    );
+}
+
+#[test]
+fn snippet_reversed_range_designator_reports_e0079() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("void f(void) { int a[4] = { [3 ... 1] = 7 }; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
+        "reversed range designator should emit E0079"
+    );
+}
+
+#[test]
+fn snippet_nonconstant_range_designator_reports_e0079() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("void f(void) { int i; int a[4] = { [i ... 2] = 7 }; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
+        "non-constant range bound should emit E0079"
+    );
+}
+
+#[test]
+fn snippet_out_of_bounds_range_designator_reports_e0079() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("void f(void) { int a[2] = { [1 ... 2] = 7 }; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
+        "out-of-bounds range designator should emit E0079"
     );
 }
 
@@ -1791,6 +1929,33 @@ fn snippet_global_array_initializer_has_static_payload() {
         })
         .collect();
     assert_eq!(values, vec![(0, 1), (1, 2), (2, 3)]);
+}
+
+#[test]
+fn snippet_global_array_range_initializer_has_static_payload() {
+    let (hir, tcx) = lower_snippet("int g[4] = { [1 ... 2] = 7, [2] = 9 };");
+    let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();
+    let DefKind::Global { ty, init: Some(init), .. } = &def.kind else {
+        panic!("expected global with initializer, got {:?}", def.kind);
+    };
+    match tcx.get(*ty) {
+        Ty::Array { elem, len: Some(4), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected int[4], got {other:?}"),
+    }
+    let values: Vec<_> = init
+        .entries
+        .iter()
+        .map(|entry| {
+            let [GlobalInitDesignator::Index(i)] = entry.path.as_slice() else {
+                panic!("expected index path, got {:?}", entry.path);
+            };
+            let GlobalInitValue::Int(v) = entry.value else {
+                panic!("expected int value, got {:?}", entry.value);
+            };
+            (*i, v)
+        })
+        .collect();
+    assert_eq!(values, vec![(1, 7), (2, 7), (2, 9)]);
 }
 
 #[test]

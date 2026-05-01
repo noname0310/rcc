@@ -31,7 +31,7 @@ reason = "15-builtin-rt: freestanding <stdarg.h>/<stdint.h> headers are not avai
 
 [[xfail]]
 id     = "c-testsuite::00216"
-reason = "06-hir-lower/14-lang-extensions/15-builtin-rt: empty aggregate extension, anonymous aggregate members, GNU range initializer lowering, and <stdio.h>"
+reason = "14-lang-extensions/15-builtin-rt: empty aggregate extension, anonymous aggregate members, and freestanding <stdio.h>"
 
 [[xfail]]
 id     = "c-testsuite::00219"

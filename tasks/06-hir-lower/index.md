@@ -31,7 +31,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [21-initializer-string-and-completeness](21-initializer-string-and-completeness.md)
 - [x] [22-switch-case-collection](22-switch-case-collection.md)
 - [x] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)
-- [ ] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
+- [x] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
 
 ## Downstream
 

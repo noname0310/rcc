@@ -1247,12 +1247,70 @@ fn emit_invalid_initializer_designator(span: Span, message: &str, session: &mut 
     session.handler.struct_err(span, message.to_string()).code(rcc_errors::codes::E0079).emit();
 }
 
-fn emit_deferred_range_designator(span: Span, session: &mut Session) {
-    emit_invalid_initializer_designator(
-        span,
-        "GNU initializer range designator lowering is not implemented yet",
-        session,
-    );
+fn eval_range_designator(
+    lo: &rcc_ast::Expr,
+    hi: &rcc_ast::Expr,
+    len: Option<u64>,
+    span: Span,
+    session: &mut Session,
+) -> Option<(u64, u64)> {
+    let Some(lo) = eval_const_expr_as_i128(lo) else {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range lower bound must be an integer constant",
+            session,
+        );
+        return None;
+    };
+    let Some(hi) = eval_const_expr_as_i128(hi) else {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range upper bound must be an integer constant",
+            session,
+        );
+        return None;
+    };
+    if lo < 0 || hi < 0 {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range designator bound cannot be negative",
+            session,
+        );
+        return None;
+    }
+    if lo > hi {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range lower bound is greater than upper bound",
+            session,
+        );
+        return None;
+    }
+    let Ok(lo) = u64::try_from(lo) else {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range lower bound is too large",
+            session,
+        );
+        return None;
+    };
+    let Ok(hi) = u64::try_from(hi) else {
+        emit_invalid_initializer_designator(
+            span,
+            "initializer range upper bound is too large",
+            session,
+        );
+        return None;
+    };
+    if len.is_some_and(|n| hi >= n) {
+        emit_invalid_initializer_designator(
+            span,
+            "array initializer range designator exceeds the declared bound",
+            session,
+        );
+        return None;
+    }
+    Some((lo, hi))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1324,13 +1382,13 @@ fn lower_global_initializer_list(
         Ty::Array { elem, len, .. } => {
             let mut cursor = 0u64;
             for (desigs, sub_init) in items {
-                let (idx, nested_desigs) = match desigs.split_first() {
+                let (idx_range, nested_desigs) = match desigs.split_first() {
                     Some((rcc_ast::Designator::Index(e), rest)) => {
-                        (eval_const_expr_as_u64(e).unwrap_or(cursor), rest)
+                        let idx = eval_const_expr_as_u64(e).unwrap_or(cursor);
+                        (Some((idx, idx)), rest)
                     }
-                    Some((rcc_ast::Designator::Range { .. }, _)) => {
-                        emit_deferred_range_designator(span, session);
-                        continue;
+                    Some((rcc_ast::Designator::Range { lo, hi }, rest)) => {
+                        (eval_range_designator(lo, hi, len, span, session), rest)
                     }
                     Some((rcc_ast::Designator::Field(_), _)) => {
                         emit_invalid_initializer_designator(
@@ -1340,9 +1398,12 @@ fn lower_global_initializer_list(
                         );
                         continue;
                     }
-                    None => (cursor, &[][..]),
+                    None => (Some((cursor, cursor)), &[][..]),
                 };
-                if len.is_some_and(|n| idx >= n) {
+                let Some((first_idx, last_idx)) = idx_range else {
+                    continue;
+                };
+                if len.is_some_and(|n| last_idx >= n) {
                     emit_invalid_initializer_designator(
                         span,
                         "array initializer designator exceeds the declared bound",
@@ -1350,19 +1411,21 @@ fn lower_global_initializer_list(
                     );
                     continue;
                 }
-                let mut next_path = path.clone();
-                next_path.push(GlobalInitDesignator::Index(idx));
-                if nested_desigs.is_empty() {
-                    lower_global_initializer_into(
-                        elem.ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
-                    );
-                } else {
-                    let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
-                    lower_global_initializer_list(
-                        elem.ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
-                    );
+                for idx in first_idx..=last_idx {
+                    let mut next_path = path.clone();
+                    next_path.push(GlobalInitDesignator::Index(idx));
+                    if nested_desigs.is_empty() {
+                        lower_global_initializer_into(
+                            elem.ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
+                        );
+                    } else {
+                        let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
+                        lower_global_initializer_list(
+                            elem.ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
+                        );
+                    }
                 }
-                cursor = idx.saturating_add(1);
+                cursor = last_idx.saturating_add(1);
             }
         }
         Ty::Record(def_id) => {
@@ -1581,14 +1644,13 @@ fn lower_array_initializer(
         // Here we only support a leading `[N]` designator for the
         // array level; deeper designators are recursed into via the
         // element-level initialiser walker.
-        let (idx, nested_desigs) = match desigs.split_first() {
+        let (idx_range, nested_desigs) = match desigs.split_first() {
             Some((rcc_ast::Designator::Index(e), rest)) => {
                 let i = eval_const_expr_as_u64(e).unwrap_or(cursor);
-                (i, rest)
+                (Some((i, i)), rest)
             }
-            Some((rcc_ast::Designator::Range { .. }, _)) => {
-                emit_deferred_range_designator(span, session);
-                continue;
+            Some((rcc_ast::Designator::Range { lo, hi }, rest)) => {
+                (eval_range_designator(lo, hi, len, span, session), rest)
             }
             Some((rcc_ast::Designator::Field(_), _)) => {
                 emit_invalid_initializer_designator(
@@ -1598,9 +1660,12 @@ fn lower_array_initializer(
                 );
                 continue;
             }
-            None => (cursor, &[][..]),
+            None => (Some((cursor, cursor)), &[][..]),
         };
-        if len.is_some_and(|n| idx >= n) {
+        let Some((first_idx, last_idx)) = idx_range else {
+            continue;
+        };
+        if len.is_some_and(|n| last_idx >= n) {
             emit_invalid_initializer_designator(
                 span,
                 "array initializer designator exceeds the declared bound",
@@ -1610,34 +1675,36 @@ fn lower_array_initializer(
         }
 
         // Emit the assignment for this sub-initialiser, nested inside
-        // the target[idx] lvalue.
-        let index_expr = push_index_expr(target, idx, elem_ty, span, body, tcx);
-        if nested_desigs.is_empty() {
-            lower_initializer(
-                index_expr, elem_ty, sub_init, span, body, scope, crate_, tcx, resolver, session,
-                out,
-            );
-        } else {
-            // Nested designators like `{ [1].x = 5 }` — feed the
-            // remaining designators through a synthetic single-item
-            // list so the element-level walker can consume them.
-            let nested_items = vec![(nested_desigs.to_vec(), sub_init.clone())];
-            lower_initializer_list(
-                index_expr,
-                elem_ty,
-                &nested_items,
-                span,
-                body,
-                scope,
-                crate_,
-                tcx,
-                resolver,
-                session,
-                out,
-            );
+        // each selected target[idx] lvalue.
+        for idx in first_idx..=last_idx {
+            let index_expr = push_index_expr(target, idx, elem_ty, span, body, tcx);
+            if nested_desigs.is_empty() {
+                lower_initializer(
+                    index_expr, elem_ty, sub_init, span, body, scope, crate_, tcx, resolver,
+                    session, out,
+                );
+            } else {
+                // Nested designators like `{ [1].x = 5 }` — feed the
+                // remaining designators through a synthetic single-item
+                // list so the element-level walker can consume them.
+                let nested_items = vec![(nested_desigs.to_vec(), sub_init.clone())];
+                lower_initializer_list(
+                    index_expr,
+                    elem_ty,
+                    &nested_items,
+                    span,
+                    body,
+                    scope,
+                    crate_,
+                    tcx,
+                    resolver,
+                    session,
+                    out,
+                );
+            }
+            written.insert(idx);
         }
-        written.insert(idx);
-        cursor = idx + 1;
+        cursor = last_idx.saturating_add(1);
     }
 
     // Zero-fill the tail (and any gaps, for designated inits) when the
@@ -3245,9 +3312,20 @@ fn lower_builtin_specs_to_base_ty(
 /// Handles only integer literals for now. A full `ConstEval` lives in
 /// `rcc_typeck` and will be wired in later.
 fn eval_const_expr_as_u64(expr: &rcc_ast::Expr) -> Option<u64> {
+    let value = eval_const_expr_as_i128(expr)?;
+    u64::try_from(value).ok()
+}
+
+fn eval_const_expr_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
     match &expr.kind {
-        rcc_ast::ExprKind::IntLit(lit) => u64::try_from(lit.value).ok(),
-        rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_u64(inner),
+        rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_i128(inner),
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
+            eval_const_expr_as_i128(operand)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
+            eval_const_expr_as_i128(operand).and_then(i128::checked_neg)
+        }
         _ => None,
     }
 }
