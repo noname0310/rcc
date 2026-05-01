@@ -80,6 +80,11 @@ Task 04-20 resolved four GNU-extension gaps:
 - **Skip** — intentionally not run (feature unsupported, adapter not
   yet implemented, GPL suite excluded without `--include-gpl`).
 
+Some skips are semantic policy, not missing implementation. Cases whose stdout
+depends on C99-unspecified evaluation order are listed in
+`rcc_conformance::metadata` and demoted to **Skip** so differential runs do not
+mistake a valid CFG evaluation-order choice for a compiler bug.
+
 ## Adapter status
 
 | Adapter | State |

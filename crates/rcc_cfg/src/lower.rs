@@ -165,6 +165,10 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             lower_short_circuit(builder, cx, ty, span, /* is_and */ false, *lhs, *rhs)
         }
         HirExprKind::Binary { op, lhs, rhs } => {
+            // CFG policy: choose left-to-right evaluation for
+            // non-short-circuit binary operands. C99 leaves many of
+            // these orders unspecified; fixing one order keeps MIR
+            // dumps and downstream codegen deterministic.
             let lhs_op = lower_as_rvalue(builder, cx, *lhs);
             let rhs_op = lower_as_rvalue(builder, cx, *rhs);
             // Pick the typed CFG op. The typed kind is determined by
@@ -255,6 +259,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             lower_as_rvalue(builder, cx, *rhs)
         }
         HirExprKind::Assign { lhs, rhs } => {
+            // CFG policy: compute the destination place before the
+            // source value. For assignment expressions with side
+            // effects this is the single order represented in MIR.
             let dest = lower_as_place(builder, cx, *lhs);
             let value = lower_as_rvalue(builder, cx, *rhs);
             // Emit through the explicit Place form so projections on
@@ -268,7 +275,11 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             Operand::Copy(dest)
         }
         HirExprKind::Call { callee, args } => {
-            // Evaluate callee and arguments left-to-right.
+            // CFG policy: evaluate the callee first, then arguments
+            // left-to-right in source order. C99 does not require a
+            // particular argument order; conformance tests whose
+            // stdout depends on another valid order must be skipped or
+            // demoted by `rcc_conformance::metadata`.
             let callee_op = lower_as_rvalue(builder, cx, *callee);
             let arg_ops: Vec<Operand> =
                 args.iter().map(|a| lower_as_rvalue(builder, cx, *a)).collect();
@@ -1303,6 +1314,10 @@ fn lower_local_decl(
     }
     builder.storage_live(cfg_local, span);
     if let Some(init_expr) = init {
+        // CFG policy: initializer expressions are evaluated at the
+        // declaration point after StorageLive. Aggregate leaf stores
+        // produced by HIR lowering remain in source/walk order unless
+        // they are zero leaves subsumed by the aggregate ZeroInit.
         let value = lower_as_rvalue(builder, cx, init_expr);
         push_assign(builder, span, cfg_local, Rvalue::Use(value));
     } else if is_vla_ty(cx.tcx, ty) {
@@ -1746,10 +1761,14 @@ mod tests {
     }
 
     fn assign_local_stmt(body: &mut HirBody, ty: TyId, local: HirLocal, value: i128) -> HirStmtId {
+        let assign = assign_local_expr(body, ty, local, value);
+        push_stmt(body, HirStmtKind::Expr(assign))
+    }
+
+    fn assign_local_expr(body: &mut HirBody, ty: TyId, local: HirLocal, value: i128) -> HirExprId {
         let lhs = push_expr(body, ty, ValueCat::LValue, HirExprKind::LocalRef(local));
         let rhs = push_expr(body, ty, ValueCat::RValue, HirExprKind::IntConst(value));
-        let assign = push_expr(body, ty, ValueCat::RValue, HirExprKind::Assign { lhs, rhs });
-        push_stmt(body, HirStmtKind::Expr(assign))
+        push_expr(body, ty, ValueCat::RValue, HirExprKind::Assign { lhs, rhs })
     }
 
     fn return_const_stmt(body: &mut HirBody, ty: TyId, value: i128) -> HirStmtId {
@@ -1829,6 +1848,20 @@ mod tests {
             other => panic!("expected return-slot assignment, got {other:?}"),
         }
         assert!(matches!(block.terminator.kind, TerminatorKind::Return));
+    }
+
+    fn assigned_int_constants(block: &crate::BasicBlock) -> Vec<i128> {
+        block
+            .statements
+            .iter()
+            .filter_map(|stmt| match &stmt.kind {
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+                    ..
+                } => Some(*v),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Helper: finish the builder safely after running lowering. If the
@@ -4860,6 +4893,86 @@ mod tests {
             _ => None,
         });
         assert_eq!(call_term, Some(2), "variadic call must pass both args");
+    }
+
+    #[test]
+    fn eval_order_call_callee_then_args_left_to_right() {
+        let (mut builder, mut hir_body, mut tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+        let func_ty = tcx.intern(rcc_hir::Ty::Func {
+            ret: int_ty,
+            params: vec![int_ty, int_ty],
+            variadic: false,
+            proto: true,
+        });
+        let func_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(func_ty)));
+
+        let callee_side_effect = assign_local_expr(&mut hir_body, int_ty, ha, 10);
+        let callee_def = def_ref_expr(&mut hir_body, func_ptr_ty, rcc_hir::DefId::new(42));
+        let callee = push_expr(
+            &mut hir_body,
+            func_ptr_ty,
+            ValueCat::RValue,
+            HirExprKind::Comma { lhs: callee_side_effect, rhs: callee_def },
+        );
+        let arg0 = assign_local_expr(&mut hir_body, int_ty, hb, 20);
+        let arg1 = assign_local_expr(&mut hir_body, int_ty, hc, 30);
+        let call = call_expr(&mut hir_body, int_ty, callee, vec![arg0, arg1]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _ = lower_as_rvalue(&mut builder, &cx, call);
+        let body = finish(builder);
+        let entry = &body.blocks[BasicBlockId(0)];
+
+        assert_eq!(
+            assigned_int_constants(entry),
+            vec![10, 20, 30],
+            "callee side effect must precede argument side effects, and arguments must follow source order"
+        );
+        match &entry.terminator.kind {
+            TerminatorKind::Call { args, .. } => {
+                assert!(matches!(
+                    args.as_slice(),
+                    [
+                        Operand::Copy(Place { base, projection }),
+                        Operand::Copy(Place { base: base1, projection: projection1 }),
+                    ] if *base == map.lookup(hb)
+                        && projection.is_empty()
+                        && *base1 == map.lookup(hc)
+                        && projection1.is_empty()
+                ));
+            }
+            other => panic!("expected call terminator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_order_binary_operands_left_to_right() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+        let lhs = assign_local_expr(&mut hir_body, int_ty, ha, 1);
+        let rhs = assign_local_expr(&mut hir_body, int_ty, hb, 2);
+        let add = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Binary { op: HirBinOp::Add, lhs, rhs },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _ = lower_as_rvalue(&mut builder, &cx, add);
+        let body = finish(builder);
+        let entry = &body.blocks[BasicBlockId(0)];
+
+        assert_eq!(
+            assigned_int_constants(entry),
+            vec![1, 2],
+            "binary operands must be materialized left-to-right before the BinaryOp temp"
+        );
+        assert!(matches!(
+            entry.statements.last().map(|stmt| &stmt.kind),
+            Some(StatementKind::Assign { rvalue: Rvalue::BinaryOp(BinOp::Add, _, _), .. })
+        ));
     }
 
     // ------------------------------------------------------------------

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-21: Evaluation-order conformance policy
 
 **Phase:** 08-cfg    **Depends on:** 08-20    **Milestone:** M3 stabilization

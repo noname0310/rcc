@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::{Adapter, Outcome, TestCase};
+use crate::{metadata, Adapter, Outcome, TestCase};
 
 /// Per-test timeout for the compile → link → execute pipeline.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -79,6 +79,10 @@ impl Adapter for CTestSuiteAdapter {
     }
 
     fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        if let Some(reason) = metadata::unspecified_eval_order_reason(&case.id) {
+            return Ok(Outcome::Skip { reason: reason.to_owned() });
+        }
+
         let expected_path = case.path.with_extension("c.expected");
         if !expected_path.exists() {
             return Ok(Outcome::Skip { reason: format!("no .expected file for {}", case.id) });
@@ -274,6 +278,10 @@ impl Adapter for ChibiccAdapter {
     }
 
     fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        if let Some(reason) = metadata::unspecified_eval_order_reason(&case.id) {
+            return Ok(Outcome::Skip { reason: reason.to_owned() });
+        }
+
         match self.mode {
             ChibiccMode::Compile => self.run_compile(rcc_path, case),
             ChibiccMode::Preprocess => self.run_preprocess_only(rcc_path, case),

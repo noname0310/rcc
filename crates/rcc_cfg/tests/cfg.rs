@@ -246,6 +246,27 @@ fn cfg_snapshots_are_stable() {
 }
 
 #[test]
+fn eval_order_snapshots_are_stable() {
+    let cases = [
+        (
+            "eval_order_call_args",
+            "int g(int, int); int f(void) { int a = 0; int b = 0; return g(a = 1, b = 2); }",
+        ),
+        ("eval_order_initializer_leaves", "int f(void) { int a[3] = {1, 2, 3}; return a[0]; }"),
+    ];
+
+    for (name, src) in cases {
+        insta::with_settings!({
+            snapshot_path => "snapshots/cfg",
+            prepend_module_to_snapshot => false,
+            omit_expression => true,
+        }, {
+            insta::assert_snapshot!(name, render_snippet(name, src));
+        });
+    }
+}
+
+#[test]
 fn sizeof_layout_service_lowers_fixed_sizes() {
     let cases = [("sizeof_int_array", "unsigned long f(void) { int a[3]; return sizeof a; }", 12)];
 

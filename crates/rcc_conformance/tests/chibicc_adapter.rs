@@ -15,9 +15,10 @@ fn fixtures_root() -> PathBuf {
 fn discover_finds_fixture_files() {
     let adapter = ChibiccAdapter::compile();
     let cases = adapter.discover(&fixtures_root()).unwrap();
-    assert_eq!(cases.len(), 2);
+    assert_eq!(cases.len(), 3);
     assert_eq!(cases[0].id, "chibicc::arith");
     assert_eq!(cases[1].id, "chibicc::control");
+    assert_eq!(cases[2].id, "chibicc::eval-order");
 }
 
 #[test]
@@ -122,6 +123,18 @@ fn run_fail_when_rcc_not_found() {
     let case = cases.iter().find(|c| c.id == "chibicc::arith").unwrap();
     let outcome = adapter.run(Path::new("nonexistent-rcc-binary-xyzzy"), case).unwrap();
     assert!(matches!(outcome, Outcome::Fail { .. }), "expected Fail, got {outcome:?}");
+}
+
+#[test]
+fn run_skips_unspecified_eval_order_case_before_invoking_rcc() {
+    let adapter = ChibiccAdapter::compile();
+    let cases = adapter.discover(&fixtures_root()).unwrap();
+    let case = cases.iter().find(|c| c.id == "chibicc::eval-order").unwrap();
+    let outcome = adapter.run(Path::new("nonexistent-rcc-binary-xyzzy"), case).unwrap();
+    assert!(
+        matches!(outcome, Outcome::Skip { ref reason } if reason.contains("unspecified")),
+        "expected unspecified-order Skip, got {outcome:?}",
+    );
 }
 
 #[test]
