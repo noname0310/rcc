@@ -1,11 +1,11 @@
 //! C99 §5.1.1.2 phase 7: convert a preprocessed pp-token stream into the
 //! parser-level [`Token`] type.
 //!
-//! This module only implements the *dispatcher*. Per-literal decoding and
-//! keyword classification live in sibling tasks (05-02 through 05-06) and
-//! currently land as stub values; the match arms are wired so that adding a
-//! new [`PpTokenKind`] variant produces a compile error until it is handled
-//! here.
+//! This module owns keyword classification, literal decoding dispatch,
+//! and adjacent string concatenation for the token stream consumed by
+//! the parser. The match arms are intentionally exhaustive so adding a
+//! new [`PpTokenKind`] variant produces a compile error until it is
+//! handled here.
 //!
 //! Whitespace, newlines, the lexer's EOF sentinel, and [`PpTokenKind::Unknown`]
 //! are intentionally dropped — the parser consumes a stream of *parser*
@@ -28,9 +28,9 @@ use crate::token::{
 /// Convert a slice of pp-tokens into a fresh `Vec<Token>`.
 ///
 /// Whitespace, newlines, the lexer's EOF sentinel, and any `Unknown`
-/// tokens (already diagnosed by the lexer) are silently dropped. Adjacent
-/// string-literal concatenation is *not* performed here — task 05-06
-/// layers that on top once per-literal decoding lands.
+/// tokens (already diagnosed by the lexer) are silently dropped.
+/// Adjacent string-literal concatenation is performed by
+/// [`merge_adjacent_strings`] after per-literal decoding.
 pub fn convert(session: &mut Session, pp: &[PpToken]) -> Vec<Token> {
     let mut out = Vec::with_capacity(pp.len());
     for tok in pp {

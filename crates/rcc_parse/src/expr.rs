@@ -1,22 +1,17 @@
 //! Expression parsing (C99 §6.5).
 //!
-//! Task 05-07 landed `parse_primary` — the leaves of the expression
-//! grammar. Task 05-08 (this file) added [`parse_expr_bp`] — a Pratt /
-//! precedence-climbing loop driven by [`infix_bp`] that folds binary
-//! and assignment operators per the C99 §6.5 table on top of those
-//! leaves. Task 05-12 wires the comma operator (§6.5.17) in as the
-//! lowest-binding infix so the two public entry points —
+//! [`parse_primary`] parses the leaves of the expression grammar.
+//! [`parse_expr_bp`] is a Pratt / precedence-climbing loop driven by
+//! [`infix_bp`] that folds binary and assignment operators per the C99
+//! §6.5 table on top of those leaves. The comma operator (§6.5.17) is
+//! wired in as the lowest-binding infix so the two public entry points —
 //! [`parse_expression`] (a *full* expression, comma folded) and
 //! [`parse_assignment_expression`] (an *assignment-expression*,
 //! comma is left as a separator for the caller) — correspond to the
 //! two non-terminals C grammar productions spell out.
 //!
-//! Non-goals (filed under later tasks):
-//!
-//! - Cast / `sizeof(type)` — task 05-10.
-//!
-//! Conditional `?:` (task 05-11) is folded here — see
-//! [`reduce_conditional`] and the `COND_*_BP` constants below —
+//! Conditional `?:` is folded here — see [`reduce_conditional`] and
+//! the `COND_*_BP` constants below —
 //! because its precedence slot (§6.5.15, just above assignment) is
 //! inside the Pratt loop proper, even though its ternary shape
 //! cannot be described by the plain `(l_bp, r_bp)` infix table.
@@ -104,8 +99,8 @@
 //! ```
 //!
 //! Postfix trailers (`a.b`, `a->b`, `a[i]`, `f(args)`, `++`, `--`,
-//! compound literals) belong to task 05-09; ternary / cast / unary
-//! wiring belongs to 05-09..05-11.
+//! compound literals) are parsed by the postfix / unary layers above
+//! the Pratt loop.
 //!
 //! ## AST shape trade-off
 //!
@@ -125,15 +120,15 @@
 //! parser re-interns the source slice behind the token's span and
 //! stores the resulting `Symbol` in the AST, preserving decoded values
 //! inside the `Token` stream that the postfix/unary tasks will thread
-//! through. A follow-up task (see `## TODO` below) will migrate the
-//! AST to the decoded shape once the broader expression grammar is in.
+//! through. Parser blocker task 05-34 tracks migrating the AST to the
+//! decoded shape now that the broader expression grammar is in place.
 //!
 //! ## Parenthesised-expression
 //!
 //! `( expression )` is parsed by [`parse_primary`] with its inner
 //! production delegating to [`parse_expr_bp`] at the zero floor, so
-//! every operator — including the comma operator (§6.5.17) folded by
-//! task 05-12 — may appear inside. That matches the C99 grammar where
+//! every operator — including the comma operator (§6.5.17) — may
+//! appear inside. That matches the C99 grammar where
 //! the parenthesised production is `( expression )`, not
 //! `( assignment-expression )`. The error recovery is simple: on a
 //! missing inner expression the outer `Paren` arm returns `None`; on
@@ -166,7 +161,7 @@
 //!
 //! ## TODO
 //!
-//! - [ ] post-M1: migrate `ExprKind::{Int,Float,Char,String}Lit` to
+//! - [ ] 05-34: migrate `ExprKind::{Int,Float,Char,String}Lit` to
 //!   carry decoded payloads (`IntLiteral`, `FloatLiteral`,
 //!   `CharLiteral`, `StringLiteral`) instead of `text: Symbol`.
 
@@ -295,8 +290,8 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
 ///
 /// C99 `sizeof` (§6.5.3.4) is also a unary-expression but has two
 /// shapes — `sizeof unary-expression` and `sizeof ( type-name )` —
-/// whose disambiguation needs typedef-name lookahead. Task 05-10
-/// wires both forms in here alongside the cast expression
+/// whose disambiguation needs typedef-name lookahead. Both forms are
+/// parsed here alongside the cast expression
 /// (§6.5.4); see [`parse_sizeof`] and [`parse_cast`] for the
 /// disambiguation code. Compound literals `( type-name ) { … }`
 /// share the same `(` lookahead; [`parse_cast`] disambiguates by
@@ -852,8 +847,8 @@ pub fn parse_assignment_expression(p: &mut Parser<'_>) -> Option<Expr> {
 /// We deliberately avoid fabricating a dummy RHS because that would
 /// invent a span and a `NodeId` that no source text backs.
 pub fn parse_expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<Expr> {
-    // Task 05-09 wedge: the Pratt leaf is now `parse_prefix_unary`,
-    // which runs its own left-to-right prefix-operator chain before
+    // The Pratt leaf is `parse_prefix_unary`, which runs its own
+    // left-to-right prefix-operator chain before
     // falling back to `parse_postfix`, which in turn consumes the
     // primary and any trailing `[...]`, `.`, `->`, `++`, `--`, or
     // `( args )` postfix trailers. This keeps all three layers —
@@ -2023,8 +2018,8 @@ mod tests {
         // `f(a = b, c)` — the `=` must fold inside argument 1, NOT
         // make the argument list a single comma-expression. This
         // pins down the "arguments are assignment-expressions"
-        // decision so the follow-up task 05-12 (comma operator)
-        // doesn't silently regress it.
+        // decision so comma-expression support does not silently
+        // regress it.
         let src = "f(a = b, c)";
         let (mut sess, fid, cap) = mk_session(src);
         let pps = lex_ascii(fid, src);
@@ -2387,7 +2382,7 @@ mod tests {
         // allows an assignment-expression. `a ? b : c = d` parses as
         // `a ? b : (c = d)`. Semantically the `=` needs an lvalue, but
         // that is checked by typeck — the parser is permissive. This
-        // pins the behaviour down so task 05-12 (comma operator) does
+        // pins the behaviour down so comma-expression support does
         // not accidentally regress it.
         let (e, _cap) = parse_expr_str("a ? b : c = d");
         match e.kind {

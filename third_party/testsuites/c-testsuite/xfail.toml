@@ -35,15 +35,15 @@ reason = "anonymous union/struct members (C11 extension, not yet supported)"
 
 [[xfail]]
 id     = "c-testsuite::00213"
-reason = "extern declaration with variadic printf — parser limitation"
+reason = "GNU statement expressions `({ ... })` inside conditional expressions — parser task 05-36"
 
 [[xfail]]
 id     = "c-testsuite::00214"
-reason = "extern printf + typedef unsigned long size_t — parser limitation"
+reason = "GNU statement expressions plus `__builtin_expect` compatibility syntax — parser task 05-36, builtin task 15-06"
 
 [[xfail]]
 id     = "c-testsuite::00216"
-reason = "empty struct typedef — parser limitation (zero-size struct)"
+reason = "GNU range designators `[lo ... hi]` and anonymous aggregate extensions — parser task 05-37, aggregate follow-up"
 
 [[xfail]]
 id     = "c-testsuite::00219"

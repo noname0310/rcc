@@ -1,9 +1,9 @@
 //! Phase-7 literal decoders.
 //!
 //! Converts a pp-number / char-constant / string-literal text slice into
-//! the typed `*Literal` payload carried by a parser-level `Token`. For now
-//! only `decode_integer` is wired (task 05-03); float/char/string decoders
-//! follow in tasks 05-04 / 05-05 / 05-06.
+//! the typed `*Literal` payload carried by a parser-level `Token`.
+//! Integer, float, character, and string literal decoders are all used
+//! by phase-7 token conversion before recursive-descent parsing starts.
 //!
 //! The decoders take a plain `&str` (the source slice covered by the
 //! pp-token) and return a `Result<_, Diagnostic>`. The returned diagnostic
@@ -567,9 +567,9 @@ pub(crate) fn decode_char_full(
 /// The returned [`Vec<u8>`] contains the decoded bytes of the string
 /// **without** a trailing NUL. C99 §6.4.5p6 adds the terminating `\0`
 /// when the literal is used as an array initializer; that step is
-/// performed by typeck (task 07-xx), not by the parser. Keeping the
-/// NUL out of `bytes` at the parser layer means adjacent-string
-/// concatenation (task 05-06) can just `extend_from_slice` the runs
+/// performed by typeck, not by the parser. Keeping the NUL out of
+/// `bytes` at the parser layer means adjacent-string concatenation
+/// can just `extend_from_slice` the runs
 /// without first having to strip a sentinel.
 ///
 /// The byte walker handles each source character as follows:

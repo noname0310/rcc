@@ -37,9 +37,11 @@
 //! This matches the "longest-specifier" disambiguation every real-
 //! world C compiler uses.
 //!
-//! Task 05-21 will formalise the full typedef-name-hack across all
-//! call sites; this local lookup is enough for the simple
-//! declaration shapes exercised by the task-18 acceptance fixtures.
+//! The full parser uses this lookup at every declaration, type-name,
+//! parameter, and expression disambiguation site. Fresh typedef names
+//! are registered immediately after their declarator is parsed, so
+//! later declarators and later declarations see the same scoped name
+//! classification that C requires.
 //!
 //! ## Struct / union / enum
 //!
@@ -118,7 +120,7 @@ struct TypeState {
 /// - A regular declaration (`declaration : declaration-specifiers
 ///   init-declarator-list ;`, §6.7) must contain at least one type
 ///   specifier; the caller will reject an empty result. This rejection
-///   lives in the declaration parser (task 05-19+), not here.
+///   lives in the declaration parser, not here.
 /// - A K&R-style old-style function definition (§6.9.1p5) may omit the
 ///   specifiers entirely — the implicit type is `int`.
 ///
@@ -1016,8 +1018,8 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
 /// - `{`        → function definition
 /// - `;`, `,`, `=` → declaration
 ///
-/// K&R-style `declaration-list` between declarator and `{` is
-/// deferred to task 05-26.
+/// K&R-style `declaration-list` between declarator and `{` is parsed
+/// when the declarator carries an identifier-list.
 pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
     let start = p.cur_span();
     let specs = parse_decl_specs(p)?;
@@ -1310,7 +1312,7 @@ const _SYMBOL_IS_LIVE: fn(Symbol) -> Symbol = |s| s;
 //
 //     [Array(3), Pointer, Function(int, int)]
 //
-// matching the task 05-19 acceptance spec. Array suffixes from a
+// matching C's declarator reading order. Array suffixes from a
 // single direct-declarator are accumulated in source order because
 // `a[10][20]` reads as "a is array of 10 of array of 20 of …" —
 // `[10]` is the outer layer (applied first to the ident `a`), `[20]`
@@ -2695,8 +2697,8 @@ mod tests {
 
     #[test]
     fn type_name_function_pointer_parses() {
-        // `int (*)(int)` — function pointer. This is the canonical
-        // acceptance shape for task 05-20. Chain must be exactly
+        // `int (*)(int)` — function pointer. This canonical shape's
+        // chain must be exactly
         // [Pointer, Function(int)]: the abstract declarator reads
         // the nested `(*)`, then the outer `(int)` attaches as a
         // function suffix of the whole parenthesised atom.
@@ -2730,8 +2732,8 @@ mod tests {
         // Regression for the shared atom-parser: now that parameter
         // declarators recurse with ctx=Param, a nested abstract
         // function-pointer parameter (`int (*)(int)` inside a
-        // parameter list) parses correctly. Before task 05-20 the
-        // nested recursion was Concrete, which required an ident.
+        // parameter list) parses correctly. The nested recursion must
+        // stay in parameter context so it does not require an ident.
         let (d, _rem, diags, sess) = parse_decl("f(int (*)(int))");
         assert_name(&d, &sess, "f");
         match d.derived.as_slice() {
@@ -2761,16 +2763,16 @@ mod tests {
         assert_eq!(tn.span.hi.0 as usize, src.len());
     }
 
-    // ── Typedef-name disambiguation (C99 §6.7.7, task 05-21) ────────
+    // ── Typedef-name disambiguation (C99 §6.7.7) ────────────────────
     //
     // `declare_declarator_name` is the post-declarator hook that
     // feeds the parser's scope stack so downstream declaration-
     // specifier slots pick up freshly-introduced typedef-names. The
     // tests below drive the helper directly by interleaving
     // `parse_decl_specs` / `parse_declarator` / `declare_declarator_
-    // name` calls against a single token stream — the declaration-
-    // list parser that would normally orchestrate this is not yet
-    // wired up (task 05-25).
+    // name` calls against a single token stream. The public
+    // declaration parsers perform the same interleaving while parsing
+    // full declarations and function definitions.
 
     /// Consume a `;` token at the cursor. Used in the §6.7.7 tests
     /// where we drive declarations manually and need to step past
@@ -2987,12 +2989,13 @@ mod tests {
         assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
     }
 
-    // ── Struct / union bodies (C99 §6.7.2.1, task 05-22) ────────────
+    // ── Struct / union bodies (C99 §6.7.2.1) ────────────────────────
     //
     // `parse_decl_specs` dispatches to `parse_record_spec` as soon as
     // it sees `struct` / `union`. The tests below drive the whole
     // specifier-list entry point so they exercise the full path the
-    // declaration parser will take in task 05-25.
+    // declaration parser takes when a top-level declarator is
+    // followed by a function body.
 
     /// Parse a specifier list and return the sole record specifier.
     /// Panics if the specs hold anything other than one
@@ -3175,7 +3178,7 @@ mod tests {
         assert!(diags.is_empty(), "clean: {diags:?}");
     }
 
-    // ── Enum bodies (C99 §6.7.2.2, task 05-23) ──────────────────────
+    // ── Enum bodies (C99 §6.7.2.2) ─────────────────────────────────
 
     #[test]
     fn enum_three_implicit_values_parses() {

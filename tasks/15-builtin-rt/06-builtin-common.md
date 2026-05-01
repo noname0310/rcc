@@ -1,6 +1,6 @@
 # 15-06: Common builtin functions
 
-**Phase:** 15-builtin-rt    **Depends on:** 15-05    **Milestone:** M6
+**Phase:** 15-builtin-rt    **Depends on:** 15-05, 05-35    **Milestone:** M6
 
 ## Goal
 Recognize and lower a set of commonly used GCC/Clang builtin
@@ -20,12 +20,16 @@ functions: `__builtin_offsetof`, `__builtin_types_compatible_p`,
   - `__builtin_constant_p(expr)` → fold to 1 if `expr` is a
     compile-time constant, 0 otherwise.
   - `__builtin_bswap16/32/64(x)` → LLVM `bswap` intrinsic.
-- Out: `__builtin_popcount`, `__builtin_clz`, `__builtin_ctz`,
-  math builtins (future task).
+- Out: parser recognition of builtin forms whose arguments are
+  type-names rather than expressions (task 05-35);
+  `__builtin_popcount`, `__builtin_clz`, `__builtin_ctz`, math
+  builtins (future task).
 
 ## Deliverables
 - Builtin table entries for each function.
 - Constant-folding or codegen lowering for each.
+- Lowering for builtin AST nodes introduced by task 05-35 where
+  ordinary call-expression lowering is not enough.
 - Tests for each builtin.
 
 ## Acceptance

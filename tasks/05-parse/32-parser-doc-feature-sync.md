@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 05-32: Parser docs and feature matrix sync
 
 **Phase:** 05-parse    **Depends on:** 05-31    **Milestone:** M2.1

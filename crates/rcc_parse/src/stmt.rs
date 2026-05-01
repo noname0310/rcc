@@ -12,9 +12,9 @@
 //! - *jump statement*          (§6.8.6)   — `goto`, `continue`, `break`,
 //!   `return`
 //!
-//! Tasks 05-13 .. 05-17 landed these in the order above; the dispatch
-//! table is a single `match` on the lookahead token that routes to the
-//! per-family parser. The expression statement path is the fallthrough.
+//! The dispatch table is a single `match` on the lookahead token that
+//! routes to the per-family parser. The expression statement path is
+//! the fallthrough.
 //!
 //! ## Dangling `else` (§6.8.4.1)
 //!
@@ -42,24 +42,17 @@
 //!
 //! C99 §6.8.2 lets declarations appear anywhere inside a compound
 //! statement, interleaved with statements — the well-known C89
-//! "decls must come first" rule is gone. The AST already models
-//! this with [`BlockItem::{Decl, Stmt}`]. Declaration parsing
-//! (task 05-18+) is not yet implemented, so [`parse_block_item`]
-//! currently routes every item through [`parse_stmt`] and wraps the
-//! result in `BlockItem::Stmt`. A source line like `int x;` inside a
-//! block therefore hits the expression-statement fallthrough, which
-//! will emit a diagnostic at the `int` keyword — this is a known
-//! deferral, not a regression.
+//! "decls must come first" rule is gone. The AST models this with
+//! [`BlockItem::{Decl, Stmt}`]. [`parse_block_item`] first recognises
+//! declaration starts with [`looks_like_decl`], then routes real
+//! declarations through [`crate::decl::parse_declaration`]; everything
+//! else falls through to [`parse_stmt`].
 //!
-//! The same stub applies to the `for (…;…;…)` *init* clause: C99
+//! The `for (…;…;…)` *init* clause follows the same distinction. C99
 //! §6.8.5p3 permits either an expression statement or a declaration
-//! there, but only the expression form is accepted by
-//! [`parse_for_stmt`] until the declaration parser arrives. A `for`
-//! whose init is `int i = 0` still enters a fresh scope (we push one
-//! unconditionally on `(`), but the `int` keyword reaches the
-//! expression-statement path and is diagnosed as such. Once task
-//! 05-18 lands, the init slot will route through [`parse_block_item`]
-//! and both shapes will be accepted uniformly.
+//! there; [`parse_for_stmt`] stores declaration init clauses as
+//! `BlockItem::Decl` so HIR lowering can keep the loop-scope lifetime
+//! attached to the declaration itself.
 //!
 //! Each compound statement pushes a new scope on the parser's
 //! [`ScopeStack`] on entry and pops it on exit so the typedef-name
@@ -70,8 +63,7 @@
 //! resolving names against an inner scope and wreck the typedef
 //! hack. `for (…;…;…) body` uses the same discipline: a scope is
 //! pushed before the init and popped after the body so any
-//! declarations in the init clause (once supported) are visible only
-//! inside the loop.
+//! declarations in the init clause are visible only inside the loop.
 //!
 //! ## Error recovery
 //!
@@ -440,7 +432,7 @@ fn parse_case_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
 /// Parse a C99 §6.8.1 labeled statement of the `default` kind:
 /// `default : statement`. Ordering relative to `case` labels is
 /// unconstrained at the parse level; the HIR-level switch check
-/// rejects multiple `default`s per switch once that phase lands.
+/// rejects multiple `default`s per switch.
 fn parse_default_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
     let def_span = p.cur_span();
     p.bump(); // `default`
@@ -554,7 +546,7 @@ fn parse_goto_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
 /// path (including error recovery). Callers are responsible for the
 /// surrounding statement wrapping — [`parse_stmt`] does the
 /// `StmtKind::Compound(..)` wrap, while function-definition parsing
-/// (task 05-25) consumes the `Block` directly for `FunctionDef::body`.
+/// consumes the `Block` directly for `FunctionDef::body`.
 ///
 /// Returns `None` if the current token isn't `{`.
 pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {

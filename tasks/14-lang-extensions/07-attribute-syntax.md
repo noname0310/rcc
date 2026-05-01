@@ -1,25 +1,24 @@
 # 14-07: `__attribute__` syntax parsing
 
-**Phase:** 14-lang-extensions    **Depends on:** —    **Milestone:** M5
+**Phase:** 14-lang-extensions    **Depends on:** 05-38    **Milestone:** M5
 
 ## Goal
-Parse GCC-style `__attribute__((name))` and
-`__attribute__((name(args)))` syntax. Attributes can appear in
-declaration-specifier position and after declarators. Build an
-`Attribute { name: Symbol, args: Vec<AttrArg> }` AST node attached
-to the relevant declaration.
+Validate and wire the GCC-style `__attribute__((...))` parser surface
+introduced by task 05-38 into the extension-policy and semantic
+pipeline.
 
 ## Scope
-- In: grammar extensions in `rcc_parse` for `__attribute__((...))`
-  with arbitrarily nested parenthesised arguments. Attach parsed
-  attributes to `DeclSpec` and `Declarator` AST nodes. Multiple
-  comma-separated attributes inside one `__attribute__((...))`.
-- Out: semantic handling of any specific attribute (task 14-08).
+- In: extension-mode diagnostics, attachment-site validation, and
+  semantic handoff for attributes already represented in the AST by
+  task 05-38. Multiple comma-separated attributes inside one
+  `__attribute__((...))`.
+- Out: initial parser surface for attachment sites (task 05-38);
+  semantic handling of any specific attribute (task 14-08).
 
 ## Deliverables
-- `Attribute` and `AttrArg` AST types.
-- Parser rules for `__attribute__` in declaration specifiers and
-  after declarators.
+- Attribute validation scaffolding attached to the AST nodes from
+  task 05-38.
+- Tests that the parser surface feeds the phase-14 semantic layer.
 - Tests: parse `__attribute__((packed))`,
   `__attribute__((aligned(16)))`,
   `__attribute__((section("text"), unused))`.
