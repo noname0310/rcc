@@ -427,6 +427,20 @@ fn edge_sizeof_layout_service_covers_records_and_record_vlas() {
 }
 
 #[test]
+fn member_access_source_pipeline_uses_resolved_field_index() {
+    let lowered = lower_snippet(
+        "member_field_index",
+        "struct S { int a; int b; }; int f(struct S s) { return s.b; }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert!(
+        body_contains_field_projection(body, 1),
+        "s.b must lower to the second record field, not a fallback projection:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn edge_complex_conversions_are_explicit_from_source_pipeline() {
     let lowered = lower_snippet(
         "edge_complex_conditional_conversion",
@@ -552,6 +566,71 @@ fn body_contains_len_rvalue(body: &Body) -> bool {
             .iter()
             .any(|stmt| matches!(stmt.kind, StatementKind::Assign { rvalue: Rvalue::Len(_), .. }))
     })
+}
+
+fn body_contains_field_projection(body: &Body, expected: u32) -> bool {
+    body.blocks.iter().any(|block| {
+        block.statements.iter().any(|stmt| match &stmt.kind {
+            StatementKind::Assign { place, rvalue } => {
+                place_contains_field_projection(place, expected)
+                    || rvalue_contains_field_projection(rvalue, expected)
+            }
+            StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop => {
+                false
+            }
+        }) || terminator_contains_field_projection(&block.terminator.kind, expected)
+    })
+}
+
+fn terminator_contains_field_projection(term: &TerminatorKind, expected: u32) -> bool {
+    match term {
+        TerminatorKind::SwitchInt { discr, .. } => {
+            operand_contains_field_projection(discr, expected)
+        }
+        TerminatorKind::Call { callee, args, destination, .. } => {
+            operand_contains_field_projection(callee, expected)
+                || args.iter().any(|arg| operand_contains_field_projection(arg, expected))
+                || destination
+                    .as_ref()
+                    .is_some_and(|place| place_contains_field_projection(place, expected))
+        }
+        TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => false,
+    }
+}
+
+fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
+    match rvalue {
+        Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast { op, .. } => {
+            operand_contains_field_projection(op, expected)
+        }
+        Rvalue::ComplexFromReal { real, .. } => operand_contains_field_projection(real, expected),
+        Rvalue::RealFromComplex { complex, .. } => {
+            operand_contains_field_projection(complex, expected)
+        }
+        Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_contains_field_projection(lhs, expected)
+                || operand_contains_field_projection(rhs, expected)
+        }
+        Rvalue::AddressOf(place) | Rvalue::Len(place) => {
+            place_contains_field_projection(place, expected)
+        }
+    }
+}
+
+fn operand_contains_field_projection(operand: &Operand, expected: u32) -> bool {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) => {
+            place_contains_field_projection(place, expected)
+        }
+        Operand::Const(_) => false,
+    }
+}
+
+fn place_contains_field_projection(place: &Place, expected: u32) -> bool {
+    place
+        .projection
+        .iter()
+        .any(|projection| matches!(projection, Projection::Field(idx) if *idx == expected))
 }
 
 fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {

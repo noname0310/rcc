@@ -88,6 +88,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0084, E0084_DESC),
     (E0085, E0085_DESC),
     (E0086, E0086_DESC),
+    (E0087, E0087_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -598,6 +599,15 @@ const E0085_DESC: &str = "sizeof operand has no complete object layout";
 /// may have the same constant value.
 pub const E0086: &str = "E0086";
 const E0086_DESC: &str = "invalid switch label";
+
+/// Invalid struct or union member access.
+///
+/// C99 §6.5.2.3 constrains `.` to a struct/union object and `->` to a
+/// pointer to a struct/union object. The named member must exist in that
+/// record type. `rcc` resolves member names during type checking so CFG
+/// receives only numeric field indices.
+pub const E0087: &str = "E0087";
+const E0087_DESC: &str = "invalid member access";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

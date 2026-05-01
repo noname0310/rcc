@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 07-13: Resolve member access types and field indices
 
 **Phase:** 07-typeck    **Depends on:** 06-25    **Milestone:** M3 pre-codegen stabilization

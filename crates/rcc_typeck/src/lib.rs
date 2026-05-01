@@ -13,6 +13,7 @@ use rcc_hir::{
     HirStmtKind, IntRank, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
+use rcc_span::Symbol;
 
 pub mod const_eval;
 pub mod init_const;
@@ -57,7 +58,7 @@ pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
 /// top-level definition referenced via `HirExprKind::DefRef`. We only
 /// keep what the walker reads, so the snapshot stays compact and the
 /// borrow shape stays simple.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct DefSnapshot {
     /// Type of the referenced object/function, or `None` if the kind has
     /// no associated type (records, enums — never the target of `DefRef`).
@@ -71,6 +72,17 @@ pub struct DefSnapshot {
     /// §6.4.4.3p2 + §6.7.2.2p3) — we materialise them as `IntConst` so
     /// later passes do not need to chase a `DefId` to evaluate one.
     pub enumerator_value: Option<i128>,
+    /// Record fields, when this snapshot describes a struct/union tag.
+    pub record_fields: Option<Vec<FieldSnapshot>>,
+}
+
+/// One record field as seen by typeck.
+#[derive(Copy, Clone, Debug)]
+pub struct FieldSnapshot {
+    /// Source name. Anonymous bitfields have no name and cannot be selected.
+    pub name: Option<Symbol>,
+    /// Lowered field type.
+    pub ty: TyId,
 }
 
 /// Read what we need from a `DefKind` for `DefRef` typing.
@@ -83,24 +95,48 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             // `FuncToPtr` decay, applied by `decay_if_needed`).
             value_cat: ValueCat::LValue,
             enumerator_value: None,
+            record_fields: None,
         },
-        DefKind::Global { ty, .. } => {
-            DefSnapshot { ty: Some(*ty), value_cat: ValueCat::LValue, enumerator_value: None }
-        }
+        DefKind::Global { ty, .. } => DefSnapshot {
+            ty: Some(*ty),
+            value_cat: ValueCat::LValue,
+            enumerator_value: None,
+            record_fields: None,
+        },
         DefKind::Typedef(ty) => {
             // Should never appear as a `DefRef` operand (typedefs live in
             // a different namespace). Pass through with the typedef's
             // alias type so the walker is total.
-            DefSnapshot { ty: Some(*ty), value_cat: ValueCat::RValue, enumerator_value: None }
+            DefSnapshot {
+                ty: Some(*ty),
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+                record_fields: None,
+            }
         }
         DefKind::Enumerator { ty, value } => DefSnapshot {
             ty: Some(*ty),
             value_cat: ValueCat::RValue,
             enumerator_value: Some(*value),
+            record_fields: None,
         },
-        DefKind::Record { .. } | DefKind::Enum { .. } => {
-            DefSnapshot { ty: None, value_cat: ValueCat::RValue, enumerator_value: None }
-        }
+        DefKind::Record { fields, .. } => DefSnapshot {
+            ty: None,
+            value_cat: ValueCat::RValue,
+            enumerator_value: None,
+            record_fields: Some(
+                fields
+                    .iter()
+                    .map(|field| FieldSnapshot { name: field.name, ty: field.ty })
+                    .collect(),
+            ),
+        },
+        DefKind::Enum { .. } => DefSnapshot {
+            ty: None,
+            value_cat: ValueCat::RValue,
+            enumerator_value: None,
+            record_fields: None,
+        },
     }
 }
 
@@ -304,10 +340,11 @@ pub fn visit_expr(
             expr_id
         }
         HirExprKind::DefRef(def_id) => {
-            let snap = def_info.get(&def_id).copied().unwrap_or(DefSnapshot {
+            let snap = def_info.get(&def_id).cloned().unwrap_or(DefSnapshot {
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
+                record_fields: None,
             });
             // Enumerator references rewrite to a typed `IntConst` so
             // const-eval and the CFG never need to look up enumerators.
@@ -379,25 +416,19 @@ pub fn visit_expr(
         }
         HirExprKind::UnresolvedField { base, field, field_span } => {
             let base2 = visit_expr(base, body, tcx, session, def_info);
-            // Field-name resolution is owned by task 07-13. Until then,
-            // preserve the requested name and compute only the value category
-            // required by generic assignment/lvalue checks.
-            let cat = value_category(body, base2);
-            body.exprs[expr_id].value_cat = cat;
-            body.exprs[expr_id].kind =
-                HirExprKind::UnresolvedField { base: base2, field, field_span };
-            expr_id
+            type_unresolved_field(
+                expr_id,
+                base2,
+                FieldRequest { name: field, span: field_span },
+                body,
+                tcx,
+                session,
+                def_info,
+            )
         }
         HirExprKind::Field { base, field_index } => {
             let base2 = visit_expr(base, body, tcx, session, def_info);
-            // We don't yet have struct field-resolution machinery in HIR
-            // typeck (task 07-11 covers fields). Best we can do today:
-            // preserve the placeholder type from lowering. We at least
-            // get the value category right so assignment LHS checks work.
-            let cat = value_category(body, base2);
-            body.exprs[expr_id].value_cat = cat;
-            body.exprs[expr_id].kind = HirExprKind::Field { base: base2, field_index };
-            expr_id
+            type_resolved_field(expr_id, base2, field_index, body, tcx, session, def_info)
         }
         HirExprKind::Call { callee, args } => {
             let callee2 = visit_expr(callee, body, tcx, session, def_info);
@@ -766,6 +797,124 @@ fn invalid_operands(session: &mut Session, span: rcc_span::Span, op_spelling: &s
         .struct_err(span, format!("invalid operands to binary `{op_spelling}`"))
         .code(rcc_errors::codes::E0083)
         .emit();
+}
+
+#[derive(Copy, Clone)]
+struct FieldRequest {
+    name: Symbol,
+    span: rcc_span::Span,
+}
+
+fn type_unresolved_field(
+    expr_id: HirExprId,
+    base: HirExprId,
+    request: FieldRequest,
+    body: &mut Body,
+    tcx: &TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> HirExprId {
+    let cat = value_category(body, base);
+    match member_base_record(body, tcx, base) {
+        Some(record) => match resolve_field(record, request.name, def_info) {
+            Some((field_index, field_ty)) => {
+                body.exprs[expr_id].ty = field_ty;
+                body.exprs[expr_id].value_cat = cat;
+                body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
+            }
+            None => {
+                let field_name = session.interner.get(request.name).to_string();
+                invalid_member_access(
+                    session,
+                    request.span,
+                    format!("record has no member named `{field_name}`"),
+                );
+                body.exprs[expr_id].ty = tcx.error;
+                body.exprs[expr_id].value_cat = cat;
+                body.exprs[expr_id].kind = HirExprKind::UnresolvedField {
+                    base,
+                    field: request.name,
+                    field_span: request.span,
+                };
+            }
+        },
+        None => {
+            let msg = if matches!(body.exprs[base].kind, HirExprKind::Deref(_))
+                && body.exprs[base].ty == tcx.error
+            {
+                "operator `->` requires a pointer to struct or union".to_string()
+            } else {
+                "member access requires a struct or union object".to_string()
+            };
+            invalid_member_access(session, request.span, msg);
+            body.exprs[expr_id].ty = tcx.error;
+            body.exprs[expr_id].value_cat = cat;
+            body.exprs[expr_id].kind = HirExprKind::UnresolvedField {
+                base,
+                field: request.name,
+                field_span: request.span,
+            };
+        }
+    }
+    expr_id
+}
+
+fn type_resolved_field(
+    expr_id: HirExprId,
+    base: HirExprId,
+    field_index: u32,
+    body: &mut Body,
+    tcx: &TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> HirExprId {
+    let cat = value_category(body, base);
+    if let Some(record) = member_base_record(body, tcx, base) {
+        if let Some(field) = def_info
+            .get(&record)
+            .and_then(|snapshot| snapshot.record_fields.as_ref())
+            .and_then(|fields| fields.get(field_index as usize))
+        {
+            body.exprs[expr_id].ty = field.ty;
+        } else if def_info
+            .get(&record)
+            .and_then(|snapshot| snapshot.record_fields.as_ref())
+            .is_some()
+        {
+            invalid_member_access(
+                session,
+                body.exprs[expr_id].span,
+                format!("record field index {field_index} is out of range"),
+            );
+            body.exprs[expr_id].ty = tcx.error;
+        }
+    }
+    body.exprs[expr_id].value_cat = cat;
+    body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
+    expr_id
+}
+
+fn member_base_record(body: &Body, tcx: &TyCtxt, base: HirExprId) -> Option<rcc_hir::DefId> {
+    match *tcx.get(body.exprs[base].ty) {
+        Ty::Record(def_id) => Some(def_id),
+        _ => None,
+    }
+}
+
+fn resolve_field(
+    record: rcc_hir::DefId,
+    name: Symbol,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> Option<(u32, TyId)> {
+    let fields = def_info.get(&record)?.record_fields.as_ref()?;
+    fields
+        .iter()
+        .enumerate()
+        .find_map(|(idx, field)| (field.name == Some(name)).then_some((idx as u32, field.ty)))
+}
+
+fn invalid_member_access(session: &mut Session, span: rcc_span::Span, msg: String) {
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0087).emit();
 }
 
 /// Source spelling of a `BinOp` for diagnostics.
@@ -3947,6 +4096,199 @@ mod tests {
         body.stmts[stmt_id].id = stmt_id;
         body.root = Some(stmt_id);
         (body, expr_id, stmt_id)
+    }
+
+    fn set_root_expr(body: &mut Body, expr: HirExprId) {
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(expr),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+    }
+
+    fn push_local(body: &mut Body, name: Option<Symbol>, ty: TyId, is_param: bool) -> Local {
+        body.locals.push(rcc_hir::LocalDecl {
+            name,
+            ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param,
+            span: DUMMY_SP,
+        })
+    }
+
+    fn record_def_info(
+        record: DefId,
+        fields: Vec<(Option<Symbol>, TyId)>,
+    ) -> rcc_data_structures::FxHashMap<DefId, DefSnapshot> {
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        def_info.insert(
+            record,
+            DefSnapshot {
+                ty: None,
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+                record_fields: Some(
+                    fields.into_iter().map(|(name, ty)| FieldSnapshot { name, ty }).collect(),
+                ),
+            },
+        );
+        def_info
+    }
+
+    #[test]
+    fn member_access_resolves_dot_field_type_and_index() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let a = session.interner.intern("a");
+        let b = session.interner.intern("b");
+        let record = DefId(7);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let def_info = record_def_info(record, vec![(Some(a), tcx.int), (Some(b), tcx.long)]);
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: b, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[member].ty, tcx.long);
+        assert_eq!(body.exprs[member].value_cat, ValueCat::LValue);
+        assert!(
+            matches!(body.exprs[member].kind, HirExprKind::Field { base: got_base, field_index: 1 } if got_base == base)
+        );
+    }
+
+    #[test]
+    fn member_access_resolves_arrow_field() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let a = session.interner.intern("a");
+        let b = session.interner.intern("b");
+        let record = DefId(8);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(rec_ty)));
+        let def_info = record_def_info(record, vec![(Some(a), tcx.int), (Some(b), tcx.long)]);
+
+        let mut body = Body::default();
+        let p = push_local(&mut body, Some(session.interner.intern("p")), ptr_ty, true);
+        let ptr = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(p));
+        let deref = push_kind(&mut body, tcx.error, HirExprKind::Deref(ptr));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base: deref, field: b, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[deref].ty, rec_ty);
+        assert_eq!(body.exprs[member].ty, tcx.long);
+        assert!(
+            matches!(body.exprs[member].kind, HirExprKind::Field { base: got_base, field_index: 1 } if got_base == deref)
+        );
+    }
+
+    #[test]
+    fn member_access_resolves_union_members() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let a = session.interner.intern("a");
+        let b = session.interner.intern("b");
+        let union_record = DefId(9);
+        let union_ty = tcx.intern(Ty::Record(union_record));
+        let def_info = record_def_info(union_record, vec![(Some(a), tcx.int), (Some(b), tcx.long)]);
+
+        let mut body = Body::default();
+        let u = push_local(&mut body, Some(session.interner.intern("u")), union_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(u));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: b, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[member].ty, tcx.long);
+        assert!(matches!(body.exprs[member].kind, HirExprKind::Field { field_index: 1, .. }));
+    }
+
+    #[test]
+    fn member_access_unknown_member_emits_e0087() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let a = session.interner.intern("a");
+        let b = session.interner.intern("b");
+        let record = DefId(10);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let def_info = record_def_info(record, vec![(Some(a), tcx.int)]);
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: b, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert_eq!(body.exprs[member].ty, tcx.error);
+        assert!(
+            matches!(body.exprs[member].kind, HirExprKind::UnresolvedField { field, .. } if field == b)
+        );
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0087)),
+            "expected E0087, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn member_access_non_record_base_emits_e0087() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let y = session.interner.intern("y");
+
+        let mut body = Body::default();
+        let x = push_local(&mut body, Some(session.interner.intern("x")), tcx.int, false);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(x));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: y, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+        );
+
+        assert_eq!(body.exprs[member].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0087)),
+            "expected E0087, got {:?}",
+            cap.diagnostics()
+        );
     }
 
     /// Acceptance: `1 + 2.0` — IntConst is wrapped in `Convert(IntToFloat, f64)`

@@ -2413,6 +2413,16 @@ fn regression_gate_struct_sizeof_source_survives_lower_and_typeck() {
 }
 
 #[test]
+fn regression_gate_member_access_non_record_reports_typeck_error() {
+    let (_hir, _tcx, cap, _sess) = lower_and_typeck_snippet("void f(void) { int x; x.y; }");
+    assert!(
+        cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0087)),
+        "x.y should emit E0087, got {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
     let (hir, tcx, cap, _sess) = lower_and_typeck_snippet(
         "typedef unsigned long Size; struct S { int x; }; typedef struct S S; S sg; enum E { A = 7 }; enum E eg; Size sz;",

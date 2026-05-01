@@ -940,6 +940,30 @@ void f(int x) {
 
 ---
 
+## E0087 — invalid member access
+
+C99 §6.5.2.3 requires `.` to select a member from a struct or union
+object, and `->` to select a member through a pointer to struct or
+union. The selected member name must exist in that record type.
+
+```c
+int x;
+x.y;                    // error[E0087]: not a struct or union
+
+struct S { int a; };
+struct S s;
+s.b;                    // error[E0087]: no member named `b`
+
+int *p;
+p->a;                   // error[E0087]: not a pointer to struct/union
+```
+
+After this check succeeds, HIR member accesses are rewritten from the
+source member name to a numeric field index, so CFG and codegen never
+guess which field was intended.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
