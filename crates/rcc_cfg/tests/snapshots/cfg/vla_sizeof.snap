@@ -1,0 +1,22 @@
+---
+source: crates/rcc_cfg/tests/cfg.rs
+---
+fn def#0() -> unsigned long {
+  locals:
+    _0: unsigned long;
+    _1: int param name#12;
+    _2: int[vla] name#13 vla_len=_3;
+    _3: unsigned long;
+    _4: unsigned long;
+    _5: unsigned long;
+
+  bb0:
+    _3 = Cast::IntToInt(copy _1, unsigned long);
+    StorageLive(_2);
+    _4 = Len(_2);
+    _5 = Mul(copy _4, 4);
+    _0 = copy _5;
+    StorageDead(_2);
+    return;
+
+}

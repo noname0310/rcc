@@ -528,11 +528,16 @@ dependencies = [
 name = "rcc_cfg"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "rcc_data_structures",
  "rcc_errors",
  "rcc_hir",
+ "rcc_hir_lower",
+ "rcc_parse",
+ "rcc_preprocess",
  "rcc_session",
  "rcc_span",
+ "rcc_typeck",
 ]
 
 [[package]]

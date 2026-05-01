@@ -1,0 +1,22 @@
+---
+source: crates/rcc_cfg/tests/cfg.rs
+---
+fn def#1() -> int {
+  locals:
+    _0: int;
+    _1: int name#12;
+    _2: int*;
+    _3: <error>;
+
+  bb0:
+    StorageLive(_1);
+    _1 = 1;
+    _2 = &_1;
+    call global#0(copy _2) -> _3, bb1;
+
+  bb1:
+    _0 = copy _3;
+    StorageDead(_1);
+    return;
+
+}

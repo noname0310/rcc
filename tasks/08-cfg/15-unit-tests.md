@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-15: CFG lowering unit tests
 
 **Phase:** 08-cfg    **Depends on:** 08-05 .. 08-14    **Milestone:** M3

@@ -14,3 +14,10 @@ rcc_errors          = { workspace = true }
 rcc_session         = { workspace = true }
 rcc_hir             = { workspace = true }
 rcc_data_structures = { workspace = true }
+
+[dev-dependencies]
+rcc_preprocess = { workspace = true }
+rcc_parse      = { workspace = true }
+rcc_hir_lower  = { workspace = true }
+rcc_typeck     = { workspace = true }
+insta          = { workspace = true }
