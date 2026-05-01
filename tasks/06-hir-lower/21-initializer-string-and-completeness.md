@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-21: initializer completeness, strings, and diagnostics
 
 **Phase:** 06-hir-lower    **Depends on:** 06-20    **Milestone:** M5 stabilization
@@ -33,4 +35,3 @@ avoid silently dropping malformed or special initializer forms.
 - C99 §6.7.8 — Initialization.
 - `lower_initializer` currently documents string initialization and
   some diagnostics as deferred.
-

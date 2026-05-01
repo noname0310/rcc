@@ -19,8 +19,9 @@ use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
-    Body, Def, DefId, DefKind, Enumerator, Field, HirCrate, HirExpr, HirExprId, HirExprKind,
-    HirStmt, HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
+    Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
+    GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
+    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -776,7 +777,7 @@ fn lower_block_decl(
             continue;
         }
 
-        let ty = lower_type_from_parts_in_scope(
+        let mut ty = lower_type_from_parts_in_scope(
             &decl.specs,
             &init_decl.declarator,
             DeclScope::Block,
@@ -786,6 +787,13 @@ fn lower_block_decl(
             crate_,
             session,
         );
+        if let Some(init) = &init_decl.init {
+            ty = complete_initializer_type(ty, init, tcx, session);
+        }
+        if is_incomplete_array_ty(ty, tcx) {
+            emit_incomplete_array_at_block_scope(init_decl.declarator.span, session);
+            ty = tcx.error;
+        }
         let vla_len = lower_top_level_vla_len(
             &init_decl.declarator,
             ty,
@@ -823,6 +831,11 @@ fn lower_block_decl(
         // flattens them into a sequence of assignment statements per
         // C99 §6.7.8.
         let (init_expr, list_init) = match &init_decl.init {
+            Some(init @ rcc_ast::Initializer::Expr(e))
+                if is_string_array_initializer(ty, e, tcx) =>
+            {
+                (None, Some(init))
+            }
             Some(rcc_ast::Initializer::Expr(e)) => {
                 (Some(lower_expr(e, body, scope, crate_, tcx, resolver, session)), None)
             }
@@ -902,6 +915,83 @@ fn push_local_ref(local: Local, ty: TyId, span: Span, body: &mut Body) -> HirExp
     id
 }
 
+fn complete_initializer_type(
+    ty: TyId,
+    init: &rcc_ast::Initializer,
+    tcx: &mut TyCtxt,
+    session: &Session,
+) -> TyId {
+    let Ty::Array { elem, len: None, is_vla: false } = tcx.get(ty).clone() else {
+        return ty;
+    };
+
+    let completed_len = match init {
+        rcc_ast::Initializer::Expr(e) if is_string_array_initializer(ty, e, tcx) => {
+            string_initializer_len(e, session)
+        }
+        rcc_ast::Initializer::List(items) => Some(array_initializer_list_len(items, session)),
+        _ => None,
+    };
+
+    completed_len
+        .map(|len| tcx.intern(Ty::Array { elem, len: Some(len), is_vla: false }))
+        .unwrap_or(ty)
+}
+
+fn is_incomplete_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
+    matches!(tcx.get(ty), Ty::Array { len: None, is_vla: false, .. })
+}
+
+fn emit_incomplete_array_at_block_scope(span: Span, session: &mut Session) {
+    session
+        .handler
+        .struct_err(span, "incomplete array type at block scope".to_string())
+        .code(rcc_errors::codes::E0076)
+        .emit();
+}
+
+fn array_initializer_list_len(
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    session: &Session,
+) -> u64 {
+    let mut cursor = 0u64;
+    let mut max_len = 0u64;
+    for (desigs, _) in items {
+        let idx = match desigs.first() {
+            Some(rcc_ast::Designator::Index(e)) => {
+                eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor)
+            }
+            _ => cursor,
+        };
+        max_len = max_len.max(idx.saturating_add(1));
+        cursor = idx.saturating_add(1);
+    }
+    max_len
+}
+
+fn is_string_array_initializer(ty: TyId, expr: &rcc_ast::Expr, tcx: &TyCtxt) -> bool {
+    matches!(expr.kind, rcc_ast::ExprKind::StringLit { .. }) && is_char_array_ty(ty, tcx)
+}
+
+fn is_char_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
+    match tcx.get(ty) {
+        Ty::Array { elem, .. } => is_char_like_ty(elem.ty, tcx),
+        _ => false,
+    }
+}
+
+fn is_char_like_ty(ty: TyId, tcx: &TyCtxt) -> bool {
+    matches!(tcx.get(ty), Ty::Int { rank: IntRank::Char, .. })
+}
+
+fn string_initializer_len(expr: &rcc_ast::Expr, session: &Session) -> Option<u64> {
+    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+        return None;
+    };
+    let s = session.interner.get(text);
+    Some((string_content_char_count(strip_string_literal_quotes(s)) + 1) as u64)
+}
+
 /// Flatten a brace-enclosed initialiser (`Initializer::List`) into a
 /// sequence of `HirStmtKind::Expr`-wrapped assignment statements.
 ///
@@ -928,10 +1018,8 @@ fn push_local_ref(local: Local, ty: TyId, span: Span, body: &mut Body) -> HirExp
 /// zero-fill marker expression is not introduced at this stage.
 ///
 /// Deferred (not handled here):
-/// - String-literal initialisation of a `char[]` (`char s[] = "hi";`).
 /// - Compound-literal lowering (`(int[]){1,2,3}`).
 /// - Initialising a struct/union with a non-brace aggregate (GNU ext).
-/// - Excess initialiser diagnostics (typeck will flag these).
 #[allow(clippy::too_many_arguments)]
 pub fn lower_initializer(
     target: HirExprId,
@@ -948,7 +1036,11 @@ pub fn lower_initializer(
 ) {
     match init {
         rcc_ast::Initializer::Expr(e) => {
-            // Scalar (or string-to-char-array) initialiser.
+            if is_string_array_initializer(target_ty, e, tcx) {
+                lower_string_array_initializer(target, target_ty, e, span, body, tcx, session, out);
+                return;
+            }
+            // Scalar initialiser.
             let rhs = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             emit_assign_stmt(target, rhs, span, body, out);
         }
@@ -957,6 +1049,285 @@ pub fn lower_initializer(
                 target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
             );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_string_array_initializer(
+    target: HirExprId,
+    target_ty: TyId,
+    expr: &rcc_ast::Expr,
+    span: Span,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+        return;
+    };
+    let Ty::Array { elem, len, .. } = tcx.get(target_ty).clone() else {
+        return;
+    };
+    let s = session.interner.get(text);
+    let mut values = decode_string_literal_values(strip_string_literal_quotes(s));
+    values.push(0);
+    let write_len = len.unwrap_or(values.len() as u64);
+    for i in 0..write_len {
+        let value = values.get(i as usize).copied().unwrap_or(0);
+        let index_expr = push_index_expr(target, i, elem.ty, span, body, tcx);
+        let rhs = push_int_const(value, elem.ty, span, body);
+        emit_assign_stmt(index_expr, rhs, span, body, out);
+    }
+}
+
+fn emit_invalid_initializer_designator(span: Span, message: &str, session: &mut Session) {
+    session.handler.struct_err(span, message.to_string()).code(rcc_errors::codes::E0079).emit();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_initializer(
+    target_ty: TyId,
+    init: &rcc_ast::Initializer,
+    span: Span,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> GlobalInit {
+    let mut entries = Vec::new();
+    lower_global_initializer_into(
+        target_ty,
+        init,
+        span,
+        Vec::new(),
+        crate_,
+        tcx,
+        resolver,
+        session,
+        &mut entries,
+    );
+    GlobalInit { ty: target_ty, entries }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_initializer_into(
+    target_ty: TyId,
+    init: &rcc_ast::Initializer,
+    span: Span,
+    path: Vec<GlobalInitDesignator>,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<GlobalInitEntry>,
+) {
+    match init {
+        rcc_ast::Initializer::Expr(e) if is_string_array_initializer(target_ty, e, tcx) => {
+            lower_global_string_array_initializer(target_ty, e, span, path, tcx, session, out);
+        }
+        rcc_ast::Initializer::Expr(e) => {
+            let value = lower_global_init_expr(e, crate_, tcx, resolver, session);
+            out.push(GlobalInitEntry { path, value, span: e.span });
+        }
+        rcc_ast::Initializer::List(items) => {
+            lower_global_initializer_list(
+                target_ty, items, span, path, crate_, tcx, resolver, session, out,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_initializer_list(
+    target_ty: TyId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    path: Vec<GlobalInitDesignator>,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<GlobalInitEntry>,
+) {
+    match tcx.get(target_ty).clone() {
+        Ty::Array { elem, len, .. } => {
+            let mut cursor = 0u64;
+            for (desigs, sub_init) in items {
+                let (idx, nested_desigs) = match desigs.split_first() {
+                    Some((rcc_ast::Designator::Index(e), rest)) => {
+                        (eval_const_expr_as_u64(e, &session.interner).unwrap_or(cursor), rest)
+                    }
+                    Some((rcc_ast::Designator::Field(_), _)) => {
+                        emit_invalid_initializer_designator(
+                            span,
+                            "field designator cannot initialize an array object",
+                            session,
+                        );
+                        continue;
+                    }
+                    None => (cursor, &[][..]),
+                };
+                if len.is_some_and(|n| idx >= n) {
+                    emit_invalid_initializer_designator(
+                        span,
+                        "array initializer designator exceeds the declared bound",
+                        session,
+                    );
+                    continue;
+                }
+                let mut next_path = path.clone();
+                next_path.push(GlobalInitDesignator::Index(idx));
+                if nested_desigs.is_empty() {
+                    lower_global_initializer_into(
+                        elem.ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
+                    );
+                } else {
+                    let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
+                    lower_global_initializer_list(
+                        elem.ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
+                    );
+                }
+                cursor = idx.saturating_add(1);
+            }
+        }
+        Ty::Record(def_id) => {
+            let (fields, is_union): (Vec<(Option<Symbol>, TyId)>, bool) =
+                match &crate_.defs[def_id].kind {
+                    DefKind::Record { fields, kind, .. } => (
+                        fields.iter().map(|f| (f.name, f.ty)).collect(),
+                        matches!(kind, RecordKind::Union),
+                    ),
+                    _ => return,
+                };
+            let mut cursor = 0u32;
+            for (desigs, sub_init) in items {
+                let (field_idx, nested_desigs) = match desigs.split_first() {
+                    Some((rcc_ast::Designator::Field(name), rest)) => {
+                        let Some((i, _)) =
+                            fields.iter().enumerate().find(|(_, (fname, _))| *fname == Some(*name))
+                        else {
+                            emit_invalid_initializer_designator(
+                                span,
+                                "field designator does not name a member of the target record",
+                                session,
+                            );
+                            continue;
+                        };
+                        (i as u32, rest)
+                    }
+                    Some((rcc_ast::Designator::Index(_), _)) => {
+                        emit_invalid_initializer_designator(
+                            span,
+                            "array designator cannot initialize a record object",
+                            session,
+                        );
+                        continue;
+                    }
+                    None => (cursor, &[][..]),
+                };
+                if field_idx as usize >= fields.len() {
+                    emit_invalid_initializer_designator(
+                        span,
+                        "record initializer has more elements than fields",
+                        session,
+                    );
+                    continue;
+                }
+                let (_, field_ty) = fields[field_idx as usize];
+                let mut next_path = path.clone();
+                next_path.push(GlobalInitDesignator::Field(field_idx));
+                if nested_desigs.is_empty() {
+                    lower_global_initializer_into(
+                        field_ty, sub_init, span, next_path, crate_, tcx, resolver, session, out,
+                    );
+                } else {
+                    let nested = vec![(nested_desigs.to_vec(), sub_init.clone())];
+                    lower_global_initializer_list(
+                        field_ty, &nested, span, next_path, crate_, tcx, resolver, session, out,
+                    );
+                }
+                cursor = field_idx.saturating_add(1);
+                if is_union {
+                    break;
+                }
+            }
+        }
+        _ => {
+            if let Some((desigs, nested)) = items.first() {
+                if !desigs.is_empty() {
+                    emit_invalid_initializer_designator(
+                        span,
+                        "designator cannot initialize a scalar object",
+                        session,
+                    );
+                }
+                lower_global_initializer_into(
+                    target_ty, nested, span, path, crate_, tcx, resolver, session, out,
+                );
+            }
+        }
+    }
+}
+
+fn lower_global_string_array_initializer(
+    target_ty: TyId,
+    expr: &rcc_ast::Expr,
+    span: Span,
+    path: Vec<GlobalInitDesignator>,
+    tcx: &TyCtxt,
+    session: &Session,
+    out: &mut Vec<GlobalInitEntry>,
+) {
+    let rcc_ast::ExprKind::StringLit { text } = expr.kind else {
+        return;
+    };
+    let Ty::Array { len, .. } = tcx.get(target_ty).clone() else {
+        return;
+    };
+    let s = session.interner.get(text);
+    let mut values = decode_string_literal_values(strip_string_literal_quotes(s));
+    values.push(0);
+    let write_len = len.unwrap_or(values.len() as u64);
+    for i in 0..write_len {
+        let mut next_path = path.clone();
+        next_path.push(GlobalInitDesignator::Index(i));
+        let value = values
+            .get(i as usize)
+            .copied()
+            .map(GlobalInitValue::Int)
+            .unwrap_or(GlobalInitValue::Zero);
+        out.push(GlobalInitEntry { path: next_path, value, span });
+    }
+}
+
+fn lower_global_init_expr(
+    expr: &rcc_ast::Expr,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> GlobalInitValue {
+    match &expr.kind {
+        rcc_ast::ExprKind::IntLit { .. } => eval_const_expr_as_u64(expr, &session.interner)
+            .map(|v| GlobalInitValue::Int(i128::from(v)))
+            .unwrap_or(GlobalInitValue::Error),
+        rcc_ast::ExprKind::CharLit { text } => {
+            let s = session.interner.get(*text);
+            decode_first_char_value(s)
+                .map(|v| GlobalInitValue::Int(i128::from(v)))
+                .unwrap_or(GlobalInitValue::Error)
+        }
+        rcc_ast::ExprKind::FloatLit { text } => {
+            let s = session.interner.get(*text);
+            let trimmed = s.trim_end_matches(['f', 'F', 'l', 'L']);
+            trimmed.parse::<f64>().map(GlobalInitValue::Float).unwrap_or(GlobalInitValue::Error)
+        }
+        rcc_ast::ExprKind::StringLit { text } => {
+            let def_id = intern_string_literal(*text, expr.span, crate_, tcx, resolver, session);
+            GlobalInitValue::StringLiteral(def_id)
+        }
+        _ => GlobalInitValue::Error,
     }
 }
 
@@ -983,9 +1354,11 @@ fn lower_initializer_list(
     if !matches!(target_ty_kind, Ty::Array { .. } | Ty::Record(_)) {
         if let Some((desigs, nested)) = items.first() {
             if !desigs.is_empty() {
-                // Designators on a scalar target are a hard constraint
-                // violation per §6.7.8p7; typeck will diagnose. Still
-                // walk the inner initialiser so the HIR has an assign.
+                emit_invalid_initializer_designator(
+                    span,
+                    "designator cannot initialize a scalar object",
+                    session,
+                );
             }
             // Recurse so nested `{{ 1 }}` still works, but use the same
             // scalar target lvalue.
@@ -1044,13 +1417,23 @@ fn lower_array_initializer(
                 (i, rest)
             }
             Some((rcc_ast::Designator::Field(_), _)) => {
-                // `.field` designator against an array target is a
-                // constraint violation (§6.7.8p7). Skip; typeck emits
-                // the diagnostic.
+                emit_invalid_initializer_designator(
+                    span,
+                    "field designator cannot initialize an array object",
+                    session,
+                );
                 continue;
             }
             None => (cursor, &[][..]),
         };
+        if len.is_some_and(|n| idx >= n) {
+            emit_invalid_initializer_designator(
+                span,
+                "array initializer designator exceeds the declared bound",
+                session,
+            );
+            continue;
+        }
 
         // Emit the assignment for this sub-initialiser, nested inside
         // the target[idx] lvalue.
@@ -1133,20 +1516,32 @@ fn lower_record_initializer(
                 let Some((i, _)) =
                     fields.iter().enumerate().find(|(_, (fname, _))| *fname == Some(*name))
                 else {
-                    // Unknown field: typeck will diagnose. Skip.
+                    emit_invalid_initializer_designator(
+                        span,
+                        "field designator does not name a member of the target record",
+                        session,
+                    );
                     continue;
                 };
                 (i as u32, rest)
             }
             Some((rcc_ast::Designator::Index(_), _)) => {
-                // `[N]` against a struct — constraint violation.
+                emit_invalid_initializer_designator(
+                    span,
+                    "array designator cannot initialize a record object",
+                    session,
+                );
                 continue;
             }
             None => (cursor, &[][..]),
         };
 
         if field_idx as usize >= fields.len() {
-            // Beyond the end — excess initialiser; typeck diagnoses.
+            emit_invalid_initializer_designator(
+                span,
+                "record initializer has more elements than fields",
+                session,
+            );
             continue;
         }
         let (_, field_ty) = fields[field_idx as usize];
@@ -1671,7 +2066,7 @@ fn intern_string_literal(
         id: DefId(0),
         name: text,
         span,
-        kind: DefKind::Global { ty: array_ty, linkage: Linkage::Internal },
+        kind: DefKind::Global { ty: array_ty, linkage: Linkage::Internal, init: None },
     });
     crate_.defs[def_id].id = def_id;
     resolver.strings.insert(text, def_id);
@@ -1732,6 +2127,97 @@ fn string_content_char_count(content: &str) -> usize {
         count += 1;
     }
     count
+}
+
+fn decode_string_literal_values(content: &str) -> Vec<i128> {
+    let bytes = content.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i] as i128);
+            i += 1;
+            continue;
+        }
+
+        let next = bytes[i + 1];
+        match next {
+            b'n' => {
+                out.push(10);
+                i += 2;
+            }
+            b't' => {
+                out.push(9);
+                i += 2;
+            }
+            b'r' => {
+                out.push(13);
+                i += 2;
+            }
+            b'\\' => {
+                out.push(b'\\' as i128);
+                i += 2;
+            }
+            b'"' => {
+                out.push(b'"' as i128);
+                i += 2;
+            }
+            b'\'' => {
+                out.push(b'\'' as i128);
+                i += 2;
+            }
+            b'a' => {
+                out.push(7);
+                i += 2;
+            }
+            b'b' => {
+                out.push(8);
+                i += 2;
+            }
+            b'f' => {
+                out.push(12);
+                i += 2;
+            }
+            b'v' => {
+                out.push(11);
+                i += 2;
+            }
+            b'?' => {
+                out.push(b'?' as i128);
+                i += 2;
+            }
+            b'x' | b'X' => {
+                let mut val = 0i128;
+                i += 2;
+                while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                    let digit = (bytes[i] as char).to_digit(16).unwrap_or(0) as i128;
+                    val = (val << 4) | digit;
+                    i += 1;
+                }
+                out.push(val);
+            }
+            d if d.is_ascii_digit() && d < b'8' => {
+                let mut val = (d - b'0') as i128;
+                i += 2;
+                let mut consumed = 1;
+                while consumed < 3
+                    && i < bytes.len()
+                    && bytes[i].is_ascii_digit()
+                    && bytes[i] < b'8'
+                {
+                    val = (val << 3) | (bytes[i] - b'0') as i128;
+                    i += 1;
+                    consumed += 1;
+                }
+                out.push(val);
+            }
+            _ => {
+                out.push(next as i128);
+                i += 2;
+            }
+        }
+    }
+    out
 }
 
 /// Decode the numeric value of the first character in a C char
@@ -2378,19 +2864,11 @@ fn apply_declarator_with_context_in_scope(
                         None => (None, scope != DeclScope::File),
                     }
                 } else {
-                    // No size — incomplete array.
-                    // At block scope, incomplete arrays without an initializer
-                    // are an error. However, the initializer check happens
-                    // at a higher level — here we just produce the incomplete
-                    // type and let the caller validate.
-                    if scope == DeclScope::Block {
-                        session
-                            .handler
-                            .struct_err(d.span, "incomplete array type at block scope".to_string())
-                            .code(rcc_errors::codes::E0076)
-                            .emit();
-                        return tcx.error;
-                    }
+                    // No size — incomplete array. The declaration-lowering
+                    // caller completes it from an initializer when one exists
+                    // (`int a[] = {1,2,3}` / `char s[] = "hi"`), then emits
+                    // the block-scope incomplete-array diagnostic if no
+                    // initializer could complete the type.
                     (None, false)
                 };
 
@@ -3140,7 +3618,7 @@ fn assign_def_ids(
                                 id: DefId(0),
                                 name,
                                 span: decl.span,
-                                kind: DefKind::Global { ty: tcx.error, linkage },
+                                kind: DefKind::Global { ty: tcx.error, linkage, init: None },
                             });
                             crate_.defs[id].id = id;
                             if !duplicate_in_decl {
@@ -3216,7 +3694,7 @@ fn finalize_file_scope_def_types(
                 continue;
             };
 
-            let ty = lower_type_from_parts(
+            let mut ty = lower_type_from_parts(
                 &decl.specs,
                 &init_decl.declarator,
                 DeclScope::File,
@@ -3225,10 +3703,27 @@ fn finalize_file_scope_def_types(
                 crate_,
                 session,
             );
+            if let Some(init) = &init_decl.init {
+                ty = complete_initializer_type(ty, init, tcx, session);
+            }
+            let global_init = init_decl.init.as_ref().map(|init| {
+                lower_global_initializer(
+                    ty,
+                    init,
+                    init_decl.declarator.span,
+                    crate_,
+                    tcx,
+                    resolver,
+                    session,
+                )
+            });
 
             match &mut crate_.defs[def_id].kind {
                 DefKind::Typedef(slot) => *slot = ty,
-                DefKind::Global { ty: slot, .. } => *slot = ty,
+                DefKind::Global { ty: slot, init, .. } => {
+                    *slot = ty;
+                    *init = global_init;
+                }
                 _ => {}
             }
         }
@@ -4388,7 +4883,7 @@ mod tests {
             id: DefId(0),
             name: g,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
         });
         crate_.defs[id].id = id;
         resolver.ordinary.insert(g, id);
@@ -4870,17 +5365,20 @@ mod tests {
     }
 
     #[test]
-    fn declarator_incomplete_array_block_scope_error() {
-        // `int arr[]` at function scope → error E0076
+    fn declarator_incomplete_array_block_scope_deferred_to_decl_lowering() {
+        // The declarator fold cannot know whether an initializer will
+        // complete `int arr[]`, so it preserves the incomplete array. The
+        // block-declaration lowering layer emits E0076 if no initializer
+        // completes it.
         let (mut sess, cap) = Session::for_test();
         let mut tcx = TyCtxt::new();
         let arr = sym(&mut sess, "arr");
         let d = make_declarator(arr, vec![incomplete_array()]);
         let result = apply_declarator(tcx.int, &d, DeclScope::Block, &mut tcx, &mut sess);
-        assert_eq!(result, tcx.error);
-        let diags = cap.diagnostics();
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, Some("E0076"));
+        let expected =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: false });
+        assert_eq!(result, expected);
+        assert!(cap.diagnostics().is_empty());
     }
 
     #[test]
@@ -5877,7 +6375,7 @@ mod tests {
             id: DefId(0),
             name: n,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
         });
         crate_.defs[n_def].id = n_def;
         resolver.ordinary.insert(n, n_def);
@@ -6224,7 +6722,7 @@ mod tests {
         };
 
         match &crate_.defs[def_id].kind {
-            DefKind::Global { ty, linkage: Linkage::Internal } => match tcx.get(*ty) {
+            DefKind::Global { ty, linkage: Linkage::Internal, .. } => match tcx.get(*ty) {
                 Ty::Array { elem, len, is_vla } => {
                     assert_eq!(elem.ty, tcx.char_, "element should be char");
                     assert_eq!(*len, Some(3), "\"hi\" is 2 chars + NUL = 3");
@@ -6770,7 +7268,7 @@ mod tests {
             id: DefId(0),
             name: g,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
         });
         crate_.defs[g_def].id = g_def;
         resolver.ordinary.insert(g, g_def);

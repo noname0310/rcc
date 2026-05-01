@@ -1275,7 +1275,7 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
         });
         defs[did].id = did;
         let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
@@ -1303,7 +1303,7 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: arr_ty, linkage: Linkage::Internal },
+            kind: DefKind::Global { ty: arr_ty, linkage: Linkage::Internal, init: None },
         });
         defs[arr_did].id = arr_did;
 
@@ -1332,7 +1332,7 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: arr_ty, linkage: Linkage::Internal },
+            kind: DefKind::Global { ty: arr_ty, linkage: Linkage::Internal, init: None },
         });
         defs[arr_did].id = arr_did;
 
@@ -1397,7 +1397,7 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::Internal },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::Internal, init: None },
         });
         defs[did].id = did;
         let r = push(&mut body, tcx.int, HirExprKind::DefRef(did));
@@ -1425,7 +1425,7 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::Internal },
+            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::Internal, init: None },
         });
         defs[did].id = did;
         let r = push(&mut body, tcx.int, HirExprKind::DefRef(did));

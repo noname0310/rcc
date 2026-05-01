@@ -78,6 +78,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0076, E0076_DESC),
     (E0077, E0077_DESC),
     (E0078, E0078_DESC),
+    (E0079, E0079_DESC),
     (E0080, E0080_DESC),
     (E0081, E0081_DESC),
     (E0082, E0082_DESC),
@@ -448,6 +449,16 @@ const E0078_DESC: &str = "duplicate enumerator name";
 /// named bit-fields with this code.
 pub const E0077: &str = "E0077";
 const E0077_DESC: &str = "invalid bit-field width";
+
+/// Invalid initializer designator or excess initializer.
+///
+/// C99 §6.7.8p7 constrains designators to match the current aggregate:
+/// `[N]` selects array elements and `.name` selects members of a
+/// struct/union. An initializer that uses the wrong designator kind,
+/// names a missing field, or selects past a known bound cannot be
+/// lowered without losing source intent, so `rcc` rejects it here.
+pub const E0079: &str = "E0079";
+const E0079_DESC: &str = "invalid initializer designator";
 
 /// Assignment to an rvalue.
 ///

@@ -83,6 +83,8 @@ pub enum DefKind {
         ty: TyId,
         /// Linkage kind.
         linkage: Linkage,
+        /// Lowered static initializer, if this file-scope object has one.
+        init: Option<GlobalInit>,
     },
     /// `typedef` alias.
     Typedef(TyId),
@@ -158,6 +160,50 @@ pub enum Linkage {
     External,
     /// Block-scope locals.
     None,
+}
+
+/// Lowered initializer payload for a file-scope object.
+#[derive(Debug, Clone)]
+pub struct GlobalInit {
+    /// Object type after incomplete array completion.
+    pub ty: TyId,
+    /// Flattened initializer leaves in evaluation order.
+    pub entries: Vec<GlobalInitEntry>,
+}
+
+/// One leaf in a flattened global initializer.
+#[derive(Debug, Clone)]
+pub struct GlobalInitEntry {
+    /// Designator path from the root object to this leaf.
+    pub path: Vec<GlobalInitDesignator>,
+    /// Leaf value.
+    pub value: GlobalInitValue,
+    /// Source span of the initializer leaf.
+    pub span: Span,
+}
+
+/// A single component selector in a global initializer path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GlobalInitDesignator {
+    /// Array element index.
+    Index(u64),
+    /// Struct or union field index.
+    Field(u32),
+}
+
+/// Constant-ish leaf value captured before codegen emits data.
+#[derive(Clone, Debug)]
+pub enum GlobalInitValue {
+    /// Integer constant.
+    Int(i128),
+    /// Floating constant.
+    Float(f64),
+    /// String literal global.
+    StringLiteral(DefId),
+    /// Zero-fill marker for a scalar leaf.
+    Zero,
+    /// Malformed or not-yet-foldable initializer leaf.
+    Error,
 }
 
 /// A function body: locals + statements that will be lowered to CFG.

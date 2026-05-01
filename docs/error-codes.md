@@ -688,6 +688,23 @@ enum { B };               // error[E0078]: duplicate enumerator name `B`
 
 ---
 
+## E0079 — invalid initializer designator
+
+C99 §6.7.8 requires initializer designators to match the aggregate
+currently being initialized: `[N]` is only valid for arrays, `.field`
+is only valid for structs/unions, and a selected index or field must
+exist. `rcc` reports E0079 during HIR lowering instead of silently
+dropping the initializer entry.
+
+```c
+int a[2] = { [4] = 1 };   // error[E0079]: index past the array bound
+int b[2] = { .x = 1 };    // error[E0079]: field designator on an array
+struct S { int x; };
+struct S s = { .y = 1 };  // error[E0079]: no member named `y`
+```
+
+---
+
 ## E0080 — assignment to rvalue
 
 C99 §6.5.16p2 requires the left operand of a simple or compound

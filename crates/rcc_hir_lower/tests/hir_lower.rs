@@ -20,8 +20,8 @@ use rcc_ast::{
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
-    Body, DefId, DefKind, HirCrate, HirExprKind, HirStmtKind, Linkage, Local, LocalDecl,
-    RecordKind, TyCtxt, TyId, ValueCat,
+    Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprKind,
+    HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -1679,6 +1679,119 @@ fn snippet_compound_literal_array_initializer_is_indexable() {
         }),
         "array compound literal should initialise element [1]"
     );
+}
+
+#[test]
+fn snippet_char_array_string_initializer_completes_length_and_writes_chars() {
+    let (hir, tcx) = lower_snippet("void f(void) { char s[] = \"hi\"; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.char_),
+        other => panic!("expected completed char[3], got {other:?}"),
+    }
+    let mut elems = Vec::new();
+    for stmt in body.stmts.iter() {
+        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
+        if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
+            continue;
+        }
+        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
+        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        elems.push((i, v));
+    }
+    elems.sort();
+    assert_eq!(elems, vec![(0, 104), (1, 105), (2, 0)]);
+}
+
+#[test]
+fn snippet_incomplete_array_list_completes_from_element_count() {
+    let (hir, tcx) = lower_snippet("void f(void) { int a[] = {1,2,3}; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected completed int[3], got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_incomplete_array_designator_completes_from_max_index() {
+    let (hir, tcx) = lower_snippet("void f(void) { int a[] = { [4] = 1 }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(5), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected completed int[5], got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_incomplete_block_array_without_initializer_still_errors() {
+    let (_hir, _tcx, cap) = lower_snippet_with_diagnostics("void f(void) { int a[]; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0076)),
+        "incomplete block array without initializer should still emit E0076"
+    );
+}
+
+#[test]
+fn snippet_bad_initializer_designator_reports_e0079() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("void f(void) { int a[2] = { .x = 1 }; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
+        "bad initializer designator should emit E0079"
+    );
+}
+
+#[test]
+fn snippet_global_array_initializer_has_static_payload() {
+    let (hir, tcx) = lower_snippet("int g[] = {1,2,3};");
+    let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();
+    let DefKind::Global { ty, init: Some(init), .. } = &def.kind else {
+        panic!("expected global with initializer, got {:?}", def.kind);
+    };
+    match tcx.get(*ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected completed int[3], got {other:?}"),
+    }
+    assert_eq!(init.ty, *ty);
+    let values: Vec<_> = init
+        .entries
+        .iter()
+        .map(|entry| {
+            let [GlobalInitDesignator::Index(i)] = entry.path.as_slice() else {
+                panic!("expected index path, got {:?}", entry.path);
+            };
+            let GlobalInitValue::Int(v) = entry.value else {
+                panic!("expected int value, got {:?}", entry.value);
+            };
+            (*i, v)
+        })
+        .collect();
+    assert_eq!(values, vec![(0, 1), (1, 2), (2, 3)]);
+}
+
+#[test]
+fn snippet_global_char_array_string_initializer_has_static_payload() {
+    let (hir, tcx) = lower_snippet("char s[] = \"hi\";");
+    let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();
+    let DefKind::Global { ty, init: Some(init), .. } = &def.kind else {
+        panic!("expected global with initializer, got {:?}", def.kind);
+    };
+    match tcx.get(*ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.char_),
+        other => panic!("expected completed char[3], got {other:?}"),
+    }
+    let values: Vec<_> = init
+        .entries
+        .iter()
+        .map(|entry| match entry.value {
+            GlobalInitValue::Int(v) => v,
+            ref other => panic!("expected int byte, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(values, vec![104, 105, 0]);
 }
 
 #[test]
