@@ -66,7 +66,7 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
         }
         let body = builder.finish();
         #[cfg(any(debug_assertions, test))]
-        if let Err(errors) = crate::verify::verify_body(&body, tcx) {
+        if let Err(errors) = crate::verify::verify_body_with_hir(&body, tcx, hir) {
             emit_cfg_verifier_error(session, def.span, &errors);
         }
         out.insert(def_id, body);

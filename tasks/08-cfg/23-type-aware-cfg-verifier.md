@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-23: Type-aware CFG verifier
 
 **Phase:** 08-cfg    **Depends on:** 07-19    **Milestone:** M3 pre-codegen stabilization

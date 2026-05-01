@@ -30,7 +30,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [20-cfg-verifier-release-gate](20-cfg-verifier-release-gate.md)
 - [x] [21-eval-order-conformance-policy](21-eval-order-conformance-policy.md)
 - [x] [22-source-pipeline-edge-fixtures](22-source-pipeline-edge-fixtures.md)
-- [ ] [23-type-aware-cfg-verifier](23-type-aware-cfg-verifier.md)
+- [x] [23-type-aware-cfg-verifier](23-type-aware-cfg-verifier.md)
 - [ ] [24-pre-codegen-contract-fixtures](24-pre-codegen-contract-fixtures.md)
 
 ## Downstream

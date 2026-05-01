@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use rcc_hir::{TyCtxt, TyId};
+use rcc_hir::{DefKind, HirCrate, Ty, TyCtxt, TyId};
 
 use crate::{
     BasicBlockId, Body, Local, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
@@ -55,6 +55,29 @@ pub enum CfgErrorKind {
     StorageDeadWithoutLive { local: Local },
     /// A straightforward lexical local has an unmatched live/dead pair.
     UnbalancedStorage { local: Local, live: usize, dead: usize },
+    /// A produced value does not match the slot or destination it is stored in.
+    TypeMismatch { expected: TyId, actual: TyId },
+    /// A place projection is not legal for the type it is applied to.
+    InvalidProjection { base_ty: TyId, projection: ProjectionKind },
+    /// A call callee did not have a function or pointer-to-function type.
+    InvalidCalleeType { callee_ty: TyId },
+}
+
+/// Verifier projection category.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ProjectionKind {
+    /// Pointer dereference.
+    Deref,
+    /// Record field index.
+    Field(u32),
+    /// Array or pointer index.
+    Index,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum InferredTy {
+    Known(TyId),
+    AddressOf { pointee: TyId },
 }
 
 impl fmt::Display for CfgError {
@@ -70,7 +93,27 @@ impl std::error::Error for CfgError {}
 /// The storage check is deliberately conservative: it catches simple lexical
 /// mismatches such as missing `StorageDead` or dead-without-live, but it does
 /// not attempt path-sensitive lifetime validation through arbitrary branches.
-pub fn verify_body(body: &Body, _tcx: &TyCtxt) -> Result<(), Vec<CfgError>> {
+pub fn verify_body(body: &Body, tcx: &TyCtxt) -> Result<(), Vec<CfgError>> {
+    verify_body_inner(body, tcx, None)
+}
+
+/// Verify a CFG body with access to the owning HIR crate.
+///
+/// The extra HIR context lets the verifier validate record field projections,
+/// whose field count and field types are intentionally not duplicated in CFG.
+pub fn verify_body_with_hir(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: &HirCrate,
+) -> Result<(), Vec<CfgError>> {
+    verify_body_inner(body, tcx, Some(hir))
+}
+
+fn verify_body_inner(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+) -> Result<(), Vec<CfgError>> {
     let mut errors = Vec::new();
     if body.blocks.is_empty() {
         errors.push(CfgError { at: CfgLocation::Body, kind: CfgErrorKind::EmptyBody });
@@ -79,7 +122,7 @@ pub fn verify_body(body: &Body, _tcx: &TyCtxt) -> Result<(), Vec<CfgError>> {
 
     verify_return_slot(body, &mut errors);
     let reachable = reachable_blocks(body, &mut errors);
-    verify_blocks(body, &reachable, &mut errors);
+    verify_blocks(body, tcx, hir, &reachable, &mut errors);
     verify_storage(body, &mut errors);
 
     if errors.is_empty() {
@@ -106,14 +149,23 @@ fn verify_return_slot(body: &Body, errors: &mut Vec<CfgError>) {
     }
 }
 
-fn verify_blocks(body: &Body, reachable: &[bool], errors: &mut Vec<CfgError>) {
+fn verify_blocks(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    reachable: &[bool],
+    errors: &mut Vec<CfgError>,
+) {
     for (bb, block) in body.blocks.iter_enumerated() {
         for (index, stmt) in block.statements.iter().enumerate() {
             let at = CfgLocation::Statement { block: bb, index };
             match &stmt.kind {
                 StatementKind::Assign { place, rvalue } => {
-                    verify_place(body, place, at.clone(), errors);
-                    verify_rvalue(body, rvalue, at, errors);
+                    let dst = verify_place_typed(body, tcx, hir, place, at.clone(), errors);
+                    let src = verify_rvalue_typed(body, tcx, hir, rvalue, at.clone(), errors);
+                    if let (Some(dst), Some(src)) = (dst, src) {
+                        verify_type_match(tcx, dst, src, at, errors);
+                    }
                 }
                 StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
                     verify_local(body, *local, at, errors);
@@ -126,7 +178,7 @@ fn verify_blocks(body: &Body, reachable: &[bool], errors: &mut Vec<CfgError>) {
         match &block.terminator.kind {
             TerminatorKind::Goto(target) => verify_block_target(body, *target, at, errors),
             TerminatorKind::SwitchInt { discr, targets } => {
-                verify_operand(body, discr, at.clone(), errors);
+                let _ = verify_operand_typed(body, tcx, hir, discr, at.clone(), errors);
                 if targets.is_empty() {
                     errors
                         .push(CfgError { at: at.clone(), kind: CfgErrorKind::EmptySwitchTargets });
@@ -142,12 +194,30 @@ fn verify_blocks(body: &Body, reachable: &[bool], errors: &mut Vec<CfgError>) {
                 }
             }
             TerminatorKind::Call { callee, args, destination, target } => {
-                verify_operand(body, callee, at.clone(), errors);
+                let callee_ty = verify_operand_typed(body, tcx, hir, callee, at.clone(), errors);
                 for arg in args {
-                    verify_operand(body, arg, at.clone(), errors);
+                    let _ = verify_operand_typed(body, tcx, hir, arg, at.clone(), errors);
                 }
-                if let Some(dest) = destination {
-                    verify_place(body, dest, at.clone(), errors);
+                let dest_ty = destination
+                    .as_ref()
+                    .and_then(|dest| verify_place_typed(body, tcx, hir, dest, at.clone(), errors));
+                if let Some(callee_ty) = callee_ty {
+                    if let Some(ret_ty) = callee_return_ty(tcx, callee_ty) {
+                        if let Some(dest_ty) = dest_ty {
+                            verify_type_match(
+                                tcx,
+                                ret_ty,
+                                InferredTy::Known(dest_ty),
+                                at.clone(),
+                                errors,
+                            );
+                        }
+                    } else {
+                        errors.push(CfgError {
+                            at: at.clone(),
+                            kind: CfgErrorKind::InvalidCalleeType { callee_ty },
+                        });
+                    }
                 }
                 if let Some(target) = target {
                     verify_block_target(body, *target, at, errors);
@@ -166,35 +236,263 @@ fn verify_blocks(body: &Body, reachable: &[bool], errors: &mut Vec<CfgError>) {
     }
 }
 
-fn verify_rvalue(body: &Body, rvalue: &Rvalue, at: CfgLocation, errors: &mut Vec<CfgError>) {
+fn verify_rvalue_typed(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    rvalue: &Rvalue,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) -> Option<InferredTy> {
     match rvalue {
-        Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast { op, .. } => {
-            verify_operand(body, op, at, errors);
+        Rvalue::Use(op) => {
+            verify_operand_typed(body, tcx, hir, op, at, errors).map(InferredTy::Known)
         }
-        Rvalue::ComplexFromReal { real, .. } => verify_operand(body, real, at, errors),
-        Rvalue::RealFromComplex { complex, .. } => verify_operand(body, complex, at, errors),
-        Rvalue::BinaryOp(_, lhs, rhs) => {
-            verify_operand(body, lhs, at.clone(), errors);
-            verify_operand(body, rhs, at, errors);
+        Rvalue::UnaryOp(op, operand) => {
+            let operand_ty = verify_operand_typed(body, tcx, hir, operand, at, errors)?;
+            match op {
+                crate::UnOp::LogNot => Some(InferredTy::Known(tcx.int)),
+                crate::UnOp::Neg | crate::UnOp::FNeg | crate::UnOp::BitNot => {
+                    Some(InferredTy::Known(operand_ty))
+                }
+            }
         }
-        Rvalue::AddressOf(place) | Rvalue::Len(place) => verify_place(body, place, at, errors),
+        Rvalue::Cast { op, to, .. } => {
+            let _ = verify_operand_typed(body, tcx, hir, op, at, errors);
+            Some(InferredTy::Known(*to))
+        }
+        Rvalue::ComplexFromReal { real, to } => {
+            let _ = verify_operand_typed(body, tcx, hir, real, at, errors);
+            Some(InferredTy::Known(*to))
+        }
+        Rvalue::RealFromComplex { complex, to } => {
+            let _ = verify_operand_typed(body, tcx, hir, complex, at, errors);
+            Some(InferredTy::Known(*to))
+        }
+        Rvalue::BinaryOp(op, lhs, rhs) => {
+            let lhs_ty = verify_operand_typed(body, tcx, hir, lhs, at.clone(), errors)?;
+            let rhs_ty = verify_operand_typed(body, tcx, hir, rhs, at, errors)?;
+            Some(InferredTy::Known(binary_result_ty(tcx, *op, lhs_ty, rhs_ty)))
+        }
+        Rvalue::AddressOf(place) => {
+            let pointee = verify_place_typed(body, tcx, hir, place, at.clone(), errors)?;
+            Some(InferredTy::AddressOf { pointee })
+        }
+        Rvalue::Len(place) => {
+            let _ = verify_place_typed(body, tcx, hir, place, at, errors);
+            Some(InferredTy::Known(tcx.ulong))
+        }
     }
 }
 
-fn verify_operand(body: &Body, operand: &Operand, at: CfgLocation, errors: &mut Vec<CfgError>) {
+fn verify_operand_typed(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    operand: &Operand,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) -> Option<TyId> {
     match operand {
-        Operand::Copy(place) | Operand::Move(place) => verify_place(body, place, at, errors),
-        Operand::Const(_) => {}
+        Operand::Copy(place) | Operand::Move(place) => {
+            verify_place_typed(body, tcx, hir, place, at, errors)
+        }
+        Operand::Const(c) => Some(c.ty),
     }
 }
 
-fn verify_place(body: &Body, place: &Place, at: CfgLocation, errors: &mut Vec<CfgError>) {
+fn verify_place_typed(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    place: &Place,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) -> Option<TyId> {
     verify_local(body, place.base, at.clone(), errors);
+    let mut ty = body.locals.get(place.base).map(|decl| decl.ty)?;
     for projection in &place.projection {
         match projection {
-            Projection::Deref | Projection::Field(_) => {}
-            Projection::Index(index) => verify_operand(body, index, at.clone(), errors),
+            Projection::Deref => match tcx.get(ty) {
+                Ty::Ptr(q) => ty = q.ty,
+                _ => {
+                    errors.push(CfgError {
+                        at,
+                        kind: CfgErrorKind::InvalidProjection {
+                            base_ty: ty,
+                            projection: ProjectionKind::Deref,
+                        },
+                    });
+                    return None;
+                }
+            },
+            Projection::Field(index) => {
+                ty = verify_field_projection(tcx, hir, ty, *index, at.clone(), errors)?;
+            }
+            Projection::Index(index) => {
+                let _ = verify_operand_typed(body, tcx, hir, index, at.clone(), errors);
+                match tcx.get(ty) {
+                    Ty::Array { elem, .. } => ty = elem.ty,
+                    Ty::Ptr(q) => ty = q.ty,
+                    _ => {
+                        errors.push(CfgError {
+                            at,
+                            kind: CfgErrorKind::InvalidProjection {
+                                base_ty: ty,
+                                projection: ProjectionKind::Index,
+                            },
+                        });
+                        return None;
+                    }
+                }
+            }
         }
+    }
+    Some(ty)
+}
+
+fn verify_field_projection(
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    base_ty: TyId,
+    index: u32,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) -> Option<TyId> {
+    let Ty::Record(def_id) = *tcx.get(base_ty) else {
+        errors.push(CfgError {
+            at,
+            kind: CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(index),
+            },
+        });
+        return None;
+    };
+
+    let Some(hir) = hir else {
+        errors.push(CfgError {
+            at,
+            kind: CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(index),
+            },
+        });
+        return None;
+    };
+
+    let Some(def) = hir.defs.get(def_id) else {
+        errors.push(CfgError {
+            at,
+            kind: CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(index),
+            },
+        });
+        return None;
+    };
+
+    let DefKind::Record { fields, .. } = &def.kind else {
+        errors.push(CfgError {
+            at,
+            kind: CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(index),
+            },
+        });
+        return None;
+    };
+
+    let Some(field) = fields.get(index as usize) else {
+        errors.push(CfgError {
+            at,
+            kind: CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(index),
+            },
+        });
+        return None;
+    };
+    Some(field.ty)
+}
+
+fn verify_type_match(
+    tcx: &TyCtxt,
+    expected: TyId,
+    actual: InferredTy,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) {
+    match actual {
+        InferredTy::Known(actual) => {
+            if actual != expected {
+                errors.push(CfgError { at, kind: CfgErrorKind::TypeMismatch { expected, actual } });
+            }
+        }
+        InferredTy::AddressOf { pointee } => match tcx.get(expected) {
+            Ty::Ptr(q) if q.ty == pointee => {}
+            _ => {
+                errors.push(CfgError {
+                    at,
+                    kind: CfgErrorKind::TypeMismatch { expected, actual: pointee },
+                });
+            }
+        },
+    }
+}
+
+fn binary_result_ty(tcx: &TyCtxt, op: crate::BinOp, lhs_ty: TyId, rhs_ty: TyId) -> TyId {
+    match op {
+        crate::BinOp::Eq
+        | crate::BinOp::Ne
+        | crate::BinOp::SLt
+        | crate::BinOp::SLe
+        | crate::BinOp::SGt
+        | crate::BinOp::SGe
+        | crate::BinOp::ULt
+        | crate::BinOp::ULe
+        | crate::BinOp::UGt
+        | crate::BinOp::UGe
+        | crate::BinOp::FLt
+        | crate::BinOp::FLe
+        | crate::BinOp::FGt
+        | crate::BinOp::FGe => tcx.int,
+        crate::BinOp::PtrDiff => tcx.long,
+        crate::BinOp::PtrAdd | crate::BinOp::PtrSub => {
+            if matches!(tcx.get(lhs_ty), Ty::Ptr(_)) {
+                lhs_ty
+            } else {
+                rhs_ty
+            }
+        }
+        crate::BinOp::Add
+        | crate::BinOp::Sub
+        | crate::BinOp::Mul
+        | crate::BinOp::SDiv
+        | crate::BinOp::UDiv
+        | crate::BinOp::SRem
+        | crate::BinOp::URem
+        | crate::BinOp::FDiv
+        | crate::BinOp::Shl
+        | crate::BinOp::AShr
+        | crate::BinOp::LShr
+        | crate::BinOp::BitAnd
+        | crate::BinOp::BitXor
+        | crate::BinOp::BitOr
+        | crate::BinOp::FAdd
+        | crate::BinOp::FSub
+        | crate::BinOp::FMul => lhs_ty,
+    }
+}
+
+fn callee_return_ty(tcx: &TyCtxt, callee_ty: TyId) -> Option<TyId> {
+    match tcx.get(callee_ty) {
+        Ty::Func { ret, .. } => Some(*ret),
+        Ty::Ptr(q) => match tcx.get(q.ty) {
+            Ty::Func { ret, .. } => Some(*ret),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -296,8 +594,10 @@ fn verify_storage(body: &Body, errors: &mut Vec<CfgError>) {
 #[cfg(test)]
 mod tests {
     use rcc_data_structures::IndexVec;
-    use rcc_hir::{Ty, TyCtxt};
-    use rcc_span::DUMMY_SP;
+    use rcc_hir::{
+        Def, DefId, DefKind, Field, HirCrate, ObjectQuals, Qual, RecordKind, Ty, TyCtxt, TyId,
+    };
+    use rcc_span::{Symbol, DUMMY_SP};
 
     use super::*;
     use crate::{BasicBlock, Const, ConstKind, LocalDecl, Statement, Terminator, TerminatorKind};
@@ -313,9 +613,13 @@ mod tests {
     }
 
     fn local_decl(name: bool) -> LocalDecl {
+        local_decl_with_ty(ty(), name)
+    }
+
+    fn local_decl_with_ty(ty: TyId, name: bool) -> LocalDecl {
         LocalDecl {
             name: name.then_some(rcc_span::Symbol(1)),
-            ty: ty(),
+            ty,
             quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
@@ -324,14 +628,44 @@ mod tests {
     }
 
     fn base_body() -> Body {
+        body_with_return_ty(ty())
+    }
+
+    fn body_with_return_ty(ret_ty: TyId) -> Body {
         let mut locals: IndexVec<Local, LocalDecl> = IndexVec::new();
-        locals.push(local_decl(false));
+        locals.push(local_decl_with_ty(ret_ty, false));
         let mut blocks: IndexVec<BasicBlockId, BasicBlock> = IndexVec::new();
         blocks.push(BasicBlock {
             statements: Vec::new(),
             terminator: Terminator { kind: TerminatorKind::Return, span: DUMMY_SP },
         });
-        Body { def: None, locals, blocks, ret_ty: Some(ty()) }
+        Body { def: None, locals, blocks, ret_ty: Some(ret_ty) }
+    }
+
+    fn record_hir(record: DefId, fields: Vec<TyId>) -> HirCrate {
+        let mut hir = HirCrate::default();
+        hir.defs.push(Def {
+            id: record,
+            name: Symbol(1),
+            span: DUMMY_SP,
+            kind: DefKind::Record {
+                kind: RecordKind::Struct,
+                layout: None,
+                fields: fields
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, ty)| Field {
+                        name: Some(Symbol((i + 2) as u32)),
+                        ty,
+                        quals: ObjectQuals::none(),
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    })
+                    .collect(),
+            },
+        });
+        hir
     }
 
     #[test]
@@ -402,6 +736,127 @@ mod tests {
         assert!(errors.iter().any(|err| matches!(
             err.kind,
             CfgErrorKind::UnbalancedStorage { local: Local(1), live: 1, dead: 0 }
+        )));
+    }
+
+    #[test]
+    fn verify_reports_bad_return_slot_type() {
+        let tcx = TyCtxt::new();
+        let mut body = body_with_return_ty(tcx.int);
+        body.locals[Local(0)].ty = tcx.double;
+
+        let errors = verify_body(&body, &tcx).unwrap_err();
+        assert!(errors.iter().any(|err| matches!(
+            err.kind,
+            CfgErrorKind::ReturnSlotTypeMismatch { ret_ty, slot_ty }
+                if ret_ty == tcx.int && slot_ty == tcx.double
+        )));
+    }
+
+    #[test]
+    fn verify_reports_bad_assignment_type() {
+        let tcx = TyCtxt::new();
+        let mut body = body_with_return_ty(tcx.int);
+        body.locals.push(local_decl_with_ty(tcx.int, true));
+        body.blocks[BasicBlockId(0)].statements.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: Local(1), projection: Vec::new() },
+                rvalue: Rvalue::Use(Operand::Const(Const {
+                    kind: ConstKind::Float(1.0),
+                    ty: tcx.double,
+                })),
+            },
+            span: DUMMY_SP,
+        });
+
+        let errors = verify_body(&body, &tcx).unwrap_err();
+        assert!(errors.iter().any(|err| matches!(
+            err.kind,
+            CfgErrorKind::TypeMismatch { expected, actual }
+                if expected == tcx.int && actual == tcx.double
+        )));
+    }
+
+    #[test]
+    fn verify_reports_invalid_field_index() {
+        let mut tcx = TyCtxt::new();
+        let record = DefId(0);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let hir = record_hir(record, vec![tcx.int, tcx.int]);
+        let mut body = body_with_return_ty(tcx.int);
+        body.locals.push(local_decl_with_ty(rec_ty, true));
+        body.blocks[BasicBlockId(0)].statements.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: Local(1), projection: vec![Projection::Field(2)] },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), ty: tcx.int })),
+            },
+            span: DUMMY_SP,
+        });
+
+        let errors = verify_body_with_hir(&body, &tcx, &hir).unwrap_err();
+        assert!(errors.iter().any(|err| matches!(
+            err.kind,
+            CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Field(2)
+            } if base_ty == rec_ty
+        )));
+    }
+
+    #[test]
+    fn verify_reports_invalid_index_projection() {
+        let tcx = TyCtxt::new();
+        let mut body = body_with_return_ty(tcx.int);
+        body.locals.push(local_decl_with_ty(tcx.int, true));
+        body.blocks[BasicBlockId(0)].statements.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place {
+                    base: Local(1),
+                    projection: vec![Projection::Index(Operand::Const(Const {
+                        kind: ConstKind::Int(0),
+                        ty: tcx.int,
+                    }))],
+                },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), ty: tcx.int })),
+            },
+            span: DUMMY_SP,
+        });
+
+        let errors = verify_body(&body, &tcx).unwrap_err();
+        assert!(errors.iter().any(|err| matches!(
+            err.kind,
+            CfgErrorKind::InvalidProjection {
+                base_ty,
+                projection: ProjectionKind::Index
+            } if base_ty == tcx.int
+        )));
+    }
+
+    #[test]
+    fn verify_reports_call_destination_type_mismatch() {
+        let mut tcx = TyCtxt::new();
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.double,
+            params: Vec::new(),
+            variadic: false,
+            proto: true,
+        });
+        let fn_ptr = tcx.intern(Ty::Ptr(Qual::plain(fn_ty)));
+        let mut body = body_with_return_ty(tcx.int);
+        body.locals.push(local_decl_with_ty(fn_ptr, true));
+        body.locals.push(local_decl_with_ty(tcx.int, true));
+        body.blocks[BasicBlockId(0)].terminator.kind = TerminatorKind::Call {
+            callee: Operand::Copy(Place { base: Local(1), projection: Vec::new() }),
+            args: Vec::new(),
+            destination: Some(Place { base: Local(2), projection: Vec::new() }),
+            target: None,
+        };
+
+        let errors = verify_body(&body, &tcx).unwrap_err();
+        assert!(errors.iter().any(|err| matches!(
+            err.kind,
+            CfgErrorKind::TypeMismatch { expected, actual }
+                if expected == tcx.double && actual == tcx.int
         )));
     }
 }

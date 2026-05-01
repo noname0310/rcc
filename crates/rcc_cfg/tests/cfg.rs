@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcc_cfg::{
-    build_bodies, pretty::dump_body, verify::verify_body, BasicBlockId, Body, CastKind, Const,
-    ConstKind, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
+    build_bodies, pretty::dump_body, verify::verify_body_with_hir, BasicBlockId, Body, CastKind,
+    Const, ConstKind, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
-use rcc_hir::{DefId, Local, TyCtxt};
+use rcc_hir::{DefId, HirCrate, Local, TyCtxt};
 use rcc_hir_lower::lower;
 use rcc_session::{Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
@@ -21,6 +21,7 @@ struct Fixture {
 
 struct Lowered {
     tcx: TyCtxt,
+    hir: HirCrate,
     bodies: Vec<(DefId, Body)>,
 }
 
@@ -291,7 +292,7 @@ fn cfg_fixture_matrix_satisfies_invariants() {
             fixture.name
         );
         for (def, body) in &lowered.bodies {
-            verify_body(body, &lowered.tcx)
+            verify_body_with_hir(body, &lowered.tcx, &lowered.hir)
                 .unwrap_or_else(|errors| panic!("{}: verifier errors: {errors:?}", fixture.name));
             assert_body_invariants(fixture.name, *def, body);
         }
@@ -313,7 +314,7 @@ fn edge_source_pipeline_stabilization_fixtures() {
             fixture.review_finding,
         );
         for (def, body) in &lowered.bodies {
-            verify_body(body, &lowered.tcx).unwrap_or_else(|errors| {
+            verify_body_with_hir(body, &lowered.tcx, &lowered.hir).unwrap_or_else(|errors| {
                 panic!(
                     "{} ({}): verifier errors for {}: {errors:?}",
                     fixture.name, fixture.task, fixture.review_finding
@@ -575,7 +576,7 @@ fn lower_snippet(name: &str, src: &str) -> Lowered {
 
     let mut bodies: Vec<_> = build_bodies(&mut session, &tcx, &hir).into_iter().collect();
     bodies.sort_by_key(|(def, _)| def.0);
-    Lowered { tcx, bodies }
+    Lowered { tcx, hir, bodies }
 }
 
 fn complex_conversion_counts(body: &Body) -> (usize, usize) {
