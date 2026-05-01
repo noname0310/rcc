@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-20: CFG verifier release gate
 
 **Phase:** 08-cfg    **Depends on:** 08-19    **Milestone:** M3 stabilization
@@ -35,3 +37,10 @@ run in every build profile.
 ## References
 - `crates/rcc_cfg/src/build.rs` `BodyBuilder::finish`.
 - `crates/rcc_cfg/tests/cfg.rs` invariant helpers.
+
+## Storage-balance limitation
+
+`verify_body` checks simple global live/dead count mismatches and
+dead-without-live errors. It intentionally does not attempt full
+path-sensitive lifetime proof through arbitrary branches; task 08-21
+keeps evaluation-order and deeper policy decisions separate.

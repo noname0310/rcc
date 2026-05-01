@@ -63,7 +63,12 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
         if !builder.is_current_terminated() {
             builder.terminate(Terminator { kind: TerminatorKind::Return, span: def.span });
         }
-        out.insert(def_id, builder.finish());
+        let body = builder.finish();
+        #[cfg(any(debug_assertions, test))]
+        if let Err(errors) = crate::verify::verify_body(&body, tcx) {
+            emit_cfg_verifier_error(session, def.span, &errors);
+        }
+        out.insert(def_id, body);
     }
     out
 }
@@ -100,6 +105,17 @@ fn emit_sizeof_layout_error(session: &mut Session, span: Span, err: LayoutError)
     .primary(span, "sizeof requires a complete object layout")
     .note(err.to_string())
     .emit();
+}
+
+#[cfg(any(debug_assertions, test))]
+fn emit_cfg_verifier_error(session: &mut Session, span: Span, errors: &[crate::verify::CfgError]) {
+    let mut diag =
+        DiagnosticBuilder::new(&mut session.handler, Level::Error, "invalid CFG produced");
+    diag = diag.primary(span, "CFG verifier rejected this function body");
+    for err in errors {
+        diag = diag.note(err.to_string());
+    }
+    diag.emit();
 }
 
 /// Per-block bookkeeping while a body is under construction.

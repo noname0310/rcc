@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcc_cfg::{
-    build_bodies, pretty::dump_body, BasicBlockId, Body, Const, ConstKind, Operand, Place,
-    Projection, Rvalue, StatementKind, TerminatorKind,
+    build_bodies, pretty::dump_body, verify::verify_body, BasicBlockId, Body, Const, ConstKind,
+    Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, Local, TyCtxt};
@@ -211,6 +211,8 @@ fn cfg_fixture_matrix_satisfies_invariants() {
             fixture.name
         );
         for (def, body) in &lowered.bodies {
+            verify_body(body, &lowered.tcx)
+                .unwrap_or_else(|errors| panic!("{}: verifier errors: {errors:?}", fixture.name));
             assert_body_invariants(fixture.name, *def, body);
         }
     }
