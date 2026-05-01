@@ -1,5 +1,12 @@
 # 08-12: StorageLive / StorageDead
 
+> **Status:** done. Block-scoped locals are bracketed by
+> `StorageLive` / `StorageDead` via `BodyBuilder::enter_scope` /
+> `exit_scope` / `storage_live`. `break` / `continue` / `return` flush
+> every scope they jump out of via `emit_storage_deads_to_depth`.
+> Goto-out-of-scope is a known limitation (the pre-pass does not
+> currently record per-label scope depth).
+
 **Phase:** 08-cfg    **Depends on:** 08-01    **Milestone:** M3
 
 ## Goal

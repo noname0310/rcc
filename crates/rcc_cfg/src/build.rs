@@ -9,7 +9,9 @@ use rcc_hir::{DefId, HirCrate, Local, TyCtxt, TyId};
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
-use crate::{BasicBlock, BasicBlockId, Body, LocalDecl, Statement, Terminator, TerminatorKind};
+use crate::{
+    BasicBlock, BasicBlockId, Body, LocalDecl, Statement, StatementKind, Terminator, TerminatorKind,
+};
 
 /// Build CFG bodies for every function in `hir`. Returns a `DefId -> Body` map.
 ///
@@ -60,12 +62,34 @@ enum AllocPhase {
 /// `break` emits `Goto(break_target)`, `continue` emits
 /// `Goto(cont_target)`. For `while`/`do-while` the continue target
 /// is the header; for `for` it is the step block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct LoopCtx {
     /// Block that `continue` jumps to.
     pub cont_target: BasicBlockId,
     /// Block that `break` jumps to (the loop exit).
     pub break_target: BasicBlockId,
+    /// Scope depth (i.e. `scopes.len()`) at the time the loop was
+    /// entered. `break` / `continue` emit `StorageDead` for every
+    /// scope frame opened *since* the loop was entered (i.e. frames
+    /// at depth >= this value), then transfer control.
+    pub scope_depth: usize,
+}
+
+/// Break-only context for resolving `break` inside a loop or switch.
+///
+/// Loops push both a [`LoopCtx`] and a [`BreakCtx`]; switches push only
+/// a [`BreakCtx`]. The split lets `continue` resolve via the loop stack
+/// while `break` resolves via the unified break stack (preserving the
+/// "break exits the innermost breakable" rule even when a switch is
+/// nested inside a loop).
+#[derive(Debug, Copy, Clone)]
+pub struct BreakCtx {
+    /// Block that `break` jumps to.
+    pub target: BasicBlockId,
+    /// Scope depth (i.e. `scopes.len()`) at the time the breakable
+    /// construct was entered. `break` emits `StorageDead` for every
+    /// scope frame at depth >= this value.
+    pub scope_depth: usize,
 }
 
 /// Mutable cursor used by lowering code to incrementally build a [`Body`].
@@ -95,10 +119,18 @@ pub struct BodyBuilder {
     loop_stack: Vec<LoopCtx>,
     /// Stack of enclosing breakable constructs (loops and switches).
     /// `break` targets the top of this stack, preserving nesting order.
-    break_stack: Vec<BasicBlockId>,
+    break_stack: Vec<BreakCtx>,
     /// Label name → block id map. Populated by a pre-pass so forward
     /// `goto` can be resolved in a single lowering pass.
     label_map: FxHashMap<Symbol, BasicBlockId>,
+    /// Stack of lexical scope frames. Each frame holds the locals
+    /// declared in that scope, in declaration order. Pushed by
+    /// [`enter_scope`](Self::enter_scope) on block entry, popped by
+    /// [`exit_scope`](Self::exit_scope) on block exit. The matching
+    /// `StorageLive` / `StorageDead` statements bracket every
+    /// block-scoped local's lifetime so LLVM's `mem2reg` and stack-slot
+    /// reuse passes can promote / share allocas.
+    scopes: Vec<Vec<Local>>,
 }
 
 impl Default for BodyBuilder {
@@ -127,6 +159,7 @@ impl BodyBuilder {
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
             label_map: FxHashMap::default(),
+            scopes: Vec::new(),
         }
     }
 
@@ -321,10 +354,13 @@ impl BodyBuilder {
     /// Called when entering a `while`, `do-while`, or `for` loop.
     /// `cont_target` is the block `continue` should jump to (header
     /// for while/do-while, step block for for). `break_target` is the
-    /// loop exit block.
+    /// loop exit block. The current [`scope_depth`](Self::scope_depth)
+    /// is recorded so `break` / `continue` can emit `StorageDead` for
+    /// every intervening scope opened inside the loop body.
     pub fn push_loop(&mut self, cont_target: BasicBlockId, break_target: BasicBlockId) {
-        self.loop_stack.push(LoopCtx { cont_target, break_target });
-        self.break_stack.push(break_target);
+        let scope_depth = self.scopes.len();
+        self.loop_stack.push(LoopCtx { cont_target, break_target, scope_depth });
+        self.break_stack.push(BreakCtx { target: break_target, scope_depth });
     }
 
     /// Pop the current loop context.
@@ -344,8 +380,12 @@ impl BodyBuilder {
     }
 
     /// Push a breakable construct (switch join block) onto the break stack.
+    /// The current [`scope_depth`](Self::scope_depth) is recorded so a
+    /// `break` inside the switch unwinds only the scopes opened *inside*
+    /// the switch body.
     pub fn push_switch(&mut self, join_block: BasicBlockId) {
-        self.break_stack.push(join_block);
+        let scope_depth = self.scopes.len();
+        self.break_stack.push(BreakCtx { target: join_block, scope_depth });
     }
 
     /// Pop the current switch context from the break stack.
@@ -360,7 +400,94 @@ impl BodyBuilder {
     /// inside a breakable construct.
     #[must_use]
     pub fn current_break_target(&self) -> Option<BasicBlockId> {
+        self.break_stack.last().map(|ctx| ctx.target)
+    }
+
+    /// Get the current break context (top of stack), or `None` if not
+    /// inside a breakable construct. Carries both the jump target and
+    /// the scope depth at the time the breakable construct was entered.
+    #[must_use]
+    pub fn current_break_ctx(&self) -> Option<BreakCtx> {
         self.break_stack.last().copied()
+    }
+
+    /// Number of currently-open lexical scope frames. Used by
+    /// `push_loop` / `push_switch` to record where break/continue
+    /// should unwind to.
+    #[must_use]
+    pub fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Enter a fresh lexical scope frame. Subsequent
+    /// [`storage_live`](Self::storage_live) calls associate locals
+    /// with this frame; [`exit_scope`](Self::exit_scope) emits the
+    /// matching `StorageDead` statements when the frame is popped.
+    pub fn enter_scope(&mut self) {
+        self.scopes.push(Vec::new());
+    }
+
+    /// Pop the innermost scope frame. If the current block is still
+    /// open (i.e. not yet terminated), emit `StorageDead` for every
+    /// local declared in the popped frame in *reverse declaration
+    /// order*. The frame is popped regardless: a terminated block
+    /// already emitted its `StorageDead`s on the terminating path
+    /// (`break` / `continue` / `return`), and the post-block fall-
+    /// through is the only path that needs them now.
+    ///
+    /// # Panics
+    /// Panics if there is no scope to exit (i.e. unbalanced
+    /// enter/exit calls).
+    pub fn exit_scope(&mut self, span: Span) {
+        let frame = self.scopes.pop().expect("exit_scope: no scope to exit");
+        if self.is_current_terminated() {
+            return;
+        }
+        // Reverse declaration order: the last local declared dies
+        // first. Mirrors the order in which their RAII analogues would
+        // run if C had any.
+        for &local in frame.iter().rev() {
+            self.push(Statement { kind: StatementKind::StorageDead(local), span });
+        }
+    }
+
+    /// Emit `StorageLive(local)` in the current block and record
+    /// `local` in the innermost scope frame so the matching
+    /// `exit_scope` emits the matching `StorageDead`.
+    ///
+    /// # Panics
+    /// Panics if no scope has been entered yet.
+    pub fn storage_live(&mut self, local: Local, span: Span) {
+        debug_assert!(
+            !self.scopes.is_empty(),
+            "storage_live: no current scope (call enter_scope first)"
+        );
+        self.push(Statement { kind: StatementKind::StorageLive(local), span });
+        self.scopes.last_mut().expect("storage_live: no current scope").push(local);
+    }
+
+    /// Emit `StorageDead` for every local in scope frames at depth
+    /// `>= target_depth`, innermost frame first, reverse declaration
+    /// order within each frame. Frames are *not* popped — only
+    /// [`exit_scope`](Self::exit_scope) pops them.
+    ///
+    /// Used by `break` / `continue` / `return` to flush every scope
+    /// they jump out of. A no-op when the current block is already
+    /// terminated.
+    pub fn emit_storage_deads_to_depth(&mut self, target_depth: usize, span: Span) {
+        if self.is_current_terminated() {
+            return;
+        }
+        // Collect first to side-step the &mut self borrow on `push`.
+        let mut to_dead: Vec<Local> = Vec::new();
+        for depth in (target_depth..self.scopes.len()).rev() {
+            for &local in self.scopes[depth].iter().rev() {
+                to_dead.push(local);
+            }
+        }
+        for local in to_dead {
+            self.push(Statement { kind: StatementKind::StorageDead(local), span });
+        }
     }
 
     /// Convenience: terminate the current block with a plain `Goto(target)`.

@@ -345,7 +345,7 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
     }
     match &stmt.kind {
         HirStmtKind::Block(stmts) => {
-            lower_block_stmts(builder, cx, stmts);
+            lower_block_stmts(builder, cx, stmt.span, stmts);
         }
         HirStmtKind::Expr(expr) => {
             let _ = lower_as_rvalue(builder, cx, *expr);
@@ -364,6 +364,10 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
                     span: stmt.span,
                 });
             }
+            // `return` exits every open lexical scope: emit StorageDead
+            // for all currently-live block-scoped locals in reverse
+            // declaration order before the `Return` terminator.
+            builder.emit_storage_deads_to_depth(0, stmt.span);
             builder.terminate(Terminator { kind: TerminatorKind::Return, span: stmt.span });
         }
         HirStmtKind::Null => {}
@@ -388,6 +392,15 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             lower_stmt(builder, cx, *body);
         }
         HirStmtKind::Goto(name) => {
+            // C99 permits `goto` to leave any number of nested scopes,
+            // but the target's scope depth is not currently tracked
+            // (the `collect_labels` pre-pass only records the block id).
+            // Without that info we can't compute the correct number of
+            // intervening `StorageDead`s, so we conservatively emit
+            // none. Goto-out-of-scope therefore leaves StorageLive/Dead
+            // un-paired on the goto path; the rest of this task's
+            // acceptance (block fall-through + break/continue/return)
+            // is unaffected.
             let target = builder.label_block(*name);
             builder.goto(target, stmt.span);
         }
@@ -397,13 +410,16 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::Break => {
             // `break` exits the innermost enclosing breakable construct
             // (loop or switch).  The break stack preserves nesting order.
-            let break_target = builder
-                .current_break_target()
-                .expect("break statement outside of a loop or switch");
-            builder.goto(break_target, stmt.span);
+            let ctx =
+                builder.current_break_ctx().expect("break statement outside of a loop or switch");
+            // Flush every scope opened *inside* the breakable construct.
+            builder.emit_storage_deads_to_depth(ctx.scope_depth, stmt.span);
+            builder.goto(ctx.target, stmt.span);
         }
         HirStmtKind::Continue => {
-            let loop_ctx = builder.current_loop().expect("continue statement outside of a loop");
+            let loop_ctx = *builder.current_loop().expect("continue statement outside of a loop");
+            // Flush every scope opened *inside* the loop body.
+            builder.emit_storage_deads_to_depth(loop_ctx.scope_depth, stmt.span);
             builder.goto(loop_ctx.cont_target, stmt.span);
         }
     }
@@ -849,6 +865,14 @@ fn lower_for(
     step: Option<HirExprId>,
     body: HirStmtId,
 ) {
+    // C99 §6.8.5p5: the for-loop is its own block whose scope encloses
+    // the optional declaration in `init`. Open that scope first so a
+    // declaration like `for (int i = 0; ...; ...)` is bracketed by
+    // `StorageLive(i)` / `StorageDead(i)` covering the whole loop —
+    // including the exit block. For an expression init the frame is
+    // empty and `exit_scope` is a no-op.
+    builder.enter_scope();
+
     // Lower init if present (runs in the current block).
     if let Some(init_stmt) = init {
         lower_stmt(builder, cx, init_stmt);
@@ -861,7 +885,9 @@ fn lower_for(
     // Current block → header.
     builder.goto(header, span);
 
-    // Loop context: continue → step_bb, break → exit.
+    // Loop context: continue → step_bb, break → exit. Pushed *after*
+    // `enter_scope` so the for-loop's own frame stays live across
+    // break/continue (those must not StorageDead the loop variable).
     builder.push_loop(step_bb, exit);
 
     // Header: evaluate condition (if present) and branch.
@@ -900,6 +926,10 @@ fn lower_for(
 
     builder.pop_loop();
     builder.switch_to(exit);
+
+    // Close the for-loop's own scope. If `init` declared a local, this
+    // emits the matching `StorageDead` in the exit block.
+    builder.exit_scope(span);
 }
 
 /// Lower a `switch (cond) { case ...: ... default: ... }` statement.
@@ -1045,7 +1075,8 @@ fn push_assign(builder: &mut BodyBuilder, span: Span, local: Local, rvalue: Rval
 /// per-element stores; `int a[5] = {1, 2};` lowers to a `ZeroInit`
 /// followed by two non-zero leaf stores `a[0] = 1; a[1] = 2;`. Any
 /// other statement is forwarded to `lower_stmt`.
-fn lower_block_stmts(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmts: &[HirStmtId]) {
+fn lower_block_stmts(builder: &mut BodyBuilder, cx: &LowerCx<'_>, span: Span, stmts: &[HirStmtId]) {
+    builder.enter_scope();
     let mut i = 0;
     while i < stmts.len() {
         let cur_id = stmts[i];
@@ -1074,20 +1105,25 @@ fn lower_block_stmts(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmts: &[HirSt
             }
         }
     }
+    builder.exit_scope(span);
 }
 
 /// Lower a `HirStmtKind::LocalDecl { local, init }`.
 ///
 /// The CFG local has already been allocated by the body-builder pre-pass;
-/// `LocalMap::lookup` resolves the HIR id. Three cases:
+/// `LocalMap::lookup` resolves the HIR id. Always emits `StorageLive(L)`
+/// first (it must dominate every use of `L`) and records `L` in the
+/// innermost scope frame so the matching `StorageDead` is emitted on
+/// every reachable scope-exit path. After the live marker, three cases:
 ///
 /// 1. `init = Some(expr)` — emit a single `cfg_local := <expr>` assign.
 /// 2. `init = None` and `ty` is an aggregate (array / struct / union) —
 ///    emit `cfg_local := ZeroInit`. The trailing per-leaf stores from
 ///    `rcc_hir_lower::lower_initializer` are recognised and dropped at
 ///    the `Block` level (see [`lower_block_stmts`]).
-/// 3. `init = None` and `ty` is scalar — emit nothing; the slot remains
-///    uninitialised, matching C99 §6.7.8p10.
+/// 3. `init = None` and `ty` is scalar — emit nothing else; the slot
+///    is `StorageLive` but its value is indeterminate, matching C99
+///    §6.7.8p10.
 fn lower_local_decl(
     builder: &mut BodyBuilder,
     cx: &LowerCx<'_>,
@@ -1097,6 +1133,7 @@ fn lower_local_decl(
 ) {
     let cfg_local = cx.locals.lookup(hir_local);
     let ty = cx.body.locals[hir_local].ty;
+    builder.storage_live(cfg_local, span);
     if let Some(init_expr) = init {
         let value = lower_as_rvalue(builder, cx, init_expr);
         push_assign(builder, span, cfg_local, Rvalue::Use(value));
@@ -4472,13 +4509,6 @@ mod tests {
         (builder, hir_body, tcx, map, ha, arr_ty, int_ty)
     }
 
-    /// Inspect the `n`-th statement of the entry block as an `Assign`
-    /// and pull out its `Place.projection` and the integer rhs (or
-    /// `None` for a `ZeroInit` rvalue).
-    fn entry_stmt_at(body: &crate::Body, n: usize) -> &Statement {
-        &body.blocks[crate::BasicBlockId(0)].statements[n]
-    }
-
     fn assert_zero_init_at(stmt: &Statement, expected_local: Local) {
         match &stmt.kind {
             StatementKind::Assign {
@@ -4489,6 +4519,20 @@ mod tests {
                 assert!(projection.is_empty(), "ZeroInit must store to the bare aggregate place");
             }
             other => panic!("expected `local := ZeroInit`, got {other:?}"),
+        }
+    }
+
+    fn assert_storage_live(stmt: &Statement, expected_local: Local) {
+        match &stmt.kind {
+            StatementKind::StorageLive(l) => assert_eq!(*l, expected_local),
+            other => panic!("expected `StorageLive({expected_local:?})`, got {other:?}"),
+        }
+    }
+
+    fn assert_storage_dead(stmt: &Statement, expected_local: Local) {
+        match &stmt.kind {
+            StatementKind::StorageDead(l) => assert_eq!(*l, expected_local),
+            other => panic!("expected `StorageDead({expected_local:?})`, got {other:?}"),
         }
     }
 
@@ -4517,15 +4561,17 @@ mod tests {
 
         let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        // StorageLive(a), ZeroInit, a[0]=1, a[1]=2, StorageDead(a).
         assert_eq!(
             stmts.len(),
-            3,
-            "expected `ZeroInit + 2 leaf stores`, got {} statements",
+            5,
+            "expected `StorageLive + ZeroInit + 2 leaf stores + StorageDead`, got {} statements",
             stmts.len()
         );
-        assert_zero_init_at(entry_stmt_at(&body, 0), cfg_a);
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_zero_init_at(&stmts[1], cfg_a);
         // `a[0] = 1`
-        match &stmts[1].kind {
+        match &stmts[2].kind {
             StatementKind::Assign {
                 place: Place { base, projection },
                 rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(1), .. })),
@@ -4540,7 +4586,7 @@ mod tests {
             other => panic!("expected `a[0] = 1`, got {other:?}"),
         }
         // `a[1] = 2`
-        match &stmts[2].kind {
+        match &stmts[3].kind {
             StatementKind::Assign {
                 place: Place { base, projection },
                 rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(2), .. })),
@@ -4553,6 +4599,7 @@ mod tests {
             }
             other => panic!("expected `a[1] = 2`, got {other:?}"),
         }
+        assert_storage_dead(&stmts[4], cfg_a);
     }
 
     /// Acceptance: `int a[1000] = {0};` lowers to one `a := ZeroInit`
@@ -4575,13 +4622,16 @@ mod tests {
 
         let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        // StorageLive(a), ZeroInit, StorageDead(a).
         assert_eq!(
             stmts.len(),
-            1,
-            "expected one `ZeroInit` and zero leaf stores, got {} statements",
+            3,
+            "expected `StorageLive + ZeroInit + StorageDead`, got {} statements",
             stmts.len()
         );
-        assert_zero_init_at(&stmts[0], cfg_a);
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_zero_init_at(&stmts[1], cfg_a);
+        assert_storage_dead(&stmts[2], cfg_a);
     }
 
     /// Acceptance: `int a[5] = { [2] = 5 };` (designated) lowers to
@@ -4606,14 +4656,16 @@ mod tests {
 
         let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        // StorageLive(a), ZeroInit, a[2]=5, StorageDead(a).
         assert_eq!(
             stmts.len(),
-            2,
-            "expected `ZeroInit + 1 leaf store`, got {} statements",
+            4,
+            "expected `StorageLive + ZeroInit + 1 leaf store + StorageDead`, got {} statements",
             stmts.len()
         );
-        assert_zero_init_at(&stmts[0], cfg_a);
-        match &stmts[1].kind {
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_zero_init_at(&stmts[1], cfg_a);
+        match &stmts[2].kind {
             StatementKind::Assign {
                 place: Place { base, projection },
                 rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(5), .. })),
@@ -4627,10 +4679,12 @@ mod tests {
             }
             other => panic!("expected `a[2] = 5`, got {other:?}"),
         }
+        assert_storage_dead(&stmts[3], cfg_a);
     }
 
-    /// `int x = 42;` (scalar with init) lowers to a single `x := 42`
-    /// store; no aggregate machinery kicks in.
+    /// `int x = 42;` (scalar with init) lowers to `StorageLive(x);
+    /// x := 42; StorageDead(x);` once block-scope bracketing is in
+    /// place; no aggregate machinery kicks in.
     #[test]
     fn scalar_local_decl_with_init() {
         let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
@@ -4643,13 +4697,26 @@ mod tests {
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
+        let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
-        assert_eq!(stmts.len(), 1);
-        assert_assign_const(&body.blocks[crate::BasicBlockId(0)], map.lookup(ha), 42);
+        assert_eq!(stmts.len(), 3);
+        assert_storage_live(&stmts[0], cfg_a);
+        match &stmts[1].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(42), .. })),
+            } => {
+                assert_eq!(*base, cfg_a);
+                assert!(projection.is_empty());
+            }
+            other => panic!("expected `x := 42`, got {other:?}"),
+        }
+        assert_storage_dead(&stmts[2], cfg_a);
     }
 
-    /// `int x;` (scalar, no init) emits no statements — the slot is
-    /// allocated but its value remains indeterminate.
+    /// `int x;` (scalar, no init) emits no value-producing statement —
+    /// the slot's value remains indeterminate — but is still bracketed
+    /// by `StorageLive` / `StorageDead`.
     #[test]
     fn scalar_local_decl_uninit() {
         let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
@@ -4660,8 +4727,15 @@ mod tests {
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
+        let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
-        assert!(stmts.is_empty(), "scalar uninit decl must not emit any statement");
+        assert_eq!(
+            stmts.len(),
+            2,
+            "scalar uninit decl must emit only `StorageLive` + `StorageDead`",
+        );
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_storage_dead(&stmts[1], cfg_a);
     }
 
     /// `int a[5];` (aggregate, no init list) is conservatively
@@ -4679,8 +4753,260 @@ mod tests {
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
+        let cfg_a = map.lookup(ha);
         let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
-        assert_eq!(stmts.len(), 1);
-        assert_zero_init_at(&stmts[0], map.lookup(ha));
+        // StorageLive(a), ZeroInit, StorageDead(a).
+        assert_eq!(stmts.len(), 3);
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_zero_init_at(&stmts[1], cfg_a);
+        assert_storage_dead(&stmts[2], cfg_a);
+    }
+
+    // ── Task 08-12: StorageLive / StorageDead bracketing ────────────────
+
+    /// Acceptance: `{ int x; { int y; } }` emits
+    /// `StorageLive(x); StorageLive(y); StorageDead(y); StorageDead(x);`
+    /// in that order — inner scope dies before the outer scope, in
+    /// reverse declaration order within each frame.
+    #[test]
+    fn nested_blocks_emit_storage_in_lifo_order() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+
+        // { int x; { int y; } }
+        let decl_y = local_decl_stmt(&mut hir_body, hb);
+        let inner = block_stmt(&mut hir_body, vec![decl_y]);
+        let decl_x = local_decl_stmt(&mut hir_body, ha);
+        let outer = block_stmt(&mut hir_body, vec![decl_x, inner]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, outer);
+        let body = finish(builder);
+
+        let cfg_x = map.lookup(ha);
+        let cfg_y = map.lookup(hb);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        // x is `int` (scalar): StorageLive only, no value-store.
+        // y is `int` (scalar): StorageLive only, no value-store.
+        // Inner exit: StorageDead(y).
+        // Outer exit: StorageDead(x).
+        assert_eq!(stmts.len(), 4, "expected 4 storage statements, got {}", stmts.len());
+        assert_storage_live(&stmts[0], cfg_x);
+        assert_storage_live(&stmts[1], cfg_y);
+        assert_storage_dead(&stmts[2], cfg_y);
+        assert_storage_dead(&stmts[3], cfg_x);
+    }
+
+    /// Two siblings in the same scope die in *reverse declaration*
+    /// order: `{ int a; int b; }` emits `Live(a); Live(b); Dead(b);
+    /// Dead(a);`.
+    #[test]
+    fn sibling_locals_die_in_reverse_declaration_order() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+
+        let decl_a = local_decl_stmt(&mut hir_body, ha);
+        let decl_b = local_decl_stmt(&mut hir_body, hb);
+        let outer = block_stmt(&mut hir_body, vec![decl_a, decl_b]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, outer);
+        let body = finish(builder);
+
+        let cfg_a = map.lookup(ha);
+        let cfg_b = map.lookup(hb);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(stmts.len(), 4);
+        assert_storage_live(&stmts[0], cfg_a);
+        assert_storage_live(&stmts[1], cfg_b);
+        assert_storage_dead(&stmts[2], cfg_b);
+        assert_storage_dead(&stmts[3], cfg_a);
+    }
+
+    /// `return` in a nested scope flushes every open scope in reverse
+    /// before the `Return` terminator: every reachable path through a
+    /// `StorageLive(L)` reaches exactly one `StorageDead(L)`.
+    #[test]
+    fn return_emits_storage_dead_for_all_open_scopes() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // { int x; { int y; return 0; } }
+        let ret = return_const_stmt(&mut hir_body, int_ty, 0);
+        let decl_y = local_decl_stmt(&mut hir_body, hb);
+        let inner = block_stmt(&mut hir_body, vec![decl_y, ret]);
+        let decl_x = local_decl_stmt(&mut hir_body, ha);
+        let outer = block_stmt(&mut hir_body, vec![decl_x, inner]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, outer);
+        let body = finish(builder);
+
+        let cfg_x = map.lookup(ha);
+        let cfg_y = map.lookup(hb);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        // StorageLive(x); StorageLive(y); ret-slot := 0;
+        // StorageDead(y); StorageDead(x); Return.
+        assert_eq!(entry.statements.len(), 5, "{:#?}", entry.statements);
+        assert_storage_live(&entry.statements[0], cfg_x);
+        assert_storage_live(&entry.statements[1], cfg_y);
+        // ret-slot assign at index 2.
+        match &entry.statements[2].kind {
+            StatementKind::Assign { place: Place { base, .. }, .. } => {
+                assert_eq!(*base, Local(0), "return value goes to ret slot");
+            }
+            other => panic!("expected ret-slot assign, got {other:?}"),
+        }
+        assert_storage_dead(&entry.statements[3], cfg_y);
+        assert_storage_dead(&entry.statements[4], cfg_x);
+        assert!(matches!(entry.terminator.kind, TerminatorKind::Return));
+    }
+
+    /// `break` flushes every scope opened *inside* the loop body
+    /// before the `goto` to the loop exit. The loop variable from a
+    /// `for (int i = 0; ...; ...)` init stays live across the break.
+    #[test]
+    fn break_emits_intervening_storage_dead() {
+        // Build a HIR body with two locals: i (loop var, int) and y
+        // (inner-block local, int).
+        let tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let mut hir_body = HirBody::default();
+        let hi = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let hy = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let ci = builder.alloc_user_local(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let cy = builder.alloc_user_local(rcc_span::Symbol(2), int_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hi, ci);
+        map.insert(hy, cy);
+
+        // for (int i = 0; ; ) { { int y; break; } }
+        let zero = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(0));
+        let init = local_decl_with_init_stmt(&mut hir_body, hi, zero);
+
+        let decl_y = local_decl_stmt(&mut hir_body, hy);
+        let brk = break_stmt(&mut hir_body);
+        let inner_block = block_stmt(&mut hir_body, vec![decl_y, brk]);
+
+        let for_stmt_id = for_stmt(&mut hir_body, Some(init), None, None, inner_block);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, for_stmt_id);
+        let body = finish(builder);
+
+        // Find the body block and verify it ends with:
+        //   StorageLive(y); StorageDead(y); Goto(exit).
+        // The exit block ends with StorageDead(i).
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        // entry: StorageLive(i); i := 0; Goto(header).
+        assert_storage_live(&entry.statements[0], ci);
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        // Infinite loop ⇒ header is a plain `Goto(body_bb)`.
+        let body_bb_id = goto_target(header_bb);
+        let body_bb = &body.blocks[body_bb_id];
+
+        // Body block: StorageLive(y); StorageDead(y); goto exit.
+        assert!(body_bb.statements.len() >= 2);
+        assert_storage_live(&body_bb.statements[0], cy);
+        let last = body_bb.statements.last().expect("body must end with StorageDead(y)");
+        assert_storage_dead(last, cy);
+        let exit_id = goto_target(body_bb);
+
+        // Exit block: StorageDead(i) (the for's frame).
+        let exit_bb = &body.blocks[exit_id];
+        assert!(!exit_bb.statements.is_empty(), "exit must hold StorageDead(i)");
+        assert_storage_dead(&exit_bb.statements[0], ci);
+    }
+
+    /// `continue` flushes scopes opened inside the loop body too.
+    #[test]
+    fn continue_emits_intervening_storage_dead() {
+        let (mut builder, mut hir_body, tcx, map, [ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        // while (a) { { int b? actually any local in inner block } continue; }
+        // For simplicity: while (a) { int x; continue; } where x = ha.
+        let cond = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let cont = continue_stmt(&mut hir_body);
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let body_block = block_stmt(&mut hir_body, vec![decl, cont]);
+        let root = while_stmt(&mut hir_body, cond, body_block);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let cfg_x = map.lookup(ha);
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let header_id = goto_target(entry);
+        let header_bb = &body.blocks[header_id];
+        let (_exit, body_bb_id) = switch_zero_default(header_bb);
+        let body_bb = &body.blocks[body_bb_id];
+        // Body: StorageLive(x); StorageDead(x); goto header.
+        assert!(body_bb.statements.len() >= 2);
+        assert_storage_live(&body_bb.statements[0], cfg_x);
+        let last = body_bb.statements.last().unwrap();
+        assert_storage_dead(last, cfg_x);
+        // Continue jumps to header, not to exit.
+        assert_eq!(goto_target(body_bb), header_id);
+    }
+
+    /// `for (int i = 0; ...; ...)` brackets the loop variable's
+    /// lifetime around the entire loop: `StorageLive(i)` in the
+    /// pre-header, `StorageDead(i)` in the post-loop exit block.
+    #[test]
+    fn for_init_decl_lives_across_loop() {
+        let tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let mut hir_body = HirBody::default();
+        let hi = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ty,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let ci = builder.alloc_user_local(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hi, ci);
+
+        // for (int i = 0; ; ) ;     (empty body)
+        let zero = push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(0));
+        let init = local_decl_with_init_stmt(&mut hir_body, hi, zero);
+        let empty_body = block_stmt(&mut hir_body, vec![]);
+        let for_stmt_id = for_stmt(&mut hir_body, Some(init), None, None, empty_body);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, for_stmt_id);
+        let body = finish(builder);
+
+        // entry: StorageLive(i); i := 0; goto header.
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        assert_storage_live(&entry.statements[0], ci);
+
+        // The exit block is wherever the cursor landed after lower_for.
+        // Find it by following: entry → header → body_bb → step → header.
+        // Since the loop is infinite, the only exit-style block is one
+        // whose only statement is StorageDead(i) (the for's
+        // `exit_scope`). The reachability audit allows it as orphan.
+        let exit_with_dead = body.blocks.iter().find(|bb| {
+            !bb.statements.is_empty()
+                && matches!(bb.statements[0].kind, StatementKind::StorageDead(l) if l == ci)
+        });
+        assert!(exit_with_dead.is_some(), "expected an exit block with StorageDead(i)");
     }
 }
