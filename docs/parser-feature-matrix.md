@@ -14,6 +14,7 @@ phases.
 | Labels, compound blocks, expression statements, `if`, `switch`, loops, jumps | complete | HIR validates labels, jump targets, switch constraints |
 | Block declarations and `for` declaration init | complete | HIR preserves lexical scope and storage |
 | Declaration specifiers, declarators, abstract declarators, typedef-name feedback | complete | HIR/typeck derive canonical types |
+| Strict `type-name` parsing for cast, `sizeof(type)`, compound literals, and future builtin type args | complete | HIR/typeck validate semantic type constraints |
 | Struct/union fields, bit-fields, enum enumerators | complete | HIR/typeck evaluate layout, duplicate names, enum values |
 | Initializer lists and C99 field/index designators | complete | HIR/typeck flatten and type-check initializers |
 | Function definitions, prototypes, variadic functions, K&R definitions | complete | HIR/typeck validate parameter types and obsolete-style semantics |
@@ -33,7 +34,6 @@ phases.
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-33 | Strict `type-name` validation contract | Builtins and C11 `_Generic` need a reusable strict type-name parser |
 | 05-34 | Decoded literal AST payloads | Typeck/codegen currently risk re-decoding source text |
 | 05-35 | Builtin type-argument syntax | `__builtin_offsetof(type, member)` and `__builtin_types_compatible_p(t1, t2)` are not ordinary calls |
 | 05-36 | GNU statement expressions `({ ... })` | c-testsuite `00213`/`00214` and real GNU-flavoured sources need expression-valued blocks |

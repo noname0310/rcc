@@ -1384,19 +1384,54 @@ pub fn parse_abstract_declarator(p: &mut Parser<'_>) -> Declarator {
 ///     specifier-qualifier-list abstract-declarator?
 /// ```
 ///
-/// Strictly speaking, `type-name` does not permit a *storage-class-
-/// specifier* or a *function-specifier*, only specifiers and
-/// qualifiers. We reuse [`parse_decl_specs`] for symmetry (it handles
-/// typedef-name recognition and the type-specifier multiset checks
-/// already) and rely on a later pass to enforce the narrower rule;
-/// the parser only cares that specs + abstract-declarator form a
-/// well-shaped span here.
+/// `type-name` is stricter than a declaration: it permits only
+/// type-specifiers and type-qualifiers. Storage-class specifiers
+/// (`typedef`, `static`, ...) and function specifiers (`inline`) are
+/// diagnosed here and stripped from the returned AST so downstream HIR
+/// lowering never has to guess whether a type-name node was really a
+/// declaration in disguise.
 pub fn parse_type_name(p: &mut Parser<'_>) -> TypeName {
     let start = p.cur_span();
-    let specs = parse_decl_specs(p).unwrap_or_default();
+    let mut specs = parse_decl_specs(p).unwrap_or_default();
+    validate_type_name_specs(p, &mut specs, start);
     let declarator = parse_abstract_declarator(p);
     let end = last_consumed_span(p, start);
     TypeName { specs, declarator, span: start.to(end) }
+}
+
+/// Enforce the `specifier-qualifier-list` subset accepted inside a
+/// C99 type-name (§6.7.6). The shared declaration-specifier parser is
+/// intentionally broad because real declarations, K&R definitions,
+/// and parameter declarations all have slightly different contextual
+/// constraints; type-name callers need the narrow contract here.
+fn validate_type_name_specs(p: &mut Parser<'_>, specs: &mut DeclSpecs, start: Span) {
+    let span = specs.span;
+
+    if specs.storage.take().is_some() {
+        p.session
+            .handler
+            .struct_err(span, "storage-class specifier is not allowed in a type name")
+            .code(codes::E0061)
+            .emit();
+    }
+
+    if specs.func_specs.inline {
+        specs.func_specs.inline = false;
+        p.session
+            .handler
+            .struct_err(span, "`inline` function specifier is not allowed in a type name")
+            .code(codes::E0061)
+            .emit();
+    }
+
+    if specs.type_specs.is_empty() {
+        let err_span = if span == rcc_span::DUMMY_SP { start } else { span };
+        p.session
+            .handler
+            .struct_err(err_span, "expected type specifier in type name")
+            .code(codes::E0061)
+            .emit();
+    }
 }
 
 /// Post-declarator hook that generalises the C99 "lexer hack"
@@ -2713,6 +2748,64 @@ mod tests {
             other => panic!("expected [Pointer, Function(int)], got {other:?}"),
         }
         assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn type_name_rejects_storage_class_specifier() {
+        let (tn, _rem, diags, _sess) = parse_tn("static int");
+        assert_eq!(codes_of(&diags), vec!["E0061"], "{diags:?}");
+        assert_eq!(tn.specs.storage, None, "invalid storage is stripped for HIR");
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+    }
+
+    #[test]
+    fn type_name_rejects_typedef_storage_class() {
+        let (tn, _rem, diags, _sess) = parse_tn("typedef int");
+        assert_eq!(codes_of(&diags), vec!["E0061"], "{diags:?}");
+        assert_eq!(tn.specs.storage, None, "invalid typedef storage is stripped for HIR");
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+    }
+
+    #[test]
+    fn type_name_rejects_inline_function_specifier() {
+        let (tn, _rem, diags, _sess) = parse_tn("inline int");
+        assert_eq!(codes_of(&diags), vec!["E0061"], "{diags:?}");
+        assert!(!tn.specs.func_specs.inline, "invalid inline is stripped for HIR");
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+    }
+
+    #[test]
+    fn type_name_rejects_missing_type_specifier() {
+        let (tn, _rem, diags, _sess) = parse_tn("const");
+        assert_eq!(codes_of(&diags), vec!["E0061"], "{diags:?}");
+        assert!(tn.specs.quals.const_, "qualifier is retained for recovery");
+        assert!(tn.specs.type_specs.is_empty());
+    }
+
+    #[test]
+    fn type_name_duplicate_qualifier_warns_but_recovers() {
+        let (tn, _rem, diags, _sess) = parse_tn("const const int");
+        assert_eq!(codes_of(&diags), vec!["W0004"], "{diags:?}");
+        assert!(tn.specs.quals.const_);
+        assert!(matches!(tn.specs.type_specs.as_slice(), [TypeSpec::Int]));
+    }
+
+    #[test]
+    fn type_name_accepts_typedef_name_as_specifier() {
+        let src = "T *";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let t_sym = sess.interner.intern("T");
+        let mut parser = Parser::new(&mut sess, tokens);
+        parser.scopes.declare(t_sym, NameKind::Typedef);
+
+        let tn = parse_type_name(&mut parser);
+        match tn.specs.type_specs.as_slice() {
+            [TypeSpec::TypedefName(sym)] => assert_eq!(parser.session.interner.get(*sym), "T"),
+            other => panic!("expected typedef-name type specifier, got {other:?}"),
+        }
+        assert!(matches!(tn.declarator.derived.as_slice(), [DerivedDeclarator::Pointer(_)]));
+        assert!(cap.diagnostics().is_empty(), "clean: {:?}", cap.diagnostics());
     }
 
     #[test]

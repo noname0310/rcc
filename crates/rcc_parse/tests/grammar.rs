@@ -645,6 +645,24 @@ fn neg_invalid_cast() {
 }
 
 #[test]
+fn neg_type_name_rejects_storage_class_contexts() {
+    let sizeof_errs = parse_err("void f(void) { sizeof(static int); }");
+    assert!(!sizeof_errs.is_empty());
+
+    let cast_errs = parse_err("void f(void) { (typedef int)x; }");
+    assert!(!cast_errs.is_empty());
+}
+
+#[test]
+fn neg_type_name_requires_type_specifier() {
+    let errs = parse_err("void f(void) { sizeof(const); }");
+    assert!(
+        errs.iter().any(|d| d.code == Some("E0061")),
+        "expected strict type-name E0061, got {errs:#?}"
+    );
+}
+
+#[test]
 fn neg_recovery_still_parses_rest() {
     // After a bad declaration, the next valid one should still parse.
     let (ast, diags, _) = parse_snippet("int x\nint y;");

@@ -1,5 +1,7 @@
 # 05-33: Type-name validation contract
 
+> ✓ done — 2026-05-01
+
 **Phase:** 05-parse    **Depends on:** 05-32    **Milestone:** M2.1
 
 ## Goal
