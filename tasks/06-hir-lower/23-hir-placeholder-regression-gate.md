@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-23: HIR placeholder regression gate
 
 **Phase:** 06-hir-lower    **Depends on:** 06-22    **Milestone:** M5 stabilization
@@ -36,3 +38,16 @@ placeholders.
 - All reopened 06-hir-lower stabilization tasks.
 - The CFG 08 review that exposed `sizeof` and record type loss through
   source-to-MIR fixtures.
+
+## Placeholder policy after completion
+
+The regression gate treats the following as intentional boundaries, not
+silent lowering failures:
+
+- Expression node `ty: tcx.error` is still allowed immediately after HIR
+  lowering; `rcc_typeck::check` must replace it for clean supported
+  fixtures.
+- `Field { field_index: 0 }` remains a pre-typeck placeholder because
+  field lookup depends on the base expression type.
+- Invalid constructs may still lower to recovery nodes after emitting a
+  diagnostic, for example bad initializer designators emitting E0079.

@@ -2108,3 +2108,237 @@ fn snippet_does_not_emit_diagnostics_on_clean_code() {
         cap.diagnostics()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Section G — task 06-23 HIR placeholder regression gate
+//
+// These tests deliberately use source snippets, not hand-built HIR. The
+// goal is to lock down the real parse -> HIR lower path that previously
+// leaked `tcx.error`, `tcx.int`, or `IntConst(0)` placeholders into CFG.
+// ═══════════════════════════════════════════════════════════════════════
+
+fn lower_and_typeck_snippet(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter, Session) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(Options::default(), handler);
+    let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<gate>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    let mut tcx = TyCtxt::new();
+    let mut hir = lower(&ast, &mut tcx, &mut sess);
+    rcc_typeck::check(&mut sess, &mut tcx, &mut hir);
+    (hir, tcx, cap, sess)
+}
+
+fn assert_ty_has_no_error(tcx: &TyCtxt, ty: TyId, context: &str) {
+    match tcx.get(ty) {
+        Ty::Error => panic!("{context} unexpectedly contains tcx.error"),
+        Ty::Ptr(pointee) => assert_ty_has_no_error(tcx, pointee.ty, context),
+        Ty::Array { elem, .. } => assert_ty_has_no_error(tcx, elem.ty, context),
+        Ty::Func { ret, params, .. } => {
+            assert_ty_has_no_error(tcx, *ret, context);
+            for param in params {
+                assert_ty_has_no_error(tcx, *param, context);
+            }
+        }
+        Ty::Void | Ty::Int { .. } | Ty::Float(_) | Ty::Complex(_) | Ty::Record(_) | Ty::Enum(_) => {
+        }
+    }
+}
+
+fn assert_no_def_or_local_error_types(hir: &HirCrate, tcx: &TyCtxt) {
+    for def in hir.defs.iter() {
+        match &def.kind {
+            DefKind::Function { ty, .. } => assert_ty_has_no_error(tcx, *ty, "function def"),
+            DefKind::Global { ty, init, .. } => {
+                assert_ty_has_no_error(tcx, *ty, "global def");
+                if let Some(init) = init {
+                    assert_ty_has_no_error(tcx, init.ty, "global initializer");
+                }
+            }
+            DefKind::Typedef(ty) => assert_ty_has_no_error(tcx, *ty, "typedef def"),
+            DefKind::Enum { repr, .. } => assert_ty_has_no_error(tcx, *repr, "enum repr"),
+            DefKind::Enumerator { ty, .. } => assert_ty_has_no_error(tcx, *ty, "enumerator"),
+            DefKind::Record { fields, .. } => {
+                for field in fields {
+                    assert_ty_has_no_error(tcx, field.ty, "record field");
+                }
+            }
+        }
+    }
+
+    for body in hir.bodies.values() {
+        for local in body.locals.iter() {
+            assert_ty_has_no_error(tcx, local.ty, "local decl");
+        }
+    }
+}
+
+fn assert_no_body_expr_error_types_after_typeck(hir: &HirCrate, tcx: &TyCtxt) {
+    for body in hir.bodies.values() {
+        for expr in body.exprs.iter() {
+            assert_ty_has_no_error(tcx, expr.ty, "typechecked expression");
+        }
+    }
+}
+
+fn def_named<'a>(hir: &'a HirCrate, sess: &Session, name: &str) -> &'a rcc_hir::Def {
+    hir.defs
+        .iter()
+        .find(|def| sess.interner.get(def.name) == name)
+        .unwrap_or_else(|| panic!("missing def named {name}"))
+}
+
+#[test]
+fn regression_gate_struct_sizeof_source_survives_lower_and_typeck() {
+    let (hir, tcx, cap, sess) = lower_and_typeck_snippet(
+        "struct S { char c; int i; }; unsigned long f(void) { struct S s; return sizeof s; }",
+    );
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    assert_no_def_or_local_error_types(&hir, &tcx);
+    assert_no_body_expr_error_types_after_typeck(&hir, &tcx);
+
+    let record_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| matches!(def.kind, DefKind::Record { .. }).then_some(id))
+        .expect("missing struct S record def");
+    let f = def_named(&hir, &sess, "f");
+    let DefKind::Function { ty, .. } = f.kind else {
+        panic!("f should be a function def");
+    };
+    match tcx.get(ty) {
+        Ty::Func { ret, .. } => assert_eq!(*ret, tcx.ulong),
+        other => panic!("expected function type, got {other:?}"),
+    }
+
+    let body = hir.bodies.values().next().expect("missing function body");
+    let s_local = body
+        .locals
+        .iter()
+        .find(|local| local.name.is_some_and(|sym| sess.interner.get(sym) == "s"))
+        .expect("missing local s");
+    assert!(matches!(tcx.get(s_local.ty), Ty::Record(id) if *id == record_id));
+    let sizeof_expr = body
+        .exprs
+        .iter()
+        .find(|expr| matches!(expr.kind, HirExprKind::SizeofExpr(_)))
+        .expect("missing sizeof expression");
+    assert_eq!(sizeof_expr.ty, tcx.ulong);
+}
+
+#[test]
+fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
+    let (hir, tcx, cap, _sess) = lower_and_typeck_snippet(
+        "typedef unsigned long Size; struct S { int x; }; typedef struct S S; S sg; enum E { A = 7 }; enum E eg; Size sz;",
+    );
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    assert_no_def_or_local_error_types(&hir, &tcx);
+
+    let typedef_tys: Vec<_> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Typedef(ty) => Some(ty),
+            _ => None,
+        })
+        .collect();
+    assert!(typedef_tys.contains(&tcx.ulong), "typedef Size should preserve unsigned long");
+    assert!(
+        typedef_tys.iter().any(|ty| matches!(tcx.get(*ty), Ty::Record(_))),
+        "typedef S should preserve the record type, not fall back to int"
+    );
+
+    let global_tys: Vec<_> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .collect();
+    assert!(global_tys.contains(&tcx.ulong), "Size sz should be unsigned long");
+    assert!(
+        global_tys.iter().any(|ty| matches!(tcx.get(*ty), Ty::Record(_))),
+        "S sg should be record-typed"
+    );
+    assert!(
+        global_tys.iter().any(|ty| matches!(tcx.get(*ty), Ty::Enum(_))),
+        "enum E eg should be enum-typed"
+    );
+}
+
+#[test]
+fn regression_gate_sizeof_type_and_compound_literal_keep_type_names() {
+    let (hir, tcx) = lower_snippet(
+        "struct S { int x; }; typedef struct S S; void f(void) { sizeof(S); (S){ .x = 1 }; }",
+    );
+    let record_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| matches!(def.kind, DefKind::Record { .. }).then_some(id))
+        .expect("missing record def");
+    let body = hir.bodies.values().next().expect("missing function body");
+
+    let sizeof_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::SizeofType(ty) => Some(ty),
+            HirExprKind::IntConst(0) => {
+                panic!("sizeof(type-name) must not lower to IntConst(0) placeholder")
+            }
+            _ => None,
+        })
+        .expect("missing sizeof(type-name)");
+    assert!(matches!(tcx.get(sizeof_ty), Ty::Record(id) if *id == record_id));
+
+    let (compound_ty, compound_local) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { ty, local, .. } => Some((ty, local)),
+            _ => None,
+        })
+        .expect("missing compound literal");
+    assert!(matches!(tcx.get(compound_ty), Ty::Record(id) if *id == record_id));
+    assert_eq!(body.locals[compound_local].ty, compound_ty);
+}
+
+#[test]
+fn regression_gate_source_switches_have_case_tables() {
+    let (hir, _tcx) = lower_snippet(
+        "int f(int x) { switch (x) { case 4: return 1; case 9: return 2; default: return 3; } }",
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    let cases = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            HirStmtKind::Switch { cases, .. } => Some(cases),
+            _ => None,
+        })
+        .expect("missing switch");
+    assert_eq!(
+        cases.iter().map(|case| case.value).collect::<Vec<_>>(),
+        vec![Some(4), Some(9), None,]
+    );
+}
+
+#[test]
+fn regression_gate_invalid_supported_boundary_reports_diagnostic() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("void f(void) { int a[2] = { .bad = 1 }; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0079)),
+        "invalid designator should remain a diagnosed boundary, not a silent placeholder"
+    );
+}

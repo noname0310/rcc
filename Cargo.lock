@@ -636,6 +636,7 @@ dependencies = [
  "rcc_preprocess",
  "rcc_session",
  "rcc_span",
+ "rcc_typeck",
 ]
 
 [[package]]

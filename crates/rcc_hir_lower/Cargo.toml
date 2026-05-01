@@ -20,3 +20,4 @@ rcc_data_structures = { workspace = true }
 rcc_lexer           = { workspace = true }
 rcc_preprocess      = { workspace = true }
 rcc_parse           = { workspace = true }
+rcc_typeck          = { workspace = true }
