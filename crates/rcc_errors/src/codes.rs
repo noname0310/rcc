@@ -477,7 +477,7 @@ const E0077_DESC: &str = "invalid bit-field width";
 pub const E0079: &str = "E0079";
 const E0079_DESC: &str = "invalid initializer designator";
 
-/// Assignment to an rvalue.
+/// Assignment to an rvalue or other non-modifiable lvalue.
 ///
 /// C99 §6.5.16p2 requires the left operand of a simple or compound
 /// assignment to be a modifiable lvalue. The narrower constraint that
@@ -487,7 +487,7 @@ const E0079_DESC: &str = "invalid initializer designator";
 /// "modifiable" half (const-qualified objects, array types, etc.)
 /// piggybacks on this code in task 07-05.
 pub const E0080: &str = "E0080";
-const E0080_DESC: &str = "assignment to rvalue";
+const E0080_DESC: &str = "assignment to non-modifiable lvalue";
 
 /// Incompatible types in assignment.
 ///

@@ -485,6 +485,20 @@ fn call_prototype_argument_conversion_reaches_cfg_operand() {
 }
 
 #[test]
+fn volatile_local_qualifier_reaches_cfg_metadata() {
+    let lowered = lower_snippet(
+        "volatile_local_metadata",
+        "int f(void) { volatile int x; int y = x; x = y; return y; }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert!(
+        body.locals.iter().any(|decl| decl.quals.is_volatile),
+        "volatile local qualifier must survive into CFG metadata:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn sizeof_layout_service_lowers_fixed_sizes() {
     let cases = [("sizeof_int_array", "unsigned long f(void) { int a[3]; return sizeof a; }", 12)];
 

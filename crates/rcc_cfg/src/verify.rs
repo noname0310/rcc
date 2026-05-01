@@ -316,6 +316,7 @@ mod tests {
         LocalDecl {
             name: name.then_some(rcc_span::Symbol(1)),
             ty: ty(),
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

@@ -2888,6 +2888,7 @@ mod tests {
         let _ = (LocalDecl {
             name: None,
             ty: TyId(0),
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

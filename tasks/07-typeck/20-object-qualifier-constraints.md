@@ -1,5 +1,7 @@
 # 07-20: Object qualifier constraints
 
+> ✓ done — 2026-05-01
+
 **Phase:** 07-typeck    **Depends on:** 06-26, 07-19    **Milestone:** M5
 
 ## Goal

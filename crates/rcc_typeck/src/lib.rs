@@ -10,7 +10,8 @@
 use rcc_hir::{
     rcc_hir_binop::{BinOp, UnOp},
     Body, ConvertKind, DefId, DefKind, FloatKind, GlobalInit, GlobalInitValue, HirCrate, HirExpr,
-    HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntRank, Qual, Ty, TyCtxt, TyId, ValueCat,
+    HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntRank, ObjectQuals, Qual, Ty, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::Symbol;
@@ -161,6 +162,8 @@ pub struct DefSnapshot {
     /// §6.4.4.3p2 + §6.7.2.2p3) — we materialise them as `IntConst` so
     /// later passes do not need to chase a `DefId` to evaluate one.
     pub enumerator_value: Option<i128>,
+    /// Object qualifiers for globals (and other object-like defs).
+    pub object_quals: ObjectQuals,
     /// Record fields, when this snapshot describes a struct/union tag.
     pub record_fields: Option<Vec<FieldSnapshot>>,
 }
@@ -172,6 +175,8 @@ pub struct FieldSnapshot {
     pub name: Option<Symbol>,
     /// Lowered field type.
     pub ty: TyId,
+    /// Object qualifiers attached to this field declaration.
+    pub quals: ObjectQuals,
 }
 
 /// Read what we need from a `DefKind` for `DefRef` typing.
@@ -184,12 +189,14 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             // `FuncToPtr` decay, applied by `decay_if_needed`).
             value_cat: ValueCat::LValue,
             enumerator_value: None,
+            object_quals: ObjectQuals::none(),
             record_fields: None,
         },
-        DefKind::Global { ty, .. } => DefSnapshot {
+        DefKind::Global { ty, quals, .. } => DefSnapshot {
             ty: Some(*ty),
             value_cat: ValueCat::LValue,
             enumerator_value: None,
+            object_quals: *quals,
             record_fields: None,
         },
         DefKind::Typedef(ty) => {
@@ -200,6 +207,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
                 ty: Some(*ty),
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
+                object_quals: ObjectQuals::none(),
                 record_fields: None,
             }
         }
@@ -207,16 +215,22 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             ty: Some(*ty),
             value_cat: ValueCat::RValue,
             enumerator_value: Some(*value),
+            object_quals: ObjectQuals::none(),
             record_fields: None,
         },
         DefKind::Record { fields, .. } => DefSnapshot {
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
+            object_quals: ObjectQuals::none(),
             record_fields: Some(
                 fields
                     .iter()
-                    .map(|field| FieldSnapshot { name: field.name, ty: field.ty })
+                    .map(|field| FieldSnapshot {
+                        name: field.name,
+                        ty: field.ty,
+                        quals: field.quals,
+                    })
                     .collect(),
             ),
         },
@@ -224,6 +238,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
+            object_quals: ObjectQuals::none(),
             record_fields: None,
         },
     }
@@ -456,6 +471,7 @@ pub fn visit_expr(
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
+                object_quals: ObjectQuals::none(),
                 record_fields: None,
             });
             // Enumerator references rewrite to a typed `IntConst` so
@@ -481,7 +497,7 @@ pub fn visit_expr(
         }
         HirExprKind::Unary { op, operand } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
-            type_unary(expr_id, op, op2, body, tcx, session)
+            type_unary(expr_id, op, op2, body, tcx, session, def_info)
         }
         HirExprKind::AddressOf(operand) => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
@@ -617,10 +633,8 @@ pub fn visit_expr(
         HirExprKind::Assign { lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
-            // C99 §6.5.16p2: LHS must be a modifiable lvalue. We check
-            // the lvalue requirement here; the modifiable subset is task
-            // 07-05's job (already in tree).
-            check_assignment_lhs(session, body, lhs2);
+            // C99 §6.5.16p2: LHS must be a modifiable lvalue.
+            check_modifiable_lvalue(session, tcx, body, def_info, lhs2);
             // RHS is an rvalue, decayed.
             let rhs2 = rvalue_decayed(rhs2, body, tcx);
             // Coerce RHS to LHS's type.
@@ -1153,8 +1167,8 @@ fn type_unresolved_field(
     let cat = value_category(body, base);
     match member_base_record(body, tcx, base) {
         Some(record) => match resolve_field(record, request.name, def_info) {
-            Some((field_index, field_ty)) => {
-                body.exprs[expr_id].ty = field_ty;
+            Some((field_index, field)) => {
+                body.exprs[expr_id].ty = field.ty;
                 body.exprs[expr_id].value_cat = cat;
                 body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
             }
@@ -1241,12 +1255,12 @@ fn resolve_field(
     record: rcc_hir::DefId,
     name: Symbol,
     def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
-) -> Option<(u32, TyId)> {
+) -> Option<(u32, FieldSnapshot)> {
     let fields = def_info.get(&record)?.record_fields.as_ref()?;
     fields
         .iter()
         .enumerate()
-        .find_map(|(idx, field)| (field.name == Some(name)).then_some((idx as u32, field.ty)))
+        .find_map(|(idx, field)| (field.name == Some(name)).then_some((idx as u32, *field)))
 }
 
 fn invalid_member_access(session: &mut Session, span: rcc_span::Span, msg: String) {
@@ -1290,7 +1304,8 @@ fn type_unary(
     operand: HirExprId,
     body: &mut Body,
     tcx: &mut TyCtxt,
-    _session: &mut Session,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
 ) -> HirExprId {
     match op {
         UnOp::Plus | UnOp::Neg | UnOp::BitNot => {
@@ -1322,6 +1337,7 @@ fn type_unary(
             // a scalar lvalue). The result is the operand's type as an
             // rvalue (post-forms produce the original value, pre-forms
             // produce the new value; both are rvalues per §6.5.3.1p2).
+            check_modifiable_lvalue(session, tcx, body, def_info, operand);
             body.exprs[expr_id].ty = body.exprs[operand].ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Unary { op, operand };
@@ -1943,6 +1959,86 @@ pub fn check_assignment_lhs(session: &mut Session, body: &Body, lhs: HirExprId) 
         .code(rcc_errors::codes::E0080)
         .emit();
     false
+}
+
+fn check_modifiable_lvalue(
+    session: &mut Session,
+    tcx: &TyCtxt,
+    body: &Body,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    lhs: HirExprId,
+) -> bool {
+    if !check_assignment_lhs(session, body, lhs) {
+        return false;
+    }
+
+    let span = body.exprs[lhs].span;
+    if matches!(tcx.get(body.exprs[lhs].ty), Ty::Array { .. }) {
+        emit_non_modifiable_lvalue(session, span, "array objects are not assignable");
+        return false;
+    }
+
+    let quals = lvalue_object_quals(body, tcx, def_info, lhs);
+    if quals.is_const {
+        emit_non_modifiable_lvalue(session, span, "assignment to const-qualified object");
+        return false;
+    }
+
+    true
+}
+
+fn emit_non_modifiable_lvalue(session: &mut Session, span: rcc_span::Span, msg: &str) {
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0080).emit();
+}
+
+fn lvalue_object_quals(
+    body: &Body,
+    tcx: &TyCtxt,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    expr: HirExprId,
+) -> ObjectQuals {
+    match &body.exprs[expr].kind {
+        HirExprKind::LocalRef(local) => body.locals[*local].quals,
+        HirExprKind::DefRef(def_id) => {
+            def_info.get(def_id).map_or(ObjectQuals::none(), |snap| snap.object_quals)
+        }
+        HirExprKind::Deref(operand) => match tcx.get(body.exprs[*operand].ty) {
+            Ty::Ptr(q) => quals_from_type_qual(*q),
+            _ => ObjectQuals::none(),
+        },
+        HirExprKind::Index { base, .. } => match tcx.get(body.exprs[*base].ty) {
+            Ty::Ptr(q) => quals_from_type_qual(*q),
+            Ty::Array { elem, .. } => quals_from_type_qual(*elem),
+            _ => ObjectQuals::none(),
+        },
+        HirExprKind::Field { base, field_index } => {
+            let base_quals = lvalue_object_quals(body, tcx, def_info, *base);
+            let field_quals = member_base_record(body, tcx, *base)
+                .and_then(|record| {
+                    def_info
+                        .get(&record)
+                        .and_then(|snapshot| snapshot.record_fields.as_ref())
+                        .and_then(|fields| fields.get(*field_index as usize))
+                        .map(|field| field.quals)
+                })
+                .unwrap_or_else(ObjectQuals::none);
+            combine_object_quals(base_quals, field_quals)
+        }
+        HirExprKind::CompoundLiteral { local, .. } => body.locals[*local].quals,
+        _ => ObjectQuals::none(),
+    }
+}
+
+fn quals_from_type_qual(q: Qual) -> ObjectQuals {
+    ObjectQuals { is_const: q.is_const, is_volatile: q.is_volatile, is_restrict: q.is_restrict }
+}
+
+fn combine_object_quals(a: ObjectQuals, b: ObjectQuals) -> ObjectQuals {
+    ObjectQuals {
+        is_const: a.is_const || b.is_const,
+        is_volatile: a.is_volatile || b.is_volatile,
+        is_restrict: a.is_restrict || b.is_restrict,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -4509,8 +4605,12 @@ mod tests {
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
+                object_quals: ObjectQuals::none(),
                 record_fields: Some(
-                    fields.into_iter().map(|(name, ty)| FieldSnapshot { name, ty }).collect(),
+                    fields
+                        .into_iter()
+                        .map(|(name, ty)| FieldSnapshot { name, ty, quals: ObjectQuals::none() })
+                        .collect(),
                 ),
             },
         );

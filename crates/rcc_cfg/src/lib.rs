@@ -9,7 +9,7 @@
 #![allow(missing_docs)]
 
 use rcc_data_structures::IndexVec;
-use rcc_hir::{DefId, Local, TyId};
+use rcc_hir::{DefId, Local, ObjectQuals, TyId};
 use rcc_span::Span;
 
 pub mod build;
@@ -45,6 +45,8 @@ pub struct LocalDecl {
     pub name: Option<rcc_span::Symbol>,
     /// Type of the slot.
     pub ty: TyId,
+    /// Object qualifiers preserved from HIR for codegen access policy.
+    pub quals: ObjectQuals,
     /// Runtime element-count local for a VLA allocation.
     pub vla_len: Option<Local>,
     /// Whether this is a function parameter.

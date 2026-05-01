@@ -33,10 +33,11 @@ use rcc_session::Session;
 use rcc_span::{Symbol, DUMMY_SP};
 use rcc_typeck::const_eval::{ConstEval, ConstScalar, ConstValue};
 use rcc_typeck::{
-    check_assignment_lhs, check_body, check_init_const, decay_if_needed, integer_promotion,
-    is_assignable, is_compatible_type, is_const_init_expr, is_null_pointer_constant,
-    lvalue_to_rvalue_if_needed, pointer_convert, usual_arithmetic, value_category,
-    verify_typed_hir, AssignError, ConvertError, DecayContext,
+    check_assignment_lhs, check_body, check_body_with_defs, check_init_const, decay_if_needed,
+    integer_promotion, is_assignable, is_compatible_type, is_const_init_expr,
+    is_null_pointer_constant, lvalue_to_rvalue_if_needed, pointer_convert, usual_arithmetic,
+    value_category, verify_typed_hir, AssignError, ConvertError, DecayContext, DefSnapshot,
+    FieldSnapshot,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -76,6 +77,17 @@ fn push_local(body: &mut Body, ty: TyId) -> Local {
         name: None,
         ty,
         quals: rcc_hir::ObjectQuals::none(),
+        vla_len: None,
+        is_param: false,
+        span: DUMMY_SP,
+    })
+}
+
+fn push_local_with_quals(body: &mut Body, ty: TyId, quals: rcc_hir::ObjectQuals) -> Local {
+    body.locals.push(LocalDecl {
+        name: None,
+        ty,
+        quals,
         vla_len: None,
         is_param: false,
         span: DUMMY_SP,
@@ -721,6 +733,146 @@ fn fixture_e0080_binary_lhs() {
     let (mut session, cap) = Session::for_test();
     assert!(!check_assignment_lhs(&mut session, &body, lhs));
     assert_eq!(cap.diagnostics()[0].code, Some(codes::E0080));
+}
+
+#[test]
+fn assignment_to_const_local_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let local = push_local_with_quals(
+        &mut body,
+        tcx.int,
+        rcc_hir::ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+    );
+    let lhs = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(local));
+    let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_to_const_global_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let def_id = DefId(4);
+    let mut def_info = rcc_data_structures::FxHashMap::default();
+    def_info.insert(
+        def_id,
+        DefSnapshot {
+            ty: Some(tcx.int),
+            value_cat: ValueCat::LValue,
+            enumerator_value: None,
+            object_quals: rcc_hir::ObjectQuals {
+                is_const: true,
+                is_volatile: false,
+                is_restrict: false,
+            },
+            record_fields: None,
+        },
+    );
+    let lhs = push_kind(&mut body, tcx.int, HirExprKind::DefRef(def_id));
+    let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_to_const_field_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let record_def = DefId(7);
+    let rec_ty = record(&mut tcx, record_def.0);
+    let mut def_info = rcc_data_structures::FxHashMap::default();
+    def_info.insert(
+        record_def,
+        DefSnapshot {
+            ty: None,
+            value_cat: ValueCat::RValue,
+            enumerator_value: None,
+            object_quals: rcc_hir::ObjectQuals::none(),
+            record_fields: Some(vec![FieldSnapshot {
+                name: Some(Symbol(1)),
+                ty: tcx.int,
+                quals: rcc_hir::ObjectQuals {
+                    is_const: true,
+                    is_volatile: false,
+                    is_restrict: false,
+                },
+            }]),
+        },
+    );
+    let base = push_local_ref(&mut body, rec_ty);
+    let lhs = push_kind(&mut body, tcx.error, HirExprKind::Field { base, field_index: 0 });
+    let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_through_pointer_to_const_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let int_ty = tcx.int;
+    let ptr_to_const_int = tcx.intern(Ty::Ptr(Qual {
+        ty: int_ty,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let ptr = push_local_ref(&mut body, ptr_to_const_int);
+    let lhs = push_kind(&mut body, tcx.error, HirExprKind::Deref(ptr));
+    let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn increment_const_local_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let local = push_local_with_quals(
+        &mut body,
+        tcx.int,
+        rcc_hir::ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+    );
+    let operand = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(local));
+    let inc = push_kind(&mut body, tcx.error, HirExprKind::Unary { op: UnOp::PreInc, operand });
+    root_stmt(&mut body, inc);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_to_array_object_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let arr_ty = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+    let lhs = push_local_ref(&mut body, arr_ty);
+    let rhs = push_kind(&mut body, arr_ty, HirExprKind::StringRef(DefId(10)));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
 }
 
 // ─── 9b. E0081 / E0082 — surfaced via is_assignable / pointer_convert ─────

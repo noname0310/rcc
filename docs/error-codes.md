@@ -737,15 +737,17 @@ assignment to be a *modifiable lvalue*. The narrower constraint that
 the LHS be an lvalue at all is checked first — writing to the result
 of a cast, an arithmetic expression, a literal, a function call, or
 any other expression that does not designate an object is a
-constraint violation. (The "modifiable" half — rejecting writes to
-const-qualified objects, array types, and the like — piggybacks on
-the same code; see task 07-05.)
+constraint violation. The broader modifiable-lvalue check also uses
+this code for writes through const-qualified objects, array objects,
+and increment/decrement of const lvalues.
 
 ```c
 void f(int x) {
     (int)x = 1;     // error[E0080]: assignment to rvalue
     1 = x;          // error[E0080]: assignment to rvalue
     x + 0 = 1;      // error[E0080]: assignment to rvalue
+    const int c = 0;
+    c = 1;          // error[E0080]: const object is not modifiable
 }
 ```
 
