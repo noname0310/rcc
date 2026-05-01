@@ -1,5 +1,7 @@
 # 06-17: C declarator scope timing
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 06-16    **Milestone:** M5 stabilization
 
 ## Goal
@@ -34,4 +36,3 @@ begins just after the completion of its declarator.
 - C99 §6.2.1p7 — identifier scope begins just after its declarator.
 - `lower_block_decl` currently lowers scalar initializers before
   inserting the local binding.
-

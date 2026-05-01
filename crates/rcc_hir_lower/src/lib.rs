@@ -211,6 +211,11 @@ impl ScopeStack {
         }
         None
     }
+
+    /// Lookup a name only in the innermost active scope frame.
+    pub fn lookup_current(&self, name: Symbol) -> Option<Binding> {
+        self.frames.last().and_then(|frame| frame.get(&name).copied())
+    }
 }
 
 impl Default for ScopeStack {
@@ -738,6 +743,10 @@ fn lower_block_decl(
         };
 
         if is_typedef {
+            let duplicate = scope.lookup_current(name).is_some();
+            if duplicate {
+                emit_duplicate_ordinary(name, decl.span, session);
+            }
             let ty = lower_type_from_parts_in_scope(
                 &decl.specs,
                 &init_decl.declarator,
@@ -755,7 +764,9 @@ fn lower_block_decl(
                 kind: DefKind::Typedef(ty),
             });
             crate_.defs[id].id = id;
-            scope.insert(name, Binding::Def(id));
+            if !duplicate {
+                scope.insert(name, Binding::Def(id));
+            }
             continue;
         }
 
@@ -780,6 +791,25 @@ fn lower_block_decl(
             session,
         );
 
+        let duplicate = scope.lookup_current(name).is_some();
+        if duplicate {
+            emit_duplicate_ordinary(name, decl.span, session);
+        }
+
+        // C99 §6.2.1p7: the identifier's scope starts just after its
+        // declarator. VLA bounds above are part of the declarator and use
+        // the old scope; initializers below use this new binding.
+        let local = body.locals.push(LocalDecl {
+            name: Some(name),
+            ty,
+            vla_len,
+            is_param: false,
+            span: decl.span,
+        });
+        if !duplicate {
+            scope.insert(name, Binding::Local(local));
+        }
+
         // Scalar (single-expression) initialiser: keep the value inline
         // on the LocalDecl so simple `int x = 5;` declarations still
         // produce exactly one statement. Aggregate (brace-enclosed)
@@ -793,16 +823,6 @@ fn lower_block_decl(
             Some(init @ rcc_ast::Initializer::List(_)) => (None, Some(init)),
             None => (None, None),
         };
-
-        // Allocate a Local and register it in the innermost scope.
-        let local = body.locals.push(LocalDecl {
-            name: Some(name),
-            ty,
-            vla_len,
-            is_param: false,
-            span: decl.span,
-        });
-        scope.insert(name, Binding::Local(local));
 
         let stmt_id = body.stmts.push(HirStmt {
             id: HirStmtId(0),
@@ -1821,6 +1841,15 @@ fn edit_distance(a: &str, b: &str) -> u32 {
     }
 
     prev[n]
+}
+
+fn emit_duplicate_ordinary(name: Symbol, span: Span, session: &mut Session) {
+    let sym_str = session.interner.get(name);
+    session
+        .handler
+        .struct_err(span, format!("redeclaration of `{sym_str}` in the same scope"))
+        .code(rcc_errors::codes::E0070)
+        .emit();
 }
 
 /// Resolve a `TypeSpec::TypedefName(sym)` to the underlying `TyId`.
@@ -2902,7 +2931,7 @@ fn validate_bit_width(
 fn assign_def_ids(
     ast: &TranslationUnit,
     tcx: &TyCtxt,
-    _session: &mut Session,
+    session: &mut Session,
     crate_: &mut HirCrate,
     resolver: &mut Resolver,
 ) {
@@ -2945,6 +2974,7 @@ fn assign_def_ids(
             }
             ExternalDecl::Decl(decl) => {
                 let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
+                let mut names_in_decl = FxHashSet::default();
 
                 // Scan type specifiers for tag definitions (struct/union/enum).
                 for ts in &decl.specs.type_specs {
@@ -2990,6 +3020,10 @@ fn assign_def_ids(
                 // Process each init-declarator.
                 for init_decl in &decl.inits {
                     if let Some((name, _span)) = init_decl.declarator.name {
+                        let duplicate_in_decl = !names_in_decl.insert(name);
+                        if duplicate_in_decl {
+                            emit_duplicate_ordinary(name, decl.span, session);
+                        }
                         if is_typedef {
                             let id = crate_.defs.push(Def {
                                 id: DefId(0),
@@ -2998,7 +3032,9 @@ fn assign_def_ids(
                                 kind: DefKind::Typedef(tcx.error),
                             });
                             crate_.defs[id].id = id;
-                            resolver.ordinary.insert(name, id);
+                            if !duplicate_in_decl {
+                                resolver.ordinary.insert(name, id);
+                            }
                         } else {
                             // Global variable (or extern declaration).
                             let linkage = match decl.specs.storage {
@@ -3013,7 +3049,9 @@ fn assign_def_ids(
                                 kind: DefKind::Global { ty: tcx.error, linkage },
                             });
                             crate_.defs[id].id = id;
-                            resolver.ordinary.insert(name, id);
+                            if !duplicate_in_decl {
+                                resolver.ordinary.insert(name, id);
+                            }
                         }
                     }
                 }

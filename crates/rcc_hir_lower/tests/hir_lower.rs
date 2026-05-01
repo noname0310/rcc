@@ -54,6 +54,19 @@ pub fn lower_snippet(src: &str) -> (HirCrate, TyCtxt) {
     (hir, tcx)
 }
 
+fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(Options::default(), handler);
+    let fid =
+        sess.source_map.write().unwrap().add_file(PathBuf::from("<lower_snippet>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    let mut tcx = TyCtxt::new();
+    let hir = lower(&ast, &mut tcx, &mut sess);
+    (hir, tcx, cap)
+}
+
 /// Like `lower_snippet`, but keeps the `Session` (with capture emitter)
 /// around so callers can inspect diagnostics. Returns the parsed AST,
 /// not the HIR — this is the entry point for hand-driven lowering of
@@ -1382,6 +1395,84 @@ fn snippet_local_object_shadows_outer_typedef_in_expressions() {
     assert!(
         body.stmts.iter().any(|stmt| matches!(stmt.kind, HirStmtKind::Expr(_))),
         "assignment to local T should lower as an expression statement"
+    );
+}
+
+#[test]
+fn snippet_initializer_self_reference_uses_new_local_scope() {
+    let (hir, _tcx) = lower_snippet("int x; void f(void) { int x = x; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let init = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt.kind {
+            HirStmtKind::LocalDecl { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .expect("missing local initializer");
+    assert!(matches!(body.exprs[init].kind, HirExprKind::LocalRef(Local(0))));
+}
+
+#[test]
+fn snippet_later_declarator_initializer_sees_earlier_local() {
+    let (hir, _tcx) = lower_snippet("void f(void) { int a = 1, b = a; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let inits: Vec<_> = body
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt.kind {
+            HirStmtKind::LocalDecl { init, .. } => init,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inits.len(), 2);
+    assert!(matches!(body.exprs[inits[1]].kind, HirExprKind::LocalRef(Local(0))));
+}
+
+#[test]
+fn snippet_sizeof_initializer_sees_declared_local() {
+    let (hir, _tcx) = lower_snippet("void f(void) { int a = sizeof a; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let init = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt.kind {
+            HirStmtKind::LocalDecl { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .expect("missing local initializer");
+    let HirExprKind::SizeofExpr(inner) = body.exprs[init].kind else {
+        panic!("expected sizeof expression");
+    };
+    assert!(matches!(body.exprs[inner].kind, HirExprKind::LocalRef(Local(0))));
+}
+
+#[test]
+fn snippet_duplicate_block_declarator_diagnoses_without_overwriting_binding() {
+    let (hir, _tcx, cap) = lower_snippet_with_diagnostics("void f(void) { int a, a = a; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0070)),
+        "duplicate block declarator should emit E0070"
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    let second_init = body
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt.kind {
+            HirStmtKind::LocalDecl { init, .. } => init,
+            _ => None,
+        })
+        .next()
+        .expect("missing duplicate declarator initializer");
+    assert!(matches!(body.exprs[second_init].kind, HirExprKind::LocalRef(Local(0))));
+}
+
+#[test]
+fn snippet_duplicate_file_scope_declarator_diagnoses() {
+    let (_hir, _tcx, cap) = lower_snippet_with_diagnostics("int a, a;");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0070)),
+        "duplicate file-scope declarator in one declaration should emit E0070"
     );
 }
 
