@@ -22,7 +22,7 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprKind,
-    HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
+    HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -257,6 +257,7 @@ fn push_local_lvalue(
     let local = body.locals.push(LocalDecl {
         name: Some(name),
         ty,
+        quals: ObjectQuals::none(),
         vla_len: None,
         is_param: false,
         span: DUMMY_SP,
@@ -456,33 +457,18 @@ fn s6_7_5_void_pointer() {
 }
 
 #[test]
-fn s6_7_5_const_pointer_to_const_int() {
-    // const int * const p;
-    // Right-left: p → * const (top-level const pointer) → const int.
-    //
-    // C99 §6.7.5.1 "type qualifiers may follow `*`": the `* const` is
-    // captured as a `const_ptr()` derived element. The pointee `const`
-    // comes from the base specifier which the test-side simulates by
-    // wrapping the int in a `const Qual` prior to building the Ptr.
-    //
-    // The `apply_declarator` API takes a base `TyId` and applies the
-    // derived chain on top, so we reproduce the pointee-const by
-    // constructing the expected type explicitly.
+fn s6_7_5_const_pointer_qualifier_does_not_qualify_pointee() {
+    // int * const p;
+    // The `const` after `*` qualifies the pointer object, not the pointee.
+    // The low-level type builder has no object metadata return slot, so it
+    // leaves the pointee unqualified; full declaration lowering records the
+    // final pointer qualifier in `ObjectQuals`.
     let (mut sess, _cap) = Session::for_test();
     let mut tcx = TyCtxt::new();
     let p = intern(&mut sess, "p");
-    // Base = int; the source-level `const int` qualifier is part of
-    // the DeclSpecs which `lower_declspecs_to_base_ty` consumes — at
-    // the declarator level we only fold the `* const`.
     let d = named(p, vec![const_ptr()]);
     let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
-    let expected = tcx.intern(Ty::Ptr(Qual {
-        ty: tcx.int,
-        is_const: true,
-        is_volatile: false,
-        is_restrict: false,
-    }));
-    assert_eq!(ty, expected);
+    assert_eq!(ty, tcx.intern(Ty::Ptr(Qual::plain(tcx.int))));
 }
 
 #[test]
@@ -1072,6 +1058,7 @@ fn init_record_per_field_assign() {
                 rcc_hir::Field {
                     name: Some(a),
                     ty: tcx.int,
+                    quals: ObjectQuals::none(),
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -1079,6 +1066,7 @@ fn init_record_per_field_assign() {
                 rcc_hir::Field {
                     name: Some(b),
                     ty: tcx.int,
+                    quals: ObjectQuals::none(),
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -1235,6 +1223,7 @@ fn expr_member_access_preserves_requested_field_name() {
             fields: vec![rcc_hir::Field {
                 name: Some(a),
                 ty: tcx.int,
+                quals: ObjectQuals::none(),
                 offset: None,
                 bit_width: None,
                 span: DUMMY_SP,
@@ -1361,6 +1350,7 @@ fn snippet_vla_decl_preserves_runtime_bound_expr() {
     let n_local = body.locals.push(LocalDecl {
         name: Some(n),
         ty: tcx.int,
+        quals: ObjectQuals::none(),
         vla_len: None,
         is_param: true,
         span: DUMMY_SP,
@@ -2465,6 +2455,83 @@ fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
         global_tys.iter().any(|ty| matches!(tcx.get(*ty), Ty::Enum(_))),
         "enum E eg should be enum-typed"
     );
+}
+
+#[test]
+fn regression_gate_volatile_global_preserves_object_qualifier() {
+    let (hir, tcx) = lower_snippet("volatile int g;");
+    let def = hir.defs.iter().find(|def| matches!(def.kind, DefKind::Global { .. })).unwrap();
+    let DefKind::Global { ty, quals, .. } = def.kind else {
+        unreachable!();
+    };
+    assert_eq!(ty, tcx.int);
+    assert_eq!(quals, ObjectQuals { is_const: false, is_volatile: true, is_restrict: false });
+}
+
+#[test]
+fn regression_gate_const_local_preserves_object_qualifier() {
+    let (hir, tcx) = lower_snippet("void f(void) { const int local = 1; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    assert_eq!(body.locals.len(), 1);
+    let local = &body.locals[Local(0)];
+    assert_eq!(local.ty, tcx.int);
+    assert_eq!(local.quals, ObjectQuals { is_const: true, is_volatile: false, is_restrict: false });
+}
+
+#[test]
+fn regression_gate_volatile_record_field_preserves_object_qualifier() {
+    let (hir, tcx) = lower_snippet("struct S { volatile int x; };");
+    let record = hir.defs.iter().find(|def| matches!(def.kind, DefKind::Record { .. })).unwrap();
+    let DefKind::Record { fields, .. } = &record.kind else {
+        unreachable!();
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].ty, tcx.int);
+    assert_eq!(
+        fields[0].quals,
+        ObjectQuals { is_const: false, is_volatile: true, is_restrict: false }
+    );
+}
+
+#[test]
+fn regression_gate_distinguishes_const_pointer_object_from_pointer_to_const() {
+    let (hir, tcx) = lower_snippet("int * const p; const int *q;");
+    let globals: Vec<_> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { ty, quals, .. } => Some((ty, quals)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(globals.len(), 2);
+
+    let (p_ty, p_quals) = globals[0];
+    assert_eq!(
+        p_quals,
+        ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+        "`int * const p` must preserve const on the pointer object"
+    );
+    match tcx.get(p_ty) {
+        Ty::Ptr(pointee) => assert_eq!(
+            *pointee,
+            Qual::plain(tcx.int),
+            "`int * const p` must not turn pointer const into pointee const"
+        ),
+        other => panic!("expected p to be pointer-to-int, got {other:?}"),
+    }
+
+    let (q_ty, q_quals) = globals[1];
+    assert_eq!(q_quals, ObjectQuals::none(), "`const int *q` does not qualify the object q");
+    match tcx.get(q_ty) {
+        Ty::Ptr(pointee) => {
+            assert_eq!(pointee.ty, tcx.int);
+            assert!(pointee.is_const, "`const int *q` must keep const on the pointee");
+            assert!(!pointee.is_volatile);
+            assert!(!pointee.is_restrict);
+        }
+        other => panic!("expected q to be pointer-to-const-int, got {other:?}"),
+    }
 }
 
 #[test]

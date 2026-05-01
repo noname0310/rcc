@@ -1,5 +1,7 @@
 # 06-26: Preserve object qualifiers in HIR
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 06-25    **Milestone:** M3 pre-codegen stabilization
 
 ## Goal

@@ -146,6 +146,7 @@ mod tests {
                     Field {
                         name: None,
                         ty: tcx.char_,
+                        quals: rcc_hir::ObjectQuals::none(),
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,
@@ -153,6 +154,7 @@ mod tests {
                     Field {
                         name: None,
                         ty: tcx.int,
+                        quals: rcc_hir::ObjectQuals::none(),
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,

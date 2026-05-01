@@ -4165,6 +4165,7 @@ mod tests {
         let char_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.char_,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4237,6 +4238,7 @@ mod tests {
         let p_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4280,6 +4282,7 @@ mod tests {
         let x_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4327,6 +4330,7 @@ mod tests {
         let x_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4479,6 +4483,7 @@ mod tests {
         let l = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4718,6 +4723,7 @@ mod tests {
         let local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: cx_ptr,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4748,6 +4754,7 @@ mod tests {
         let cx_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4836,6 +4843,7 @@ mod tests {
         let cx_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4843,6 +4851,7 @@ mod tests {
         let real_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.double,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4905,6 +4914,7 @@ mod tests {
         let a = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -4961,6 +4971,7 @@ mod tests {
         let r = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

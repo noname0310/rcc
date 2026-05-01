@@ -33,7 +33,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)
 - [x] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
 - [x] [25-member-access-name-preservation](25-member-access-name-preservation.md)
-- [ ] [26-object-qualifier-preservation](26-object-qualifier-preservation.md)
+- [x] [26-object-qualifier-preservation](26-object-qualifier-preservation.md)
 
 ## Downstream
 

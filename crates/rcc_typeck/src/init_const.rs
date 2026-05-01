@@ -212,7 +212,12 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
+            kind: DefKind::Global {
+                ty: tcx.int,
+                quals: rcc_hir::ObjectQuals::none(),
+                linkage: Linkage::External,
+                init: None,
+            },
         });
         defs[g].id = g;
         let dref = push(&mut body, tcx.int, HirExprKind::DefRef(g));
@@ -241,7 +246,12 @@ mod tests {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.char_, linkage: Linkage::Internal, init: None },
+            kind: DefKind::Global {
+                ty: tcx.char_,
+                quals: rcc_hir::ObjectQuals::none(),
+                linkage: Linkage::Internal,
+                init: None,
+            },
         });
         defs[def].id = def;
         let sref = push(&mut body, tcx.char_, HirExprKind::StringRef(def));

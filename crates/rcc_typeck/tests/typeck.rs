@@ -842,7 +842,12 @@ fn fixture_e0084_address_of_global_silent() {
         id: DefId(0),
         name: rcc_span::Symbol(0),
         span: DUMMY_SP,
-        kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
+        kind: DefKind::Global {
+            ty: tcx.int,
+            quals: rcc_hir::ObjectQuals::none(),
+            linkage: Linkage::External,
+            init: None,
+        },
     });
     defs[g].id = g;
     let dref = push_kind(&mut body, tcx.int, HirExprKind::DefRef(g));

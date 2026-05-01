@@ -57,6 +57,25 @@ pub struct Def {
     pub kind: DefKind,
 }
 
+/// Top-level qualifiers attached to a declared object rather than to one of
+/// its component types.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ObjectQuals {
+    /// `const`
+    pub is_const: bool,
+    /// `volatile`
+    pub is_volatile: bool,
+    /// `restrict`
+    pub is_restrict: bool,
+}
+
+impl ObjectQuals {
+    /// No object-level qualifiers.
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 /// Flavour of a top-level definition.
 #[derive(Debug, Clone)]
 pub enum DefKind {
@@ -81,6 +100,8 @@ pub enum DefKind {
     Global {
         /// Object type.
         ty: TyId,
+        /// Qualifiers that apply to the global object itself.
+        quals: ObjectQuals,
         /// Linkage kind.
         linkage: Linkage,
         /// Lowered static initializer, if this file-scope object has one.
@@ -132,6 +153,8 @@ pub struct Field {
     pub name: Option<Symbol>,
     /// Field type.
     pub ty: TyId,
+    /// Qualifiers that apply to the field object itself.
+    pub quals: ObjectQuals,
     /// Offset within the record, in bytes (filled by layout).
     pub offset: Option<u64>,
     /// Bitfield width, if applicable.
@@ -236,6 +259,8 @@ pub struct LocalDecl {
     pub name: Option<Symbol>,
     /// Resolved type.
     pub ty: TyId,
+    /// Qualifiers that apply to the local object itself.
+    pub quals: ObjectQuals,
     /// Runtime bound expression for a block-scope VLA local, when this
     /// declaration owns a dynamic array allocation.
     pub vla_len: Option<HirExprId>,

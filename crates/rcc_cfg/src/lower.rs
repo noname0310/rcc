@@ -1722,6 +1722,7 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -1729,6 +1730,7 @@ mod tests {
         let hb = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -1736,6 +1738,7 @@ mod tests {
         let hc = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2036,6 +2039,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2265,6 +2269,7 @@ mod tests {
         let hs = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2321,6 +2326,7 @@ mod tests {
         let hx = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2353,6 +2359,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2389,6 +2396,7 @@ mod tests {
         let hs = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2434,6 +2442,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2491,6 +2500,7 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: arr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2499,6 +2509,7 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2576,6 +2587,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2651,6 +2663,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -2775,6 +2788,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -5052,6 +5066,7 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: arr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -5431,6 +5446,7 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -5438,6 +5454,7 @@ mod tests {
         let hy = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -5589,6 +5606,7 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            quals: rcc_hir::ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -5634,7 +5652,14 @@ mod tests {
         vla_len: Option<HirExprId>,
         is_param: bool,
     ) -> HirLocal {
-        body.locals.push(rcc_hir::LocalDecl { name: None, ty, vla_len, is_param, span: DUMMY_SP })
+        body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len,
+            is_param,
+            span: DUMMY_SP,
+        })
     }
 
     fn int_vla_ty(tcx: &mut TyCtxt) -> TyId {
@@ -5656,6 +5681,7 @@ mod tests {
                     rcc_hir::Field {
                         name: None,
                         ty: tcx.char_,
+                        quals: rcc_hir::ObjectQuals::none(),
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,
@@ -5663,6 +5689,7 @@ mod tests {
                     rcc_hir::Field {
                         name: None,
                         ty: tcx.int,
+                        quals: rcc_hir::ObjectQuals::none(),
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,

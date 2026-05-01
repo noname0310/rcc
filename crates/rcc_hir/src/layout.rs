@@ -286,16 +286,44 @@ mod tests {
             &mut defs,
             RecordKind::Struct,
             vec![
-                Field { name: None, ty: tcx.char_, offset: None, bit_width: None, span: DUMMY_SP },
-                Field { name: None, ty: tcx.int, offset: None, bit_width: None, span: DUMMY_SP },
+                Field {
+                    name: None,
+                    ty: tcx.char_,
+                    quals: crate::ObjectQuals::none(),
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+                Field {
+                    name: None,
+                    ty: tcx.int,
+                    quals: crate::ObjectQuals::none(),
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
             ],
         );
         let union_id = record_def(
             &mut defs,
             RecordKind::Union,
             vec![
-                Field { name: None, ty: tcx.char_, offset: None, bit_width: None, span: DUMMY_SP },
-                Field { name: None, ty: tcx.long, offset: None, bit_width: None, span: DUMMY_SP },
+                Field {
+                    name: None,
+                    ty: tcx.char_,
+                    quals: crate::ObjectQuals::none(),
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+                Field {
+                    name: None,
+                    ty: tcx.long,
+                    quals: crate::ObjectQuals::none(),
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
             ],
         );
         let struct_ty = tcx.intern(Ty::Record(struct_id));

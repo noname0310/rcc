@@ -21,8 +21,8 @@ use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, SwitchCase, TyCtxt, TyId,
-    ValueCat,
+    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, RecordKind, SwitchCase, TyCtxt,
+    TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -137,6 +137,7 @@ fn lower_function_params(
         let local = body.locals.push(LocalDecl {
             name,
             ty,
+            quals: declaration_object_quals(&param.specs, &param.declarator),
             vla_len: None,
             is_param: true,
             span: param.span,
@@ -988,6 +989,7 @@ fn lower_block_decl(
         let local = body.locals.push(LocalDecl {
             name: Some(name),
             ty,
+            quals: declaration_object_quals(&decl.specs, &init_decl.declarator),
             vla_len,
             is_param: false,
             span: decl.span,
@@ -2234,6 +2236,7 @@ pub fn lower_expr(
             let local = body.locals.push(LocalDecl {
                 name: None,
                 ty,
+                quals: ObjectQuals::none(),
                 vla_len: None,
                 is_param: false,
                 span: expr.span,
@@ -2305,7 +2308,12 @@ fn intern_string_literal(
         id: DefId(0),
         name: text,
         span,
-        kind: DefKind::Global { ty: array_ty, linkage: Linkage::Internal, init: None },
+        kind: DefKind::Global {
+            ty: array_ty,
+            quals: ObjectQuals::none(),
+            linkage: Linkage::Internal,
+            init: None,
+        },
     });
     crate_.defs[def_id].id = def_id;
     resolver.strings.insert(text, def_id);
@@ -2727,8 +2735,9 @@ fn lower_type_from_parts_in_scope(
     if base == tcx.error {
         return tcx.error;
     }
-    apply_declarator_with_context_in_scope(
+    apply_declarator_with_base_quals_in_scope(
         base,
+        specs.quals,
         declarator,
         scope,
         typedef_scope,
@@ -2963,6 +2972,29 @@ fn quals_to_hir(base: TyId, q: &rcc_ast::TypeQuals) -> Qual {
     Qual { ty: base, is_const: q.const_, is_volatile: q.volatile, is_restrict: q.restrict }
 }
 
+fn object_quals_from_type_quals(q: &rcc_ast::TypeQuals) -> ObjectQuals {
+    ObjectQuals { is_const: q.const_, is_volatile: q.volatile, is_restrict: q.restrict }
+}
+
+fn merge_type_quals(
+    base: rcc_ast::TypeQuals,
+    component: &rcc_ast::TypeQuals,
+) -> rcc_ast::TypeQuals {
+    rcc_ast::TypeQuals {
+        const_: base.const_ || component.const_,
+        volatile: base.volatile || component.volatile,
+        restrict: base.restrict || component.restrict,
+    }
+}
+
+fn declaration_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator) -> ObjectQuals {
+    match declarator.derived.last() {
+        Some(DerivedDeclarator::Pointer(quals)) => object_quals_from_type_quals(quals),
+        Some(_) => ObjectQuals::none(),
+        None => object_quals_from_type_quals(&specs.quals),
+    }
+}
+
 /// Fold a parsed `Declarator` (name + chain of `DerivedDeclarator`) over
 /// a base `Ty` obtained from `DeclSpecs`. Produces the final `TyId` for
 /// the declared name; applies qualifiers correctly.
@@ -3029,15 +3061,46 @@ fn apply_declarator_with_context_in_scope(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
+    apply_declarator_with_base_quals_in_scope(
+        base,
+        rcc_ast::TypeQuals::default(),
+        d,
+        scope,
+        typedef_scope,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_declarator_with_base_quals_in_scope(
+    base: TyId,
+    base_quals: rcc_ast::TypeQuals,
+    d: &Declarator,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
     let mut ty = base;
+    let mut pending_component_quals = base_quals;
 
     // Iterate the derived chain in forward order (outermost-to-innermost).
     for dd in d.derived.iter() {
         match dd {
             DerivedDeclarator::Pointer(quals) => {
-                // Build a Ptr whose pointee is the current type + qualifiers.
-                let qual = quals_to_hir(ty, quals);
+                // Build a pointer to the current qualified component.
+                // The pointer's own qualifiers become pending metadata for
+                // the newly constructed pointer type: an outer pointer/array
+                // can consume them as component qualifiers, while the final
+                // declarator object records them in `ObjectQuals`.
+                let qual = quals_to_hir(ty, &pending_component_quals);
                 ty = tcx.intern(Ty::Ptr(qual));
+                pending_component_quals = *quals;
             }
             DerivedDeclarator::Array(arr_decl) => {
                 // C99 §6.7.5.2: the element type shall be a complete object
@@ -3073,8 +3136,10 @@ fn apply_declarator_with_context_in_scope(
                     (None, false)
                 };
 
-                let elem = quals_to_hir(ty, &arr_decl.quals);
+                let merged = merge_type_quals(pending_component_quals, &arr_decl.quals);
+                let elem = quals_to_hir(ty, &merged);
                 ty = tcx.intern(Ty::Array { elem, len, is_vla });
+                pending_component_quals = rcc_ast::TypeQuals::default();
             }
             DerivedDeclarator::Function(func_decl) => {
                 // C99 §6.7.5.3p1: the return type shall not be an array
@@ -3561,6 +3626,7 @@ pub fn lower_record(
                         out_fields.push(Field {
                             name: None,
                             ty: base,
+                            quals: object_quals_from_type_quals(&fd.specs.quals),
                             offset: None,
                             bit_width,
                             span: fd.span,
@@ -3612,7 +3678,14 @@ pub fn lower_record(
                     } else {
                         None
                     };
-                    out_fields.push(Field { name, ty, offset: None, bit_width, span: decl.span });
+                    out_fields.push(Field {
+                        name,
+                        ty,
+                        quals: declaration_object_quals(&fd.specs, decl),
+                        offset: None,
+                        bit_width,
+                        span: decl.span,
+                    });
                 }
             }
         }
@@ -3815,7 +3888,15 @@ fn assign_def_ids(
                                 id: DefId(0),
                                 name,
                                 span: decl.span,
-                                kind: DefKind::Global { ty: tcx.error, linkage, init: None },
+                                kind: DefKind::Global {
+                                    ty: tcx.error,
+                                    quals: declaration_object_quals(
+                                        &decl.specs,
+                                        &init_decl.declarator,
+                                    ),
+                                    linkage,
+                                    init: None,
+                                },
                             });
                             crate_.defs[id].id = id;
                             if !duplicate_in_decl {
@@ -3917,8 +3998,9 @@ fn finalize_file_scope_def_types(
 
             match &mut crate_.defs[def_id].kind {
                 DefKind::Typedef(slot) => *slot = ty,
-                DefKind::Global { ty: slot, init, .. } => {
+                DefKind::Global { ty: slot, quals, init, .. } => {
                     *slot = ty;
+                    *quals = declaration_object_quals(&decl.specs, &init_decl.declarator);
                     *init = global_init;
                 }
                 _ => {}
@@ -5089,7 +5171,12 @@ mod tests {
             id: DefId(0),
             name: g,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
+            kind: DefKind::Global {
+                ty: tcx.int,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::External,
+                init: None,
+            },
         });
         crate_.defs[id].id = id;
         resolver.ordinary.insert(g, id);
@@ -5402,21 +5489,15 @@ mod tests {
 
     #[test]
     fn declarator_const_pointer_to_int() {
-        // `int * const cp;` → Ptr(const int)
-        // Wait, actually: `int * const cp` means cp is a const pointer
-        // to int. The const qualifies the pointer, not the pointee.
-        // In our representation: Ptr(Qual { ty: int, is_const: true })
+        // `int * const cp;` means cp is a const pointer to int. The
+        // const qualifies the pointer object, not the pointee; the full
+        // declaration lowering path records that in `ObjectQuals`.
         let (mut sess, _cap) = Session::for_test();
         let mut tcx = TyCtxt::new();
         let cp = sym(&mut sess, "cp");
         let d = make_declarator(cp, vec![const_ptr()]);
         let result = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
-        let expected = tcx.intern(Ty::Ptr(Qual {
-            ty: tcx.int,
-            is_const: true,
-            is_volatile: false,
-            is_restrict: false,
-        }));
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
         assert_eq!(result, expected);
     }
 
@@ -6613,7 +6694,12 @@ mod tests {
             id: DefId(0),
             name: n,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
+            kind: DefKind::Global {
+                ty: tcx.int,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::External,
+                init: None,
+            },
         });
         crate_.defs[n_def].id = n_def;
         resolver.ordinary.insert(n, n_def);
@@ -6741,6 +6827,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(i),
             ty: TyCtxt::new().int,
+            quals: ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -7258,6 +7345,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            quals: ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -7298,6 +7386,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            quals: ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -7547,6 +7636,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            quals: ObjectQuals::none(),
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -7572,7 +7662,12 @@ mod tests {
             id: DefId(0),
             name: g,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty: tcx.int, linkage: Linkage::External, init: None },
+            kind: DefKind::Global {
+                ty: tcx.int,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::External,
+                init: None,
+            },
         });
         crate_.defs[g_def].id = g_def;
         resolver.ordinary.insert(g, g_def);
