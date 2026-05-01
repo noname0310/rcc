@@ -104,6 +104,13 @@ pub struct Options {
     /// succeeds as a single pp-number token instead of emitting
     /// E0025. Off by default.
     pub gnu_permissive_paste: bool,
+    /// Enable GNU statement expressions `({ ... })` without a warning.
+    ///
+    /// The parser accepts the extension in all modes so GNU-flavoured
+    /// test suites can keep an AST shape for downstream HIR/CFG work.
+    /// With this option off, use of the construct emits W0013 as a
+    /// strict-C99 compatibility warning.
+    pub gnu_statement_expressions: bool,
 }
 
 impl Default for Options {
@@ -120,6 +127,7 @@ impl Default for Options {
             gnu_permissive_redefinition: false,
             gnu_named_variadic: false,
             gnu_permissive_paste: false,
+            gnu_statement_expressions: false,
         }
     }
 }

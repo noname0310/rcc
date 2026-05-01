@@ -98,6 +98,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0010, W0010_DESC),
     (W0011, W0011_DESC),
     (W0012, W0012_DESC),
+    (W0013, W0013_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -737,6 +738,15 @@ const W0011_DESC: &str = "shift count out of range in constant expression";
 /// case (assigning a complex source into a real destination).
 pub const W0012: &str = "W0012";
 const W0012_DESC: &str = "imaginary part discarded in complex-to-real conversion";
+
+/// GNU statement expression accepted in strict C99 mode.
+///
+/// `({ ... })` is a GNU C extension that evaluates a compound
+/// statement as an expression. The parser accepts it so real-world
+/// GNU-flavoured sources can keep their AST shape, but emits this
+/// warning unless `Options::gnu_statement_expressions` is enabled.
+pub const W0013: &str = "W0013";
+const W0013_DESC: &str = "GNU statement expression extension";
 
 #[cfg(test)]
 mod tests {

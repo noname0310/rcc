@@ -1103,3 +1103,19 @@ int y = 1 << -1;               // warning[W0011]: negative shift count
 As with W0009 / W0010 the fold returns `None`; the operator stays
 in HIR for codegen to emit (where LLVM in turn picks a target-
 specific behaviour).
+
+---
+
+## W0013 — GNU statement expression extension
+
+`({ ... })` is a GNU C extension that evaluates a compound statement
+as an expression:
+
+```c
+int x = ({ int y = 1; y; });   // warning[W0013] in strict C99 mode
+```
+
+The parser preserves the statement-expression AST so HIR/CFG work can
+diagnose labels, gotos, lifetimes, and result type rules later. Enable
+`Options::gnu_statement_expressions` to accept the syntax without this
+compatibility warning.

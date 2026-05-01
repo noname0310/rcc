@@ -2042,10 +2042,12 @@ pub fn lower_expr(
             HirExprKind::Call { callee: callee_id, args: arg_ids }
         }
         rcc_ast::ExprKind::BuiltinOffsetof { .. }
-        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => {
+        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. }
+        | rcc_ast::ExprKind::StmtExpr(_) => {
             // Phase 15 owns builtin lowering once layout/type-compatibility
-            // services are available. Keep HIR lowering exhaustive for now
-            // without pretending these are ordinary call expressions.
+            // services are available; GNU statement-expression value/lifetime
+            // semantics are a phase 14/CFG follow-up. Keep HIR lowering
+            // exhaustive for now without pretending these are ordinary calls.
             HirExprKind::IntConst(0)
         }
         rcc_ast::ExprKind::Member { base, field: _ } => {

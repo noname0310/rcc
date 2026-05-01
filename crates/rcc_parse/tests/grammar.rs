@@ -21,9 +21,16 @@ use rcc_session::{Options, Session};
 /// Parse `src` through lex→preprocess→parse, returning the AST and
 /// any captured diagnostics.
 fn parse_snippet(src: &str) -> (Option<TranslationUnit>, Vec<Diagnostic>, CaptureEmitter) {
+    parse_snippet_with_options(src, Options::default())
+}
+
+fn parse_snippet_with_options(
+    src: &str,
+    opts: Options,
+) -> (Option<TranslationUnit>, Vec<Diagnostic>, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut sess = Session::with_handler(Options::default(), handler);
+    let mut sess = Session::with_handler(opts, handler);
     let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<test>"), Arc::from(src));
     let pp_tokens = preprocess(&mut sess, fid);
     let ast = rcc_parse::parse(&mut sess, pp_tokens);
@@ -37,6 +44,13 @@ fn parse_ok(src: &str) -> TranslationUnit {
     let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
     assert!(errors.is_empty(), "expected zero errors, got {errors:#?}\nsource: {src}");
     ast.expect("parse returned None")
+}
+
+fn parse_ok_with_options(src: &str, opts: Options) -> (TranslationUnit, Vec<Diagnostic>) {
+    let (ast, diags, _) = parse_snippet_with_options(src, opts);
+    let errors: Vec<_> = diags.iter().filter(|d| d.level == rcc_errors::Level::Error).collect();
+    assert!(errors.is_empty(), "expected zero errors, got {errors:#?}\nsource: {src}");
+    (ast.expect("parse returned None"), diags)
 }
 
 /// Parse `src` and assert at least one error diagnostic was emitted.
@@ -236,6 +250,80 @@ fn s6_5_17_comma_expression() {
 #[test]
 fn s6_5_2_6_compound_literal() {
     parse_ok("void f(void) { (int){42}; }");
+}
+
+#[test]
+fn gnu_statement_expression_warns_in_default_mode() {
+    let src = "int f(void) { int x = ({ int y = 1; y; }); }";
+    let (_tu, diags) = parse_ok_with_options(src, Options::default());
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0013)),
+        "expected W0013 for GNU statement expression in strict mode, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_statement_expression_option_suppresses_warning() {
+    let src = "int f(void) { int x = ({ int y = 1; y; }); }";
+    let opts = Options { gnu_statement_expressions: true, ..Options::default() };
+    let (_tu, diags) = parse_ok_with_options(src, opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0013)),
+        "gnu option should suppress W0013, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_statement_expression_preserves_labels_and_gotos() {
+    let src = "void f(void) { int x = ({ label: 1; goto label; }); }";
+    let tu = parse_ok(src);
+    let ExternalDecl::Function(func) = &tu.decls[0] else {
+        panic!("expected function definition");
+    };
+    let BlockItem::Decl(decl) = &func.body.items[0] else {
+        panic!("expected declaration initialized by statement expression");
+    };
+    let init = decl.inits[0].init.as_ref().expect("initializer");
+    let Initializer::Expr(expr) = init else {
+        panic!("expected expression initializer");
+    };
+    let ExprKind::StmtExpr(block) = &expr.kind else {
+        panic!("expected statement-expression AST, got {:?}", expr.kind);
+    };
+    assert_eq!(block.items.len(), 2);
+    assert!(
+        matches!(
+            &block.items[0],
+            BlockItem::Stmt(stmt) if matches!(stmt.kind, StmtKind::Label { .. })
+        ),
+        "first item should preserve label, got {:?}",
+        block.items[0]
+    );
+    assert!(
+        matches!(
+            &block.items[1],
+            BlockItem::Stmt(stmt) if matches!(stmt.kind, StmtKind::Goto(_))
+        ),
+        "second item should preserve goto, got {:?}",
+        block.items[1]
+    );
+}
+
+#[test]
+fn gnu_statement_expression_malformed_reports_error() {
+    parse_err("void f(void) { int x = ({ int y = 1; y; ); }");
+}
+
+#[test]
+fn ctestsuite_00213_reduced_statement_expression_fixture_parses() {
+    parse_ok("void f(void) { int i = 1; (1 ? 0 : ({ while (i--) label: i; goto label; })); }");
+}
+
+#[test]
+fn ctestsuite_00214_reduced_statement_expression_fixture_parses() {
+    parse_ok(
+        "void f(void) { int __ret = 42; ({ if (__builtin_expect(!!(0), 0)) { int x = !!(__ret); } __ret; }); }",
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════

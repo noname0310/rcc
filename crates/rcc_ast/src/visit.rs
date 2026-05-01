@@ -208,6 +208,7 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             v.visit_type_name(lhs);
             v.visit_type_name(rhs);
         }
+        ExprKind::StmtExpr(block) => v.visit_block(block),
         ExprKind::Index { base, index } => {
             v.visit_expr(base);
             v.visit_expr(index);

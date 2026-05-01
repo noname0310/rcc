@@ -546,6 +546,8 @@ pub enum ExprKind {
         /// Right type argument.
         rhs: Box<TypeName>,
     },
+    /// GNU C statement expression `({ block-item* })`.
+    StmtExpr(Box<Block>),
     /// `a.b`
     Member { base: Box<Expr>, field: Symbol },
     /// `a->b`

@@ -17,6 +17,7 @@ phases.
 | Declaration specifiers, declarators, abstract declarators, typedef-name feedback | complete | HIR/typeck derive canonical types |
 | Strict `type-name` parsing for cast, `sizeof(type)`, compound literals, and future builtin type args | complete | HIR/typeck validate semantic type constraints |
 | GCC/Clang builtin type-argument syntax (`__builtin_offsetof`, `__builtin_types_compatible_p`) | complete | Phase 15 lowers layout and type-compatibility semantics |
+| GNU statement expressions `({ ... })` | complete | HIR/CFG validate result type, lifetime, and label/codegen semantics |
 | Struct/union fields, bit-fields, enum enumerators | complete | HIR/typeck evaluate layout, duplicate names, enum values |
 | Initializer lists and C99 field/index designators | complete | HIR/typeck flatten and type-check initializers |
 | Function definitions, prototypes, variadic functions, K&R definitions | complete | HIR/typeck validate parameter types and obsolete-style semantics |
@@ -36,7 +37,6 @@ phases.
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-36 | GNU statement expressions `({ ... })` | c-testsuite `00213`/`00214` and real GNU-flavoured sources need expression-valued blocks |
 | 05-37 | GNU range designators `[lo ... hi]` | c-testsuite `00216` needs range initializer syntax before HIR can expand it |
 | 05-38 | GCC `__attribute__((...))` parser surface | Phase 14 attribute semantics need stable AST attachment sites |
 | 05-39 | GCC inline asm parser surface | Inline asm codegen needs parsed templates, constraints, and clobbers |

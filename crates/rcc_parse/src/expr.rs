@@ -144,6 +144,7 @@ use rcc_ast::{
     IntSuffix as AstIntSuffix, LiteralEncoding, OffsetofDesignator,
     StringLiteral as AstStringLiteral, UnOp,
 };
+use rcc_errors::codes;
 use rcc_lexer::{Punct, StringEncoding};
 use rcc_span::{Span, Symbol};
 
@@ -209,6 +210,9 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
             p.bump();
+            if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
+                return parse_gnu_statement_expr(p, lparen_span);
+            }
             // `( expression )` per §6.5.1 — the inner production is a
             // *full* expression, so the comma operator is allowed
             // here even though it is disallowed at the argument-list
@@ -243,6 +247,41 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             None
         }
     }
+}
+
+fn parse_gnu_statement_expr(p: &mut Parser<'_>, lparen_span: Span) -> Option<Expr> {
+    if !p.session.opts.gnu_statement_expressions {
+        p.session
+            .handler
+            .struct_warn(lparen_span, "GNU statement expression is not part of C99")
+            .code(codes::W0013)
+            .note("parsing it as an extension so downstream passes can diagnose semantics")
+            .emit();
+    }
+
+    let block = crate::stmt::parse_block(p)?;
+    let rparen_span = match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::RParen)) => {
+            let span = t.span;
+            p.bump();
+            span
+        }
+        Some(t) => {
+            p.session
+                .handler
+                .struct_err(t.span, "expected `)` to close GNU statement expression")
+                .label(lparen_span, "statement expression starts here")
+                .emit();
+            block.span
+        }
+        None => {
+            p.session.handler.struct_err(lparen_span, "unclosed GNU statement expression").emit();
+            block.span
+        }
+    };
+
+    let id = p.fresh_id();
+    Some(Expr { id, span: lparen_span.to(rparen_span), kind: ExprKind::StmtExpr(Box::new(block)) })
 }
 
 fn is_builtin_type_arg_call(p: &Parser<'_>, sym: Symbol) -> bool {

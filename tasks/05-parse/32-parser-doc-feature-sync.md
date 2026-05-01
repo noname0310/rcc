@@ -33,9 +33,10 @@ actual parser blockers so future agents do not fix the wrong layer.
 - No `rcc_parse` comment says block declarations, `for` declaration
   init, function definitions, K&R definitions, or typedef-name feedback
   are unimplemented.
-- xfail entries for `00213`, `00214`, and `00216` name the real parser
-  blockers: GNU statement expression, GNU builtin/type syntax, and GNU
-  range designator as applicable.
+- Remaining xfail entries name the real parser blockers. `00213` and
+  `00214` were removed after task 05-36 taught the parser GNU
+  statement-expression syntax; `00216` still names GNU range
+  designators.
 - `rg "not yet implemented|deferred to task 05|same stub" crates/rcc_parse/src`
   returns no stale phase-05 references.
 
