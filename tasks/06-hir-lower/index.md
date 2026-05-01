@@ -25,7 +25,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [15-file-scope-def-type-finalization](15-file-scope-def-type-finalization.md)
 - [x] [16-block-scope-typedef-defs](16-block-scope-typedef-defs.md)
 - [x] [17-declarator-scope-timing](17-declarator-scope-timing.md)
-- [ ] [18-record-enum-tag-completion](18-record-enum-tag-completion.md)
+- [x] [18-record-enum-tag-completion](18-record-enum-tag-completion.md)
 - [ ] [19-type-name-expression-lowering](19-type-name-expression-lowering.md)
 - [ ] [20-compound-literal-temporaries](20-compound-literal-temporaries.md)
 - [ ] [21-initializer-string-and-completeness](21-initializer-string-and-completeness.md)

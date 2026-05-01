@@ -1477,6 +1477,114 @@ fn snippet_duplicate_file_scope_declarator_diagnoses() {
 }
 
 #[test]
+fn snippet_forward_record_completion_uses_one_def_id() {
+    let (hir, tcx) = lower_snippet("struct S; struct S { int a; }; struct S s;");
+    let record_ids: Vec<DefId> = hir
+        .defs
+        .iter_enumerated()
+        .filter_map(|(id, def)| match &def.kind {
+            DefKind::Record { .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(record_ids.len(), 1);
+    let record_id = record_ids[0];
+    let DefKind::Record { fields, .. } = &hir.defs[record_id].kind else {
+        unreachable!();
+    };
+    assert_eq!(fields.len(), 1);
+    let global_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .expect("missing global");
+    assert!(matches!(tcx.get(global_ty), Ty::Record(id) if *id == record_id));
+}
+
+#[test]
+fn snippet_record_pointer_uses_completed_tag() {
+    let (hir, tcx) = lower_snippet("struct S { int a; }; struct S *p;");
+    let record_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match def.kind {
+            DefKind::Record { .. } => Some(id),
+            _ => None,
+        })
+        .expect("missing record");
+    let global_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .expect("missing pointer global");
+    match tcx.get(global_ty) {
+        Ty::Ptr(pointee) => {
+            assert!(matches!(tcx.get(pointee.ty), Ty::Record(id) if *id == record_id))
+        }
+        other => panic!("expected pointer-to-record, got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_mutual_record_pointer_references_complete_later() {
+    let (hir, tcx) = lower_snippet("struct A { struct B *b; }; struct B { int x; };");
+    let records: Vec<_> = hir
+        .defs
+        .iter_enumerated()
+        .filter_map(|(id, def)| match &def.kind {
+            DefKind::Record { fields, .. } => Some((id, fields)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.len(), 2);
+    let (a_id, a_fields) = records[0];
+    let (b_id, b_fields) = records[1];
+    assert_eq!(a_fields.len(), 1);
+    assert_eq!(b_fields.len(), 1);
+    match tcx.get(a_fields[0].ty) {
+        Ty::Ptr(pointee) => assert!(matches!(tcx.get(pointee.ty), Ty::Record(id) if *id == b_id)),
+        other => panic!("expected A.b to be pointer-to-B, got {other:?}"),
+    }
+    assert_ne!(a_id, b_id);
+}
+
+#[test]
+fn snippet_enum_completion_exposes_enumerator_and_global_type() {
+    let (hir, tcx) = lower_snippet("enum E { A = 1 }; enum E e;");
+    let enum_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match def.kind {
+            DefKind::Enum { .. } => Some(id),
+            _ => None,
+        })
+        .expect("missing enum");
+    let DefKind::Enum { variants, .. } = &hir.defs[enum_id].kind else {
+        unreachable!();
+    };
+    assert_eq!(variants.len(), 1);
+    assert!(
+        hir.defs.iter().any(|def| matches!(def.kind, DefKind::Enumerator { value: 1, .. })),
+        "enumerator A should be in the ordinary namespace"
+    );
+    let global_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .expect("missing enum global");
+    assert!(matches!(tcx.get(global_ty), Ty::Enum(id) if *id == enum_id));
+}
+
+#[test]
 fn snippet_struct_global_yields_two_defs() {
     // `struct P { int x; int y; } origin;` — one tag def + one global.
     let (hir, _tcx) = lower_snippet("struct P { int x; int y; } origin;");

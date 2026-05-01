@@ -31,6 +31,7 @@ pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> 
     let mut crate_ = HirCrate::default();
     let mut resolver = Resolver::default();
     assign_def_ids(ast, tcx, session, &mut crate_, &mut resolver);
+    finalize_file_scope_tag_definitions(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
     crate_
@@ -736,6 +737,11 @@ fn lower_block_decl(
     out: &mut Vec<HirStmtId>,
 ) {
     let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
+
+    if decl.inits.is_empty() {
+        materialize_tag_definitions_in_specs(&decl.specs, tcx, resolver, crate_, session);
+        return;
+    }
 
     for init_decl in &decl.inits {
         let Some((name, _name_span)) = init_decl.declarator.name else {
@@ -2106,8 +2112,9 @@ fn lower_record_spec_to_ty(
         id
     };
 
-    if spec.fields.is_some() {
+    if spec.fields.is_some() && can_complete_record_tag(def_id, spec.span, crate_, session) {
         let lowered = lower_record(spec, tcx, resolver, crate_, session);
+        crate_.defs[def_id].span = spec.span;
         crate_.defs[def_id].kind = lowered;
     }
 
@@ -2140,12 +2147,47 @@ fn lower_enum_spec_to_ty(
         id
     };
 
-    if spec.enumerators.is_some() {
+    if spec.enumerators.is_some() && can_complete_enum_tag(def_id, spec.span, crate_, session) {
         let lowered = lower_enum(spec, tcx, resolver, crate_, session);
+        crate_.defs[def_id].span = spec.span;
         crate_.defs[def_id].kind = lowered;
     }
 
     tcx.intern(Ty::Enum(def_id))
+}
+
+fn can_complete_record_tag(
+    def_id: DefId,
+    span: Span,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> bool {
+    let def = &crate_.defs[def_id];
+    let DefKind::Record { fields, .. } = &def.kind else {
+        return true;
+    };
+    if !fields.is_empty() && def.span != span {
+        emit_duplicate_ordinary(def.name, span, session);
+        return false;
+    }
+    true
+}
+
+fn can_complete_enum_tag(
+    def_id: DefId,
+    span: Span,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> bool {
+    let def = &crate_.defs[def_id];
+    let DefKind::Enum { variants, .. } = &def.kind else {
+        return true;
+    };
+    if !variants.is_empty() && def.span != span {
+        emit_duplicate_ordinary(def.name, span, session);
+        return false;
+    }
+    true
 }
 
 /// Whether the declaration occurs at file scope, function (block) scope,
@@ -2980,37 +3022,27 @@ fn assign_def_ids(
                 for ts in &decl.specs.type_specs {
                     match ts {
                         TypeSpec::Record(rec) => {
-                            // Only register when defining (fields present) and tag exists.
-                            if let (Some(tag), Some(_fields)) = (rec.tag, &rec.fields) {
+                            if let Some(tag) = rec.tag {
                                 let kind = match rec.kind {
-                                    rcc_ast::RecordKind::Struct => RecordKind::Struct,
-                                    rcc_ast::RecordKind::Union => RecordKind::Union,
+                                    rcc_ast::RecordKind::Struct => TagKind::Struct,
+                                    rcc_ast::RecordKind::Union => TagKind::Union,
                                 };
-                                let id = crate_.defs.push(Def {
-                                    id: DefId(0),
-                                    name: tag,
-                                    span: rec.span,
-                                    kind: DefKind::Record {
-                                        kind,
-                                        layout: None,
-                                        fields: Vec::new(),
-                                    },
-                                });
-                                crate_.defs[id].id = id;
-                                resolver.tags.insert(tag, id);
+                                let _ = resolve_tag(
+                                    tag, rec.span, kind, crate_, tcx, resolver, session,
+                                );
                             }
                         }
                         TypeSpec::Enum(en) => {
-                            // Only register when defining (enumerators present) and tag exists.
-                            if let (Some(tag), Some(_enumerators)) = (en.tag, &en.enumerators) {
-                                let id = crate_.defs.push(Def {
-                                    id: DefId(0),
-                                    name: tag,
-                                    span: en.span,
-                                    kind: DefKind::Enum { repr: tcx.int, variants: Vec::new() },
-                                });
-                                crate_.defs[id].id = id;
-                                resolver.tags.insert(tag, id);
+                            if let Some(tag) = en.tag {
+                                let _ = resolve_tag(
+                                    tag,
+                                    en.span,
+                                    TagKind::Enum,
+                                    crate_,
+                                    tcx,
+                                    resolver,
+                                    session,
+                                );
                             }
                         }
                         _ => {}
@@ -3056,6 +3088,43 @@ fn assign_def_ids(
                     }
                 }
             }
+        }
+    }
+}
+
+fn finalize_file_scope_tag_definitions(
+    ast: &TranslationUnit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    for ext_decl in &ast.decls {
+        match ext_decl {
+            ExternalDecl::Decl(decl) if decl.inits.is_empty() => {
+                materialize_tag_definitions_in_specs(&decl.specs, tcx, resolver, crate_, session);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn materialize_tag_definitions_in_specs(
+    specs: &rcc_ast::DeclSpecs,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) {
+    for ts in &specs.type_specs {
+        match ts {
+            TypeSpec::Record(spec) if spec.fields.is_some() => {
+                let _ = lower_record_spec_to_ty(spec, tcx, resolver, crate_, session);
+            }
+            TypeSpec::Enum(spec) if spec.enumerators.is_some() => {
+                let _ = lower_enum_spec_to_ty(spec, tcx, resolver, crate_, session);
+            }
+            _ => {}
         }
     }
 }
@@ -3470,8 +3539,8 @@ mod tests {
     }
 
     #[test]
-    fn bare_struct_ref_no_def() {
-        // `struct S;` (forward declaration, no field body) — no tag def created.
+    fn bare_struct_ref_creates_incomplete_def() {
+        // `struct S;` (forward declaration, no field body) creates one incomplete tag def.
         let (mut sess, _cap) = Session::for_test();
         let tag = sym(&mut sess, "S");
 
@@ -3496,7 +3565,11 @@ mod tests {
         };
         let mut tcx = TyCtxt::new();
         let hir = lower(&ast, &mut tcx, &mut sess);
-        assert_eq!(hir.defs.len(), 0, "bare struct ref should not create a def");
+        assert_eq!(hir.defs.len(), 1, "bare struct ref should create one incomplete def");
+        assert!(matches!(
+            hir.defs[DefId(0)].kind,
+            DefKind::Record { kind: RecordKind::Struct, ref fields, .. } if fields.is_empty()
+        ));
     }
 
     // ── Name resolution (task 06-02) tests ──────────────────────────

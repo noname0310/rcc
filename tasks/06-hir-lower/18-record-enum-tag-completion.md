@@ -1,5 +1,7 @@
 # 06-18: complete record and enum tag definitions in place
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 06-17    **Milestone:** M5 stabilization
 
 ## Goal
@@ -35,4 +37,3 @@ fields or variants.
 - C99 §6.7.2.1 — Structure and union specifiers.
 - C99 §6.7.2.2 — Enumeration specifiers.
 - Existing `resolve_tag`, `lower_record`, and `lower_enum` helpers.
-
