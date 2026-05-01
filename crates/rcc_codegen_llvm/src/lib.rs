@@ -70,19 +70,149 @@ pub fn codegen(
 }
 
 #[cfg(feature = "llvm")]
-mod backend {
-    //! The real inkwell-backed codegen. Filled in M3 follow-up.
+pub mod backend {
+    //! The real inkwell-backed codegen.
+
     use super::*;
 
+    use inkwell::builder::Builder;
+    use inkwell::context::Context;
+    use inkwell::module::Module;
+    use inkwell::targets::{TargetData, TargetTriple};
+
+    /// First supported backend target: Linux x86-64 SysV.
+    pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+    /// LLVM data layout for the first supported Linux x86-64 SysV target.
+    pub const BASELINE_DATA_LAYOUT: &str =
+        "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
+
+    const FALLBACK_MODULE_NAME: &str = "rcc_module";
+
+    /// Shared state for one LLVM module emission.
+    pub struct CodegenCx<'a, 'ctx> {
+        context: &'ctx Context,
+        module: Module<'ctx>,
+        builder: Builder<'ctx>,
+        target_triple: String,
+        data_layout: String,
+        session: &'a mut Session,
+        tcx: &'a TyCtxt,
+        hir: &'a HirCrate,
+        bodies: &'a FxHashMap<DefId, Body>,
+    }
+
+    impl<'a, 'ctx> CodegenCx<'a, 'ctx> {
+        /// Build a codegen context with deterministic module and target metadata.
+        pub fn new(
+            context: &'ctx Context,
+            session: &'a mut Session,
+            tcx: &'a TyCtxt,
+            hir: &'a HirCrate,
+            bodies: &'a FxHashMap<DefId, Body>,
+        ) -> Self {
+            let module_name = module_name(session);
+            let module = context.create_module(&module_name);
+            let builder = context.create_builder();
+            let target_triple = target_triple(session);
+            let data_layout = BASELINE_DATA_LAYOUT.to_owned();
+
+            module.set_triple(&TargetTriple::create(&target_triple));
+            let target_data = TargetData::create(&data_layout);
+            module.set_data_layout(&target_data.get_data_layout());
+
+            Self { context, module, builder, target_triple, data_layout, session, tcx, hir, bodies }
+        }
+
+        /// Return the inkwell context backing this module.
+        pub fn context(&self) -> &'ctx Context {
+            self.context
+        }
+
+        /// Return the LLVM module being emitted.
+        pub fn module(&self) -> &Module<'ctx> {
+            &self.module
+        }
+
+        /// Return the instruction builder for later emission tasks.
+        pub fn builder(&self) -> &Builder<'ctx> {
+            &self.builder
+        }
+
+        /// Return the session used for diagnostics and options.
+        pub fn session(&self) -> &Session {
+            self.session
+        }
+
+        /// Return the typed-HIR context used for type queries.
+        pub fn tcx(&self) -> &'a TyCtxt {
+            self.tcx
+        }
+
+        /// Return the HIR crate being emitted.
+        pub fn hir(&self) -> &'a HirCrate {
+            self.hir
+        }
+
+        /// Return the CFG body map being emitted.
+        pub fn bodies(&self) -> &'a FxHashMap<DefId, Body> {
+            self.bodies
+        }
+
+        /// Return the LLVM target triple attached to this module.
+        pub fn target_triple(&self) -> &str {
+            &self.target_triple
+        }
+
+        /// Return the LLVM data layout attached to this module.
+        pub fn data_layout(&self) -> &str {
+            &self.data_layout
+        }
+
+        /// Verify the current LLVM module and convert verifier text into `CodegenError`.
+        pub fn verify_module(&self) -> Result<(), CodegenError> {
+            self.module.verify().map_err(|err| {
+                CodegenError::Internal(format!("LLVM module verifier failed: {}", err.to_string()))
+            })
+        }
+
+        /// Render the current LLVM module as textual LLVM IR.
+        pub fn ir_text(&self) -> String {
+            self.module.print_to_string().to_string()
+        }
+    }
+
     pub(super) fn codegen_impl(
-        _session: &mut Session,
-        _tcx: &TyCtxt,
-        _hir: &HirCrate,
-        _bodies: &FxHashMap<DefId, Body>,
+        session: &mut Session,
+        tcx: &TyCtxt,
+        hir: &HirCrate,
+        bodies: &FxHashMap<DefId, Body>,
     ) -> Result<CodegenArtifact, CodegenError> {
-        // TODO: build an `inkwell::context::Context`, translate every `Body`,
-        // run `mem2reg`, and serialise the module.
-        Ok(CodegenArtifact { ir_text: String::new() })
+        let context = Context::create();
+        let cx = CodegenCx::new(&context, session, tcx, hir, bodies);
+        cx.verify_module()?;
+        Ok(CodegenArtifact { ir_text: cx.ir_text() })
+    }
+
+    fn target_triple(session: &Session) -> String {
+        session
+            .opts
+            .target
+            .as_ref()
+            .map(|target| target.0.clone())
+            .unwrap_or_else(|| BASELINE_TARGET_TRIPLE.to_owned())
+    }
+
+    fn module_name(session: &Session) -> String {
+        session
+            .source_map
+            .read()
+            .ok()
+            .and_then(|source_map| {
+                source_map.files().next().map(|file| file.name.display().to_string())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| FALLBACK_MODULE_NAME.to_owned())
     }
 }
 
@@ -120,6 +250,7 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
 #[cfg(test)]
 mod tests {
     use rcc_hir::{Field, Qual, RecordKind};
+    use rcc_session::Session;
     use rcc_span::{Symbol, DUMMY_SP};
 
     use super::*;
@@ -169,5 +300,49 @@ mod tests {
             layout_of_with_defs(&tcx, &defs, record_ty),
             LayoutCx::with_defs(&tcx, &defs).layout_of(record_ty)
         );
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    #[test]
+    fn codegen_reports_backend_disabled_without_llvm_feature() {
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+
+        assert!(matches!(
+            codegen(&mut session, &tcx, &hir, &bodies),
+            Err(CodegenError::BackendDisabled)
+        ));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_backend_verifies_empty_module() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        assert_eq!(cx.target_triple(), backend::BASELINE_TARGET_TRIPLE);
+        assert_eq!(cx.data_layout(), backend::BASELINE_DATA_LAYOUT);
+        cx.verify_module().unwrap();
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_codegen_returns_module_header_target_and_layout() {
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(artifact.ir_text.contains("; ModuleID = 'rcc_module'"));
+        assert!(artifact.ir_text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
+        assert!(artifact.ir_text.contains("target datalayout = "));
     }
 }

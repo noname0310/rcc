@@ -8,7 +8,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 
 ## Tasks (pick in order)
 
-- [ ] [01-codegen-context-module-target](01-codegen-context-module-target.md)
+- [x] [01-codegen-context-module-target](01-codegen-context-module-target.md)
 - [ ] [02-layoutcx-scalars](02-layoutcx-scalars.md)
 - [ ] [03-layoutcx-records](03-layoutcx-records.md)
 - [ ] [04-layoutcx-arrays](04-layoutcx-arrays.md)
