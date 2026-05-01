@@ -11,7 +11,7 @@ phase's `index.md` next.
 - [x] [02-diagnostics](02-diagnostics/index.md) — real diagnostic emitter + error-code registry
 - [x] [03-lex](03-lex/index.md) — full C99 pp-token lexer
 - [x] [04-preprocess](04-preprocess/index.md) — C preprocessor
-- [ ] [05-parse](05-parse/index.md) — recursive-descent + Pratt parser
+- [x] [05-parse](05-parse/index.md) — recursive-descent + Pratt parser
 - [ ] [06-hir-lower](06-hir-lower/index.md) — AST → HIR
 - [x] [07-typeck](07-typeck/index.md) — conversions + const-eval
 - [x] [08-cfg](08-cfg/index.md) — HIR → MIR-style CFG

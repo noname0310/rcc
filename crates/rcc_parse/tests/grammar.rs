@@ -434,6 +434,26 @@ fn gnu_attribute_type_name_site_parses() {
 }
 
 #[test]
+fn gnu_attribute_type_name_before_base_specifier_parses() {
+    parse_ok(
+        r#"
+        #define ATTR __attribute__((__noinline__))
+        int f(void) { void *p = 0; return ((ATTR int (*)(void)) p)(); }
+        "#,
+    );
+}
+
+#[test]
+fn gnu_attribute_inside_abstract_pointer_declarator_parses() {
+    parse_ok(
+        r#"
+        #define ATTR __attribute__((__noinline__))
+        int f(void) { void *p = 0; return ((int (ATTR *)(void)) p)(); }
+        "#,
+    );
+}
+
+#[test]
 fn gnu_attribute_malformed_parentheses_reports_error() {
     let errs = parse_err("int x __attribute__((aligned(16));");
     assert!(

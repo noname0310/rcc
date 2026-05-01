@@ -7,40 +7,36 @@
 
 [[xfail]]
 id     = "c-testsuite::00046"
-reason = "anonymous struct/union members (C11 extension, not yet supported)"
+reason = "14-lang-extensions: anonymous struct/union members are outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00050"
-reason = "anonymous union member inside struct (C11 extension, not yet supported)"
+reason = "14-lang-extensions: anonymous union member inside struct is outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00104"
-reason = "#include <stdint.h> — system headers not available in parse-only mode"
+reason = "15-builtin-rt: freestanding <stdint.h> header is not available in parse-only mode"
 
 [[xfail]]
 id     = "c-testsuite::00152"
-reason = "#line directive not fully implemented in preprocessor"
+reason = "04-preprocess: macro-expanded #line directive is not fully implemented"
 
 [[xfail]]
 id     = "c-testsuite::00189"
-reason = "#include <stdio.h> — system headers not available in parse-only mode"
+reason = "15-builtin-rt: freestanding <stdio.h> header is not available in parse-only mode"
 
 [[xfail]]
 id     = "c-testsuite::00204"
-reason = "#include <stdarg.h>/<stdint.h> — system headers not available in parse-only mode"
-
-[[xfail]]
-id     = "c-testsuite::00210"
-reason = "anonymous union/struct members (C11 extension, not yet supported)"
+reason = "15-builtin-rt: freestanding <stdarg.h>/<stdint.h> headers are not available in parse-only mode"
 
 [[xfail]]
 id     = "c-testsuite::00216"
-reason = "anonymous aggregate extensions and GNU range initializer lowering semantics — aggregate/HIR follow-up"
+reason = "06-hir-lower/14-lang-extensions/15-builtin-rt: empty aggregate extension, anonymous aggregate members, GNU range initializer lowering, and <stdio.h>"
 
 [[xfail]]
 id     = "c-testsuite::00219"
-reason = "#include <stdio.h> — system headers not available in parse-only mode"
+reason = "15-builtin-rt: freestanding <stdio.h> header is not available in parse-only mode"
 
 [[xfail]]
 id     = "c-testsuite::00220"
-reason = "#include <stdio.h>/<wchar.h> — system headers not available in parse-only mode"
+reason = "15-builtin-rt: freestanding <stdio.h>/<wchar.h> headers are not available in parse-only mode"

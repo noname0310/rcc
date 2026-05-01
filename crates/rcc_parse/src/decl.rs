@@ -1504,10 +1504,11 @@ pub fn declare_declarator_name(p: &mut Parser<'_>, specs: &DeclSpecs, declarator
 fn parse_declarator_in_ctx(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<Declarator> {
     let start_cursor = p.cursor;
     let start = p.cur_span();
+    let mut attrs = crate::attr::parse_attributes(p);
     let pointer_prefix = parse_pointer_prefix(p);
     let (name, mut chain) = parse_declarator_atom(p, ctx)?;
     parse_declarator_suffixes(p, &mut chain);
-    let attrs = crate::attr::parse_attributes(p);
+    attrs.extend(crate::attr::parse_attributes(p));
     // Pointer prefix modifiers wrap the *whole* direct-declarator from
     // the outside in the source but fold INSIDE of its suffixes in the
     // inside-out type, so they append after the direct-declarator's
@@ -1680,6 +1681,7 @@ fn parse_declarator_atom(p: &mut Parser<'_>, ctx: DeclCtx) -> Option<DirectDecl>
 /// opens a nested declarator or a function suffix on an empty direct-
 /// declarator. See the docstring on the caller for the full table.
 fn looks_like_nested_declarator(p: &Parser<'_>, at: usize, ctx: DeclCtx) -> bool {
+    let at = crate::attr::skip_attribute_groups_at(p, at);
     match p.tokens.get(at).map(|t| &t.kind) {
         Some(TokenKind::Punct(Punct::Star)) => true,
         Some(TokenKind::Punct(Punct::LParen)) => true,

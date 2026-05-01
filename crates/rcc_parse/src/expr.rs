@@ -671,7 +671,8 @@ fn parse_sizeof(p: &mut Parser<'_>) -> Option<Expr> {
 /// side-effect-free peeking, so the caller can still fall through
 /// to the paren-expression path if it returns `false`.
 fn starts_type_name_after_lparen(p: &Parser<'_>) -> bool {
-    match p.tokens.get(p.cursor + 1).map(|t| &t.kind) {
+    let at = crate::attr::skip_attribute_groups_at(p, p.cursor + 1);
+    match p.tokens.get(at).map(|t| &t.kind) {
         Some(TokenKind::Keyword(kw)) => is_type_name_start_kw(*kw),
         Some(TokenKind::Ident(sym)) => p.scopes.is_typedef(*sym),
         _ => false,

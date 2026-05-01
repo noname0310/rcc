@@ -9,10 +9,47 @@ use crate::token::TokenKind;
 use crate::Parser;
 
 pub(crate) fn peek_attribute(p: &Parser<'_>) -> bool {
+    is_attribute_at(p, p.cursor)
+}
+
+pub(crate) fn is_attribute_at(p: &Parser<'_>, at: usize) -> bool {
     matches!(
-        p.peek().map(|t| &t.kind),
+        p.tokens.get(at).map(|t| &t.kind),
         Some(TokenKind::Ident(sym)) if p.session.interner.get(*sym) == "__attribute__"
     )
+}
+
+pub(crate) fn skip_attribute_groups_at(p: &Parser<'_>, mut at: usize) -> usize {
+    while is_attribute_at(p, at) {
+        let Some(TokenKind::Punct(Punct::LParen)) = p.tokens.get(at + 1).map(|t| &t.kind) else {
+            return at;
+        };
+        let Some(TokenKind::Punct(Punct::LParen)) = p.tokens.get(at + 2).map(|t| &t.kind) else {
+            return at;
+        };
+
+        let mut depth = 2usize;
+        at += 3;
+        while let Some(tok) = p.tokens.get(at) {
+            match tok.kind {
+                TokenKind::Punct(Punct::LParen) => depth += 1,
+                TokenKind::Punct(Punct::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        at += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+
+        if depth != 0 {
+            return at;
+        }
+    }
+    at
 }
 
 pub(crate) fn parse_attributes(p: &mut Parser<'_>) -> Vec<Attribute> {

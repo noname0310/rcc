@@ -40,9 +40,10 @@ phases.
 
 ## Parser Blockers Still Open
 
-| Task | Syntax | Why it blocks later work |
-|---|---|---|
-| 05-40 | Parser-owned xfail shrink | Remaining parse xfails must be reclassified after the blocker tasks land |
+None for the C99 parser surface as of 05-40. The remaining
+c-testsuite parse xfails are owned by preprocessor behavior,
+freestanding headers/runtime, HIR/initializer lowering, or explicitly
+non-C99 extension semantics.
 
 ## External Suite Notes
 
