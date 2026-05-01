@@ -682,8 +682,8 @@ pub fn lower_stmt(
 /// in `body.locals`, registered in `scope` as [`Binding::Local`], and
 /// recorded as [`HirStmtKind::LocalDecl`] statements in the returned
 /// list so later CFG construction sees the initialisation point.
-/// Typedef-storage declarations are skipped entirely — they affect
-/// name lookup only and contribute no runtime semantics.
+/// Typedef-storage declarations are materialised as scoped
+/// [`DefKind::Typedef`] entries and contribute no runtime statements.
 #[allow(clippy::too_many_arguments)]
 fn lower_block_items(
     items: &[BlockItem],
@@ -724,7 +724,7 @@ fn lower_block_decl(
     decl: &rcc_ast::Decl,
     body: &mut Body,
     scope: &mut ScopeStack,
-    _crate: &mut HirCrate,
+    crate_: &mut HirCrate,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     session: &mut Session,
@@ -738,22 +738,35 @@ fn lower_block_decl(
         };
 
         if is_typedef {
-            // Typedefs affect name lookup only. We don't emit a
-            // statement or create a local for them. Block-scope
-            // typedefs are rarely used; full handling (including
-            // registering a fresh Typedef def in `crate_`) is deferred
-            // to later tasks. For now just note the name so
-            // subsequent references don't report "undeclared".
+            let ty = lower_type_from_parts_in_scope(
+                &decl.specs,
+                &init_decl.declarator,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            let id = crate_.defs.push(Def {
+                id: DefId(0),
+                name,
+                span: decl.span,
+                kind: DefKind::Typedef(ty),
+            });
+            crate_.defs[id].id = id;
+            scope.insert(name, Binding::Def(id));
             continue;
         }
 
-        let ty = lower_type_from_parts(
+        let ty = lower_type_from_parts_in_scope(
             &decl.specs,
             &init_decl.declarator,
             DeclScope::Block,
+            Some(scope),
             tcx,
             resolver,
-            _crate,
+            crate_,
             session,
         );
         let vla_len = lower_top_level_vla_len(
@@ -761,7 +774,7 @@ fn lower_block_decl(
             ty,
             body,
             scope,
-            _crate,
+            crate_,
             tcx,
             resolver,
             session,
@@ -775,7 +788,7 @@ fn lower_block_decl(
         // C99 §6.7.8.
         let (init_expr, list_init) = match &init_decl.init {
             Some(rcc_ast::Initializer::Expr(e)) => {
-                (Some(lower_expr(e, body, scope, _crate, tcx, resolver, session)), None)
+                (Some(lower_expr(e, body, scope, crate_, tcx, resolver, session)), None)
             }
             Some(init @ rcc_ast::Initializer::List(_)) => (None, Some(init)),
             None => (None, None),
@@ -806,7 +819,7 @@ fn lower_block_decl(
         if let Some(init) = list_init {
             let target = push_local_ref(local, ty, decl.span, body);
             lower_initializer(
-                target, ty, init, decl.span, body, scope, _crate, tcx, resolver, session, out,
+                target, ty, init, decl.span, body, scope, crate_, tcx, resolver, session, out,
             );
         }
     }
@@ -1843,22 +1856,48 @@ pub fn lower_typedef_name(
     tcx: &TyCtxt,
     session: &mut Session,
 ) -> TyId {
+    lower_typedef_name_in_scope(sym, span, expanding, None, resolver, crate_, tcx, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_typedef_name_in_scope(
+    sym: Symbol,
+    span: Span,
+    expanding: &mut FxHashSet<DefId>,
+    scope: Option<&ScopeStack>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> TyId {
     // Look up the symbol in the ordinary namespace.
-    let def_id = match resolver.ordinary.get(&sym) {
-        Some(&id) => id,
-        None => {
-            // Not found — emit undeclared identifier. This shouldn't
-            // normally happen because the parser only produces
-            // TypedefName when the name was seen as a typedef, but
-            // handle gracefully.
+    let def_id = match scope.and_then(|s| s.lookup(sym)) {
+        Some(Binding::Def(id)) => id,
+        Some(Binding::Local(_)) => {
             let sym_str = session.interner.get(sym);
             session
                 .handler
-                .struct_err(span, format!("use of undeclared typedef `{sym_str}`"))
+                .struct_err(span, format!("`{sym_str}` is not a typedef"))
                 .code(rcc_errors::codes::E0071)
                 .emit();
             return tcx.error;
         }
+        None => match resolver.ordinary.get(&sym) {
+            Some(&id) => id,
+            None => {
+                // Not found — emit undeclared identifier. This shouldn't
+                // normally happen because the parser only produces
+                // TypedefName when the name was seen as a typedef, but
+                // handle gracefully.
+                let sym_str = session.interner.get(sym);
+                session
+                    .handler
+                    .struct_err(span, format!("use of undeclared typedef `{sym_str}`"))
+                    .code(rcc_errors::codes::E0071)
+                    .emit();
+                return tcx.error;
+            }
+        },
     };
 
     // Cycle detection: if this DefId is already being expanded, we have
@@ -1907,11 +1946,35 @@ pub fn lower_type_from_parts(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    let base = lower_specs_to_base_ty(specs, tcx, resolver, crate_, session);
+    lower_type_from_parts_in_scope(specs, declarator, scope, None, tcx, resolver, crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_type_from_parts_in_scope(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &Declarator,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    let base =
+        lower_specs_to_base_ty_in_scope(specs, typedef_scope, tcx, resolver, crate_, session);
     if base == tcx.error {
         return tcx.error;
     }
-    apply_declarator_with_context(base, declarator, scope, tcx, resolver, crate_, session)
+    apply_declarator_with_context_in_scope(
+        base,
+        declarator,
+        scope,
+        typedef_scope,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )
 }
 
 /// Lower an AST `type-name` (used by casts, `sizeof(type)`, and compound
@@ -1940,14 +2003,27 @@ fn lower_specs_to_base_ty(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
+    lower_specs_to_base_ty_in_scope(specs, None, tcx, resolver, crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_specs_to_base_ty_in_scope(
+    specs: &rcc_ast::DeclSpecs,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
     for ts in &specs.type_specs {
         match ts {
             TypeSpec::TypedefName(sym) => {
                 let mut expanding = FxHashSet::default();
-                return lower_typedef_name(
+                return lower_typedef_name_in_scope(
                     *sym,
                     specs.span,
                     &mut expanding,
+                    typedef_scope,
                     resolver,
                     crate_,
                     tcx,
@@ -2119,6 +2195,20 @@ fn apply_declarator_with_context(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
+    apply_declarator_with_context_in_scope(base, d, scope, None, tcx, resolver, crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_declarator_with_context_in_scope(
+    base: TyId,
+    d: &Declarator,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
     let mut ty = base;
 
     // Iterate the derived chain in forward order (outermost-to-innermost).
@@ -2200,10 +2290,11 @@ fn apply_declarator_with_context(
                 // Lower parameter types.
                 let mut param_tys = Vec::new();
                 for param in &func_decl.params {
-                    let param_ty = lower_type_from_parts(
+                    let param_ty = lower_type_from_parts_in_scope(
                         &param.specs,
                         &param.declarator,
                         DeclScope::Param,
+                        typedef_scope,
                         tcx,
                         resolver,
                         crate_,

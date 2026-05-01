@@ -23,7 +23,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [13-inline-linkage](13-inline-linkage.md)
 - [x] [14-type-spec-to-ty-service](14-type-spec-to-ty-service.md)
 - [x] [15-file-scope-def-type-finalization](15-file-scope-def-type-finalization.md)
-- [ ] [16-block-scope-typedef-defs](16-block-scope-typedef-defs.md)
+- [x] [16-block-scope-typedef-defs](16-block-scope-typedef-defs.md)
 - [ ] [17-declarator-scope-timing](17-declarator-scope-timing.md)
 - [ ] [18-record-enum-tag-completion](18-record-enum-tag-completion.md)
 - [ ] [19-type-name-expression-lowering](19-type-name-expression-lowering.md)

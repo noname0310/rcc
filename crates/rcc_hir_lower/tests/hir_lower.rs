@@ -1346,6 +1346,46 @@ fn snippet_function_declaration_global_has_function_type() {
 }
 
 #[test]
+fn snippet_block_typedef_lowers_later_local_type() {
+    let (hir, tcx) = lower_snippet("void f(void) { typedef long T; T x; }");
+    assert!(
+        hir.defs.iter().any(|def| matches!(def.kind, DefKind::Typedef(ty) if ty == tcx.long)),
+        "block typedef should be materialised as a HIR typedef def"
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    assert_eq!(body.locals.len(), 1, "typedef should not create a runtime local");
+    assert_eq!(body.locals[Local(0)].ty, tcx.long);
+    let local_decl_count =
+        body.stmts.iter().filter(|stmt| matches!(stmt.kind, HirStmtKind::LocalDecl { .. })).count();
+    assert_eq!(local_decl_count, 1, "typedef should not emit a LocalDecl statement");
+}
+
+#[test]
+fn snippet_block_typedef_shadows_file_scope_typedef() {
+    let (hir, tcx) = lower_snippet("typedef int T; void f(void) { typedef long T; T x; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    assert_eq!(body.locals.len(), 1);
+    assert_eq!(body.locals[Local(0)].ty, tcx.long);
+    assert_eq!(
+        hir.defs.iter().filter(|def| matches!(def.kind, DefKind::Typedef(_))).count(),
+        2,
+        "file-scope and block-scope typedef defs should both exist"
+    );
+}
+
+#[test]
+fn snippet_local_object_shadows_outer_typedef_in_expressions() {
+    let (hir, tcx) = lower_snippet("typedef int T; void f(void) { int T; T = 1; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    assert_eq!(body.locals.len(), 1);
+    assert_eq!(body.locals[Local(0)].ty, tcx.int);
+    assert!(
+        body.stmts.iter().any(|stmt| matches!(stmt.kind, HirStmtKind::Expr(_))),
+        "assignment to local T should lower as an expression statement"
+    );
+}
+
+#[test]
 fn snippet_struct_global_yields_two_defs() {
     // `struct P { int x; int y; } origin;` — one tag def + one global.
     let (hir, _tcx) = lower_snippet("struct P { int x; int y; } origin;");

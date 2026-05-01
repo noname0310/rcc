@@ -1,5 +1,7 @@
 # 06-16: real block-scope typedef definitions
 
+> ✓ done — 2026-05-01
+
 **Phase:** 06-hir-lower    **Depends on:** 06-15    **Milestone:** M5 stabilization
 
 ## Goal
@@ -33,4 +35,3 @@ skipping them after parser-level name recognition.
 ## References
 - C99 §6.2.1 — Scopes of identifiers.
 - `lower_block_decl` currently says block typedef handling is deferred.
-
