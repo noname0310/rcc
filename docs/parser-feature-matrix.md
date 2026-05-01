@@ -42,8 +42,7 @@ phases.
 
 | Task | Syntax | Why it blocks later work |
 |---|---|---|
-| 05-40 | C11 `_Generic` | C11 compatibility tests need generic-selection syntax before type matching |
-| 05-41 | Parser-owned xfail shrink | Remaining parse xfails must be reclassified after the blocker tasks land |
+| 05-40 | Parser-owned xfail shrink | Remaining parse xfails must be reclassified after the blocker tasks land |
 
 ## External Suite Notes
 

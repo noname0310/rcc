@@ -1,6 +1,6 @@
-# 05-41: Parser blocker xfail shrink
+# 05-40: Parser blocker xfail shrink
 
-**Phase:** 05-parse    **Depends on:** 05-31 through 05-40    **Milestone:** M5/M6 gate
+**Phase:** 05-parse    **Depends on:** 05-31 through 05-39    **Milestone:** M5/M6 gate
 
 ## Goal
 Close the parser-owned xfail loop by removing or reclassifying every
@@ -9,7 +9,7 @@ c-testsuite parse xfail that was caused by parser syntax.
 ## Scope
 - In:
   - Re-run the full c-testsuite parse smoke.
-  - Remove xfail entries that now pass due to 05-31 through 05-40.
+  - Remove xfail entries that now pass due to 05-31 through 05-39.
   - Reclassify remaining failures as preprocessor, headers/builtin-rt,
     HIR/typeck, C11-only, or GNU-extension-semantic work.
   - Add reduced fixtures for any parser-owned failure that remains.
@@ -32,4 +32,4 @@ c-testsuite parse xfail that was caused by parser syntax.
 ## References
 - `crates/rcc_parse/tests/ctestsuite_smoke.rs`.
 - `third_party/testsuites/c-testsuite/xfail.toml`.
-- Tasks 05-31 through 05-40.
+- Tasks 05-31 through 05-39.

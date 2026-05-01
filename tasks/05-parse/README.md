@@ -49,8 +49,7 @@ concatenation) and the "typedef-name hack".
 | 37 | [`37-gnu-range-designator-syntax.md`](37-gnu-range-designator-syntax.md) | Parse GNU `[lo ... hi]` initializer ranges. |
 | 38 | [`38-attribute-syntax-surface.md`](38-attribute-syntax-surface.md) | Parse GCC-style `__attribute__((...))` attachment sites. |
 | 39 | [`39-inline-asm-syntax-surface.md`](39-inline-asm-syntax-surface.md) | Parse GCC-style inline asm statements. |
-| 40 | [`40-c11-generic-selection-syntax.md`](40-c11-generic-selection-syntax.md) | Parse C11 `_Generic` expressions. |
-| 41 | [`41-parser-blocker-xfail-shrink.md`](41-parser-blocker-xfail-shrink.md) | Shrink/reclassify parser-owned c-testsuite xfails. |
+| 40 | [`40-parser-blocker-xfail-shrink.md`](40-parser-blocker-xfail-shrink.md) | Shrink/reclassify parser-owned c-testsuite xfails. |
 
 ## Exit criteria
 
