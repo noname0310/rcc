@@ -859,6 +859,25 @@ expressions per §6.7.8p3.
 
 ---
 
+## E0085 — sizeof operand has no complete object layout
+
+C99 §6.5.3.4 requires `sizeof` to have a complete object layout. For
+ordinary types this is a compile-time size. For VLA operands the bound
+is runtime-dependent, but the element layout still must be known so the
+CFG can lower `sizeof a` to `len(a) * sizeof(element)`.
+
+```c
+struct Incomplete;
+
+unsigned long a = sizeof(struct Incomplete);  // error[E0085]
+```
+
+The CFG pass emits E0085 before LLVM codegen instead of materialising a
+silent `0` byte size. Supported layout answers come from the shared
+`rcc_hir::LayoutCx` service used by both CFG and LLVM codegen.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

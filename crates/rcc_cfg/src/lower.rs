@@ -23,10 +23,11 @@
 //! Out of scope (deferred): compound literals. Each such arm panics with
 //! a `todo!` carrying the task id that owns it.
 
+use rcc_data_structures::IndexVec;
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
-    Body as HirBody, ConvertKind, FloatKind, HirExprId, HirExprKind, HirStmtId, HirStmtKind,
-    IntRank, Local as HirLocal, Ty, TyCtxt, TyId,
+    Body as HirBody, ConvertKind, Def, DefId, FloatKind, HirExprId, HirExprKind, HirStmtId,
+    HirStmtKind, IntRank, LayoutCx, Local as HirLocal, Ty, TyCtxt, TyId,
 };
 use rcc_span::Span;
 
@@ -95,13 +96,27 @@ pub struct LowerCx<'a> {
     pub tcx: &'a TyCtxt,
     /// HIR-local -> CFG-local translation.
     pub locals: &'a LocalMap,
+    /// Shared target layout service used by `sizeof` lowering.
+    pub layout: LayoutCx<'a>,
 }
 
 impl<'a> LowerCx<'a> {
     /// Create a new context.
     #[must_use]
     pub fn new(body: &'a HirBody, tcx: &'a TyCtxt, locals: &'a LocalMap) -> Self {
-        Self { body, tcx, locals }
+        Self { body, tcx, locals, layout: LayoutCx::new(tcx) }
+    }
+
+    /// Create a context with access to top-level definitions so record
+    /// and enum layout queries can be resolved.
+    #[must_use]
+    pub fn with_defs(
+        body: &'a HirBody,
+        tcx: &'a TyCtxt,
+        locals: &'a LocalMap,
+        defs: &'a IndexVec<DefId, Def>,
+    ) -> Self {
+        Self { body, tcx, locals, layout: LayoutCx::with_defs(tcx, defs) }
     }
 }
 
@@ -1234,19 +1249,22 @@ fn lower_sizeof_expr(
     let expr = &cx.body.exprs[expr_id];
     let operand_ty = cx.body.exprs[operand].ty;
 
-    if let Some(size) = const_size_of_ty(cx.tcx, operand_ty) {
-        return Operand::Const(Const { kind: ConstKind::Int(size), ty: expr.ty });
-    }
-
     let Ty::Array { elem, is_vla: true, .. } = cx.tcx.get(operand_ty) else {
-        return Operand::Const(Const { kind: ConstKind::Int(0), ty: expr.ty });
+        let size = layout_size_as_i128(
+            cx.layout
+                .layout_of(operand_ty)
+                .unwrap_or_else(|err| panic!("sizeof layout failed for {operand_ty:?}: {err}")),
+        );
+        return Operand::Const(Const { kind: ConstKind::Int(size), ty: expr.ty });
     };
 
     let place = lower_as_place(builder, cx, operand);
     let len_local = builder.alloc_temp(expr.ty, expr.span);
     push_assign(builder, expr.span, len_local, Rvalue::Len(place));
 
-    let elem_size = const_size_of_ty(cx.tcx, elem.ty).unwrap_or(0);
+    let elem_size = layout_size_as_i128(cx.layout.layout_of(elem.ty).unwrap_or_else(|err| {
+        panic!("sizeof(VLA) element layout failed for {:?}: {err}", elem.ty)
+    }));
     if elem_size == 1 {
         return Operand::Copy(Place { base: len_local, projection: Vec::new() });
     }
@@ -1265,6 +1283,10 @@ fn lower_sizeof_expr(
     Operand::Copy(Place { base: size_local, projection: Vec::new() })
 }
 
+fn layout_size_as_i128(layout: rcc_hir::Layout) -> i128 {
+    i128::from(layout.size)
+}
+
 /// `true` for C aggregate types (array / struct / union). Enums are
 /// scalars at the CFG level (their underlying integer type is what is
 /// stored), so they do not count.
@@ -1274,33 +1296,6 @@ fn is_aggregate_ty(tcx: &TyCtxt, ty: TyId) -> bool {
 
 fn is_vla_ty(tcx: &TyCtxt, ty: TyId) -> bool {
     matches!(tcx.get(ty), Ty::Array { is_vla: true, .. })
-}
-
-fn const_size_of_ty(tcx: &TyCtxt, ty: TyId) -> Option<i128> {
-    match tcx.get(ty) {
-        Ty::Void => None,
-        Ty::Int { rank, .. } => Some(match rank {
-            IntRank::Bool | IntRank::Char => 1,
-            IntRank::Short => 2,
-            IntRank::Int => 4,
-            IntRank::Long | IntRank::LongLong => 8,
-        }),
-        Ty::Float(kind) => Some(match kind {
-            FloatKind::F32 => 4,
-            FloatKind::F64 => 8,
-            FloatKind::F80 => 16,
-        }),
-        Ty::Complex(kind) => Some(match kind {
-            FloatKind::F32 => 8,
-            FloatKind::F64 => 16,
-            FloatKind::F80 => 32,
-        }),
-        Ty::Ptr(_) => Some(8),
-        Ty::Array { elem, len: Some(n), is_vla: false } => {
-            const_size_of_ty(tcx, elem.ty)?.checked_mul(i128::from(*n))
-        }
-        Ty::Array { .. } | Ty::Func { .. } | Ty::Record(_) | Ty::Enum(_) | Ty::Error => None,
-    }
 }
 
 /// `true` if `stmt_id` is `HirStmtKind::Expr(Assign { lhs, .. })` whose
@@ -5408,6 +5403,39 @@ mod tests {
         tcx.intern(Ty::Array { elem: rcc_hir::Qual::plain(tcx.int), len: None, is_vla: true })
     }
 
+    fn char_int_record_ty(
+        tcx: &mut TyCtxt,
+        defs: &mut rcc_data_structures::IndexVec<rcc_hir::DefId, rcc_hir::Def>,
+    ) -> TyId {
+        let record_def = defs.push(rcc_hir::Def {
+            id: rcc_hir::DefId(0),
+            name: Symbol(99),
+            span: DUMMY_SP,
+            kind: rcc_hir::DefKind::Record {
+                kind: rcc_hir::RecordKind::Struct,
+                layout: None,
+                fields: vec![
+                    rcc_hir::Field {
+                        name: None,
+                        ty: tcx.char_,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                    rcc_hir::Field {
+                        name: None,
+                        ty: tcx.int,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                ],
+            },
+        });
+        defs[record_def].id = record_def;
+        tcx.intern(Ty::Record(record_def))
+    }
+
     #[test]
     fn vla_decl_saves_runtime_bound_before_storage_live() {
         let mut tcx = TyCtxt::new();
@@ -5557,6 +5585,98 @@ mod tests {
                 } if *base == len_assign && projection.is_empty()
             )),
             "sizeof(int vla) should multiply Len(a) by sizeof(int)"
+        );
+    }
+
+    #[test]
+    fn sizeof_record_and_nested_array_lower_to_checked_constants() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = rcc_data_structures::IndexVec::new();
+        let record_ty = char_int_record_ty(&mut tcx, &mut defs);
+        let record_array_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(record_ty),
+            len: Some(2),
+            is_vla: false,
+        });
+
+        let mut hir_body = HirBody::default();
+        let hs = add_hir_local(&mut hir_body, record_ty, None, false);
+        let ha = add_hir_local(&mut hir_body, record_array_ty, None, false);
+        let s_ref =
+            push_expr(&mut hir_body, record_ty, ValueCat::LValue, HirExprKind::LocalRef(hs));
+        let a_ref =
+            push_expr(&mut hir_body, record_array_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let sizeof_s =
+            push_expr(&mut hir_body, tcx.ulong, ValueCat::RValue, HirExprKind::SizeofExpr(s_ref));
+        let sizeof_a =
+            push_expr(&mut hir_body, tcx.ulong, ValueCat::RValue, HirExprKind::SizeofExpr(a_ref));
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.void, DUMMY_SP);
+        let cs = builder.alloc_user_local(Symbol(1), record_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(Symbol(2), record_array_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hs, cs);
+        map.insert(ha, ca);
+
+        let cx = LowerCx::with_defs(&hir_body, &tcx, &map, &defs);
+        let s_size = lower_as_rvalue(&mut builder, &cx, sizeof_s);
+        let a_size = lower_as_rvalue(&mut builder, &cx, sizeof_a);
+
+        assert!(matches!(s_size, Operand::Const(Const { kind: ConstKind::Int(8), .. })));
+        assert!(matches!(a_size, Operand::Const(Const { kind: ConstKind::Int(16), .. })));
+    }
+
+    #[test]
+    fn sizeof_record_vla_uses_checked_record_element_layout() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let mut defs = rcc_data_structures::IndexVec::new();
+        let record_ty = char_int_record_ty(&mut tcx, &mut defs);
+        let record_vla_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(record_ty),
+            len: None,
+            is_vla: true,
+        });
+
+        let mut hir_body = HirBody::default();
+        let hn = add_hir_local(&mut hir_body, int_ty, None, true);
+        let n_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hn));
+        let ha = add_hir_local(&mut hir_body, record_vla_ty, Some(n_ref), false);
+
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let a_ref =
+            push_expr(&mut hir_body, record_vla_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let sizeof_a =
+            push_expr(&mut hir_body, tcx.ulong, ValueCat::RValue, HirExprKind::SizeofExpr(a_ref));
+        let expr_stmt = push_stmt(&mut hir_body, HirStmtKind::Expr(sizeof_a));
+        let root = block_stmt(&mut hir_body, vec![decl, expr_stmt]);
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.void, DUMMY_SP);
+        let cn = builder.alloc_param(Symbol(1), int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(Symbol(2), record_vla_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hn, cn);
+        map.insert(ha, ca);
+
+        let cx = LowerCx::with_defs(&hir_body, &tcx, &map, &defs);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        assert!(
+            body.blocks.iter().any(|block| block.statements.iter().any(|stmt| matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::BinaryOp(
+                        BinOp::Mul,
+                        Operand::Copy(_),
+                        Operand::Const(Const { kind: ConstKind::Int(8), .. }),
+                    ),
+                    ..
+                }
+            ))),
+            "sizeof(struct S[n]) should multiply Len(a) by sizeof(struct S), not by 0"
         );
     }
 

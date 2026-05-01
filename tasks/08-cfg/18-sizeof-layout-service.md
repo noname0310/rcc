@@ -1,5 +1,7 @@
 # 08-18: Sizeof layout service
 
+> ✓ done — 2026-05-01
+
 **Phase:** 08-cfg    **Depends on:** 08-17    **Milestone:** M6 stabilization
 
 ## Goal

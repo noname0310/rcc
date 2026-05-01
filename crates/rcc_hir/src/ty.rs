@@ -105,7 +105,7 @@ impl Qual {
     }
 }
 
-/// Computed layout for a type (filled by `rcc_codegen_llvm::LayoutCx`).
+/// Computed layout for a type (via `rcc_hir::LayoutCx`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     /// Size in bytes.

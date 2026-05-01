@@ -24,7 +24,7 @@ use rcc_data_structures::IndexVec;
 use rcc_errors::codes;
 use rcc_hir::{
     rcc_hir_binop::{BinOp, UnOp},
-    Body, ConvertKind, Def, DefId, DefKind, FloatKind, HirExprId, HirExprKind, IntRank, Ty, TyCtxt,
+    Body, ConvertKind, Def, DefId, DefKind, HirExprId, HirExprKind, IntRank, LayoutCx, Ty, TyCtxt,
     TyId,
 };
 use rcc_session::Session;
@@ -581,49 +581,14 @@ impl<'a> ConstEval<'a> {
         }
     }
 
-    /// Compute the size of a type in bytes.
-    ///
-    /// **TODO(phase 15):** the per-target sizes here are baked-in
-    /// LP64 stubs (the same assumption the rest of the compiler is
-    /// already making — see `INT_BITS` in `rcc_typeck::lib`). When
-    /// `TargetInfo` lands the stubs should defer to it.
+    /// Compute the size of a type in bytes using the shared layout service.
     pub fn size_of_ty(&self, ty: TyId) -> Option<i128> {
-        match self.tcx.get(ty).clone() {
-            Ty::Void => None,
-            Ty::Int { rank, .. } => Some(match rank {
-                IntRank::Bool => 1,
-                IntRank::Char => 1,
-                IntRank::Short => 2,
-                IntRank::Int => 4,
-                IntRank::Long => 8,
-                IntRank::LongLong => 8,
-            }),
-            Ty::Float(kind) => Some(match kind {
-                FloatKind::F32 => 4,
-                FloatKind::F64 => 8,
-                // `long double` lays out as a 16-byte slot on the
-                // SysV-x86_64 / AArch64 stub targets we'll support
-                // first; record-layout is target-specific so this is
-                // the same LP64 placeholder as the integer ranks.
-                FloatKind::F80 => 16,
-            }),
-            // Pointers are LP64.
-            Ty::Ptr(_) => Some(8),
-            Ty::Array { elem, len: Some(n), is_vla: false } => {
-                let elem_size = self.size_of_ty(elem.ty)?;
-                elem_size.checked_mul(i128::from(n))
-            }
-            // VLA / incomplete arrays / functions / records / enums:
-            // their size requires layout that lives outside the
-            // const-eval API surface (or is genuinely unknowable at
-            // const-eval time, e.g. VLAs). Bail.
-            Ty::Array { .. }
-            | Ty::Func { .. }
-            | Ty::Record(_)
-            | Ty::Enum(_)
-            | Ty::Complex(_)
-            | Ty::Error => None,
+        let layout = match self.defs {
+            Some(defs) => LayoutCx::with_defs(self.tcx, defs).layout_of(ty),
+            None => LayoutCx::new(self.tcx).layout_of(ty),
         }
+        .ok()?;
+        Some(i128::from(layout.size))
     }
 
     fn eval_binary(

@@ -12,7 +12,8 @@
 
 use rcc_cfg::Body;
 use rcc_data_structures::FxHashMap;
-use rcc_hir::{DefId, HirCrate, Layout, Ty, TyCtxt, TyId};
+use rcc_data_structures::IndexVec;
+use rcc_hir::{Def, DefId, HirCrate, Layout, LayoutError, Ty, TyCtxt, TyId};
 use rcc_session::Session;
 
 pub mod layout;
@@ -86,8 +87,17 @@ mod backend {
 }
 
 /// Backend-agnostic view of per-type layout (useful for tests).
-pub fn layout_of(tcx: &TyCtxt, ty: TyId) -> Layout {
+pub fn layout_of(tcx: &TyCtxt, ty: TyId) -> Result<Layout, LayoutError> {
     LayoutCx::new(tcx).layout_of(ty)
+}
+
+/// Backend-agnostic layout query with access to HIR definitions.
+pub fn layout_of_with_defs(
+    tcx: &TyCtxt,
+    defs: &IndexVec<DefId, Def>,
+    ty: TyId,
+) -> Result<Layout, LayoutError> {
+    LayoutCx::with_defs(tcx, defs).layout_of(ty)
 }
 
 /// Re-export a trivial `Ty` pretty-printer used by tests. Not backend-specific.
@@ -104,5 +114,58 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
         Ty::Record(d) => format!("record#{}", d.0),
         Ty::Enum(d) => format!("enum#{}", d.0),
         Ty::Error => "<error>".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rcc_hir::{Field, Qual, RecordKind};
+    use rcc_span::{Symbol, DUMMY_SP};
+
+    use super::*;
+
+    #[test]
+    fn codegen_layout_api_reuses_hir_layout_answers() {
+        let mut tcx = TyCtxt::new();
+        let arr = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+        assert_eq!(layout_of(&tcx, arr), LayoutCx::new(&tcx).layout_of(arr));
+    }
+
+    #[test]
+    fn codegen_layout_with_defs_matches_hir_for_records() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let record = defs.push(Def {
+            id: DefId(0),
+            name: Symbol(1),
+            span: DUMMY_SP,
+            kind: rcc_hir::DefKind::Record {
+                kind: RecordKind::Struct,
+                layout: None,
+                fields: vec![
+                    Field {
+                        name: None,
+                        ty: tcx.char_,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                    Field {
+                        name: None,
+                        ty: tcx.int,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                ],
+            },
+        });
+        defs[record].id = record;
+        let record_ty = tcx.intern(Ty::Record(record));
+
+        assert_eq!(
+            layout_of_with_defs(&tcx, &defs, record_ty),
+            LayoutCx::with_defs(&tcx, &defs).layout_of(record_ty)
+        );
     }
 }

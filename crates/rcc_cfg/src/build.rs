@@ -5,7 +5,11 @@
 //! `&mut BodyBuilder` and append at the *current* block.
 
 use rcc_data_structures::{FxHashMap, IndexVec};
-use rcc_hir::{DefId, DefKind, HirCrate, Local, Ty, TyCtxt, TyId};
+use rcc_errors::{codes, DiagnosticBuilder, Level};
+use rcc_hir::{
+    Body as HirBody, DefId, DefKind, HirCrate, HirExprKind, LayoutCx, LayoutError, Local, Ty,
+    TyCtxt, TyId,
+};
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
 
@@ -16,12 +20,9 @@ use crate::{
 
 /// Build CFG bodies for every function in `hir`. Returns a `DefId -> Body` map.
 ///
-pub fn build_bodies(
-    _session: &mut Session,
-    tcx: &TyCtxt,
-    hir: &HirCrate,
-) -> FxHashMap<DefId, Body> {
+pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHashMap<DefId, Body> {
     let mut out = FxHashMap::default();
+    let layout = LayoutCx::with_defs(tcx, &hir.defs);
     for (&def_id, hir_body) in &hir.bodies {
         let Some(def) = hir.defs.get(def_id) else {
             continue;
@@ -52,8 +53,11 @@ pub fn build_bodies(
         }
 
         if let Some(root) = hir_body.root {
+            if !audit_sizeof_layout(session, hir_body, &layout) {
+                continue;
+            }
             builder.collect_labels(hir_body, root);
-            let cx = LowerCx::new(hir_body, tcx, &local_map);
+            let cx = LowerCx::with_defs(hir_body, tcx, &local_map, &hir.defs);
             lower_stmt(&mut builder, &cx, root);
         }
         if !builder.is_current_terminated() {
@@ -62,6 +66,37 @@ pub fn build_bodies(
         out.insert(def_id, builder.finish());
     }
     out
+}
+
+fn audit_sizeof_layout(session: &mut Session, hir_body: &HirBody, layout: &LayoutCx<'_>) -> bool {
+    let mut ok = true;
+    for expr in hir_body.exprs.iter() {
+        let HirExprKind::SizeofExpr(operand) = expr.kind else {
+            continue;
+        };
+        let operand_ty = hir_body.exprs[operand].ty;
+        let result = match layout.tcx.get(operand_ty) {
+            Ty::Array { elem, is_vla: true, .. } => layout.layout_of(elem.ty),
+            _ => layout.layout_of(operand_ty),
+        };
+        if let Err(err) = result {
+            emit_sizeof_layout_error(session, expr.span, err);
+            ok = false;
+        }
+    }
+    ok
+}
+
+fn emit_sizeof_layout_error(session: &mut Session, span: Span, err: LayoutError) {
+    DiagnosticBuilder::new(
+        &mut session.handler,
+        Level::Error,
+        "cannot compute layout for sizeof operand",
+    )
+    .code(codes::E0085)
+    .primary(span, "sizeof requires a complete object layout")
+    .note(err.to_string())
+    .emit();
 }
 
 /// Per-block bookkeeping while a body is under construction.

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcc_cfg::{
-    build_bodies, pretty::dump_body, BasicBlockId, Body, Const, Operand, Place, Projection, Rvalue,
-    StatementKind, TerminatorKind,
+    build_bodies, pretty::dump_body, BasicBlockId, Body, Const, ConstKind, Operand, Place,
+    Projection, Rvalue, StatementKind, TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, Local, TyCtxt};
@@ -173,6 +173,11 @@ const FIXTURES: &[Fixture] = &[
         functions: 1,
     },
     Fixture {
+        name: "sizeof_int_array",
+        src: "unsigned long f(void) { int a[3]; return sizeof a; }",
+        functions: 1,
+    },
+    Fixture {
         name: "multi_function",
         src: "int a(void) { return 1; } int b(void) { return a(); }",
         functions: 2,
@@ -228,6 +233,21 @@ fn cfg_snapshots_are_stable() {
     }
 }
 
+#[test]
+fn sizeof_layout_service_lowers_fixed_sizes() {
+    let cases = [("sizeof_int_array", "unsigned long f(void) { int a[3]; return sizeof a; }", 12)];
+
+    for (name, src, expected) in cases {
+        let lowered = lower_snippet(name, src);
+        let body = &lowered.bodies[0].1;
+        assert!(
+            body_contains_int_const(body, expected),
+            "{name}: expected sizeof constant {expected} in CFG:\n{}",
+            dump_body(body, &lowered.tcx)
+        );
+    }
+}
+
 fn lower_snippet(name: &str, src: &str) -> Lowered {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
@@ -252,6 +272,34 @@ fn lower_snippet(name: &str, src: &str) -> Lowered {
     let mut bodies: Vec<_> = build_bodies(&mut session, &tcx, &hir).into_iter().collect();
     bodies.sort_by_key(|(def, _)| def.0);
     Lowered { tcx, bodies }
+}
+
+fn body_contains_int_const(body: &Body, expected: i128) -> bool {
+    body.blocks.iter().any(|block| {
+        block.statements.iter().any(|stmt| match &stmt.kind {
+            StatementKind::Assign { rvalue, .. } => rvalue_contains_int_const(rvalue, expected),
+            _ => false,
+        })
+    })
+}
+
+fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
+    match rvalue {
+        Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast { op, .. } => {
+            operand_contains_int_const(op, expected)
+        }
+        Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
+        }
+        Rvalue::AddressOf(_) | Rvalue::Len(_) => false,
+    }
+}
+
+fn operand_contains_int_const(operand: &Operand, expected: i128) -> bool {
+    matches!(
+        operand,
+        Operand::Const(Const { kind: ConstKind::Int(value), .. }) if *value == expected
+    )
 }
 
 fn render_snippet(name: &str, src: &str) -> String {

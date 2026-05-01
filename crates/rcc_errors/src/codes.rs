@@ -83,6 +83,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0082, E0082_DESC),
     (E0083, E0083_DESC),
     (E0084, E0084_DESC),
+    (E0085, E0085_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -552,6 +553,16 @@ const E0083_DESC: &str = "invalid operands to binary operator";
 /// initializer.
 pub const E0084: &str = "E0084";
 const E0084_DESC: &str = "non-constant expression in static initializer";
+
+/// `sizeof` operand has no complete object layout.
+///
+/// C99 §6.5.3.4 requires `sizeof` to operate on a complete object
+/// type, except that VLA operands are evaluated at runtime and still
+/// need a known element layout. The CFG pass emits this error before
+/// codegen when layout cannot be computed without silently producing
+/// an incorrect zero-size object.
+pub const E0085: &str = "E0085";
+const E0085_DESC: &str = "sizeof operand has no complete object layout";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 
