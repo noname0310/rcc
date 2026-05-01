@@ -316,6 +316,15 @@ pub enum Designator {
     Index(Expr),
 }
 
+/// Member-designator component accepted by `__builtin_offsetof`.
+#[derive(Debug, Clone)]
+pub enum OffsetofDesignator {
+    /// `.field` or the first unprefixed `field`.
+    Field(Symbol),
+    /// `[expr]`.
+    Index(Box<Expr>),
+}
+
 /// Compound statement / block.
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -523,6 +532,20 @@ pub enum ExprKind {
     Comma { lhs: Box<Expr>, rhs: Box<Expr> },
     /// Function call.
     Call { callee: Box<Expr>, args: Vec<Expr> },
+    /// `__builtin_offsetof(type-name, member-designator)`.
+    BuiltinOffsetof {
+        /// Type being queried.
+        ty: Box<TypeName>,
+        /// Member-designator path.
+        designators: Vec<OffsetofDesignator>,
+    },
+    /// `__builtin_types_compatible_p(type-name, type-name)`.
+    BuiltinTypesCompatible {
+        /// Left type argument.
+        lhs: Box<TypeName>,
+        /// Right type argument.
+        rhs: Box<TypeName>,
+    },
     /// `a.b`
     Member { base: Box<Expr>, field: Symbol },
     /// `a->b`

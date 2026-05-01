@@ -32,6 +32,11 @@ functions: `__builtin_offsetof`, `__builtin_types_compatible_p`,
   ordinary call-expression lowering is not enough.
 - Tests for each builtin.
 
+## Parser Surface Dependency
+Task 05-35 provides `ExprKind::BuiltinOffsetof` and
+`ExprKind::BuiltinTypesCompatible` so phase 15 can lower type-name
+arguments without rediscovering them from ordinary call syntax.
+
 ## Acceptance
 - `__builtin_offsetof(struct S, field)` evaluates to the correct
   constant in a static assertion.

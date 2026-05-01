@@ -141,7 +141,8 @@
 use rcc_ast::{
     AssignOp, BinOp, CharLiteral as AstCharLiteral, Expr, ExprKind,
     FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, IntLiteral as AstIntLiteral,
-    IntSuffix as AstIntSuffix, LiteralEncoding, StringLiteral as AstStringLiteral, UnOp,
+    IntSuffix as AstIntSuffix, LiteralEncoding, OffsetofDesignator,
+    StringLiteral as AstStringLiteral, UnOp,
 };
 use rcc_lexer::{Punct, StringEncoding};
 use rcc_span::{Span, Symbol};
@@ -174,6 +175,9 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
     let span = tok.span;
     match tok.kind {
         TokenKind::Ident(sym) => {
+            if is_builtin_type_arg_call(p, sym) {
+                return parse_builtin_type_arg_expr(p, sym, span);
+            }
             p.bump();
             let id = p.fresh_id();
             Some(Expr { id, kind: ExprKind::Ident(sym), span })
@@ -236,6 +240,222 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
         }
         _ => {
             p.session.handler.struct_err(span, "expected primary expression").emit();
+            None
+        }
+    }
+}
+
+fn is_builtin_type_arg_call(p: &Parser<'_>, sym: Symbol) -> bool {
+    let name = p.session.interner.get(sym);
+    matches!(name, "__builtin_offsetof" | "__builtin_types_compatible_p")
+        && matches!(
+            p.tokens.get(p.cursor + 1).map(|t| &t.kind),
+            Some(TokenKind::Punct(Punct::LParen))
+        )
+}
+
+fn parse_builtin_type_arg_expr(p: &mut Parser<'_>, sym: Symbol, name_span: Span) -> Option<Expr> {
+    let name = p.session.interner.get(sym).to_owned();
+    p.bump(); // builtin identifier
+
+    let lparen_span = match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::LParen)) => {
+            let span = t.span;
+            p.bump();
+            span
+        }
+        _ => {
+            let id = p.fresh_id();
+            return Some(Expr { id, kind: ExprKind::Ident(sym), span: name_span });
+        }
+    };
+
+    let (kind, end_span) = match name.as_str() {
+        "__builtin_offsetof" => parse_builtin_offsetof_body(p, lparen_span),
+        "__builtin_types_compatible_p" => parse_builtin_types_compatible_body(p, lparen_span),
+        _ => unreachable!("is_builtin_type_arg_call filters builtin names"),
+    };
+
+    let id = p.fresh_id();
+    Some(Expr { id, kind, span: name_span.to(end_span) })
+}
+
+fn parse_builtin_offsetof_body(p: &mut Parser<'_>, lparen_span: Span) -> (ExprKind, Span) {
+    let ty = parse_type_name(p);
+    let _ = expect_builtin_comma(p, lparen_span, "__builtin_offsetof");
+    let designators = parse_offsetof_designators(p, lparen_span);
+    let end_span = expect_builtin_rparen(p, lparen_span, "__builtin_offsetof");
+    (ExprKind::BuiltinOffsetof { ty: Box::new(ty), designators }, end_span)
+}
+
+fn parse_builtin_types_compatible_body(p: &mut Parser<'_>, lparen_span: Span) -> (ExprKind, Span) {
+    let lhs = parse_type_name(p);
+    let _ = expect_builtin_comma(p, lparen_span, "__builtin_types_compatible_p");
+    let rhs = parse_type_name(p);
+    let end_span = expect_builtin_rparen(p, lparen_span, "__builtin_types_compatible_p");
+    (ExprKind::BuiltinTypesCompatible { lhs: Box::new(lhs), rhs: Box::new(rhs) }, end_span)
+}
+
+fn expect_builtin_comma(p: &mut Parser<'_>, lparen_span: Span, builtin: &str) -> Option<Span> {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Comma)) => {
+            let span = t.span;
+            p.bump();
+            Some(span)
+        }
+        Some(t) => {
+            p.session
+                .handler
+                .struct_err(t.span, format!("expected `,` in {builtin} argument list"))
+                .label(lparen_span, "builtin argument list starts here")
+                .emit();
+            None
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(lparen_span, format!("unclosed {builtin} argument list"))
+                .emit();
+            None
+        }
+    }
+}
+
+fn expect_builtin_rparen(p: &mut Parser<'_>, lparen_span: Span, builtin: &str) -> Span {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::RParen)) => {
+            let span = t.span;
+            p.bump();
+            span
+        }
+        Some(t) => {
+            let span = t.span;
+            p.session
+                .handler
+                .struct_err(span, format!("expected `)` to close {builtin} argument list"))
+                .label(lparen_span, "unmatched `(` here")
+                .emit();
+            span
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(lparen_span, format!("unclosed {builtin} argument list"))
+                .emit();
+            lparen_span
+        }
+    }
+}
+
+fn parse_offsetof_designators(p: &mut Parser<'_>, lparen_span: Span) -> Vec<OffsetofDesignator> {
+    let mut designators = Vec::new();
+
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Dot)) => {
+            let dot_span = t.span;
+            p.bump();
+            if !push_offsetof_field(p, dot_span, "`.`", &mut designators) {
+                return designators;
+            }
+        }
+        Some(t) if matches!(t.kind, TokenKind::Ident(_)) => {
+            let TokenKind::Ident(field) = t.kind else { unreachable!() };
+            p.bump();
+            designators.push(OffsetofDesignator::Field(field));
+        }
+        Some(t) => {
+            p.session
+                .handler
+                .struct_err(t.span, "expected member designator in __builtin_offsetof")
+                .label(lparen_span, "offsetof argument list starts here")
+                .emit();
+            return designators;
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(lparen_span, "unclosed __builtin_offsetof argument list")
+                .emit();
+            return designators;
+        }
+    }
+
+    loop {
+        match p.peek() {
+            Some(t) if matches!(t.kind, TokenKind::Punct(Punct::Dot)) => {
+                let dot_span = t.span;
+                p.bump();
+                if !push_offsetof_field(p, dot_span, "`.`", &mut designators) {
+                    break;
+                }
+            }
+            Some(t) if matches!(t.kind, TokenKind::Punct(Punct::LBracket)) => {
+                let lbracket_span = t.span;
+                p.bump();
+                let Some(index) = parse_expression(p) else {
+                    break;
+                };
+                let _ = expect_offsetof_rbracket(p, lbracket_span);
+                designators.push(OffsetofDesignator::Index(Box::new(index)));
+            }
+            _ => break,
+        }
+    }
+
+    designators
+}
+
+fn push_offsetof_field(
+    p: &mut Parser<'_>,
+    op_span: Span,
+    op_spelling: &str,
+    designators: &mut Vec<OffsetofDesignator>,
+) -> bool {
+    match p.peek() {
+        Some(t) => {
+            if let TokenKind::Ident(field) = t.kind {
+                p.bump();
+                designators.push(OffsetofDesignator::Field(field));
+                true
+            } else {
+                p.session
+                    .handler
+                    .struct_err(t.span, format!("expected identifier after {op_spelling}"))
+                    .label(op_span, "offsetof member access here")
+                    .emit();
+                false
+            }
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(op_span, format!("expected identifier after {op_spelling}"))
+                .emit();
+            false
+        }
+    }
+}
+
+fn expect_offsetof_rbracket(p: &mut Parser<'_>, lbracket_span: Span) -> Option<Span> {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(Punct::RBracket)) => {
+            let span = t.span;
+            p.bump();
+            Some(span)
+        }
+        Some(t) => {
+            p.session
+                .handler
+                .struct_err(t.span, "expected `]` to close __builtin_offsetof subscript")
+                .label(lbracket_span, "unmatched `[` here")
+                .emit();
+            None
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(lbracket_span, "unclosed __builtin_offsetof subscript")
+                .emit();
             None
         }
     }
@@ -2708,7 +2928,7 @@ mod tests {
     // expression.
 
     use crate::scope::NameKind;
-    use rcc_ast::{Initializer, TypeSpec};
+    use rcc_ast::{Initializer, OffsetofDesignator, RecordKind, TypeSpec};
     use rcc_lexer::Tokenizer;
 
     fn parse_expr_full(
@@ -3052,5 +3272,130 @@ mod tests {
         let (e, diags, _sess) = parse_expr_full(src, &[]);
         assert!(diags.is_empty(), "clean: {diags:?}");
         assert!(matches!(e.kind, ExprKind::SizeofType(_)), "expected SizeofType, got {:?}", e.kind);
+    }
+
+    #[test]
+    fn builtin_offsetof_type_argument_parses() {
+        let src = "__builtin_offsetof(struct S, x)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::BuiltinOffsetof { ty, designators } => {
+                match ty.specs.type_specs.as_slice() {
+                    [TypeSpec::Record(rec)] => {
+                        assert_eq!(rec.kind, RecordKind::Struct);
+                        let tag = rec.tag.expect("struct tag");
+                        assert_eq!(sess.interner.get(tag), "S");
+                    }
+                    other => panic!("expected struct S type-name, got {other:?}"),
+                }
+                assert_eq!(designators.len(), 1);
+                match &designators[0] {
+                    OffsetofDesignator::Field(field) => {
+                        assert_eq!(sess.interner.get(*field), "x");
+                    }
+                    other => panic!("expected field designator, got {other:?}"),
+                }
+            }
+            other => panic!("expected BuiltinOffsetof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_offsetof_nested_fields_and_subscript_parse() {
+        let src = "__builtin_offsetof(struct S, a[2].b)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::BuiltinOffsetof { designators, .. } => {
+                assert_eq!(designators.len(), 3);
+                match &designators[0] {
+                    OffsetofDesignator::Field(field) => {
+                        assert_eq!(sess.interner.get(*field), "a");
+                    }
+                    other => panic!("expected first field, got {other:?}"),
+                }
+                match &designators[1] {
+                    OffsetofDesignator::Index(index) => match &index.kind {
+                        ExprKind::IntLit(lit) => assert_eq!(lit.value, 2),
+                        other => panic!("expected integer subscript, got {other:?}"),
+                    },
+                    other => panic!("expected index designator, got {other:?}"),
+                }
+                match &designators[2] {
+                    OffsetofDesignator::Field(field) => {
+                        assert_eq!(sess.interner.get(*field), "b");
+                    }
+                    other => panic!("expected final field, got {other:?}"),
+                }
+            }
+            other => panic!("expected BuiltinOffsetof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_types_compatible_typedef_names_parse() {
+        let src = "__builtin_types_compatible_p(T, int *)";
+        let (e, diags, sess) = parse_expr_full(src, &["T"]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::BuiltinTypesCompatible { lhs, rhs } => {
+                match lhs.specs.type_specs.as_slice() {
+                    [TypeSpec::TypedefName(sym)] => assert_eq!(sess.interner.get(*sym), "T"),
+                    other => panic!("expected typedef-name lhs, got {other:?}"),
+                }
+                assert!(matches!(rhs.specs.type_specs.as_slice(), [TypeSpec::Int]));
+                assert!(
+                    matches!(
+                        rhs.declarator.derived.as_slice(),
+                        [rcc_ast::DerivedDeclarator::Pointer(_)]
+                    ),
+                    "expected pointer rhs, got {:?}",
+                    rhs.declarator.derived
+                );
+            }
+            other => panic!("expected BuiltinTypesCompatible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_expression_builtin_remains_call() {
+        let src = "__builtin_expect(x, 1)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::Call { callee, args } => {
+                assert_eq!(args.len(), 2);
+                match &callee.kind {
+                    ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "__builtin_expect"),
+                    other => panic!("expected builtin callee ident, got {other:?}"),
+                }
+            }
+            other => panic!("expected ordinary Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_malformed_type_argument_diagnoses() {
+        let src = "__builtin_types_compatible_p(static int, long)";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(
+            diags.iter().any(|d| d.code == Some("E0061")),
+            "expected strict type-name diagnostic, got {diags:?}"
+        );
+        assert!(matches!(e.kind, ExprKind::BuiltinTypesCompatible { .. }));
+    }
+
+    #[test]
+    fn builtin_offsetof_malformed_member_diagnoses() {
+        let src = "__builtin_offsetof(struct S, 1)";
+        let (e, diags, _sess) = parse_expr_full(src, &[]);
+        assert!(!diags.is_empty(), "expected diagnostics");
+        match &e.kind {
+            ExprKind::BuiltinOffsetof { designators, .. } => {
+                assert!(designators.is_empty(), "bad member should not fabricate designator");
+            }
+            other => panic!("expected BuiltinOffsetof, got {other:?}"),
+        }
     }
 }

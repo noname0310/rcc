@@ -1,5 +1,7 @@
 # 05-35: Builtin type-argument syntax
 
+> ✓ done — 2026-05-01
+
 **Phase:** 05-parse    **Depends on:** 05-34    **Milestone:** M5 blocker
 
 ## Goal

@@ -3,8 +3,8 @@
 
 use crate::{
     Block, BlockItem, Decl, Declarator, EnumSpec, Expr, ExprKind, ExternalDecl, FieldDecl,
-    FunctionDef, InitDeclarator, Initializer, ParamDecl, RecordSpec, Stmt, StmtKind,
-    TranslationUnit, TypeName,
+    FunctionDef, InitDeclarator, Initializer, OffsetofDesignator, ParamDecl, RecordSpec, Stmt,
+    StmtKind, TranslationUnit, TypeName,
 };
 
 /// Walk the AST read-only.
@@ -195,6 +195,18 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             for a in args {
                 v.visit_expr(a);
             }
+        }
+        ExprKind::BuiltinOffsetof { ty, designators } => {
+            v.visit_type_name(ty);
+            for designator in designators {
+                if let OffsetofDesignator::Index(index) = designator {
+                    v.visit_expr(index);
+                }
+            }
+        }
+        ExprKind::BuiltinTypesCompatible { lhs, rhs } => {
+            v.visit_type_name(lhs);
+            v.visit_type_name(rhs);
         }
         ExprKind::Index { base, index } => {
             v.visit_expr(base);

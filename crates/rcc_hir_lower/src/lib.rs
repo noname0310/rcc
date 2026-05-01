@@ -2041,6 +2041,13 @@ pub fn lower_expr(
                 .collect();
             HirExprKind::Call { callee: callee_id, args: arg_ids }
         }
+        rcc_ast::ExprKind::BuiltinOffsetof { .. }
+        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => {
+            // Phase 15 owns builtin lowering once layout/type-compatibility
+            // services are available. Keep HIR lowering exhaustive for now
+            // without pretending these are ordinary call expressions.
+            HirExprKind::IntConst(0)
+        }
         rcc_ast::ExprKind::Member { base, field: _ } => {
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
             // Field-index resolution happens in typeck; placeholder 0.
