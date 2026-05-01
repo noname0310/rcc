@@ -21,7 +21,8 @@ use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, TyCtxt, TyId, ValueCat,
+    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, RecordKind, SwitchCase, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -96,6 +97,7 @@ fn lower_function_bodies(
             span: func_def.body.span,
         };
         let root = lower_stmt(&root_stmt, &mut body, &mut scope, crate_, tcx, resolver, session);
+        populate_switch_case_tables(&mut body, root, session);
         body.root = Some(root);
         scope.pop_scope();
         resolver.labels.clear();
@@ -679,6 +681,164 @@ pub fn lower_stmt(
     let stmt_id = body.stmts.push(HirStmt { id: HirStmtId(0), span: stmt.span, kind });
     body.stmts[stmt_id].id = stmt_id;
     stmt_id
+}
+
+fn populate_switch_case_tables(body: &mut Body, root: HirStmtId, session: &mut Session) {
+    populate_switch_case_tables_in_stmt(body, root, 0, session);
+}
+
+fn populate_switch_case_tables_in_stmt(
+    body: &mut Body,
+    stmt_id: HirStmtId,
+    switch_depth: usize,
+    session: &mut Session,
+) {
+    let kind = body.stmts[stmt_id].kind.clone();
+    match kind {
+        HirStmtKind::Block(stmts) => {
+            for stmt in stmts {
+                populate_switch_case_tables_in_stmt(body, stmt, switch_depth, session);
+            }
+        }
+        HirStmtKind::If { then_branch, else_branch, .. } => {
+            populate_switch_case_tables_in_stmt(body, then_branch, switch_depth, session);
+            if let Some(else_branch) = else_branch {
+                populate_switch_case_tables_in_stmt(body, else_branch, switch_depth, session);
+            }
+        }
+        HirStmtKind::While { body: inner, .. } | HirStmtKind::DoWhile { body: inner, .. } => {
+            populate_switch_case_tables_in_stmt(body, inner, switch_depth, session);
+        }
+        HirStmtKind::For { init, body: inner, .. } => {
+            if let Some(init) = init {
+                populate_switch_case_tables_in_stmt(body, init, switch_depth, session);
+            }
+            populate_switch_case_tables_in_stmt(body, inner, switch_depth, session);
+        }
+        HirStmtKind::Switch { cond, body: switch_body, .. } => {
+            let mut state = SwitchCaseCollection::default();
+            collect_cases_for_switch(body, switch_body, session, &mut state);
+            body.stmts[stmt_id].kind =
+                HirStmtKind::Switch { cond, body: switch_body, cases: state.cases };
+            populate_switch_case_tables_in_stmt(body, switch_body, switch_depth + 1, session);
+        }
+        HirStmtKind::Case { body: inner, .. } => {
+            if switch_depth == 0 {
+                emit_invalid_switch_label(
+                    body.stmts[stmt_id].span,
+                    "case label outside switch",
+                    session,
+                );
+            }
+            populate_switch_case_tables_in_stmt(body, inner, switch_depth, session);
+        }
+        HirStmtKind::Default { body: inner } => {
+            if switch_depth == 0 {
+                emit_invalid_switch_label(
+                    body.stmts[stmt_id].span,
+                    "default label outside switch",
+                    session,
+                );
+            }
+            populate_switch_case_tables_in_stmt(body, inner, switch_depth, session);
+        }
+        HirStmtKind::Label { body: inner, .. } => {
+            populate_switch_case_tables_in_stmt(body, inner, switch_depth, session);
+        }
+        HirStmtKind::Expr(_)
+        | HirStmtKind::Goto(_)
+        | HirStmtKind::Break
+        | HirStmtKind::Continue
+        | HirStmtKind::Return(_)
+        | HirStmtKind::LocalDecl { .. }
+        | HirStmtKind::Null => {}
+    }
+}
+
+#[derive(Default)]
+struct SwitchCaseCollection {
+    cases: Vec<SwitchCase>,
+    seen_values: FxHashSet<i128>,
+    seen_default: bool,
+}
+
+fn collect_cases_for_switch(
+    body: &Body,
+    stmt_id: HirStmtId,
+    session: &mut Session,
+    state: &mut SwitchCaseCollection,
+) {
+    match body.stmts[stmt_id].kind.clone() {
+        HirStmtKind::Block(stmts) => {
+            for stmt in stmts {
+                collect_cases_for_switch(body, stmt, session, state);
+            }
+        }
+        HirStmtKind::If { then_branch, else_branch, .. } => {
+            collect_cases_for_switch(body, then_branch, session, state);
+            if let Some(else_branch) = else_branch {
+                collect_cases_for_switch(body, else_branch, session, state);
+            }
+        }
+        HirStmtKind::While { body: inner, .. }
+        | HirStmtKind::DoWhile { body: inner, .. }
+        | HirStmtKind::Label { body: inner, .. } => {
+            collect_cases_for_switch(body, inner, session, state);
+        }
+        HirStmtKind::For { init, body: inner, .. } => {
+            if let Some(init) = init {
+                collect_cases_for_switch(body, init, session, state);
+            }
+            collect_cases_for_switch(body, inner, session, state);
+        }
+        HirStmtKind::Switch { .. } => {
+            // A nested switch owns its own case/default labels. Do not
+            // leak them into the enclosing switch table.
+        }
+        HirStmtKind::Case { value, body: inner } => {
+            let Some(v) = value else {
+                emit_invalid_switch_label(
+                    body.stmts[stmt_id].span,
+                    "case label is not an integer constant expression",
+                    session,
+                );
+                collect_cases_for_switch(body, inner, session, state);
+                return;
+            };
+            if !state.seen_values.insert(v) {
+                emit_invalid_switch_label(
+                    body.stmts[stmt_id].span,
+                    "duplicate case value in switch",
+                    session,
+                );
+            }
+            state.cases.push(SwitchCase { value: Some(v), target: stmt_id });
+            collect_cases_for_switch(body, inner, session, state);
+        }
+        HirStmtKind::Default { body: inner } => {
+            if state.seen_default {
+                emit_invalid_switch_label(
+                    body.stmts[stmt_id].span,
+                    "duplicate default label in switch",
+                    session,
+                );
+            }
+            state.seen_default = true;
+            state.cases.push(SwitchCase { value: None, target: stmt_id });
+            collect_cases_for_switch(body, inner, session, state);
+        }
+        HirStmtKind::Expr(_)
+        | HirStmtKind::Goto(_)
+        | HirStmtKind::Break
+        | HirStmtKind::Continue
+        | HirStmtKind::Return(_)
+        | HirStmtKind::LocalDecl { .. }
+        | HirStmtKind::Null => {}
+    }
+}
+
+fn emit_invalid_switch_label(span: Span, message: &str, session: &mut Session) {
+    session.handler.struct_err(span, message.to_string()).code(rcc_errors::codes::E0086).emit();
 }
 
 /// Lower a list of [`BlockItem`]s (from a compound statement or a

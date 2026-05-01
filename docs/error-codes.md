@@ -895,6 +895,26 @@ silent `0` byte size. Supported layout answers come from the shared
 
 ---
 
+## E0086 — invalid switch label
+
+C99 §6.8.4.2 requires every `case` and `default` label to appear inside
+an enclosing `switch` statement. Within one switch, each `case`
+constant value must be unique and there may be only one `default`.
+
+```c
+void f(int x) {
+    case 1: ;              // error[E0086]: case outside switch
+    switch (x) {
+        case 1:
+        case 1: ;          // error[E0086]: duplicate case value
+        default:
+        default: ;         // error[E0086]: duplicate default label
+    }
+}
+```
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

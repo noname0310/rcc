@@ -29,7 +29,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [19-type-name-expression-lowering](19-type-name-expression-lowering.md)
 - [x] [20-compound-literal-temporaries](20-compound-literal-temporaries.md)
 - [x] [21-initializer-string-and-completeness](21-initializer-string-and-completeness.md)
-- [ ] [22-switch-case-collection](22-switch-case-collection.md)
+- [x] [22-switch-case-collection](22-switch-case-collection.md)
 - [ ] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)
 
 ## Downstream

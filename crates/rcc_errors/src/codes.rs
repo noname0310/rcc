@@ -85,6 +85,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0083, E0083_DESC),
     (E0084, E0084_DESC),
     (E0085, E0085_DESC),
+    (E0086, E0086_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -574,6 +575,15 @@ const E0084_DESC: &str = "non-constant expression in static initializer";
 /// an incorrect zero-size object.
 pub const E0085: &str = "E0085";
 const E0085_DESC: &str = "sizeof operand has no complete object layout";
+
+/// Invalid `case` / `default` label placement inside switch lowering.
+///
+/// C99 §6.8.4.2 requires every `case` and `default` label to appear
+/// within the body of an enclosing `switch`. Each switch may contain at
+/// most one `default` label, and no two `case` labels in the same switch
+/// may have the same constant value.
+pub const E0086: &str = "E0086";
+const E0086_DESC: &str = "invalid switch label";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

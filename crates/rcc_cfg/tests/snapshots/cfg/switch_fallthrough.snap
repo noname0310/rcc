@@ -13,9 +13,21 @@ fn def#0() -> int {
     goto -> bb1;
 
   bb1:
-    goto -> bb2;
+    switchInt(copy _1) -> [1: bb2, 2: bb3, otherwise: bb4];
 
   bb2:
+    _2 = 1;
+    goto -> bb3;
+
+  bb3:
+    _2 = 2;
+    goto -> bb4;
+
+  bb4:
+    _2 = 3;
+    goto -> bb5;
+
+  bb5:
     _0 = copy _2;
     StorageDead(_2);
     return;

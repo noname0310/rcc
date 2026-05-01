@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-22: populate switch case tables from real source
 
 **Phase:** 06-hir-lower    **Depends on:** 06-21    **Milestone:** M5 stabilization
@@ -33,4 +35,3 @@ to see switch targets.
 - C99 §6.8.4.2 — The `switch` statement.
 - CFG switch tests currently hand-build `SwitchCase`; real HIR lowering
   leaves `cases: Vec::new()`.
-

@@ -285,8 +285,8 @@ pub enum HirStmtKind {
     /// Unresolved label; target resolution in `rcc_cfg`.
     Label { name: Symbol, body: HirStmtId },
     /// `case expr: stmt` inside a switch. The case value is a folded
-    /// integer constant; the switch-collection pass (task 06-10 /
-    /// typeck) rewrites these into the enclosing `Switch::cases` table.
+    /// integer constant; HIR lowering's switch-collection pass rewrites
+    /// these into the enclosing `Switch::cases` table.
     Case { value: Option<i128>, body: HirStmtId },
     /// `default: stmt` inside a switch. Same rewrite as `Case`.
     Default { body: HirStmtId },

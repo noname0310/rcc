@@ -1795,6 +1795,66 @@ fn snippet_global_char_array_string_initializer_has_static_payload() {
 }
 
 #[test]
+fn snippet_switch_collects_case_table_from_source() {
+    let (hir, _tcx) =
+        lower_snippet("int f(int x) { switch (x) { case 1: return 2; default: return 3; } }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let cases = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            HirStmtKind::Switch { cases, .. } => Some(cases),
+            _ => None,
+        })
+        .expect("missing switch");
+    assert_eq!(cases.len(), 2);
+    assert_eq!(cases[0].value, Some(1));
+    assert_eq!(cases[1].value, None);
+    assert!(matches!(body.stmts[cases[0].target].kind, HirStmtKind::Case { .. }));
+    assert!(matches!(body.stmts[cases[1].target].kind, HirStmtKind::Default { .. }));
+}
+
+#[test]
+fn snippet_nested_switch_cases_do_not_leak_to_outer_switch() {
+    let (hir, _tcx) = lower_snippet(
+        "int f(int x) { switch (x) { case 1: switch (x) { case 2: return 2; } default: return 0; } }",
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    let switch_cases: Vec<Vec<Option<i128>>> = body
+        .stmts
+        .iter()
+        .filter_map(|stmt| match &stmt.kind {
+            HirStmtKind::Switch { cases, .. } => {
+                Some(cases.iter().map(|case| case.value).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(switch_cases.len(), 2);
+    assert!(switch_cases.contains(&vec![Some(1), None]));
+    assert!(switch_cases.contains(&vec![Some(2)]));
+}
+
+#[test]
+fn snippet_case_outside_switch_reports_e0086() {
+    let (_hir, _tcx, cap) = lower_snippet_with_diagnostics("int f(void) { case 1: return 0; }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0086)),
+        "case outside switch should emit E0086"
+    );
+}
+
+#[test]
+fn snippet_duplicate_default_reports_e0086() {
+    let (_hir, _tcx, cap) =
+        lower_snippet_with_diagnostics("int f(int x) { switch (x) { default: ; default: ; } }");
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0086)),
+        "duplicate default should emit E0086"
+    );
+}
+
+#[test]
 fn snippet_duplicate_block_declarator_diagnoses_without_overwriting_binding() {
     let (hir, _tcx, cap) = lower_snippet_with_diagnostics("void f(void) { int a, a = a; }");
     assert!(

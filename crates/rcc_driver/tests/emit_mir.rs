@@ -100,6 +100,14 @@ fn compound_literal_address() {
 }
 
 #[test]
+fn switch_from_source() {
+    snap!(
+        "switch_from_source",
+        render("int f(int x) { switch (x) { case 1: return 2; default: return 3; } }")
+    );
+}
+
+#[test]
 fn sizeof_incomplete_type_reports_layout_error() {
     let cap =
         diagnostics_after_mir_build("struct S; unsigned long f(void) { return sizeof(struct S); }");
