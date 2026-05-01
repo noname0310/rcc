@@ -451,10 +451,13 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::SizeofType(ty);
             expr_id
         }
-        HirExprKind::CompoundLiteral { ty } => {
+        HirExprKind::CompoundLiteral { ty, local, init_stmts } => {
+            for stmt in &init_stmts {
+                visit_stmt(*stmt, body, tcx, session, def_info);
+            }
             body.exprs[expr_id].ty = ty;
             body.exprs[expr_id].value_cat = ValueCat::LValue;
-            body.exprs[expr_id].kind = HirExprKind::CompoundLiteral { ty };
+            body.exprs[expr_id].kind = HirExprKind::CompoundLiteral { ty, local, init_stmts };
             expr_id
         }
         HirExprKind::Assign { lhs, rhs } => {

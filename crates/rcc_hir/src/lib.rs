@@ -334,6 +334,11 @@ pub enum HirExprKind {
     CompoundLiteral {
         /// Object type named by the compound literal.
         ty: TyId,
+        /// Synthetic automatic-storage local backing the lvalue object.
+        local: Local,
+        /// Initializer statements to execute when the compound literal is
+        /// evaluated.
+        init_stmts: Vec<HirStmtId>,
     },
     /// `&expr`
     AddressOf(HirExprId),

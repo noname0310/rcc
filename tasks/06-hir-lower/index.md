@@ -27,7 +27,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [17-declarator-scope-timing](17-declarator-scope-timing.md)
 - [x] [18-record-enum-tag-completion](18-record-enum-tag-completion.md)
 - [x] [19-type-name-expression-lowering](19-type-name-expression-lowering.md)
-- [ ] [20-compound-literal-temporaries](20-compound-literal-temporaries.md)
+- [x] [20-compound-literal-temporaries](20-compound-literal-temporaries.md)
 - [ ] [21-initializer-string-and-completeness](21-initializer-string-and-completeness.md)
 - [ ] [22-switch-case-collection](22-switch-case-collection.md)
 - [ ] [23-hir-placeholder-regression-gate](23-hir-placeholder-regression-gate.md)

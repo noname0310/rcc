@@ -1564,15 +1564,121 @@ fn snippet_sizeof_enum_type_preserves_completed_enum() {
 fn snippet_compound_literal_preserves_type_part() {
     let (hir, tcx) = lower_snippet("void f(void) { (int){1}; }");
     let body = hir.bodies.values().next().expect("missing function body");
-    let literal_ty = body
+    let (literal_ty, literal_local, init_stmts) = body
         .exprs
         .iter()
         .find_map(|expr| match expr.kind {
-            HirExprKind::CompoundLiteral { ty } => Some(ty),
+            HirExprKind::CompoundLiteral { ty, local, ref init_stmts } => {
+                Some((ty, local, init_stmts))
+            }
             _ => None,
         })
         .expect("missing compound literal");
     assert_eq!(literal_ty, tcx.int);
+    assert_eq!(body.locals[literal_local].ty, tcx.int);
+    assert_eq!(init_stmts.len(), 1);
+    let HirStmtKind::Expr(assign) = body.stmts[init_stmts[0]].kind else {
+        panic!("compound literal init must be an assignment expression statement");
+    };
+    let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
+        panic!("compound literal init statement must assign");
+    };
+    assert!(matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(l) if l == literal_local));
+    assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(1)));
+}
+
+#[test]
+fn snippet_compound_literal_address_uses_synthetic_local() {
+    let (hir, tcx) = lower_snippet("void f(void) { int *p = &(int){3}; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let (literal_local, init_stmts) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { local, ref init_stmts, .. } => Some((local, init_stmts)),
+            _ => None,
+        })
+        .expect("missing compound literal");
+    assert_eq!(body.locals[literal_local].name, None);
+    assert_eq!(body.locals[literal_local].ty, tcx.int);
+    assert_eq!(init_stmts.len(), 1);
+
+    let pointer_init = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt.kind {
+            HirStmtKind::LocalDecl { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .expect("missing pointer initializer");
+    let HirExprKind::AddressOf(operand) = body.exprs[pointer_init].kind else {
+        panic!("pointer initializer should be address-of compound literal");
+    };
+    assert!(
+        matches!(body.exprs[operand].kind, HirExprKind::CompoundLiteral { local, .. } if local == literal_local)
+    );
+}
+
+#[test]
+fn snippet_compound_literal_record_initializer_reuses_initializer_walker() {
+    let (hir, tcx) =
+        lower_snippet("struct S { int x; int y; }; void f(void) { ((struct S){ .x = 1 }).x; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let (literal_ty, literal_local, init_stmts) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { ty, local, ref init_stmts } => {
+                Some((ty, local, init_stmts))
+            }
+            _ => None,
+        })
+        .expect("missing record compound literal");
+    assert!(matches!(tcx.get(literal_ty), Ty::Record(_)));
+    assert_eq!(body.locals[literal_local].ty, literal_ty);
+    assert!(
+        init_stmts.iter().any(|stmt| {
+            let HirStmtKind::Expr(assign) = body.stmts[*stmt].kind else { return false };
+            let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
+                return false;
+            };
+            matches!(body.exprs[lhs].kind, HirExprKind::Field { base, field_index: 0 }
+                if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local))
+                && matches!(body.exprs[rhs].kind, HirExprKind::IntConst(1))
+        }),
+        "record compound literal should initialise field x via lower_initializer"
+    );
+}
+
+#[test]
+fn snippet_compound_literal_array_initializer_is_indexable() {
+    let (hir, tcx) = lower_snippet("void f(void) { (int[3]){1,2,3}[1]; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let (literal_local, init_stmts) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { local, ref init_stmts, .. } => Some((local, init_stmts)),
+            _ => None,
+        })
+        .expect("missing array compound literal");
+    match tcx.get(body.locals[literal_local].ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected int[3] synthetic local, got {other:?}"),
+    }
+    assert!(
+        init_stmts.iter().any(|stmt| {
+            let HirStmtKind::Expr(assign) = body.stmts[*stmt].kind else { return false };
+            let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
+                return false;
+            };
+            matches!(body.exprs[lhs].kind, HirExprKind::Index { base, index }
+                if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local)
+                    && matches!(body.exprs[index].kind, HirExprKind::IntConst(1)))
+                && matches!(body.exprs[rhs].kind, HirExprKind::IntConst(2))
+        }),
+        "array compound literal should initialise element [1]"
+    );
 }
 
 #[test]

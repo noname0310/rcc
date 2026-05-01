@@ -1,0 +1,23 @@
+---
+source: crates/rcc_driver/tests/emit_mir.rs
+assertion_line: 99
+---
+fn def#0() -> int {
+  locals:
+    _0: int;
+    _1: int* name#11;
+    _2: int;
+    _3: int*;
+
+  bb0:
+    StorageLive(_1);
+    StorageLive(_2);
+    _2 = 3;
+    _3 = &_2;
+    _1 = copy _3;
+    _0 = copy _1.*;
+    StorageDead(_2);
+    StorageDead(_1);
+    return;
+
+}

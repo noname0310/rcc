@@ -1404,7 +1404,7 @@ fn lower_for_init_decl(
 /// | `Cast`                            | `Cast { operand, to }`                               |
 /// | `SizeofExpr`                      | `SizeofExpr` (typed / folded in typeck + CFG)        |
 /// | `SizeofType`                      | `SizeofType(ty)`                                     |
-/// | `CompoundLiteral`                 | `CompoundLiteral { ty }` (initializer in 06-20)      |
+/// | `CompoundLiteral`                 | synthetic local + initializer statements             |
 ///
 /// The returned id is always the id of the last node pushed for this
 /// expression, so `body.exprs[id].span == expr.span` except for the
@@ -1579,7 +1579,7 @@ pub fn lower_expr(
             );
             HirExprKind::SizeofType(ty)
         }
-        rcc_ast::ExprKind::CompoundLiteral { ty, init: _ } => {
+        rcc_ast::ExprKind::CompoundLiteral { ty, init } => {
             let ty = lower_type_name_in_scope(
                 ty,
                 DeclScope::Block,
@@ -1589,7 +1589,29 @@ pub fn lower_expr(
                 crate_,
                 session,
             );
-            HirExprKind::CompoundLiteral { ty }
+            let local = body.locals.push(LocalDecl {
+                name: None,
+                ty,
+                vla_len: None,
+                is_param: false,
+                span: expr.span,
+            });
+            let target = push_local_ref(local, ty, expr.span, body);
+            let mut init_stmts = Vec::new();
+            lower_initializer(
+                target,
+                ty,
+                init,
+                expr.span,
+                body,
+                scope,
+                crate_,
+                tcx,
+                resolver,
+                session,
+                &mut init_stmts,
+            );
+            HirExprKind::CompoundLiteral { ty, local, init_stmts }
         }
     };
 

@@ -20,9 +20,6 @@
 //! terminate the current block with a `SwitchInt` and continue lowering
 //! at a fresh join block.
 //!
-//! Out of scope (deferred): compound literals. Each such arm panics with
-//! a `todo!` carrying the task id that owns it.
-
 use rcc_data_structures::IndexVec;
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
@@ -207,16 +204,16 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         }
         HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
         HirExprKind::SizeofType(ty) => lower_sizeof_type(cx, expr_id, *ty),
-        HirExprKind::CompoundLiteral { .. } => {
-            todo!("06-20 compound literal storage materialization")
-        }
         HirExprKind::AddressOf(operand) => {
             let place = lower_as_place(builder, cx, *operand);
             let temp = builder.alloc_temp(ty, span);
             push_assign(builder, span, temp, Rvalue::AddressOf(place));
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
-        HirExprKind::Deref(_) | HirExprKind::Field { .. } | HirExprKind::Index { .. } => {
+        HirExprKind::CompoundLiteral { .. }
+        | HirExprKind::Deref(_)
+        | HirExprKind::Field { .. }
+        | HirExprKind::Index { .. } => {
             // These are lvalues; in value position emit a Copy of the
             // computed Place. The compute itself is delegated to
             // `lower_as_place` so the rules live in exactly one spot.
@@ -323,14 +320,39 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
         HirExprKind::Convert { operand, kind: ConvertKind::LvalueToRvalue } => {
             lower_as_place(builder, cx, *operand)
         }
-        HirExprKind::CompoundLiteral { .. } => {
-            todo!("06-20 compound literal place materialization")
+        HirExprKind::CompoundLiteral { local, init_stmts, .. } => {
+            lower_compound_literal_place(builder, cx, expr.span, *local, init_stmts)
         }
         _ => panic!(
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
             std::mem::discriminant(&expr.kind),
         ),
     }
+}
+
+fn lower_compound_literal_place(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    hir_local: HirLocal,
+    init_stmts: &[HirStmtId],
+) -> Place {
+    let cfg_local = cx.locals.lookup(hir_local);
+    let ty = cx.body.locals[hir_local].ty;
+    builder.storage_live(cfg_local, span);
+    if is_aggregate_ty(cx.tcx, ty) && !is_vla_ty(cx.tcx, ty) {
+        builder.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: cfg_local, projection: Vec::new() },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::ZeroInit, ty })),
+            },
+            span,
+        });
+    }
+    for stmt in init_stmts {
+        lower_stmt(builder, cx, *stmt);
+    }
+    Place { base: cfg_local, projection: Vec::new() }
 }
 
 fn lower_inc_dec(

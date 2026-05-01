@@ -95,6 +95,11 @@ fn sizeof_type() {
 }
 
 #[test]
+fn compound_literal_address() {
+    snap!("compound_literal_address", render("int f(void) { int *p = &(int){3}; return *p; }"));
+}
+
+#[test]
 fn sizeof_incomplete_type_reports_layout_error() {
     let cap =
         diagnostics_after_mir_build("struct S; unsigned long f(void) { return sizeof(struct S); }");
