@@ -1448,6 +1448,134 @@ fn snippet_sizeof_initializer_sees_declared_local() {
 }
 
 #[test]
+fn snippet_cast_type_name_preserves_destination_type() {
+    let (hir, tcx) = lower_snippet("void f(int x) { (long)x; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let cast_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::Cast { to, .. } => Some(to),
+            _ => None,
+        })
+        .expect("missing cast");
+    assert_eq!(cast_ty, tcx.long);
+}
+
+#[test]
+fn snippet_cast_type_name_resolves_typedef_pointer() {
+    let (hir, tcx) = lower_snippet("typedef int T; void f(void) { (T *)0; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let cast_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::Cast { to, .. } => Some(to),
+            _ => None,
+        })
+        .expect("missing cast");
+    match tcx.get(cast_ty) {
+        Ty::Ptr(pointee) => assert_eq!(pointee.ty, tcx.int),
+        other => panic!("expected pointer-to-typedef target, got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_sizeof_type_preserves_type_name() {
+    let (hir, tcx) = lower_snippet("void f(void) { sizeof(int); }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let size_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::SizeofType(ty) => Some(ty),
+            HirExprKind::IntConst(0) => panic!("sizeof(type) must not lower to zero placeholder"),
+            _ => None,
+        })
+        .expect("missing sizeof(type)");
+    assert_eq!(size_ty, tcx.int);
+}
+
+#[test]
+fn snippet_sizeof_record_type_preserves_completed_record() {
+    let (hir, tcx) = lower_snippet("struct S { int x; }; void f(void) { sizeof(struct S); }");
+    let record_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match def.kind {
+            DefKind::Record { .. } => Some(id),
+            _ => None,
+        })
+        .expect("missing record def");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let size_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::SizeofType(ty) => Some(ty),
+            _ => None,
+        })
+        .expect("missing sizeof(record)");
+    assert!(matches!(tcx.get(size_ty), Ty::Record(id) if *id == record_id));
+}
+
+#[test]
+fn snippet_sizeof_array_type_preserves_bound() {
+    let (hir, tcx) = lower_snippet("void f(void) { sizeof(int[3]); }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let size_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::SizeofType(ty) => Some(ty),
+            _ => None,
+        })
+        .expect("missing sizeof(array type)");
+    match tcx.get(size_ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected int[3], got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_sizeof_enum_type_preserves_completed_enum() {
+    let (hir, tcx) = lower_snippet("enum E { A }; void f(void) { sizeof(enum E); }");
+    let enum_id = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match def.kind {
+            DefKind::Enum { .. } => Some(id),
+            _ => None,
+        })
+        .expect("missing enum def");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let size_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::SizeofType(ty) => Some(ty),
+            _ => None,
+        })
+        .expect("missing sizeof(enum)");
+    assert!(matches!(tcx.get(size_ty), Ty::Enum(id) if *id == enum_id));
+}
+
+#[test]
+fn snippet_compound_literal_preserves_type_part() {
+    let (hir, tcx) = lower_snippet("void f(void) { (int){1}; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let literal_ty = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { ty } => Some(ty),
+            _ => None,
+        })
+        .expect("missing compound literal");
+    assert_eq!(literal_ty, tcx.int);
+}
+
+#[test]
 fn snippet_duplicate_block_declarator_diagnoses_without_overwriting_binding() {
     let (hir, _tcx, cap) = lower_snippet_with_diagnostics("void f(void) { int a, a = a; }");
     assert!(

@@ -1,0 +1,13 @@
+---
+source: crates/rcc_driver/tests/emit_mir.rs
+assertion_line: 94
+---
+fn def#0() -> unsigned long {
+  locals:
+    _0: unsigned long;
+
+  bb0:
+    _0 = 4;
+    return;
+
+}

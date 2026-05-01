@@ -169,6 +169,11 @@ impl<'a> ConstEval<'a> {
                 #[allow(clippy::cast_precision_loss)]
                 self.size_of_ty(ty).map(|size| size as f64)
             }
+            HirExprKind::SizeofType(ty) => {
+                let size = self.size_of_ty(ty)?;
+                #[allow(clippy::cast_precision_loss)]
+                Some(size as f64)
+            }
 
             // ---- Operators ------------------------------------------------
             HirExprKind::Unary { op, operand } => {
@@ -261,6 +266,7 @@ impl<'a> ConstEval<'a> {
             HirExprKind::Call { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
+            | HirExprKind::CompoundLiteral { .. }
             | HirExprKind::AddressOf(_)
             | HirExprKind::Deref(_)
             | HirExprKind::Comma { .. }
@@ -539,6 +545,7 @@ impl<'a> ConstEval<'a> {
                 let ty = body.exprs.get(operand)?.ty;
                 self.size_of_ty(ty)
             }
+            HirExprKind::SizeofType(ty) => self.size_of_ty(ty),
 
             // The typeck pass wraps ICE-bearing expressions in
             // `Convert { kind: IntegerPromotion | UsualArithmetic |
@@ -574,6 +581,7 @@ impl<'a> ConstEval<'a> {
             HirExprKind::Call { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
+            | HirExprKind::CompoundLiteral { .. }
             | HirExprKind::AddressOf(_)
             | HirExprKind::Deref(_)
             | HirExprKind::Comma { .. }

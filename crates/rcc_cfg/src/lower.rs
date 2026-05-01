@@ -206,6 +206,10 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
         HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
+        HirExprKind::SizeofType(ty) => lower_sizeof_type(cx, expr_id, *ty),
+        HirExprKind::CompoundLiteral { .. } => {
+            todo!("06-20 compound literal storage materialization")
+        }
         HirExprKind::AddressOf(operand) => {
             let place = lower_as_place(builder, cx, *operand);
             let temp = builder.alloc_temp(ty, span);
@@ -318,6 +322,9 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
         // `lower_as_place` on the wrapper we just step through it.
         HirExprKind::Convert { operand, kind: ConvertKind::LvalueToRvalue } => {
             lower_as_place(builder, cx, *operand)
+        }
+        HirExprKind::CompoundLiteral { .. } => {
+            todo!("06-20 compound literal place materialization")
         }
         _ => panic!(
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
@@ -1281,6 +1288,16 @@ fn lower_sizeof_expr(
         ),
     );
     Operand::Copy(Place { base: size_local, projection: Vec::new() })
+}
+
+fn lower_sizeof_type(cx: &LowerCx<'_>, expr_id: HirExprId, ty: TyId) -> Operand {
+    let expr = &cx.body.exprs[expr_id];
+    let size = layout_size_as_i128(
+        cx.layout
+            .layout_of(ty)
+            .unwrap_or_else(|err| panic!("sizeof(type) layout failed for {ty:?}: {err}")),
+    );
+    Operand::Const(Const { kind: ConstKind::Int(size), ty: expr.ty })
 }
 
 fn layout_size_as_i128(layout: rcc_hir::Layout) -> i128 {

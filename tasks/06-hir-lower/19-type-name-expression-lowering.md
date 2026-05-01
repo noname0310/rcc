@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-19: lower `TypeName` expressions without losing types
 
 **Phase:** 06-hir-lower    **Depends on:** 06-18    **Milestone:** M5 stabilization
@@ -34,4 +36,3 @@ and the type part of compound literals.
 - C99 §6.5.4 — Cast operators.
 - `lower_expr` currently ignores cast `ty` and placeholder-lowers
   `SizeofType`.
-

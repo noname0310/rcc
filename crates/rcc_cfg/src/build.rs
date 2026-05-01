@@ -71,13 +71,16 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
 fn audit_sizeof_layout(session: &mut Session, hir_body: &HirBody, layout: &LayoutCx<'_>) -> bool {
     let mut ok = true;
     for expr in hir_body.exprs.iter() {
-        let HirExprKind::SizeofExpr(operand) = expr.kind else {
-            continue;
-        };
-        let operand_ty = hir_body.exprs[operand].ty;
-        let result = match layout.tcx.get(operand_ty) {
-            Ty::Array { elem, is_vla: true, .. } => layout.layout_of(elem.ty),
-            _ => layout.layout_of(operand_ty),
+        let result = match expr.kind {
+            HirExprKind::SizeofExpr(operand) => {
+                let operand_ty = hir_body.exprs[operand].ty;
+                match layout.tcx.get(operand_ty) {
+                    Ty::Array { elem, is_vla: true, .. } => layout.layout_of(elem.ty),
+                    _ => layout.layout_of(operand_ty),
+                }
+            }
+            HirExprKind::SizeofType(ty) => layout.layout_of(ty),
+            _ => continue,
         };
         if let Err(err) = result {
             emit_sizeof_layout_error(session, expr.span, err);

@@ -1401,10 +1401,10 @@ fn lower_for_init_decl(
 /// | `Member { a.b }`                  | `Field { base, field_index: 0 }` (index filled later)|
 /// | `Arrow  { a->b }`                 | `Field { base: Deref(a), field_index: 0 }`           |
 /// | `Index`                           | `Index`                                              |
-/// | `Cast`                            | `Cast { operand, to: error }` (type filled later)    |
+/// | `Cast`                            | `Cast { operand, to }`                               |
 /// | `SizeofExpr`                      | `SizeofExpr` (typed / folded in typeck + CFG)        |
-/// | `SizeofType`                      | `IntConst(0)` placeholder                            |
-/// | `CompoundLiteral`                 | `IntConst(0)` placeholder — full lowering in M3       |
+/// | `SizeofType`                      | `SizeofType(ty)`                                     |
+/// | `CompoundLiteral`                 | `CompoundLiteral { ty }` (initializer in 06-20)      |
 ///
 /// The returned id is always the id of the last node pushed for this
 /// expression, so `body.exprs[id].span == expr.span` except for the
@@ -1550,28 +1550,46 @@ pub fn lower_expr(
             let index_id = lower_expr(index, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Index { base: base_id, index: index_id }
         }
-        rcc_ast::ExprKind::Cast { ty: _, expr: inner } => {
+        rcc_ast::ExprKind::Cast { ty, expr: inner } => {
+            let to = lower_type_name_in_scope(
+                ty,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
             let inner_id = lower_expr(inner, body, scope, crate_, tcx, resolver, session);
-            // Target type is resolved in typeck: at HIR-lower time we
-            // still have `type-name` -> `Ty` machinery only inside
-            // declarators. Keep the placeholder; typeck will overwrite.
-            HirExprKind::Cast { operand: inner_id, to: tcx.error }
+            HirExprKind::Cast { operand: inner_id, to }
         }
         rcc_ast::ExprKind::SizeofExpr(inner) => {
             let inner_id = lower_expr(inner, body, scope, crate_, tcx, resolver, session);
             HirExprKind::SizeofExpr(inner_id)
         }
-        rcc_ast::ExprKind::SizeofType(_) => {
-            // Type-name lowering for `sizeof(type)` is still deferred; keep
-            // the historical zero placeholder for that form.
-            HirExprKind::IntConst(0)
+        rcc_ast::ExprKind::SizeofType(ty) => {
+            let ty = lower_type_name_in_scope(
+                ty,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            HirExprKind::SizeofType(ty)
         }
-        rcc_ast::ExprKind::CompoundLiteral { .. } => {
-            // C99 compound literals materialise a temporary object.
-            // Full handling (initialiser-list lowering, generation of
-            // a synthetic local) is deferred to task 06-11 +
-            // M3-typeck; placeholder for now.
-            HirExprKind::IntConst(0)
+        rcc_ast::ExprKind::CompoundLiteral { ty, init: _ } => {
+            let ty = lower_type_name_in_scope(
+                ty,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            HirExprKind::CompoundLiteral { ty }
         }
     };
 
@@ -2027,7 +2045,29 @@ pub fn lower_type_name(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    lower_type_from_parts(&ty.specs, &ty.declarator, scope, tcx, resolver, crate_, session)
+    lower_type_name_in_scope(ty, scope, None, tcx, resolver, crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_type_name_in_scope(
+    ty: &rcc_ast::TypeName,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    lower_type_from_parts_in_scope(
+        &ty.specs,
+        &ty.declarator,
+        scope,
+        typedef_scope,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6603,7 +6643,6 @@ mod tests {
 
     #[test]
     fn expr_cast_wraps_operand() {
-        // Just need a type-name; typeck resolves it later.
         let (mut sess, _cap) = Session::for_test();
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
@@ -6617,8 +6656,9 @@ mod tests {
         };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
-            HirExprKind::Cast { operand, .. } => {
+            HirExprKind::Cast { operand, to } => {
                 assert!(matches!(body.exprs[operand].kind, HirExprKind::IntConst(1)));
+                assert_ne!(to, TyCtxt::new().error);
             }
             ref other => panic!("expected Cast, got {other:?}"),
         }
@@ -6648,11 +6688,11 @@ mod tests {
         };
         let st = Expr { id: NodeId(0), kind: ExprKind::SizeofType(ty_name), span: DUMMY_SP };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, st);
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+        assert!(matches!(body.exprs[id].kind, HirExprKind::SizeofType(_)));
     }
 
     #[test]
-    fn expr_compound_literal_placeholder() {
+    fn expr_compound_literal_preserves_type() {
         let (mut sess, _cap) = Session::for_test();
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
@@ -6668,8 +6708,7 @@ mod tests {
             span: DUMMY_SP,
         };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
-        // Placeholder per the task spec.
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+        assert!(matches!(body.exprs[id].kind, HirExprKind::CompoundLiteral { .. }));
     }
 
     #[test]

@@ -325,6 +325,16 @@ pub enum HirExprKind {
     },
     /// `sizeof expr`.
     SizeofExpr(HirExprId),
+    /// `sizeof(type-name)`.
+    SizeofType(TyId),
+    /// C99 compound literal `(type-name){ initializer-list }`.
+    ///
+    /// The type part is preserved here; storage materialisation is handled by
+    /// the HIR-lower follow-up that lowers compound literal initializers.
+    CompoundLiteral {
+        /// Object type named by the compound literal.
+        ty: TyId,
+    },
     /// `&expr`
     AddressOf(HirExprId),
     /// `*expr`

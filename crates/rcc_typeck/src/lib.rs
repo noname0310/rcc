@@ -445,6 +445,18 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::SizeofExpr(op2);
             expr_id
         }
+        HirExprKind::SizeofType(ty) => {
+            body.exprs[expr_id].ty = tcx.ulong;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::SizeofType(ty);
+            expr_id
+        }
+        HirExprKind::CompoundLiteral { ty } => {
+            body.exprs[expr_id].ty = ty;
+            body.exprs[expr_id].value_cat = ValueCat::LValue;
+            body.exprs[expr_id].kind = HirExprKind::CompoundLiteral { ty };
+            expr_id
+        }
         HirExprKind::Assign { lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
@@ -1267,6 +1279,8 @@ pub fn decay_if_needed(
 /// | `Convert { kind: ArrayToPtr | FuncToPtr }`      | rvalue   |
 /// | other `Convert { .. }`                          | rvalue   |
 /// | `Cast { .. }`                                   | rvalue   |
+/// | `SizeofType(_)`                                | rvalue   |
+/// | `CompoundLiteral { .. }`                       | lvalue   |
 /// | `Binary`, `Unary`, `Call`                       | rvalue   |
 /// | `AddressOf`                                     | rvalue   |
 /// | `Cond`, `Comma`, `Assign`                       | rvalue   |
@@ -1291,6 +1305,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Unary { .. }
         | HirExprKind::Call { .. }
         | HirExprKind::SizeofExpr(_)
+        | HirExprKind::SizeofType(_)
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
         | HirExprKind::Cond { .. }
@@ -1304,6 +1319,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         HirExprKind::LocalRef(_)
         | HirExprKind::DefRef(_)
         | HirExprKind::StringRef(_)
+        | HirExprKind::CompoundLiteral { .. }
         | HirExprKind::Deref(_)
         | HirExprKind::Index { .. } => ValueCat::LValue,
 
