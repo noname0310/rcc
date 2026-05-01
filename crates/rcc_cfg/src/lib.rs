@@ -201,6 +201,27 @@ pub enum Rvalue {
         /// Cast kind (integer, pointer, ...).
         kind: CastKind,
     },
+    /// C99 real -> complex conversion: construct `to` from `real + 0i`.
+    ///
+    /// Backend contract: codegen must emit a complex value whose real
+    /// component is `real` converted to the corresponding real element type,
+    /// and whose imaginary component is zero.
+    ComplexFromReal {
+        /// Real operand to place into the complex real component.
+        real: Operand,
+        /// Target complex type.
+        to: TyId,
+    },
+    /// C99 complex -> real conversion: extract the real component.
+    ///
+    /// Backend contract: codegen must read only the real component, discarding
+    /// the imaginary component. Typeck is responsible for W0012.
+    RealFromComplex {
+        /// Complex operand to read.
+        complex: Operand,
+        /// Target real type.
+        to: TyId,
+    },
     /// Take the address of a place.
     AddressOf(Place),
     /// Array/struct length (used for VLA).

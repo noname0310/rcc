@@ -178,6 +178,16 @@ const FIXTURES: &[Fixture] = &[
         functions: 1,
     },
     Fixture {
+        name: "real_to_complex_return",
+        src: "double _Complex f(double x) { return x; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "complex_to_real_return",
+        src: "double f(double _Complex z) { return z; }",
+        functions: 1,
+    },
+    Fixture {
         name: "multi_function",
         src: "int a(void) { return 1; } int b(void) { return a(); }",
         functions: 2,
@@ -248,6 +258,44 @@ fn sizeof_layout_service_lowers_fixed_sizes() {
     }
 }
 
+#[test]
+fn complex_conversion_rvalues_are_explicit() {
+    let cases = [
+        ("return_real_to_complex", "double _Complex f(double x) { return x; }", 1, 0),
+        ("return_complex_to_real", "double f(double _Complex z) { return z; }", 0, 1),
+        ("assignment_real_to_complex", "void f(double x) { double _Complex z; z = x; }", 1, 0),
+        (
+            "call_argument_real_to_complex",
+            "void g(double _Complex); void f(double x) { g(x); }",
+            1,
+            0,
+        ),
+        (
+            "conditional_real_to_complex_arm",
+            "double _Complex f(int c, double x, double _Complex z) { return c ? x : z; }",
+            1,
+            0,
+        ),
+    ];
+
+    for (name, src, expected_to_complex, expected_to_real) in cases {
+        let lowered = lower_snippet(name, src);
+        let counts = complex_conversion_counts(&lowered.bodies[0].1);
+        assert_eq!(
+            counts.0,
+            expected_to_complex,
+            "{name}: unexpected ComplexFromReal count in CFG:\n{}",
+            dump_body(&lowered.bodies[0].1, &lowered.tcx)
+        );
+        assert_eq!(
+            counts.1,
+            expected_to_real,
+            "{name}: unexpected RealFromComplex count in CFG:\n{}",
+            dump_body(&lowered.bodies[0].1, &lowered.tcx)
+        );
+    }
+}
+
 fn lower_snippet(name: &str, src: &str) -> Lowered {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
@@ -274,6 +322,22 @@ fn lower_snippet(name: &str, src: &str) -> Lowered {
     Lowered { tcx, bodies }
 }
 
+fn complex_conversion_counts(body: &Body) -> (usize, usize) {
+    let mut to_complex = 0usize;
+    let mut to_real = 0usize;
+    for block in body.blocks.iter() {
+        for stmt in &block.statements {
+            let StatementKind::Assign { rvalue, .. } = &stmt.kind else { continue };
+            match rvalue {
+                Rvalue::ComplexFromReal { .. } => to_complex += 1,
+                Rvalue::RealFromComplex { .. } => to_real += 1,
+                _ => {}
+            }
+        }
+    }
+    (to_complex, to_real)
+}
+
 fn body_contains_int_const(body: &Body, expected: i128) -> bool {
     body.blocks.iter().any(|block| {
         block.statements.iter().any(|stmt| match &stmt.kind {
@@ -288,6 +352,8 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
         Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast { op, .. } => {
             operand_contains_int_const(op, expected)
         }
+        Rvalue::ComplexFromReal { real, .. } => operand_contains_int_const(real, expected),
+        Rvalue::RealFromComplex { complex, .. } => operand_contains_int_const(complex, expected),
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
@@ -463,6 +529,12 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
     match rvalue {
         Rvalue::Use(op) | Rvalue::UnaryOp(_, op) | Rvalue::Cast { op, .. } => {
             assert_operand_valid(name, def, body, op);
+        }
+        Rvalue::ComplexFromReal { real, .. } => {
+            assert_operand_valid(name, def, body, real);
+        }
+        Rvalue::RealFromComplex { complex, .. } => {
+            assert_operand_valid(name, def, body, complex);
         }
         Rvalue::BinaryOp(_, lhs, rhs) => {
             assert_operand_valid(name, def, body, lhs);

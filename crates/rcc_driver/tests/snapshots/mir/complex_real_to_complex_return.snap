@@ -1,0 +1,15 @@
+---
+source: crates/rcc_driver/tests/emit_mir.rs
+---
+fn def#0() -> _Complex double {
+  locals:
+    _0: _Complex double;
+    _1: double param name#11;
+    _2: _Complex double;
+
+  bb0:
+    _2 = ComplexFromReal(copy _1, _Complex double);
+    _0 = copy _2;
+    return;
+
+}

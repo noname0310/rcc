@@ -108,6 +108,16 @@ fn switch_from_source() {
 }
 
 #[test]
+fn complex_real_to_complex_return() {
+    snap!("complex_real_to_complex_return", render("double _Complex f(double x) { return x; }"));
+}
+
+#[test]
+fn complex_to_real_return() {
+    snap!("complex_to_real_return", render("double f(double _Complex z) { return z; }"));
+}
+
+#[test]
 fn sizeof_incomplete_type_reports_layout_error() {
     let cap =
         diagnostics_after_mir_build("struct S; unsigned long f(void) { return sizeof(struct S); }");

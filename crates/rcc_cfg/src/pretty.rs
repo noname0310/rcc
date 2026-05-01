@@ -90,6 +90,12 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::Cast { op, to, kind } => {
             format!("Cast::{kind:?}({}, {})", fmt_operand(op), fmt_ty(tcx, *to))
         }
+        Rvalue::ComplexFromReal { real, to } => {
+            format!("ComplexFromReal({}, {})", fmt_operand(real), fmt_ty(tcx, *to))
+        }
+        Rvalue::RealFromComplex { complex, to } => {
+            format!("RealFromComplex({}, {})", fmt_operand(complex), fmt_ty(tcx, *to))
+        }
         Rvalue::AddressOf(place) => format!("&{}", fmt_place(place)),
         Rvalue::Len(place) => format!("Len({})", fmt_place(place)),
     }

@@ -95,13 +95,16 @@ pub struct LowerCx<'a> {
     pub locals: &'a LocalMap,
     /// Shared target layout service used by `sizeof` lowering.
     pub layout: LayoutCx<'a>,
+    /// Enclosing function return type, when this context is lowering a
+    /// full function body.
+    pub ret_ty: Option<TyId>,
 }
 
 impl<'a> LowerCx<'a> {
     /// Create a new context.
     #[must_use]
     pub fn new(body: &'a HirBody, tcx: &'a TyCtxt, locals: &'a LocalMap) -> Self {
-        Self { body, tcx, locals, layout: LayoutCx::new(tcx) }
+        Self { body, tcx, locals, layout: LayoutCx::new(tcx), ret_ty: None }
     }
 
     /// Create a context with access to top-level definitions so record
@@ -113,7 +116,20 @@ impl<'a> LowerCx<'a> {
         locals: &'a LocalMap,
         defs: &'a IndexVec<DefId, Def>,
     ) -> Self {
-        Self { body, tcx, locals, layout: LayoutCx::with_defs(tcx, defs) }
+        Self { body, tcx, locals, layout: LayoutCx::with_defs(tcx, defs), ret_ty: None }
+    }
+
+    /// Create a context with top-level definitions and the enclosing
+    /// function return type.
+    #[must_use]
+    pub fn with_defs_and_return(
+        body: &'a HirBody,
+        tcx: &'a TyCtxt,
+        locals: &'a LocalMap,
+        defs: &'a IndexVec<DefId, Def>,
+        ret_ty: TyId,
+    ) -> Self {
+        Self { body, tcx, locals, layout: LayoutCx::with_defs(tcx, defs), ret_ty: Some(ret_ty) }
     }
 }
 
@@ -181,6 +197,18 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::Convert { operand, kind } => {
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
+            if matches!(kind, ConvertKind::RealToComplex | ConvertKind::ComplexToReal) {
+                let temp = builder.alloc_temp(ty, span);
+                let rvalue = match kind {
+                    ConvertKind::RealToComplex => Rvalue::ComplexFromReal { real: inner, to: ty },
+                    ConvertKind::ComplexToReal => {
+                        Rvalue::RealFromComplex { complex: inner, to: ty }
+                    }
+                    _ => unreachable!(),
+                };
+                push_assign(builder, span, temp, rvalue);
+                return Operand::Copy(Place { base: temp, projection: Vec::new() });
+            }
             // No-op convert kinds we just pass through (decay /
             // identity). Everything else materialises a `Cast` rvalue
             // with the appropriate `CastKind`.
@@ -456,6 +484,18 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::Return(expr) => {
             if let Some(expr) = expr {
                 let value = lower_as_rvalue(builder, cx, *expr);
+                let value = if let Some(ret_ty) = cx.ret_ty {
+                    lower_complex_coercion_if_needed(
+                        builder,
+                        cx,
+                        stmt.span,
+                        value,
+                        cx.body.exprs[*expr].ty,
+                        ret_ty,
+                    )
+                } else {
+                    value
+                };
                 builder.push(Statement {
                     kind: StatementKind::Assign {
                         place: Place { base: Local(0), projection: Vec::new() },
@@ -1154,6 +1194,41 @@ fn push_assign(builder: &mut BodyBuilder, span: Span, local: Local, rvalue: Rval
     });
 }
 
+fn lower_complex_coercion_if_needed(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    value: Operand,
+    from_ty: TyId,
+    to_ty: TyId,
+) -> Operand {
+    if from_ty == to_ty {
+        return value;
+    }
+
+    let rvalue = match (is_complex_ty(cx.tcx, from_ty), is_complex_ty(cx.tcx, to_ty)) {
+        (false, true) if is_real_arithmetic_ty(cx.tcx, from_ty) => {
+            Rvalue::ComplexFromReal { real: value, to: to_ty }
+        }
+        (true, false) if is_real_arithmetic_ty(cx.tcx, to_ty) => {
+            Rvalue::RealFromComplex { complex: value, to: to_ty }
+        }
+        _ => return value,
+    };
+
+    let temp = builder.alloc_temp(to_ty, span);
+    push_assign(builder, span, temp, rvalue);
+    Operand::Copy(Place { base: temp, projection: Vec::new() })
+}
+
+fn is_complex_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Complex(_))
+}
+
+fn is_real_arithmetic_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Float(_))
+}
+
 /// Lower a `Block(stmts)` statement list, applying the aggregate-init
 /// recogniser: a `LocalDecl` of an array/record type without an inline
 /// initialiser is materialised as a single `place := ZeroInit` store,
@@ -1546,11 +1621,10 @@ fn convert_to_cast_kind(
         // Pointer-to-pointer (compatible / void*) — bitcast.
         Pointer => Some(CastKind::PtrToPtr),
 
-        // Real-to-complex / complex-to-real are not representable as a
-        // single CastKind; they are codegen-visible and need their own
-        // sequence of stores. Keep them as no-op markers for now and
-        // let codegen-llvm split them out (task 09).
-        RealToComplex | ComplexToReal => None,
+        // Handled directly in `lower_as_rvalue` because these are not
+        // casts. They construct/extract complex components and must stay
+        // visible to codegen.
+        RealToComplex | ComplexToReal => unreachable!("complex conversions are Rvalue nodes"),
 
         // Integer promotion / usual arithmetic are real width changes
         // unless from/to are already identical.

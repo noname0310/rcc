@@ -57,7 +57,7 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
                 continue;
             }
             builder.collect_labels(hir_body, root);
-            let cx = LowerCx::with_defs(hir_body, tcx, &local_map, &hir.defs);
+            let cx = LowerCx::with_defs_and_return(hir_body, tcx, &local_map, &hir.defs, ret_ty);
             lower_stmt(&mut builder, &cx, root);
         }
         if !builder.is_current_terminated() {

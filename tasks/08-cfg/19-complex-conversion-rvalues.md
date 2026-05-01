@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-19: Complex conversion rvalues
 
 **Phase:** 08-cfg    **Depends on:** 08-18    **Milestone:** M6 stabilization
@@ -38,3 +40,12 @@ reconstruct complex conversion intent from lost HIR context.
 - C99 §6.3.1.7 real and complex conversions.
 - `rcc_hir::ConvertKind`.
 - `rcc_cfg::CastKind` and `rcc_cfg::Rvalue`.
+
+## Backend contract after completion
+
+- `Rvalue::ComplexFromReal { real, to }` constructs the target complex
+  value with `real` as the real component and an exact zero imaginary
+  component.
+- `Rvalue::RealFromComplex { complex, to }` extracts only the real
+  component. Typeck has already emitted W0012 when the imaginary
+  component is discarded.
