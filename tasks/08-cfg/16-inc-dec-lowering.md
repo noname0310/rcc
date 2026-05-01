@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-16: Increment/decrement lowering
 
 **Phase:** 08-cfg    **Depends on:** 08-15    **Milestone:** M3 stabilization

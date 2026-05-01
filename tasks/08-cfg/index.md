@@ -23,7 +23,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [13-vla-lowering](13-vla-lowering.md)
 - [x] [14-snapshot-mir-emit](14-snapshot-mir-emit.md)
 - [x] [15-unit-tests](15-unit-tests.md)
-- [ ] [16-inc-dec-lowering](16-inc-dec-lowering.md)
+- [x] [16-inc-dec-lowering](16-inc-dec-lowering.md)
 - [ ] [17-goto-scope-lifetimes](17-goto-scope-lifetimes.md)
 - [ ] [18-sizeof-layout-service](18-sizeof-layout-service.md)
 - [ ] [19-complex-conversion-rvalues](19-complex-conversion-rvalues.md)

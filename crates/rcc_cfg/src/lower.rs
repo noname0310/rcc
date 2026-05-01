@@ -20,9 +20,8 @@
 //! terminate the current block with a `SwitchInt` and continue lowering
 //! at a fresh join block.
 //!
-//! Out of scope (deferred): calls (those terminate a block), `++` /
-//! `--`, compound literals, `sizeof` over an expression. Each such arm
-//! panics with a `todo!` carrying the task id that owns it.
+//! Out of scope (deferred): compound literals. Each such arm panics with
+//! a `todo!` carrying the task id that owns it.
 
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
@@ -164,11 +163,7 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
                 Operand::Copy(Place { base: temp, projection: Vec::new() })
             }
             HirUnOp::PreInc | HirUnOp::PreDec | HirUnOp::PostInc | HirUnOp::PostDec => {
-                // Increment/decrement is a read-modify-write on an
-                // lvalue; the canonical lowering threads through a
-                // temp and a couple of assignments. Deferred until
-                // we have the wider statement-lowering scaffolding.
-                todo!("inc/dec lowering — deferred to a follow-up task in 08-cfg")
+                lower_inc_dec(builder, cx, ty, span, *op, *operand)
             }
         },
         HirExprKind::Convert { operand, kind } => {
@@ -313,6 +308,66 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
             std::mem::discriminant(&expr.kind),
         ),
+    }
+}
+
+fn lower_inc_dec(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    result_ty: TyId,
+    span: Span,
+    op: HirUnOp,
+    operand: HirExprId,
+) -> Operand {
+    let place = lower_as_place(builder, cx, operand);
+    let operand_ty = cx.body.exprs[operand].ty;
+    let is_postfix = matches!(op, HirUnOp::PostInc | HirUnOp::PostDec);
+    let is_decrement = matches!(op, HirUnOp::PreDec | HirUnOp::PostDec);
+
+    let old_value = if is_postfix {
+        let old_temp = builder.alloc_temp(result_ty, span);
+        push_assign(builder, span, old_temp, Rvalue::Use(Operand::Copy(place.clone())));
+        Operand::Copy(Place { base: old_temp, projection: Vec::new() })
+    } else {
+        Operand::Copy(place.clone())
+    };
+
+    let new_temp = builder.alloc_temp(operand_ty, span);
+    let binop = inc_dec_binop(cx.tcx, operand_ty, is_decrement);
+    let step = inc_dec_step(cx.tcx, operand_ty);
+    push_assign(builder, span, new_temp, Rvalue::BinaryOp(binop, old_value.clone(), step));
+
+    let new_value = Operand::Copy(Place { base: new_temp, projection: Vec::new() });
+    builder.push(Statement {
+        kind: StatementKind::Assign { place, rvalue: Rvalue::Use(new_value.clone()) },
+        span,
+    });
+
+    if is_postfix {
+        old_value
+    } else {
+        new_value
+    }
+}
+
+fn inc_dec_binop(tcx: &TyCtxt, operand_ty: TyId, is_decrement: bool) -> BinOp {
+    match classify(operand_ty, tcx) {
+        TyClass::Ptr if is_decrement => BinOp::PtrSub,
+        TyClass::Ptr => BinOp::PtrAdd,
+        TyClass::Float if is_decrement => BinOp::FSub,
+        TyClass::Float => BinOp::FAdd,
+        _ if is_decrement => BinOp::Sub,
+        _ => BinOp::Add,
+    }
+}
+
+fn inc_dec_step(tcx: &TyCtxt, operand_ty: TyId) -> Operand {
+    match tcx.get(operand_ty) {
+        Ty::Float(_) | Ty::Complex(_) => {
+            Operand::Const(Const { kind: ConstKind::Float(1.0), ty: operand_ty })
+        }
+        Ty::Ptr(_) => Operand::Const(Const { kind: ConstKind::Int(1), ty: tcx.long }),
+        _ => Operand::Const(Const { kind: ConstKind::Int(1), ty: operand_ty }),
     }
 }
 
@@ -1407,7 +1462,8 @@ fn pick_binop(op: HirBinOp, lhs_ty: TyId, rhs_ty: TyId, tcx: &TyCtxt) -> BinOp {
 }
 
 /// Pick the right typed CFG `UnOp` for a HIR `UnOp`. `Plus` is a
-/// no-op (handled at the call site), `PreInc` etc. are deferred.
+/// no-op (handled at the call site), `PreInc` etc. are lowered as
+/// read-modify-write operations before this helper is reached.
 fn pick_unop(op: HirUnOp, operand_ty: TyId, tcx: &TyCtxt) -> UnOp {
     match op {
         HirUnOp::Neg => match classify(operand_ty, tcx) {
@@ -2495,6 +2551,162 @@ mod tests {
             }
             other => panic!("expected `*p = Const(42)`, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inc_dec_prefix_and_postfix_ints_lower_without_panic() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let a_pre = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let pre = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PreInc, operand: a_pre },
+        );
+        let b_post = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hb));
+        let post_inc = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PostInc, operand: b_post },
+        );
+        let c_pre = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hc));
+        let pre_dec = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PreDec, operand: c_pre },
+        );
+        let a_post = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let post_dec = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PostDec, operand: a_post },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let pre_op = lower_as_rvalue(&mut builder, &cx, pre);
+        let post_inc_op = lower_as_rvalue(&mut builder, &cx, post_inc);
+        let pre_dec_op = lower_as_rvalue(&mut builder, &cx, pre_dec);
+        let post_dec_op = lower_as_rvalue(&mut builder, &cx, post_dec);
+
+        let body = finish(builder);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(stmts.len(), 10, "prefix emits 2 statements; postfix emits 3 statements");
+        assert!(matches!(pre_op, Operand::Copy(Place { .. })));
+        assert!(matches!(post_inc_op, Operand::Copy(Place { .. })));
+        assert!(matches!(pre_dec_op, Operand::Copy(Place { .. })));
+        assert!(matches!(post_dec_op, Operand::Copy(Place { .. })));
+        let add_count = stmts
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    StatementKind::Assign { rvalue: Rvalue::BinaryOp(BinOp::Add, _, _), .. }
+                )
+            })
+            .count();
+        let sub_count = stmts
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    StatementKind::Assign { rvalue: Rvalue::BinaryOp(BinOp::Sub, _, _), .. }
+                )
+            })
+            .count();
+        assert_eq!(add_count, 2, "`++i` and `i++` must each emit Add");
+        assert_eq!(sub_count, 2, "`--i` and `i--` must each emit Sub");
+    }
+
+    #[test]
+    fn inc_dec_pointer_and_deref_lvalues_lower_without_panic() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let int_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(int_ty)));
+
+        let mut hir_body = HirBody::default();
+        let hp = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: int_ptr_ty,
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(int_ty, DUMMY_SP);
+        let cp = builder.alloc_user_local(rcc_span::Symbol(1), int_ptr_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hp, cp);
+
+        // `p++` — pointer post-increment.
+        let p_ref =
+            push_expr(&mut hir_body, int_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let post_ptr = push_expr(
+            &mut hir_body,
+            int_ptr_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PostInc, operand: p_ref },
+        );
+
+        // `(*p)++` — dereferenced int lvalue post-increment.
+        let p_ref =
+            push_expr(&mut hir_body, int_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let star_p = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::Deref(p_ref));
+        let post_deref = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PostInc, operand: star_p },
+        );
+
+        // `*p++` — dereference the old pointer value while incrementing `p`.
+        let p_ref =
+            push_expr(&mut hir_body, int_ptr_ty, ValueCat::LValue, HirExprKind::LocalRef(hp));
+        let post_ptr_for_deref = push_expr(
+            &mut hir_body,
+            int_ptr_ty,
+            ValueCat::RValue,
+            HirExprKind::Unary { op: HirUnOp::PostInc, operand: p_ref },
+        );
+        let star_post_ptr = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::LValue,
+            HirExprKind::Deref(post_ptr_for_deref),
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let _ = lower_as_rvalue(&mut builder, &cx, post_ptr);
+        let _ = lower_as_rvalue(&mut builder, &cx, post_deref);
+        let _ = lower_as_rvalue(&mut builder, &cx, star_post_ptr);
+
+        let body = finish(builder);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        let ptr_add_count = stmts
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    StatementKind::Assign { rvalue: Rvalue::BinaryOp(BinOp::PtrAdd, _, _), .. }
+                )
+            })
+            .count();
+        assert_eq!(ptr_add_count, 2, "`p++` and `*p++` must both increment the pointer");
+        assert!(
+            stmts.iter().any(|s| matches!(
+                s.kind,
+                StatementKind::Assign {
+                    place: Place { base, ref projection },
+                    rvalue: Rvalue::Use(_),
+                } if base == cp && matches!(projection.as_slice(), [Projection::Deref])
+            )),
+            "(*p)++ must store through the dereferenced pointer place"
+        );
     }
 
     /// 8. Non-lvalue expression in place position panics.

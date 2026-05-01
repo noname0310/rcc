@@ -88,6 +88,36 @@ const FIXTURES: &[Fixture] = &[
         functions: 1,
     },
     Fixture {
+        name: "for_prefix_increment_step",
+        src: "int f(int n) { int i = 0; for (i = 0; i < n; ++i) {} return i; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "postfix_increment_return",
+        src: "int f(void) { int i = 0; return i++; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "prefix_decrement_return",
+        src: "int f(void) { int i = 2; return --i; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "deref_postfix_increment",
+        src: "int f(int *p) { return (*p)++; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "postfix_pointer_deref",
+        src: "int f(int *p) { return *p++; }",
+        functions: 1,
+    },
+    Fixture {
+        name: "array_index_postfix_increment",
+        src: "int f(int i) { int a[2] = {1, 2}; return a[i]++; }",
+        functions: 1,
+    },
+    Fixture {
         name: "for_infinite_with_break",
         src: "int f(void) { int i = 0; for (;;) { i = i + 1; if (i == 3) break; } return i; }",
         functions: 1,
