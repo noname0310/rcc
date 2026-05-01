@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-05: LLVM type lowering
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-02, 09-03, 09-04    **Milestone:** M3

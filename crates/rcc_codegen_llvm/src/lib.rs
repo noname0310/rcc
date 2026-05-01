@@ -25,6 +25,13 @@ pub use layout::{LayoutCx, BASELINE_POINTER_LAYOUT};
 pub enum CodegenError {
     /// The `llvm` feature is not enabled; rebuild with `--features llvm`.
     BackendDisabled,
+    /// HIR type lowering failed for the given type id.
+    TypeLowering {
+        /// Original HIR type that failed to lower.
+        ty: TyId,
+        /// Human-readable reason.
+        reason: String,
+    },
     /// Internal error with a human-readable message.
     Internal(String),
 }
@@ -34,6 +41,9 @@ impl std::fmt::Display for CodegenError {
         match self {
             CodegenError::BackendDisabled => {
                 write!(f, "rcc_codegen_llvm built without the `llvm` feature")
+            }
+            CodegenError::TypeLowering { ty, reason } => {
+                write!(f, "failed to lower HIR type {ty:?} to LLVM: {reason}")
             }
             CodegenError::Internal(m) => write!(f, "internal codegen error: {m}"),
         }
@@ -79,6 +89,11 @@ pub mod backend {
     use inkwell::context::Context;
     use inkwell::module::Module;
     use inkwell::targets::{TargetData, TargetTriple};
+    use inkwell::types::{
+        AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
+    };
+    use inkwell::AddressSpace;
+    use rcc_hir::{DefKind, FloatKind, IntRank, Qual, RecordKind};
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -179,6 +194,208 @@ pub mod backend {
         /// Render the current LLVM module as textual LLVM IR.
         pub fn ir_text(&self) -> String {
             self.module.print_to_string().to_string()
+        }
+
+        /// Build a type-lowering helper sharing this module's context and HIR.
+        pub fn type_cx(&self) -> TypeCx<'a, 'ctx> {
+            TypeCx::new(self.context, self.tcx, self.hir)
+        }
+    }
+
+    /// Recursive `TyId` to LLVM type lowering service for one LLVM context.
+    pub struct TypeCx<'a, 'ctx> {
+        context: &'ctx Context,
+        tcx: &'a TyCtxt,
+        hir: &'a HirCrate,
+        cache: FxHashMap<TyId, AnyTypeEnum<'ctx>>,
+    }
+
+    impl<'a, 'ctx> TypeCx<'a, 'ctx> {
+        /// Build a fresh type-lowering context.
+        pub fn new(context: &'ctx Context, tcx: &'a TyCtxt, hir: &'a HirCrate) -> Self {
+            Self { context, tcx, hir, cache: FxHashMap::default() }
+        }
+
+        /// Lower any HIR type representable as an LLVM type.
+        pub fn type_of(&mut self, ty: TyId) -> Result<AnyTypeEnum<'ctx>, CodegenError> {
+            if let Some(&llvm_ty) = self.cache.get(&ty) {
+                return Ok(llvm_ty);
+            }
+
+            let llvm_ty = match self.tcx.get(ty) {
+                Ty::Void => self.context.void_type().into(),
+                Ty::Int { rank, .. } => self.int_type(*rank).into(),
+                Ty::Float(kind) => self.float_type(*kind).into(),
+                Ty::Complex(kind) => self.complex_type(*kind).into(),
+                Ty::Ptr(_) => self.ptr_type().into(),
+                Ty::Array { elem, len: Some(len), is_vla: false } => {
+                    let elem_ty = self.basic_type_of_qual(*elem)?;
+                    let len = array_len(*len, ty)?;
+                    elem_ty.array_type(len).into()
+                }
+                Ty::Array { is_vla: true, .. } => {
+                    return self.type_error(ty, "VLA array objects are runtime-sized");
+                }
+                Ty::Array { len: None, .. } => {
+                    return self.type_error(ty, "incomplete arrays have no LLVM object type");
+                }
+                Ty::Func { .. } => self.fn_type_of(ty)?.into(),
+                Ty::Record(def) => self.record_type(ty, *def)?.into(),
+                Ty::Enum(def) => basic_type_as_any(self.enum_type(ty, *def)?),
+                Ty::Error => return self.type_error(ty, "error type cannot be lowered"),
+            };
+
+            self.cache.insert(ty, llvm_ty);
+            Ok(llvm_ty)
+        }
+
+        /// Lower an object/scalar type. `void` and functions are rejected.
+        pub fn basic_type_of(&mut self, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            match self.type_of(ty)? {
+                AnyTypeEnum::ArrayType(t) => Ok(t.into()),
+                AnyTypeEnum::FloatType(t) => Ok(t.into()),
+                AnyTypeEnum::IntType(t) => Ok(t.into()),
+                AnyTypeEnum::PointerType(t) => Ok(t.into()),
+                AnyTypeEnum::StructType(t) => Ok(t.into()),
+                AnyTypeEnum::VectorType(t) => Ok(t.into()),
+                AnyTypeEnum::ScalableVectorType(t) => Ok(t.into()),
+                AnyTypeEnum::FunctionType(_) => self.type_error(ty, "function is not a basic type"),
+                AnyTypeEnum::VoidType(_) => self.type_error(ty, "void is not a basic type"),
+            }
+        }
+
+        /// Lower a C function type to an LLVM function type.
+        pub fn fn_type_of(&mut self, ty: TyId) -> Result<FunctionType<'ctx>, CodegenError> {
+            let (ret, params, variadic) = match self.tcx.get(ty) {
+                Ty::Func { ret, params, variadic, .. } => (*ret, params.clone(), *variadic),
+                _ => return self.type_error(ty, "not a function type"),
+            };
+
+            let params: Vec<BasicMetadataTypeEnum<'ctx>> = params
+                .into_iter()
+                .map(|param| self.basic_type_of(param).map(Into::into))
+                .collect::<Result<_, _>>()?;
+
+            match self.tcx.get(ret) {
+                Ty::Void => Ok(self.context.void_type().fn_type(&params, variadic)),
+                _ => Ok(self.basic_type_of(ret)?.fn_type(&params, variadic)),
+            }
+        }
+
+        /// Number of cached type entries, exposed for reuse tests.
+        pub fn cached_type_count(&self) -> usize {
+            self.cache.len()
+        }
+
+        fn int_type(&self, rank: IntRank) -> inkwell::types::IntType<'ctx> {
+            match rank {
+                IntRank::Bool => self.context.bool_type(),
+                IntRank::Char => self.context.i8_type(),
+                IntRank::Short => self.context.i16_type(),
+                IntRank::Int => self.context.i32_type(),
+                IntRank::Long | IntRank::LongLong => self.context.i64_type(),
+            }
+        }
+
+        fn float_type(&self, kind: FloatKind) -> inkwell::types::FloatType<'ctx> {
+            match kind {
+                FloatKind::F32 => self.context.f32_type(),
+                FloatKind::F64 => self.context.f64_type(),
+                FloatKind::F80 => self.context.x86_f80_type(),
+            }
+        }
+
+        fn complex_type(&self, kind: FloatKind) -> inkwell::types::StructType<'ctx> {
+            let elem: BasicTypeEnum<'ctx> = self.float_type(kind).into();
+            self.context.struct_type(&[elem, elem], false)
+        }
+
+        fn ptr_type(&self) -> inkwell::types::PointerType<'ctx> {
+            self.context.ptr_type(AddressSpace::default())
+        }
+
+        fn basic_type_of_qual(&mut self, qual: Qual) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            self.basic_type_of(qual.ty)
+        }
+
+        fn record_type(
+            &mut self,
+            ty: TyId,
+            def: DefId,
+        ) -> Result<inkwell::types::StructType<'ctx>, CodegenError> {
+            if let Some(AnyTypeEnum::StructType(existing)) = self.cache.get(&ty).copied() {
+                return Ok(existing);
+            }
+
+            let (kind, field_tys) = {
+                let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                    type_error(ty, format!("record definition {def:?} is missing"))
+                })?;
+                let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                    return self
+                        .type_error(ty, "record type does not reference a record definition");
+                };
+                (*kind, fields.iter().map(|field| field.ty).collect::<Vec<_>>())
+            };
+
+            let record = self.context.opaque_struct_type(&format!("rcc.record.{}", def.0));
+            self.cache.insert(ty, record.into());
+
+            let field_types = match kind {
+                RecordKind::Struct => field_tys
+                    .into_iter()
+                    .map(|field_ty| self.basic_type_of(field_ty))
+                    .collect::<Result<Vec<_>, _>>()?,
+                RecordKind::Union => {
+                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(ty)
+                        .map_err(|err| type_error(ty, err.to_string()))?;
+                    vec![self.context.i8_type().array_type(array_len(layout.size, ty)?).into()]
+                }
+            };
+            record.set_body(&field_types, false);
+            Ok(record)
+        }
+
+        fn enum_type(&mut self, ty: TyId, def: DefId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            let repr = self
+                .hir
+                .defs
+                .get(def)
+                .and_then(|def_data| match &def_data.kind {
+                    DefKind::Enum { repr, .. } | DefKind::Enumerator { ty: repr, .. } => {
+                        Some(*repr)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(self.tcx.int);
+            self.basic_type_of(repr)
+                .map_err(|_| type_error(ty, format!("enum representation {repr:?} is invalid")))
+        }
+
+        fn type_error<T>(&self, ty: TyId, reason: impl Into<String>) -> Result<T, CodegenError> {
+            Err(type_error(ty, reason))
+        }
+    }
+
+    fn array_len(len: u64, ty: TyId) -> Result<u32, CodegenError> {
+        u32::try_from(len)
+            .map_err(|_| type_error(ty, format!("array length {len} exceeds LLVM u32 limit")))
+    }
+
+    fn type_error(ty: TyId, reason: impl Into<String>) -> CodegenError {
+        CodegenError::TypeLowering { ty, reason: reason.into() }
+    }
+
+    fn basic_type_as_any<'ctx>(ty: BasicTypeEnum<'ctx>) -> AnyTypeEnum<'ctx> {
+        match ty {
+            BasicTypeEnum::ArrayType(ty) => ty.into(),
+            BasicTypeEnum::FloatType(ty) => ty.into(),
+            BasicTypeEnum::IntType(ty) => ty.into(),
+            BasicTypeEnum::PointerType(ty) => ty.into(),
+            BasicTypeEnum::StructType(ty) => ty.into(),
+            BasicTypeEnum::VectorType(ty) => ty.into(),
+            BasicTypeEnum::ScalableVectorType(ty) => ty.into(),
         }
     }
 
@@ -392,6 +609,11 @@ mod tests {
         });
         defs[id].id = id;
         id
+    }
+
+    #[cfg(feature = "llvm")]
+    fn hir_with_defs(defs: IndexVec<DefId, Def>) -> HirCrate {
+        HirCrate { defs, ..HirCrate::default() }
     }
 
     #[test]
@@ -614,5 +836,81 @@ mod tests {
         assert!(artifact.ir_text.contains("; ModuleID = 'rcc_module'"));
         assert!(artifact.ir_text.contains("target triple = \"x86_64-unknown-linux-gnu\""));
         assert!(artifact.ir_text.contains("target datalayout = "));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_reuses_lowered_types() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let arr = tcx.intern(Ty::Array { elem: Qual::plain(ptr), len: Some(4), is_vla: false });
+        let hir = HirCrate::default();
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let first = types.basic_type_of(arr).unwrap();
+        let cached = types.cached_type_count();
+        let second = types.basic_type_of(arr).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(cached, types.cached_type_count());
+        assert_eq!(first.print_to_string().to_string(), "[4 x ptr]");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_terminates_recursive_record_through_pointer() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let node = record_def(&mut defs, RecordKind::Struct, Vec::new());
+        let node_ty = tcx.intern(Ty::Record(node));
+        let node_ptr = tcx.intern(Ty::Ptr(Qual::plain(node_ty)));
+        defs[node].kind = DefKind::Record {
+            kind: RecordKind::Struct,
+            layout: None,
+            fields: vec![field(tcx.int), field(node_ptr)],
+        };
+        let hir = hir_with_defs(defs);
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(node_ty).unwrap();
+
+        assert_eq!(lowered.print_to_string().to_string(), "%rcc.record.0 = type { i32, ptr }");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_lowers_function_declarations_without_body_codegen() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let func = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.double, ptr],
+            variadic: true,
+            proto: true,
+        });
+        let hir = HirCrate::default();
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let fn_ty = types.fn_type_of(func).unwrap();
+
+        assert_eq!(fn_ty.print_to_string().to_string(), "i32 (double, ptr, ...)");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_reports_original_ty_for_unlowerable_type() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let vla = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: true });
+        let hir = HirCrate::default();
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        assert!(matches!(
+            types.type_of(vla),
+            Err(CodegenError::TypeLowering { ty, .. }) if ty == vla
+        ));
     }
 }
