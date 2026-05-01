@@ -368,6 +368,120 @@ mod tests {
         assert_eq!(LayoutCx::new(&tcx).layout_of(enum_ty), Ok(Layout { size: 4, align: 4 }));
     }
 
+    fn field(ty: TyId) -> Field {
+        Field {
+            name: None,
+            ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            offset: None,
+            bit_width: None,
+            span: DUMMY_SP,
+        }
+    }
+
+    fn bitfield(ty: TyId, width: u32) -> Field {
+        Field { bit_width: Some(width), ..field(ty) }
+    }
+
+    fn record_def(defs: &mut IndexVec<DefId, Def>, kind: RecordKind, fields: Vec<Field>) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name: Symbol(3),
+            span: DUMMY_SP,
+            kind: DefKind::Record { kind, layout: None, fields },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    #[test]
+    fn record_layout_reports_nested_offsets_and_padding() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let inner =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.char_), field(tcx.int)]);
+        let inner_ty = tcx.intern(Ty::Record(inner));
+        let outer = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.char_), field(inner_ty), field(tcx.long)],
+        );
+        let outer_ty = tcx.intern(Ty::Record(outer));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(outer_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 24, align: 8 });
+        assert_eq!(layout.fields.iter().map(|field| field.offset).collect::<Vec<_>>(), [0, 4, 16]);
+    }
+
+    #[test]
+    fn record_layout_reports_union_offsets_and_max_size() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let arr =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(3), is_vla: false });
+        let union = record_def(
+            &mut defs,
+            RecordKind::Union,
+            vec![field(tcx.char_), field(tcx.long), field(arr)],
+        );
+        let union_ty = tcx.intern(Ty::Record(union));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(union_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 8, align: 8 });
+        assert_eq!(layout.fields.iter().map(|field| field.offset).collect::<Vec<_>>(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn record_layout_ignores_flexible_array_trailing_size() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let flex =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.double), len: None, is_vla: false });
+        let record = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(flex)]);
+        let record_ty = tcx.intern(Ty::Record(record));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(record_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 8, align: 8 });
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[1].offset, 8);
+        assert_eq!(layout.fields[1].storage_size, 0);
+    }
+
+    #[test]
+    fn record_layout_reports_bitfield_pack_metadata() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let record = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![
+                bitfield(tcx.uint, 3),
+                bitfield(tcx.uint, 5),
+                bitfield(tcx.uint, 0),
+                bitfield(tcx.uint, 6),
+            ],
+        );
+        let record_ty = tcx.intern(Ty::Record(record));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(record_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 8, align: 4 });
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[0].bit_offset, Some(0));
+        assert_eq!(layout.fields[0].bit_width, Some(3));
+        assert_eq!(layout.fields[1].offset, 0);
+        assert_eq!(layout.fields[1].bit_offset, Some(3));
+        assert_eq!(layout.fields[1].bit_width, Some(5));
+        assert_eq!(layout.fields[2].offset, 4);
+        assert_eq!(layout.fields[2].bit_width, Some(0));
+        assert_eq!(layout.fields[3].offset, 4);
+        assert_eq!(layout.fields[3].bit_offset, Some(0));
+        assert_eq!(layout.fields[3].storage_size, 4);
+    }
+
     #[test]
     fn layoutcx_rejects_error_type() {
         let tcx = TyCtxt::new();
