@@ -39,7 +39,18 @@ Turn the pp-token stream into a complete C99 AST. Phase-7 conversion + recursive
 - [x] [28-unit-tests-grammar](28-unit-tests-grammar.md)
 - [x] [29-ui-tests](29-ui-tests.md)
 - [x] [30-ctestsuite-parse-smoke](30-ctestsuite-parse-smoke.md)
+- [ ] [31-parser-recovery-contract](31-parser-recovery-contract.md)
+- [ ] [32-parser-doc-feature-sync](32-parser-doc-feature-sync.md)
+- [ ] [33-type-name-validation-contract](33-type-name-validation-contract.md)
+- [ ] [34-decoded-literal-ast-payloads](34-decoded-literal-ast-payloads.md)
+- [ ] [35-builtin-type-argument-syntax](35-builtin-type-argument-syntax.md)
+- [ ] [36-gnu-statement-expression-syntax](36-gnu-statement-expression-syntax.md)
+- [ ] [37-gnu-range-designator-syntax](37-gnu-range-designator-syntax.md)
+- [ ] [38-attribute-syntax-surface](38-attribute-syntax-surface.md)
+- [ ] [39-inline-asm-syntax-surface](39-inline-asm-syntax-surface.md)
+- [ ] [40-c11-generic-selection-syntax](40-c11-generic-selection-syntax.md)
+- [ ] [41-parser-blocker-xfail-shrink](41-parser-blocker-xfail-shrink.md)
 
 ## Downstream
 
-- 06-hir-lower
+- 06-hir-lower, 09-codegen-llvm, 14-lang-extensions, 15-builtin-rt

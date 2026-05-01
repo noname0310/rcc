@@ -40,10 +40,24 @@ concatenation) and the "typedef-name hack".
 | 28 | [`28-unit-tests-grammar.md`](28-unit-tests-grammar.md) | One test per production. |
 | 29 | [`29-ui-tests.md`](29-ui-tests.md) | Bad input → stable stderr. |
 | 30 | [`30-ctestsuite-parse-smoke.md`](30-ctestsuite-parse-smoke.md) | Parse every c-testsuite file. |
+| 31 | [`31-parser-recovery-contract.md`](31-parser-recovery-contract.md) | Make parser recovery safe for downstream phases. |
+| 32 | [`32-parser-doc-feature-sync.md`](32-parser-doc-feature-sync.md) | Sync parser docs, feature matrix, and xfail reasons. |
+| 33 | [`33-type-name-validation-contract.md`](33-type-name-validation-contract.md) | Define strict `type-name` parsing and downstream constraints. |
+| 34 | [`34-decoded-literal-ast-payloads.md`](34-decoded-literal-ast-payloads.md) | Carry decoded literal payloads in AST. |
+| 35 | [`35-builtin-type-argument-syntax.md`](35-builtin-type-argument-syntax.md) | Parse builtin forms that take type-name arguments. |
+| 36 | [`36-gnu-statement-expression-syntax.md`](36-gnu-statement-expression-syntax.md) | Parse GNU `({ ... })` statement expressions. |
+| 37 | [`37-gnu-range-designator-syntax.md`](37-gnu-range-designator-syntax.md) | Parse GNU `[lo ... hi]` initializer ranges. |
+| 38 | [`38-attribute-syntax-surface.md`](38-attribute-syntax-surface.md) | Parse GCC-style `__attribute__((...))` attachment sites. |
+| 39 | [`39-inline-asm-syntax-surface.md`](39-inline-asm-syntax-surface.md) | Parse GCC-style inline asm statements. |
+| 40 | [`40-c11-generic-selection-syntax.md`](40-c11-generic-selection-syntax.md) | Parse C11 `_Generic` expressions. |
+| 41 | [`41-parser-blocker-xfail-shrink.md`](41-parser-blocker-xfail-shrink.md) | Shrink/reclassify parser-owned c-testsuite xfails. |
 
 ## Exit criteria
 
 - `rcc_parse::parse` returns `Some(TranslationUnit)` for every well-
-  formed c-testsuite input.
+  formed C99 c-testsuite input not gated behind headers or explicit
+  extension syntax.
+- Parser-owned xfail entries name a concrete parser task or have been
+  removed.
 - `cargo test -p rcc_parse`: ≥ 80 % line coverage.
 - Bad inputs produce stable, reviewed `.stderr` fixtures.
