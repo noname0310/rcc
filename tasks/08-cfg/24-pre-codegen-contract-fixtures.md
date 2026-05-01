@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-24: Pre-codegen contract fixtures
 
 **Phase:** 08-cfg    **Depends on:** 08-23, 07-20    **Milestone:** M3 pre-codegen stabilization
