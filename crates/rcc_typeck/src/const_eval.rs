@@ -164,6 +164,11 @@ impl<'a> ConstEval<'a> {
             }
 
             HirExprKind::StringRef(_) | HirExprKind::LocalRef(_) => None,
+            HirExprKind::SizeofExpr(operand) => {
+                let ty = body.exprs.get(operand)?.ty;
+                #[allow(clippy::cast_precision_loss)]
+                self.size_of_ty(ty).map(|size| size as f64)
+            }
 
             // ---- Operators ------------------------------------------------
             HirExprKind::Unary { op, operand } => {
@@ -528,6 +533,11 @@ impl<'a> ConstEval<'a> {
                 };
                 let v = self.eval_int(operand)?;
                 Some(truncate_to_width(v, bits, signed))
+            }
+
+            HirExprKind::SizeofExpr(operand) => {
+                let ty = body.exprs.get(operand)?.ty;
+                self.size_of_ty(ty)
             }
 
             // The typeck pass wraps ICE-bearing expressions in

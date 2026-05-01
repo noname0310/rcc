@@ -236,6 +236,11 @@ fn visit_stmt(
             HirStmtKind::Return(opt_e2)
         }
         HirStmtKind::LocalDecl { local, init } => {
+            let vla_len = body.locals[local].vla_len.map(|e| {
+                let e2 = visit_expr(e, body, tcx, session, def_info);
+                rvalue_decayed(e2, body, tcx)
+            });
+            body.locals[local].vla_len = vla_len;
             let init2 = init.map(|e| {
                 let e2 = visit_expr(e, body, tcx, session, def_info);
                 let e2 = rvalue_decayed(e2, body, tcx);
@@ -427,6 +432,17 @@ pub fn visit_expr(
             body.exprs[expr_id].ty = dst;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Cast { operand: op2, to: dst };
+            expr_id
+        }
+        HirExprKind::SizeofExpr(operand) => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            // `sizeof` is one of the C99 array-decay exceptions. Keep arrays
+            // as arrays so CFG lowering can distinguish fixed arrays from
+            // VLAs and materialise `Rvalue::Len` for the latter.
+            let op2 = decay_if_needed(tcx, body, op2, DecayContext::SizeofOperand);
+            body.exprs[expr_id].ty = tcx.ulong;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::SizeofExpr(op2);
             expr_id
         }
         HirExprKind::Assign { lhs, rhs } => {
@@ -1274,6 +1290,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Binary { .. }
         | HirExprKind::Unary { .. }
         | HirExprKind::Call { .. }
+        | HirExprKind::SizeofExpr(_)
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
         | HirExprKind::Cond { .. }
@@ -4115,6 +4132,7 @@ mod tests {
         let char_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.char_,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4186,6 +4204,7 @@ mod tests {
         let p_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4228,6 +4247,7 @@ mod tests {
         let x_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4274,6 +4294,7 @@ mod tests {
         let x_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4425,6 +4446,7 @@ mod tests {
         let l = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4663,6 +4685,7 @@ mod tests {
         let local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: cx_ptr,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4692,6 +4715,7 @@ mod tests {
         let cx_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4779,12 +4803,14 @@ mod tests {
         let cx_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
         let real_local = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.double,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4846,6 +4872,7 @@ mod tests {
         let a = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4901,6 +4928,7 @@ mod tests {
         let r = body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: tcx.complex_double,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });

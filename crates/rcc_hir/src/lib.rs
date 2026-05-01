@@ -188,6 +188,9 @@ pub struct LocalDecl {
     pub name: Option<Symbol>,
     /// Resolved type.
     pub ty: TyId,
+    /// Runtime bound expression for a block-scope VLA local, when this
+    /// declaration owns a dynamic array allocation.
+    pub vla_len: Option<HirExprId>,
     /// Whether this local is a function parameter.
     pub is_param: bool,
     /// Declaration span.
@@ -318,6 +321,8 @@ pub enum HirExprKind {
         /// Destination type.
         to: TyId,
     },
+    /// `sizeof expr`.
+    SizeofExpr(HirExprId),
     /// `&expr`
     AddressOf(HirExprId),
     /// `*expr`

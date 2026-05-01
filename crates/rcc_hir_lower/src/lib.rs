@@ -643,6 +643,16 @@ fn lower_block_decl(
         }
 
         let ty = apply_declarator(base, &init_decl.declarator, DeclScope::Block, tcx, session);
+        let vla_len = lower_top_level_vla_len(
+            &init_decl.declarator,
+            ty,
+            body,
+            scope,
+            _crate,
+            tcx,
+            resolver,
+            session,
+        );
 
         // Scalar (single-expression) initialiser: keep the value inline
         // on the LocalDecl so simple `int x = 5;` declarations still
@@ -659,8 +669,13 @@ fn lower_block_decl(
         };
 
         // Allocate a Local and register it in the innermost scope.
-        let local =
-            body.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span: decl.span });
+        let local = body.locals.push(LocalDecl {
+            name: Some(name),
+            ty,
+            vla_len,
+            is_param: false,
+            span: decl.span,
+        });
         scope.insert(name, Binding::Local(local));
 
         let stmt_id = body.stmts.push(HirStmt {
@@ -682,6 +697,39 @@ fn lower_block_decl(
             );
         }
     }
+}
+
+/// Lower the runtime bound for a block-scope VLA declaration.
+///
+/// The declarator-to-type fold keeps the final type shape, but the bound
+/// expression itself must be stored on the HIR local so CFG lowering can
+/// evaluate it at the declaration point. We only attach the expression when
+/// the declared object itself is a top-level VLA array; pointer-to-VLA
+/// declarations do not allocate a VLA local.
+#[allow(clippy::too_many_arguments)]
+fn lower_top_level_vla_len(
+    declarator: &Declarator,
+    ty: TyId,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<HirExprId> {
+    if !matches!(tcx.get(ty), Ty::Array { is_vla: true, .. }) {
+        return None;
+    }
+
+    let Some(DerivedDeclarator::Array(arr_decl)) = declarator.derived.last() else {
+        return None;
+    };
+    let size_expr = arr_decl.size.as_ref()?;
+    if eval_const_expr_as_u64(size_expr, &session.interner).is_some() {
+        return None;
+    }
+
+    Some(lower_expr(size_expr, body, scope, crate_, tcx, resolver, session))
 }
 
 /// Push an `HirExprKind::LocalRef` into `body.exprs` and return its id.
@@ -1233,7 +1281,8 @@ fn lower_block_specs_to_base_ty(
 /// | `Arrow  { a->b }`                 | `Field { base: Deref(a), field_index: 0 }`           |
 /// | `Index`                           | `Index`                                              |
 /// | `Cast`                            | `Cast { operand, to: error }` (type filled later)    |
-/// | `SizeofExpr` / `SizeofType`       | `IntConst(0)` (folded in typeck)                     |
+/// | `SizeofExpr`                      | `SizeofExpr` (typed / folded in typeck + CFG)        |
+/// | `SizeofType`                      | `IntConst(0)` placeholder                            |
 /// | `CompoundLiteral`                 | `IntConst(0)` placeholder — full lowering in M3       |
 ///
 /// The returned id is always the id of the last node pushed for this
@@ -1387,9 +1436,13 @@ pub fn lower_expr(
             // declarators. Keep the placeholder; typeck will overwrite.
             HirExprKind::Cast { operand: inner_id, to: tcx.error }
         }
-        rcc_ast::ExprKind::SizeofExpr(_) | rcc_ast::ExprKind::SizeofType(_) => {
-            // Folded to a `size_t`-typed constant by typeck; the exact
-            // value needs layout info so we leave a zero placeholder.
+        rcc_ast::ExprKind::SizeofExpr(inner) => {
+            let inner_id = lower_expr(inner, body, scope, crate_, tcx, resolver, session);
+            HirExprKind::SizeofExpr(inner_id)
+        }
+        rcc_ast::ExprKind::SizeofType(_) => {
+            // Type-name lowering for `sizeof(type)` is still deferred; keep
+            // the historical zero placeholder for that form.
             HirExprKind::IntConst(0)
         }
         rcc_ast::ExprKind::CompoundLiteral { .. } => {
@@ -1839,13 +1892,18 @@ pub fn apply_declarator(
                 }
 
                 // Evaluate constant size expression (stub: only integer
-                // literal constants for now; VLA deferred).
-                let len = if arr_decl.star {
+                // literal constants for now). Non-constant block-scope
+                // bounds are VLAs; the HIR local stores the lowered bound
+                // expression so CFG can evaluate it at the declaration.
+                let (len, is_vla) = if arr_decl.star {
                     // [*] — VLA of unspecified size.
-                    None
+                    (None, true)
                 } else if let Some(ref size_expr) = arr_decl.size {
                     // Try to evaluate as a constant integer.
-                    eval_const_expr_as_u64(size_expr, &session.interner)
+                    match eval_const_expr_as_u64(size_expr, &session.interner) {
+                        Some(n) => (Some(n), false),
+                        None => (None, scope != DeclScope::File),
+                    }
                 } else {
                     // No size — incomplete array.
                     // At block scope, incomplete arrays without an initializer
@@ -1860,11 +1918,11 @@ pub fn apply_declarator(
                             .emit();
                         return tcx.error;
                     }
-                    None
+                    (None, false)
                 };
 
                 let elem = quals_to_hir(ty, &arr_decl.quals);
-                ty = tcx.intern(Ty::Array { elem, len, is_vla: arr_decl.star });
+                ty = tcx.intern(Ty::Array { elem, len, is_vla });
             }
             DerivedDeclarator::Function(func_decl) => {
                 // C99 §6.7.5.3p1: the return type shall not be an array
@@ -5124,6 +5182,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(i),
             ty: TyCtxt::new().int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -5591,6 +5650,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -5630,6 +5690,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -5803,7 +5864,7 @@ mod tests {
     }
 
     #[test]
-    fn expr_sizeof_expr_and_type_lower_to_int_const() {
+    fn expr_sizeof_expr_preserves_operand_and_type_placeholder() {
         let (mut sess, _cap) = Session::for_test();
 
         let se = Expr {
@@ -5812,7 +5873,12 @@ mod tests {
             span: DUMMY_SP,
         };
         let (body, id, _c, _r) = lower_single_expr(&mut sess, se);
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(0)));
+        match body.exprs[id].kind {
+            HirExprKind::SizeofExpr(inner) => {
+                assert!(matches!(body.exprs[inner].kind, HirExprKind::IntConst(1)));
+            }
+            ref other => panic!("expected SizeofExpr, got {other:?}"),
+        }
 
         let ty_name = rcc_ast::TypeName {
             specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
@@ -5857,6 +5923,7 @@ mod tests {
         let local = body.locals.push(LocalDecl {
             name: Some(x),
             ty: tcx.int,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });

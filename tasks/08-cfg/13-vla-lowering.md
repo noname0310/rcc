@@ -1,5 +1,10 @@
 # 08-13: Variable-length array lowering
 
+> **Status:** done. Block-scope VLA declarations now preserve and
+> evaluate their runtime bound, store it in CFG metadata for the local,
+> and lower `sizeof(vla)` through `Rvalue::Len(place)` multiplied by the
+> element size. `StorageDead` continues to delimit VLA lifetimes.
+
 **Phase:** 08-cfg    **Depends on:** 08-02, 08-12    **Milestone:** M6
 
 ## Goal

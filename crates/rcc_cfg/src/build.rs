@@ -250,7 +250,13 @@ impl BodyBuilder {
             self.locals.len()
         );
         self.ret_ty = Some(ret_ty);
-        let local = self.locals.push(LocalDecl { name: None, ty: ret_ty, is_param: false, span });
+        let local = self.locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            vla_len: None,
+            is_param: false,
+            span,
+        });
         debug_assert_eq!(local, Local(0));
         self.phase = AllocPhase::Params;
         local
@@ -274,7 +280,7 @@ impl BodyBuilder {
              and do not interleave alloc_user_local/alloc_temp before parameters)",
             self.phase
         );
-        self.locals.push(LocalDecl { name: Some(name), ty, is_param: true, span })
+        self.locals.push(LocalDecl { name: Some(name), ty, vla_len: None, is_param: true, span })
     }
 
     /// Allocate a user-declared local. Closes the parameter run on the first
@@ -285,7 +291,7 @@ impl BodyBuilder {
             "alloc_user_local: return slot has not been allocated yet"
         );
         self.phase = AllocPhase::Locals;
-        self.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span })
+        self.locals.push(LocalDecl { name: Some(name), ty, vla_len: None, is_param: false, span })
     }
 
     /// Allocate a lowering-introduced temporary. Closes the parameter run on
@@ -296,7 +302,7 @@ impl BodyBuilder {
             "alloc_temp: return slot has not been allocated yet"
         );
         self.phase = AllocPhase::Locals;
-        self.locals.push(LocalDecl { name: None, ty, is_param: false, span })
+        self.locals.push(LocalDecl { name: None, ty, vla_len: None, is_param: false, span })
     }
 
     /// Convenience matching the task spec's `local(ty, name)` signature:
@@ -306,6 +312,16 @@ impl BodyBuilder {
             Some(sym) => self.alloc_user_local(sym, ty, span),
             None => self.alloc_temp(ty, span),
         }
+    }
+
+    /// Attach the runtime element-count local for a VLA user local.
+    pub fn set_vla_len(&mut self, local: Local, len_local: Local) {
+        debug_assert!(local.0 < self.locals.len() as u32, "set_vla_len: unknown local {local:?}");
+        debug_assert!(
+            len_local.0 < self.locals.len() as u32,
+            "set_vla_len: unknown len local {len_local:?}"
+        );
+        self.locals[local].vla_len = Some(len_local);
     }
 
     /// Append a statement to the current block.
@@ -652,6 +668,7 @@ mod tests {
         let ret_slot = b.alloc_local(LocalDecl {
             name: None,
             ty: dummy_ty(),
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });

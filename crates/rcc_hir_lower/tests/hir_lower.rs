@@ -98,6 +98,15 @@ fn array_size(size: u64, sess: &mut Session) -> DerivedDeclarator {
     })
 }
 
+fn array_runtime_size(name: &str, sess: &mut Session) -> DerivedDeclarator {
+    DerivedDeclarator::Array(ArrayDeclarator {
+        quals: TypeQuals::default(),
+        has_static: false,
+        star: false,
+        size: Some(ident_expr(sess, name)),
+    })
+}
+
 fn array_unsized() -> DerivedDeclarator {
     DerivedDeclarator::Array(ArrayDeclarator {
         quals: TypeQuals::default(),
@@ -210,8 +219,13 @@ fn push_local_lvalue(
     name: Symbol,
     ty: TyId,
 ) -> (Local, rcc_hir::HirExprId) {
-    let local =
-        body.locals.push(LocalDecl { name: Some(name), ty, is_param: false, span: DUMMY_SP });
+    let local = body.locals.push(LocalDecl {
+        name: Some(name),
+        ty,
+        vla_len: None,
+        is_param: false,
+        span: DUMMY_SP,
+    });
     scope.insert(name, Binding::Local(local));
     let id = body.exprs.push(rcc_hir::HirExpr {
         id: rcc_hir::HirExprId(0),
@@ -276,6 +290,19 @@ fn s6_7_5_sized_array() {
     let ty = apply_declarator(tcx.int, &d, DeclScope::File, &mut tcx, &mut sess);
     let expected =
         tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(10), is_vla: false });
+    assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_block_runtime_array_bound_is_vla() {
+    // int x[n]; at block scope is a VLA: the constant length is unknown,
+    // but the type records that it must be dynamically sized.
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let x = intern(&mut sess, "x");
+    let d = named(x, vec![array_runtime_size("n", &mut sess)]);
+    let ty = apply_declarator(tcx.int, &d, DeclScope::Block, &mut tcx, &mut sess);
+    let expected = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: true });
     assert_eq!(ty, expected);
 }
 
@@ -1179,6 +1206,48 @@ fn snippet_function_definition_has_body_flag() {
         unreachable!();
     };
     assert!(has_body, "function definition should have has_body = true");
+}
+
+#[test]
+fn snippet_vla_decl_preserves_runtime_bound_expr() {
+    let (ast, mut sess, _cap) = parse_to_ast("void f(int n) { int a[n]; }");
+    let func = match &ast.decls[0] {
+        rcc_ast::ExternalDecl::Function(func) => func,
+        other => panic!("expected function definition, got {other:?}"),
+    };
+
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let mut scope = ScopeStack::new();
+    scope.push_scope();
+    let n = intern(&mut sess, "n");
+    let n_local = body.locals.push(LocalDecl {
+        name: Some(n),
+        ty: tcx.int,
+        vla_len: None,
+        is_param: true,
+        span: DUMMY_SP,
+    });
+    scope.insert(n, Binding::Local(n_local));
+
+    let mut crate_ = HirCrate::default();
+    let mut resolver = Resolver::default();
+    let stmt = Stmt { id: NodeId(0), kind: StmtKind::Compound(func.body.clone()), span: DUMMY_SP };
+    let _root =
+        lower_stmt(&stmt, &mut body, &mut scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
+
+    let vla = body
+        .locals
+        .iter()
+        .find(|local| matches!(tcx.get(local.ty), Ty::Array { is_vla: true, .. }))
+        .expect("expected a VLA local");
+    let len_expr = vla.vla_len.expect("VLA local should carry runtime bound expression");
+    match body.exprs[len_expr].kind {
+        HirExprKind::LocalRef(local) => {
+            assert!(body.locals[local].is_param, "VLA bound should refer to parameter n");
+        }
+        ref other => panic!("expected VLA bound LocalRef(n), got {other:?}"),
+    }
 }
 
 #[test]

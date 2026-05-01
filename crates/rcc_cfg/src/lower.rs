@@ -195,6 +195,7 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             push_assign(builder, span, temp, Rvalue::Cast { op: inner, to: *to, kind });
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
+        HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
         HirExprKind::AddressOf(operand) => {
             let place = lower_as_place(builder, cx, *operand);
             let temp = builder.alloc_temp(ty, span);
@@ -1133,10 +1134,17 @@ fn lower_local_decl(
 ) {
     let cfg_local = cx.locals.lookup(hir_local);
     let ty = cx.body.locals[hir_local].ty;
+    if let Some(len_expr) = cx.body.locals[hir_local].vla_len {
+        lower_vla_len(builder, cx, span, cfg_local, len_expr);
+    }
     builder.storage_live(cfg_local, span);
     if let Some(init_expr) = init {
         let value = lower_as_rvalue(builder, cx, init_expr);
         push_assign(builder, span, cfg_local, Rvalue::Use(value));
+    } else if is_vla_ty(cx.tcx, ty) {
+        // A plain VLA declaration has indeterminate element values. Its
+        // runtime allocation is represented by StorageLive + the saved
+        // length metadata, not by ZeroInit.
     } else if is_aggregate_ty(cx.tcx, ty) {
         builder.push(Statement {
             kind: StatementKind::Assign {
@@ -1148,11 +1156,106 @@ fn lower_local_decl(
     }
 }
 
+fn lower_vla_len(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    cfg_local: Local,
+    len_expr: HirExprId,
+) {
+    let len_operand = lower_as_rvalue(builder, cx, len_expr);
+    let len_ty = cx.body.exprs[len_expr].ty;
+    let len_local = builder.alloc_temp(cx.tcx.ulong, span);
+    if len_ty == cx.tcx.ulong {
+        push_assign(builder, span, len_local, Rvalue::Use(len_operand));
+    } else {
+        let kind = explicit_cast_kind(len_ty, cx.tcx.ulong, cx.tcx);
+        push_assign(
+            builder,
+            span,
+            len_local,
+            Rvalue::Cast { op: len_operand, to: cx.tcx.ulong, kind },
+        );
+    }
+    builder.set_vla_len(cfg_local, len_local);
+}
+
+fn lower_sizeof_expr(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    expr_id: HirExprId,
+    operand: HirExprId,
+) -> Operand {
+    let expr = &cx.body.exprs[expr_id];
+    let operand_ty = cx.body.exprs[operand].ty;
+
+    if let Some(size) = const_size_of_ty(cx.tcx, operand_ty) {
+        return Operand::Const(Const { kind: ConstKind::Int(size), ty: expr.ty });
+    }
+
+    let Ty::Array { elem, is_vla: true, .. } = cx.tcx.get(operand_ty) else {
+        return Operand::Const(Const { kind: ConstKind::Int(0), ty: expr.ty });
+    };
+
+    let place = lower_as_place(builder, cx, operand);
+    let len_local = builder.alloc_temp(expr.ty, expr.span);
+    push_assign(builder, expr.span, len_local, Rvalue::Len(place));
+
+    let elem_size = const_size_of_ty(cx.tcx, elem.ty).unwrap_or(0);
+    if elem_size == 1 {
+        return Operand::Copy(Place { base: len_local, projection: Vec::new() });
+    }
+
+    let size_local = builder.alloc_temp(expr.ty, expr.span);
+    push_assign(
+        builder,
+        expr.span,
+        size_local,
+        Rvalue::BinaryOp(
+            BinOp::Mul,
+            Operand::Copy(Place { base: len_local, projection: Vec::new() }),
+            Operand::Const(Const { kind: ConstKind::Int(elem_size), ty: expr.ty }),
+        ),
+    );
+    Operand::Copy(Place { base: size_local, projection: Vec::new() })
+}
+
 /// `true` for C aggregate types (array / struct / union). Enums are
 /// scalars at the CFG level (their underlying integer type is what is
 /// stored), so they do not count.
 fn is_aggregate_ty(tcx: &TyCtxt, ty: TyId) -> bool {
     matches!(tcx.get(ty), Ty::Array { .. } | Ty::Record(_))
+}
+
+fn is_vla_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Array { is_vla: true, .. })
+}
+
+fn const_size_of_ty(tcx: &TyCtxt, ty: TyId) -> Option<i128> {
+    match tcx.get(ty) {
+        Ty::Void => None,
+        Ty::Int { rank, .. } => Some(match rank {
+            IntRank::Bool | IntRank::Char => 1,
+            IntRank::Short => 2,
+            IntRank::Int => 4,
+            IntRank::Long | IntRank::LongLong => 8,
+        }),
+        Ty::Float(kind) => Some(match kind {
+            FloatKind::F32 => 4,
+            FloatKind::F64 => 8,
+            FloatKind::F80 => 16,
+        }),
+        Ty::Complex(kind) => Some(match kind {
+            FloatKind::F32 => 8,
+            FloatKind::F64 => 16,
+            FloatKind::F80 => 32,
+        }),
+        Ty::Ptr(_) => Some(8),
+        Ty::Array { elem, len: Some(n), is_vla: false } => {
+            const_size_of_ty(tcx, elem.ty)?.checked_mul(i128::from(*n))
+        }
+        Ty::Array { .. } | Ty::Func { .. } | Ty::Record(_) | Ty::Enum(_) | Ty::Error => None,
+    }
 }
 
 /// `true` if `stmt_id` is `HirStmtKind::Expr(Assign { lhs, .. })` whose
@@ -1438,18 +1541,21 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
         let hb = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
         let hc = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -1731,6 +1837,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -1959,6 +2066,7 @@ mod tests {
         let hs = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2014,6 +2122,7 @@ mod tests {
         let hx = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2045,6 +2154,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2080,6 +2190,7 @@ mod tests {
         let hs = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2124,6 +2235,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2180,6 +2292,7 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: arr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2187,6 +2300,7 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2263,6 +2377,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: rec_ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2337,6 +2452,7 @@ mod tests {
         let hp = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ptr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -2406,7 +2522,13 @@ mod tests {
     // references the type directly.
     #[allow(dead_code)]
     fn _suppress_unused_imports() {
-        let _ = (LocalDecl { name: None, ty: TyId(0), is_param: false, span: DUMMY_SP },);
+        let _ = (LocalDecl {
+            name: None,
+            ty: TyId(0),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        },);
         let _: IndexVec<crate::BasicBlockId, crate::BasicBlock> = IndexVec::new();
     }
 
@@ -4495,6 +4617,7 @@ mod tests {
         let ha = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: arr_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4873,12 +4996,14 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
         let hy = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -4974,6 +5099,7 @@ mod tests {
         let hi = hir_body.locals.push(rcc_hir::LocalDecl {
             name: None,
             ty: int_ty,
+            vla_len: None,
             is_param: false,
             span: DUMMY_SP,
         });
@@ -5008,5 +5134,186 @@ mod tests {
                 && matches!(bb.statements[0].kind, StatementKind::StorageDead(l) if l == ci)
         });
         assert!(exit_with_dead.is_some(), "expected an exit block with StorageDead(i)");
+    }
+
+    // ── Task 08-13: VLA lowering ────────────────────────────────────────
+
+    fn add_hir_local(
+        body: &mut HirBody,
+        ty: TyId,
+        vla_len: Option<HirExprId>,
+        is_param: bool,
+    ) -> HirLocal {
+        body.locals.push(rcc_hir::LocalDecl { name: None, ty, vla_len, is_param, span: DUMMY_SP })
+    }
+
+    fn int_vla_ty(tcx: &mut TyCtxt) -> TyId {
+        tcx.intern(Ty::Array { elem: rcc_hir::Qual::plain(tcx.int), len: None, is_vla: true })
+    }
+
+    #[test]
+    fn vla_decl_saves_runtime_bound_before_storage_live() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let vla_ty = int_vla_ty(&mut tcx);
+        let mut hir_body = HirBody::default();
+        let hn = add_hir_local(&mut hir_body, int_ty, None, true);
+        let n_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hn));
+        let ha = add_hir_local(&mut hir_body, vla_ty, Some(n_ref), false);
+
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let root = block_stmt(&mut hir_body, vec![decl]);
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.void, DUMMY_SP);
+        let cn = builder.alloc_param(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(2), vla_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hn, cn);
+        map.insert(ha, ca);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+        let saved_len = body.locals[ca].vla_len.expect("VLA local should record saved len local");
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+
+        match &stmts[0].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue:
+                    Rvalue::Cast {
+                        op: Operand::Copy(Place { base: source, projection: source_proj }),
+                        to,
+                        kind,
+                    },
+            } => {
+                assert_eq!(*base, saved_len);
+                assert!(projection.is_empty());
+                assert_eq!(*source, cn);
+                assert!(source_proj.is_empty());
+                assert_eq!(*to, tcx.ulong);
+                assert_eq!(*kind, CastKind::IntToInt);
+            }
+            other => panic!("expected saved VLA length cast, got {other:?}"),
+        }
+        assert_storage_live(&stmts[1], ca);
+        assert_storage_dead(stmts.last().expect("block should end with StorageDead(a)"), ca);
+        assert!(
+            !stmts.iter().any(|s| matches!(
+                s.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::ZeroInit, .. })),
+                    ..
+                }
+            )),
+            "plain VLA declarations must not be aggregate-zero-initialized"
+        );
+    }
+
+    #[test]
+    fn sizeof_vla_lowers_to_len_times_element_size() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let vla_ty = int_vla_ty(&mut tcx);
+        let mut hir_body = HirBody::default();
+        let hn = add_hir_local(&mut hir_body, int_ty, None, true);
+        let n_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hn));
+        let ha = add_hir_local(&mut hir_body, vla_ty, Some(n_ref), false);
+
+        let decl = local_decl_stmt(&mut hir_body, ha);
+        let a_ref = push_expr(&mut hir_body, vla_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let sizeof_a =
+            push_expr(&mut hir_body, tcx.ulong, ValueCat::RValue, HirExprKind::SizeofExpr(a_ref));
+        let expr_stmt = push_stmt(&mut hir_body, HirStmtKind::Expr(sizeof_a));
+        let root = block_stmt(&mut hir_body, vec![decl, expr_stmt]);
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.void, DUMMY_SP);
+        let cn = builder.alloc_param(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(2), vla_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hn, cn);
+        map.insert(ha, ca);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+
+        let len_assign = stmts
+            .iter()
+            .find_map(|stmt| match &stmt.kind {
+                StatementKind::Assign {
+                    place: Place { base, .. },
+                    rvalue: Rvalue::Len(Place { base: len_base, projection }),
+                } if *len_base == ca && projection.is_empty() => Some(*base),
+                _ => None,
+            })
+            .expect("sizeof(vla) should emit Rvalue::Len(a)");
+
+        assert!(
+            stmts.iter().any(|stmt| matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue:
+                        Rvalue::BinaryOp(
+                            BinOp::Mul,
+                            Operand::Copy(Place { base, projection }),
+                            Operand::Const(Const { kind: ConstKind::Int(4), .. }),
+                        ),
+                    ..
+                } if *base == len_assign && projection.is_empty()
+            )),
+            "sizeof(int vla) should multiply Len(a) by sizeof(int)"
+        );
+    }
+
+    #[test]
+    fn nested_vlas_emit_storage_dead_in_scope_order() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let vla_ty = int_vla_ty(&mut tcx);
+        let mut hir_body = HirBody::default();
+        let hn = add_hir_local(&mut hir_body, int_ty, None, true);
+        let hm = add_hir_local(&mut hir_body, int_ty, None, true);
+        let n_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hn));
+        let m_ref = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(hm));
+        let ha = add_hir_local(&mut hir_body, vla_ty, Some(n_ref), false);
+        let hb = add_hir_local(&mut hir_body, vla_ty, Some(m_ref), false);
+
+        let decl_a = local_decl_stmt(&mut hir_body, ha);
+        let decl_b = local_decl_stmt(&mut hir_body, hb);
+        let inner = block_stmt(&mut hir_body, vec![decl_b]);
+        let outer = block_stmt(&mut hir_body, vec![decl_a, inner]);
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.void, DUMMY_SP);
+        let cn = builder.alloc_param(rcc_span::Symbol(1), int_ty, DUMMY_SP);
+        let cm = builder.alloc_param(rcc_span::Symbol(2), int_ty, DUMMY_SP);
+        let ca = builder.alloc_user_local(rcc_span::Symbol(3), vla_ty, DUMMY_SP);
+        let cb = builder.alloc_user_local(rcc_span::Symbol(4), vla_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hn, cn);
+        map.insert(hm, cm);
+        map.insert(ha, ca);
+        map.insert(hb, cb);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, outer);
+        let body = finish(builder);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        let dead_b = stmts
+            .iter()
+            .position(|s| matches!(s.kind, StatementKind::StorageDead(l) if l == cb))
+            .expect("inner VLA should be dead at inner scope exit");
+        let dead_a = stmts
+            .iter()
+            .position(|s| matches!(s.kind, StatementKind::StorageDead(l) if l == ca))
+            .expect("outer VLA should be dead at outer scope exit");
+
+        assert!(dead_b < dead_a, "inner VLA must be deallocated before outer VLA");
+        assert!(body.locals[ca].vla_len.is_some());
+        assert!(body.locals[cb].vla_len.is_some());
     }
 }

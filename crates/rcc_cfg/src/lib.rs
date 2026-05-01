@@ -43,6 +43,8 @@ pub struct LocalDecl {
     pub name: Option<rcc_span::Symbol>,
     /// Type of the slot.
     pub ty: TyId,
+    /// Runtime element-count local for a VLA allocation.
+    pub vla_len: Option<Local>,
     /// Whether this is a function parameter.
     pub is_param: bool,
     /// Declaration span.
