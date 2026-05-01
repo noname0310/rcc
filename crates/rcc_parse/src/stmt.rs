@@ -290,11 +290,9 @@ fn parse_do_while_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
 /// `for ( init? ; cond? ; step? ) statement`.
 ///
 /// **Init clause:** C99 §6.8.5p3 allows either an expression
-/// statement or a declaration; declaration parsing lands in task
-/// 05-18, so only the expression form is accepted here. A `for`
-/// with an empty init (`for ( ; …)`) is supported. A leading `int`
-/// / `char` / ... still hits the expression-statement fallthrough
-/// and is diagnosed there.
+/// statement or a declaration. A `for` with an empty init (`for ( ;
+/// ...)`) is supported; a declaration init is parsed as
+/// `BlockItem::Decl` so HIR lowering can give it the loop scope.
 ///
 /// A new scope is pushed on entry (covering the init, cond, step
 /// and body) and popped on every return path so the future
@@ -313,8 +311,16 @@ fn parse_for_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
         if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
             p.bump();
             None
+        } else if looks_like_decl(p) {
+            let decl = match crate::decl::parse_declaration(p) {
+                Some(decl) => decl,
+                None => {
+                    p.scopes.pop();
+                    return None;
+                }
+            };
+            Some(Box::new(BlockItem::Decl(decl)))
         } else {
-            // Expression-init (declaration-init is deferred to 05-18).
             // parse_expr_stmt already handles the trailing `;` so we
             // wrap its result as a BlockItem::Stmt.
             let stmt = match parse_expr_stmt(p) {
@@ -1046,7 +1052,7 @@ mod tests {
                     BlockItem::Stmt(inner) => {
                         assert!(matches!(inner.kind, StmtKind::Expr(Some(_))));
                     }
-                    BlockItem::Decl(_) => panic!("decl init is not yet supported"),
+                    BlockItem::Decl(_) => panic!("expression-init should not parse as a decl"),
                 }
                 assert!(cond.is_some());
                 assert!(step.is_some());
@@ -1057,21 +1063,27 @@ mod tests {
     }
 
     #[test]
-    fn for_loop_with_declaration_init_is_deferred_to_task_05_18() {
-        // Per task 05-15 scope note: declaration-init inside `for`
-        // is explicitly deferred to the declaration-parsing task
-        // (05-18). For now `for (int i = 0; …; …)` reaches the
-        // expression-statement path on the `int` keyword and is
-        // diagnosed. We assert the deferral is observable (a
-        // diagnostic fires) rather than silently succeeds, so the
-        // handoff to 05-18 is explicit.
+    fn for_loop_with_declaration_init_parses() {
         let src = "for (int i = 0; i < n; i = i + 1) ;";
         let (mut sess, fid, cap) = mk_session(src);
         let tokens = tokens_from_src(&mut sess, fid, src);
         let mut parser = Parser::new(&mut sess, tokens);
-        let _ = parse_stmt(&mut parser);
-        let diags = cap.diagnostics();
-        assert!(!diags.is_empty(), "declaration-init in for should diagnose until 05-18 lands");
+        let s = parse_stmt(&mut parser).expect("declaration-init for-loop parses");
+        match s.kind {
+            StmtKind::For { init, cond, step, body: _ } => {
+                let init = init.expect("init present");
+                match *init {
+                    BlockItem::Decl(decl) => {
+                        assert_eq!(decl.inits.len(), 1);
+                    }
+                    BlockItem::Stmt(_) => panic!("declaration-init should parse as a decl"),
+                }
+                assert!(cond.is_some());
+                assert!(step.is_some());
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+        assert!(cap.diagnostics().is_empty());
     }
 
     // ── 05-16: switch / case / default ───────────────────────────────

@@ -24,6 +24,14 @@ struct Lowered {
     bodies: Vec<(DefId, Body)>,
 }
 
+struct EdgeFixture {
+    name: &'static str,
+    task: &'static str,
+    review_finding: &'static str,
+    src: &'static str,
+    functions: usize,
+}
+
 const FIXTURES: &[Fixture] = &[
     Fixture { name: "return_zero", src: "int f(void) { return 0; }", functions: 1 },
     Fixture { name: "return_param", src: "int f(int x) { return x; }", functions: 1 },
@@ -199,6 +207,78 @@ const FIXTURES: &[Fixture] = &[
     },
 ];
 
+// Former CFG review findings guarded by the source-level edge matrix:
+//
+// - 08-16: inc/dec lowering must survive parser/typeck shapes, including
+//   declaration-style `for` initializers and postfix result values.
+// - 08-17: goto lifetime fixups must emit scope exits when jumping out of
+//   nested scopes and must allow jumps around, not into, VLA scopes.
+// - 08-18: sizeof lowering must use the shared layout service for records and
+//   record-element VLAs, not ad hoc scalar sizes.
+// - 08-19: complex conversions must remain explicit CFG rvalues after the full
+//   source pipeline inserts typeck conversions.
+// - 08-20: every edge case is fed through verify_body after build_bodies.
+// - 08-21: source-level order fixtures assert MIR order only; they never depend
+//   on a runtime result for unspecified operand order.
+const EDGE_FIXTURES: &[EdgeFixture] = &[
+    EdgeFixture {
+        name: "edge_for_decl_init_prefix_inc",
+        task: "08-16",
+        review_finding: "for-init declarations plus prefix increment previously only had hand-built HIR coverage",
+        src: "int f(int n) { int total = 0; for (int i = 0; i < n; ++i) { total++; } return total; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_postfix_increment_result",
+        task: "08-16",
+        review_finding: "postfix increment must preserve the old value as the expression result",
+        src: "int f(void) { int i = 1; int old = i++; return old; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_goto_out_nested_scope",
+        task: "08-17",
+        review_finding: "goto out of a nested scope must emit StorageDead in LIFO order",
+        src: "int f(int flag) { int x = 0; { int y = 1; if (flag) goto out; x = y; } out: return x; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_goto_around_vla_scope",
+        task: "08-17",
+        review_finding: "goto may jump around a VLA scope without entering the VLA lifetime",
+        src: "unsigned long f(int n) { if (n < 0) goto out; { int a[n]; return sizeof a; } out: return 0; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_sizeof_record",
+        task: "08-18",
+        review_finding: "sizeof(record) must use checked record layout from LayoutCx",
+        src: "struct S { int a; char b; }; unsigned long f(void) { return sizeof(struct S); }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_sizeof_record_vla",
+        task: "08-18",
+        review_finding: "sizeof(record[n]) must multiply runtime length by record element layout",
+        src: "struct S { int a; char b; }; unsigned long f(int n) { struct S a[n]; return sizeof a; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_complex_conditional_conversion",
+        task: "08-19",
+        review_finding: "typeck-inserted real-to-complex conversions must survive conditional lowering",
+        src: "double _Complex f(int c, double x, double _Complex z) { return c ? x : z; }",
+        functions: 1,
+    },
+    EdgeFixture {
+        name: "edge_eval_order_call_args",
+        task: "08-21",
+        review_finding: "call argument side effects should be stable in MIR without using runtime output as oracle",
+        src: "int g(int, int); int f(void) { int a = 0; int b = 0; return g(a = 1, b = 2); }",
+        functions: 1,
+    },
+];
+
 #[test]
 fn cfg_fixture_matrix_satisfies_invariants() {
     assert!(FIXTURES.len() >= 25, "task requires at least 25 CFG fixtures");
@@ -213,6 +293,32 @@ fn cfg_fixture_matrix_satisfies_invariants() {
         for (def, body) in &lowered.bodies {
             verify_body(body, &lowered.tcx)
                 .unwrap_or_else(|errors| panic!("{}: verifier errors: {errors:?}", fixture.name));
+            assert_body_invariants(fixture.name, *def, body);
+        }
+    }
+}
+
+#[test]
+fn edge_source_pipeline_stabilization_fixtures() {
+    assert!(EDGE_FIXTURES.len() >= 8, "expected coverage for tasks 08-16 through 08-21");
+
+    for fixture in EDGE_FIXTURES {
+        let lowered = lower_snippet(fixture.name, fixture.src);
+        assert_eq!(
+            lowered.bodies.len(),
+            fixture.functions,
+            "{} ({}): unexpected function-body count; guards {}",
+            fixture.name,
+            fixture.task,
+            fixture.review_finding,
+        );
+        for (def, body) in &lowered.bodies {
+            verify_body(body, &lowered.tcx).unwrap_or_else(|errors| {
+                panic!(
+                    "{} ({}): verifier errors for {}: {errors:?}",
+                    fixture.name, fixture.task, fixture.review_finding
+                )
+            });
             assert_body_invariants(fixture.name, *def, body);
         }
     }
@@ -246,6 +352,30 @@ fn cfg_snapshots_are_stable() {
 }
 
 #[test]
+fn edge_snapshots_are_stable() {
+    let cases = [
+        (
+            "edge_goto_out_nested_scope",
+            "int f(int flag) { int x = 0; { int y = 1; if (flag) goto out; x = y; } out: return x; }",
+        ),
+        (
+            "edge_complex_conditional_conversion",
+            "double _Complex f(int c, double x, double _Complex z) { return c ? x : z; }",
+        ),
+    ];
+
+    for (name, src) in cases {
+        insta::with_settings!({
+            snapshot_path => "snapshots/cfg",
+            prepend_module_to_snapshot => false,
+            omit_expression => true,
+        }, {
+            insta::assert_snapshot!(name, render_snippet(name, src));
+        });
+    }
+}
+
+#[test]
 fn eval_order_snapshots_are_stable() {
     let cases = [
         (
@@ -264,6 +394,51 @@ fn eval_order_snapshots_are_stable() {
             insta::assert_snapshot!(name, render_snippet(name, src));
         });
     }
+}
+
+#[test]
+fn edge_sizeof_layout_service_covers_records_and_record_vlas() {
+    let record = lower_snippet(
+        "edge_sizeof_record",
+        "struct S { int a; char b; }; unsigned long f(void) { return sizeof(struct S); }",
+    );
+    let record_body = &record.bodies[0].1;
+    assert!(
+        body_contains_int_const(record_body, 8),
+        "record sizeof should lower to checked layout size 8:\n{}",
+        dump_body(record_body, &record.tcx)
+    );
+
+    let record_vla = lower_snippet(
+        "edge_sizeof_record_vla",
+        "struct S { int a; char b; }; unsigned long f(int n) { struct S a[n]; return sizeof a; }",
+    );
+    let record_vla_body = &record_vla.bodies[0].1;
+    assert!(
+        body_contains_len_rvalue(record_vla_body),
+        "record VLA sizeof should read the saved runtime length:\n{}",
+        dump_body(record_vla_body, &record_vla.tcx)
+    );
+    assert!(
+        body_contains_int_const(record_vla_body, 8),
+        "record VLA sizeof should multiply by record element size 8:\n{}",
+        dump_body(record_vla_body, &record_vla.tcx)
+    );
+}
+
+#[test]
+fn edge_complex_conversions_are_explicit_from_source_pipeline() {
+    let lowered = lower_snippet(
+        "edge_complex_conditional_conversion",
+        "double _Complex f(int c, double x, double _Complex z) { return c ? x : z; }",
+    );
+    let counts = complex_conversion_counts(&lowered.bodies[0].1);
+    assert_eq!(
+        counts,
+        (1, 0),
+        "expected one RealToComplex rvalue from the real conditional arm:\n{}",
+        dump_body(&lowered.bodies[0].1, &lowered.tcx)
+    );
 }
 
 #[test]
@@ -367,6 +542,15 @@ fn body_contains_int_const(body: &Body, expected: i128) -> bool {
             StatementKind::Assign { rvalue, .. } => rvalue_contains_int_const(rvalue, expected),
             _ => false,
         })
+    })
+}
+
+fn body_contains_len_rvalue(body: &Body) -> bool {
+    body.blocks.iter().any(|block| {
+        block
+            .statements
+            .iter()
+            .any(|stmt| matches!(stmt.kind, StatementKind::Assign { rvalue: Rvalue::Len(_), .. }))
     })
 }
 

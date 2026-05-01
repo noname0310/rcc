@@ -1,0 +1,32 @@
+---
+source: crates/rcc_cfg/tests/cfg.rs
+---
+fn def#0() -> int {
+  locals:
+    _0: int;
+    _1: int param name#10;
+    _2: int name#11;
+    _3: int name#12;
+
+  bb0:
+    StorageLive(_2);
+    _2 = 0;
+    StorageLive(_3);
+    _3 = 1;
+    switchInt(copy _1) -> [0: bb3, otherwise: bb2];
+
+  bb1:
+    _0 = copy _2;
+    StorageDead(_2);
+    return;
+
+  bb2:
+    StorageDead(_3);
+    goto -> bb1;
+
+  bb3:
+    _2 = copy _3;
+    StorageDead(_3);
+    goto -> bb1;
+
+}

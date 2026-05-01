@@ -29,7 +29,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [19-complex-conversion-rvalues](19-complex-conversion-rvalues.md)
 - [x] [20-cfg-verifier-release-gate](20-cfg-verifier-release-gate.md)
 - [x] [21-eval-order-conformance-policy](21-eval-order-conformance-policy.md)
-- [ ] [22-source-pipeline-edge-fixtures](22-source-pipeline-edge-fixtures.md)
+- [x] [22-source-pipeline-edge-fixtures](22-source-pipeline-edge-fixtures.md)
 
 ## Downstream
 

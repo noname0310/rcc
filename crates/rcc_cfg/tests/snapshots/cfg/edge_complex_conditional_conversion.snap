@@ -1,0 +1,29 @@
+---
+source: crates/rcc_cfg/tests/cfg.rs
+---
+fn def#0() -> _Complex double {
+  locals:
+    _0: _Complex double;
+    _1: int param name#12;
+    _2: double param name#13;
+    _3: _Complex double param name#14;
+    _4: _Complex double;
+    _5: _Complex double;
+
+  bb0:
+    switchInt(copy _1) -> [0: bb2, otherwise: bb1];
+
+  bb1:
+    _5 = ComplexFromReal(copy _2, _Complex double);
+    _4 = copy _5;
+    goto -> bb3;
+
+  bb2:
+    _4 = copy _3;
+    goto -> bb3;
+
+  bb3:
+    _0 = copy _4;
+    return;
+
+}

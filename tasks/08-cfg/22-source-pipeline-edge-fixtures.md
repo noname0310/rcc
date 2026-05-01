@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 08-22: Source pipeline edge fixtures
 
 **Phase:** 08-cfg    **Depends on:** 08-21    **Milestone:** M3 stabilization
@@ -32,6 +34,14 @@ were intentionally avoided by the initial fixture table.
   08-16 through 08-21 stabilization task.
 - No fixture relies on undefined or unspecified C behavior for its pass
   condition.
+
+## Implementation note
+
+The `for (int i = 0; ...; ++i)` source fixture exposed an upstream parser
+gap: the AST and HIR layers already represented declaration-initialized
+`for` statements, but `rcc_parse::stmt::parse_for_stmt` still routed the init
+slot through the expression path. This task includes the minimal parser hook
+needed for the requested source-level CFG fixture.
 
 ## References
 - `crates/rcc_cfg/tests/cfg.rs`.

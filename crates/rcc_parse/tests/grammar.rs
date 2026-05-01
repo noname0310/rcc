@@ -507,6 +507,11 @@ fn s6_8_5_3_for_statement() {
 }
 
 #[test]
+fn s6_8_5_3_for_statement_declaration_init() {
+    parse_ok("void f(void) { for (int i = 0; i < 10; ++i) ; }");
+}
+
+#[test]
 fn s6_8_5_3_for_statement_empty_clauses() {
     parse_ok("void f(void) { for (;;) ; }");
 }
