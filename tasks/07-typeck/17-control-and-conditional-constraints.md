@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 07-17: Control-expression and conditional-operator constraints
 
 **Phase:** 07-typeck    **Depends on:** 07-16    **Milestone:** M3 pre-codegen stabilization

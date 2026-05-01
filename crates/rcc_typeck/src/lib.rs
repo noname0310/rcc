@@ -323,7 +323,7 @@ fn visit_stmt_with_context(
             // Controlling expression must be scalar; convert lvalue-to-rvalue
             // and decay arrays/functions so the resulting node is a plain
             // scalar rvalue.
-            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let cond2 = scalar_control_rvalue(cond2, body, tcx, session, "if condition");
             visit_stmt_with_context(then_branch, body, tcx, session, def_info, context);
             if let Some(eb) = else_branch {
                 visit_stmt_with_context(eb, body, tcx, session, def_info, context);
@@ -332,14 +332,14 @@ fn visit_stmt_with_context(
         }
         HirStmtKind::While { cond, body: b } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
-            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let cond2 = scalar_control_rvalue(cond2, body, tcx, session, "while condition");
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::While { cond: cond2, body: b }
         }
         HirStmtKind::DoWhile { body: b, cond } => {
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
-            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let cond2 = scalar_control_rvalue(cond2, body, tcx, session, "do-while condition");
             HirStmtKind::DoWhile { body: b, cond: cond2 }
         }
         HirStmtKind::For { init, cond, step, body: b } => {
@@ -348,7 +348,7 @@ fn visit_stmt_with_context(
             }
             let cond2 = cond.map(|c| {
                 let c2 = visit_expr(c, body, tcx, session, def_info);
-                scalar_rvalue(c2, body, tcx)
+                scalar_control_rvalue(c2, body, tcx, session, "for condition")
             });
             let step2 = step.map(|s| visit_expr(s, body, tcx, session, def_info));
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
@@ -356,7 +356,7 @@ fn visit_stmt_with_context(
         }
         HirStmtKind::Switch { cond, body: b, cases } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
-            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let cond2 = scalar_control_rvalue(cond2, body, tcx, session, "switch condition");
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Switch { cond: cond2, body: b, cases }
         }
@@ -635,42 +635,18 @@ pub fn visit_expr(
         }
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
-            let cond2 = scalar_rvalue(cond2, body, tcx);
+            let cond2 =
+                scalar_control_rvalue(cond2, body, tcx, session, "conditional operator condition");
             let then2 = visit_expr(then_expr, body, tcx, session, def_info);
             let else2 = visit_expr(else_expr, body, tcx, session, def_info);
             let then2 = rvalue_decayed(then2, body, tcx);
             let else2 = rvalue_decayed(else2, body, tcx);
-            let then_ty = body.exprs[then2].ty;
-            let else_ty = body.exprs[else2].ty;
-            // Common case: both arithmetic — apply usual arithmetic.
-            let result_ty = if is_arithmetic(tcx, then_ty) && is_arithmetic(tcx, else_ty) {
-                let common = usual_arithmetic(tcx, then_ty, else_ty);
-                // No diagnostics on real-arithmetic narrowing here —
-                // usual_arithmetic is a widening conversion by
-                // construction. Complex ↔ real is dispatched via
-                // `push_arithmetic_convert` so a `?:` whose arms mix a
-                // complex and a real operand wraps the real arm in
-                // `RealToComplex` (no warning); a complex source going
-                // into a real arm cannot arise here because `common` is
-                // complex whenever either arm is.
-                let then2_w = push_arithmetic_convert(body, session, tcx, then2, common);
-                let else2_w = push_arithmetic_convert(body, session, tcx, else2, common);
-                body.exprs[expr_id].kind =
-                    HirExprKind::Cond { cond: cond2, then_expr: then2_w, else_expr: else2_w };
-                common
-            } else if then_ty == else_ty {
-                body.exprs[expr_id].kind =
-                    HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
-                then_ty
-            } else {
-                // Pointer / mixed cases: pick `then`'s type as a
-                // best-effort placeholder. Task 07-11 expands this.
-                body.exprs[expr_id].kind =
-                    HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
-                then_ty
-            };
+            let (result_ty, then2, else2) =
+                unify_conditional_arms(then2, else2, body, tcx, session);
             body.exprs[expr_id].ty = result_ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind =
+                HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
             expr_id
         }
         HirExprKind::Comma { lhs, rhs } => {
@@ -702,6 +678,122 @@ fn rvalue_decayed(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExpr
 /// task 07-11.
 fn scalar_rvalue(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExprId {
     rvalue_decayed(expr, body, tcx)
+}
+
+fn scalar_control_rvalue(
+    expr: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    context: &str,
+) -> HirExprId {
+    let expr = scalar_rvalue(expr, body, tcx);
+    check_scalar_operand(expr, body, tcx, session, context);
+    expr
+}
+
+fn check_scalar_operand(
+    expr: HirExprId,
+    body: &Body,
+    tcx: &TyCtxt,
+    session: &mut Session,
+    context: &str,
+) -> bool {
+    let ty = body.exprs[expr].ty;
+    if ty == tcx.error || is_scalar(tcx, ty) {
+        return true;
+    }
+    session
+        .handler
+        .struct_err(body.exprs[expr].span, format!("{context} must have scalar type"))
+        .code(rcc_errors::codes::E0083)
+        .emit();
+    false
+}
+
+fn is_scalar(tcx: &TyCtxt, ty: TyId) -> bool {
+    is_arithmetic(tcx, ty) || is_pointer(tcx, ty)
+}
+
+fn unify_conditional_arms(
+    then_expr: HirExprId,
+    else_expr: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> (TyId, HirExprId, HirExprId) {
+    let then_ty = body.exprs[then_expr].ty;
+    let else_ty = body.exprs[else_expr].ty;
+
+    if then_ty == tcx.error || else_ty == tcx.error {
+        return (tcx.error, then_expr, else_expr);
+    }
+
+    if is_arithmetic(tcx, then_ty) && is_arithmetic(tcx, else_ty) {
+        let common = usual_arithmetic(tcx, then_ty, else_ty);
+        let then_expr = push_arithmetic_convert(body, session, tcx, then_expr, common);
+        let else_expr = push_arithmetic_convert(body, session, tcx, else_expr, common);
+        return (common, then_expr, else_expr);
+    }
+
+    if is_void(tcx, then_ty) && is_void(tcx, else_ty) {
+        return (tcx.void, then_expr, else_expr);
+    }
+
+    if then_ty == else_ty {
+        return (then_ty, then_expr, else_expr);
+    }
+
+    if is_pointer(tcx, then_ty) && is_null_pointer_constant(body, else_expr) {
+        let else_expr = coerce_to(else_expr, then_ty, body, tcx, session).expr();
+        return (then_ty, then_expr, else_expr);
+    }
+    if is_pointer(tcx, else_ty) && is_null_pointer_constant(body, then_expr) {
+        let then_expr = coerce_to(then_expr, else_ty, body, tcx, session).expr();
+        return (else_ty, then_expr, else_expr);
+    }
+
+    if let Some(common) = conditional_pointer_type(tcx, then_ty, else_ty) {
+        let then_expr = coerce_to(then_expr, common, body, tcx, session).expr();
+        let else_expr = coerce_to(else_expr, common, body, tcx, session).expr();
+        return (common, then_expr, else_expr);
+    }
+
+    invalid_conditional_operands(session, body.exprs[then_expr].span);
+    (tcx.error, then_expr, else_expr)
+}
+
+fn conditional_pointer_type(tcx: &mut TyCtxt, a: TyId, b: TyId) -> Option<TyId> {
+    let qa = pointee_qual(tcx, a)?;
+    let qb = pointee_qual(tcx, b)?;
+    let q = Qual {
+        ty: conditional_pointer_pointee(tcx, qa.ty, qb.ty)?,
+        is_const: qa.is_const || qb.is_const,
+        is_volatile: qa.is_volatile || qb.is_volatile,
+        is_restrict: qa.is_restrict || qb.is_restrict,
+    };
+    Some(tcx.intern(Ty::Ptr(q)))
+}
+
+fn conditional_pointer_pointee(tcx: &TyCtxt, a: TyId, b: TyId) -> Option<TyId> {
+    if is_compatible_type(tcx, a, b) {
+        return Some(a);
+    }
+    if is_void(tcx, a) && is_object_or_incomplete(tcx, b) {
+        return Some(a);
+    }
+    if is_void(tcx, b) && is_object_or_incomplete(tcx, a) {
+        return Some(b);
+    }
+    None
+}
+
+fn invalid_conditional_operands(session: &mut Session, span: rcc_span::Span) {
+    session
+        .handler
+        .struct_err(span, "conditional operator arms have incompatible types")
+        .code(rcc_errors::codes::E0083)
+        .emit();
 }
 
 /// Wrap `expr` in a `Convert { kind: UsualArithmetic }` whose type is
@@ -970,7 +1062,11 @@ fn type_binary(
             }
         }
         // Logical && / ||: scalar operands, result is `int`.
-        BinOp::LogAnd | BinOp::LogOr => (tcx.int, lhs, rhs),
+        BinOp::LogAnd | BinOp::LogOr => {
+            check_scalar_operand(lhs, body, tcx, session, "left operand of logical operator");
+            check_scalar_operand(rhs, body, tcx, session, "right operand of logical operator");
+            (tcx.int, lhs, rhs)
+        }
     };
 
     body.exprs[expr_id].ty = result_ty;

@@ -851,11 +851,11 @@ assigned to any pointer type.
 
 ---
 
-## E0083 — invalid operands to binary operator
+## E0083 — invalid operands to operator or controlling expression
 
-Raised by the type-checker when the operand types of a binary
-operator do not match any rule the operator allows
-(C99 §6.5.5–§6.5.14).
+Raised by the type-checker when operand types do not match any rule
+the operator allows, or when a statement / conditional controlling
+expression is not scalar (C99 §6.5.5–§6.5.15, §6.8.4).
 
 ```c
 struct S { int x; } s1, s2;
@@ -866,6 +866,8 @@ void f(int *p, int i, double d) {
     p % i;            // error[E0083]: % is integer-only
     p && d;           // error[E0083]: logical operands must be scalar
                       //               with a common type
+    if (s1) {}         // error[E0083]: condition must be scalar
+    p ? p : d;         // error[E0083]: conditional arms incompatible
 }
 ```
 

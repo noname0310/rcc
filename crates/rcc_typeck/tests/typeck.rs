@@ -26,7 +26,7 @@ use rcc_errors::codes;
 use rcc_hir::rcc_hir_binop::{BinOp, UnOp};
 use rcc_hir::{
     Body, ConvertKind, Def, DefId, DefKind, FloatKind, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, IntRank, Linkage, Local, Qual, Ty, TyCtxt, TyId, ValueCat,
+    HirStmtId, HirStmtKind, IntRank, Linkage, Local, LocalDecl, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::DUMMY_SP;
@@ -70,6 +70,22 @@ fn push_kind(body: &mut Body, ty: TyId, kind: HirExprKind) -> HirExprId {
     id
 }
 
+fn push_local(body: &mut Body, ty: TyId) -> Local {
+    body.locals.push(LocalDecl {
+        name: None,
+        ty,
+        quals: rcc_hir::ObjectQuals::none(),
+        vla_len: None,
+        is_param: false,
+        span: DUMMY_SP,
+    })
+}
+
+fn push_local_ref(body: &mut Body, ty: TyId) -> HirExprId {
+    let local = push_local(body, ty);
+    push_kind(body, ty, HirExprKind::LocalRef(local))
+}
+
 /// Wrap `expr_id` as the root statement of `body`.
 fn root_stmt(body: &mut Body, expr_id: HirExprId) {
     let stmt_id = body.stmts.push(HirStmt {
@@ -79,6 +95,13 @@ fn root_stmt(body: &mut Body, expr_id: HirExprId) {
     });
     body.stmts[stmt_id].id = stmt_id;
     body.root = Some(stmt_id);
+}
+
+fn push_null_stmt(body: &mut Body) -> HirStmtId {
+    let stmt_id =
+        body.stmts.push(HirStmt { id: HirStmtId(0), span: DUMMY_SP, kind: HirStmtKind::Null });
+    body.stmts[stmt_id].id = stmt_id;
+    stmt_id
 }
 
 fn ptr_to(tcx: &mut TyCtxt, pointee: TyId) -> TyId {
@@ -783,6 +806,106 @@ fn fixture_e0083_shift_with_float_count() {
     root_stmt(&mut body, bin);
     let (mut session, cap) = Session::for_test();
     check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn fixture_e0083_if_condition_rejects_record() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let rec_ty = record(&mut tcx, 0);
+    let cond = push_local_ref(&mut body, rec_ty);
+    let then_branch = push_null_stmt(&mut body);
+    let if_stmt = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::If { cond, then_branch, else_branch: None },
+    });
+    body.stmts[if_stmt].id = if_stmt;
+    body.root = Some(if_stmt);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn fixture_e0083_logical_operator_rejects_record_operand() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let rec_ty = record(&mut tcx, 0);
+    let lhs = push_local_ref(&mut body, rec_ty);
+    let rhs = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Binary { op: BinOp::LogAnd, lhs, rhs });
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn conditional_pointer_null_arm_converts_to_pointer_type() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let int_ptr = ptr_to_int(&mut tcx);
+    let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let then_expr = push_local_ref(&mut body, int_ptr);
+    let else_expr = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Cond { cond, then_expr, else_expr });
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().is_empty());
+    assert_eq!(body.exprs[expr].ty, int_ptr);
+    let HirExprKind::Cond { else_expr, .. } = body.exprs[expr].kind else {
+        panic!("expected conditional expression");
+    };
+    assert!(matches!(
+        body.exprs[else_expr].kind,
+        HirExprKind::Convert { kind: ConvertKind::Pointer, .. }
+    ));
+}
+
+#[test]
+fn conditional_void_arms_yield_void() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let one = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let two = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+    let then_expr =
+        push_kind(&mut body, tcx.void, HirExprKind::Cast { operand: one, to: tcx.void });
+    let else_expr =
+        push_kind(&mut body, tcx.void, HirExprKind::Cast { operand: two, to: tcx.void });
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Cond { cond, then_expr, else_expr });
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().is_empty());
+    assert_eq!(body.exprs[expr].ty, tcx.void);
+}
+
+#[test]
+fn conditional_incompatible_pointer_arms_emit_e0083() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let int_ptr = ptr_to_int(&mut tcx);
+    let float_ptr = ptr_to_float(&mut tcx);
+    let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let then_expr = push_local_ref(&mut body, int_ptr);
+    let else_expr = push_local_ref(&mut body, float_ptr);
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Cond { cond, then_expr, else_expr });
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert_eq!(body.exprs[expr].ty, tcx.error);
     assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
 }
 
