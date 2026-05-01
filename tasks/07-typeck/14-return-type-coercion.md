@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 07-14: Return type coercion and diagnostics
 
 **Phase:** 07-typeck    **Depends on:** 07-13    **Milestone:** M3 pre-codegen stabilization

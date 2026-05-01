@@ -2423,6 +2423,25 @@ fn regression_gate_member_access_non_record_reports_typeck_error() {
 }
 
 #[test]
+fn regression_gate_return_constraints_report_typeck_errors() {
+    for (name, src) in [
+        ("void_value_return", "void f(void) { return 1; }"),
+        ("nonvoid_bare_return", "int f(void) { return; }"),
+        (
+            "incompatible_record_return",
+            "struct A { int x; }; struct B { int x; }; struct A f(struct B b) { return b; }",
+        ),
+    ] {
+        let (_hir, _tcx, cap, _sess) = lower_and_typeck_snippet(src);
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0081)),
+            "{name} should emit E0081, got {:?}",
+            cap.diagnostics()
+        );
+    }
+}
+
+#[test]
 fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
     let (hir, tcx, cap, _sess) = lower_and_typeck_snippet(
         "typedef unsigned long Size; struct S { int x; }; typedef struct S S; S sg; enum E { A = 7 }; enum E eg; Size sz;",

@@ -21,7 +21,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [x] [11-unit-tests-truth-tables](11-unit-tests-truth-tables.md)
 - [x] [12-complex-arithmetic](12-complex-arithmetic.md)
 - [x] [13-member-access-resolution](13-member-access-resolution.md)
-- [ ] [14-return-type-coercion](14-return-type-coercion.md)
+- [x] [14-return-type-coercion](14-return-type-coercion.md)
 - [ ] [15-coerce-to-diagnostics-gate](15-coerce-to-diagnostics-gate.md)
 - [ ] [16-global-initializer-consteval](16-global-initializer-consteval.md)
 - [ ] [17-control-and-conditional-constraints](17-control-and-conditional-constraints.md)

@@ -48,8 +48,13 @@ pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
     // `get_mut` that follows.
     let body_keys: Vec<_> = hir.bodies.keys().copied().collect();
     for def_id in body_keys {
+        let return_ty =
+            def_info.get(&def_id).and_then(|snap| snap.ty).and_then(|ty| match tcx.get(ty) {
+                Ty::Func { ret, .. } => Some(*ret),
+                _ => None,
+            });
         if let Some(body) = hir.bodies.get_mut(&def_id) {
-            check_body_with_defs(body, tcx, session, &def_info);
+            check_body_with_context(body, tcx, session, &def_info, BodyCheckContext { return_ty });
         }
     }
 }
@@ -170,13 +175,28 @@ pub fn check_body_with_defs(
     session: &mut Session,
     def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
 ) {
+    check_body_with_context(body, tcx, session, def_info, BodyCheckContext::default());
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct BodyCheckContext {
+    return_ty: Option<TyId>,
+}
+
+fn check_body_with_context(
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    context: BodyCheckContext,
+) {
     // Walk every statement in the body, visiting whichever expressions
     // each statement points at. The traversal is rooted at `body.root`
     // when present (top-level functions); free-standing test bodies that
     // build an isolated expression set their `root` to `None` and rely
     // on the caller to drive `visit_expr` directly.
     if let Some(root) = body.root {
-        visit_stmt(root, body, tcx, session, def_info);
+        visit_stmt_with_context(root, body, tcx, session, def_info, context);
     }
 }
 
@@ -191,13 +211,24 @@ fn visit_stmt(
     session: &mut Session,
     def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
 ) {
+    visit_stmt_with_context(stmt_id, body, tcx, session, def_info, BodyCheckContext::default());
+}
+
+fn visit_stmt_with_context(
+    stmt_id: HirStmtId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    context: BodyCheckContext,
+) {
     // Clone the kind so we can mutate child ids without holding a borrow
     // on `body.stmts` while we recurse into `body.exprs`.
     let kind = body.stmts[stmt_id].kind.clone();
     let new_kind = match kind {
         HirStmtKind::Block(stmts) => {
             for s in &stmts {
-                visit_stmt(*s, body, tcx, session, def_info);
+                visit_stmt_with_context(*s, body, tcx, session, def_info, context);
             }
             HirStmtKind::Block(stmts)
         }
@@ -211,64 +242,57 @@ fn visit_stmt(
             // and decay arrays/functions so the resulting node is a plain
             // scalar rvalue.
             let cond2 = scalar_rvalue(cond2, body, tcx);
-            visit_stmt(then_branch, body, tcx, session, def_info);
+            visit_stmt_with_context(then_branch, body, tcx, session, def_info, context);
             if let Some(eb) = else_branch {
-                visit_stmt(eb, body, tcx, session, def_info);
+                visit_stmt_with_context(eb, body, tcx, session, def_info, context);
             }
             HirStmtKind::If { cond: cond2, then_branch, else_branch }
         }
         HirStmtKind::While { cond, body: b } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
             let cond2 = scalar_rvalue(cond2, body, tcx);
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::While { cond: cond2, body: b }
         }
         HirStmtKind::DoWhile { body: b, cond } => {
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
             let cond2 = scalar_rvalue(cond2, body, tcx);
             HirStmtKind::DoWhile { body: b, cond: cond2 }
         }
         HirStmtKind::For { init, cond, step, body: b } => {
             if let Some(i) = init {
-                visit_stmt(i, body, tcx, session, def_info);
+                visit_stmt_with_context(i, body, tcx, session, def_info, context);
             }
             let cond2 = cond.map(|c| {
                 let c2 = visit_expr(c, body, tcx, session, def_info);
                 scalar_rvalue(c2, body, tcx)
             });
             let step2 = step.map(|s| visit_expr(s, body, tcx, session, def_info));
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::For { init, cond: cond2, step: step2, body: b }
         }
         HirStmtKind::Switch { cond, body: b, cases } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
             let cond2 = scalar_rvalue(cond2, body, tcx);
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Switch { cond: cond2, body: b, cases }
         }
         HirStmtKind::Label { name, body: b } => {
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Label { name, body: b }
         }
         HirStmtKind::Case { value, body: b } => {
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Case { value, body: b }
         }
         HirStmtKind::Default { body: b } => {
-            visit_stmt(b, body, tcx, session, def_info);
+            visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Default { body: b }
         }
         HirStmtKind::Return(opt_e) => {
-            // The return-value's expected type is the enclosing function's
-            // return type. We don't have that here without threading more
-            // context; for now just type-check the expression and fall
-            // through. Task 07-11 will tighten this with `is_assignable`
-            // against the declared return type.
-            let opt_e2 = opt_e.map(|e| {
-                let e2 = visit_expr(e, body, tcx, session, def_info);
-                rvalue_decayed(e2, body, tcx)
-            });
+            let opt_e2 =
+                type_return(opt_e, body.stmts[stmt_id].span, body, tcx, session, def_info, context);
             HirStmtKind::Return(opt_e2)
         }
         HirStmtKind::LocalDecl { local, init } => {
@@ -797,6 +821,69 @@ fn invalid_operands(session: &mut Session, span: rcc_span::Span, op_spelling: &s
         .struct_err(span, format!("invalid operands to binary `{op_spelling}`"))
         .code(rcc_errors::codes::E0083)
         .emit();
+}
+
+fn type_return(
+    opt_e: Option<HirExprId>,
+    stmt_span: rcc_span::Span,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    context: BodyCheckContext,
+) -> Option<HirExprId> {
+    let Some(return_ty) = context.return_ty else {
+        return opt_e.map(|e| {
+            let e2 = visit_expr(e, body, tcx, session, def_info);
+            rvalue_decayed(e2, body, tcx)
+        });
+    };
+
+    match opt_e {
+        None if is_void(tcx, return_ty) => None,
+        None => {
+            invalid_return(session, stmt_span, "non-void function must return a value");
+            None
+        }
+        Some(expr) => {
+            let expr = visit_expr(expr, body, tcx, session, def_info);
+            let expr = rvalue_decayed(expr, body, tcx);
+            if is_void(tcx, return_ty) {
+                invalid_return(
+                    session,
+                    body.exprs[expr].span,
+                    "void function should not return a value",
+                );
+                return Some(expr);
+            }
+
+            match is_assignable(tcx, body, return_ty, body.exprs[expr].ty, expr) {
+                Ok(()) | Err(AssignError::Narrowing) => {
+                    Some(coerce_to(expr, return_ty, body, tcx, session))
+                }
+                Err(AssignError::QualifierLoss) => {
+                    invalid_return(
+                        session,
+                        body.exprs[expr].span,
+                        "return expression discards pointer qualifiers",
+                    );
+                    Some(expr)
+                }
+                Err(AssignError::Incompatible) => {
+                    invalid_return(
+                        session,
+                        body.exprs[expr].span,
+                        "return expression is not assignable to function return type",
+                    );
+                    Some(expr)
+                }
+            }
+        }
+    }
+}
+
+fn invalid_return(session: &mut Session, span: rcc_span::Span, msg: &str) {
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0081).emit();
 }
 
 #[derive(Copy, Clone)]
@@ -4108,6 +4195,17 @@ mod tests {
         body.root = Some(stmt_id);
     }
 
+    fn set_root_return(body: &mut Body, expr: Option<HirExprId>) -> HirStmtId {
+        let stmt_id = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Return(expr),
+        });
+        body.stmts[stmt_id].id = stmt_id;
+        body.root = Some(stmt_id);
+        stmt_id
+    }
+
     fn push_local(body: &mut Body, name: Option<Symbol>, ty: TyId, is_param: bool) -> Local {
         body.locals.push(rcc_hir::LocalDecl {
             name,
@@ -4289,6 +4387,147 @@ mod tests {
             "expected E0087, got {:?}",
             cap.diagnostics()
         );
+    }
+
+    #[test]
+    fn return_int_to_long_inserts_conversion() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let mut body = Body::default();
+        let x = push_local(&mut body, Some(session.interner.intern("x")), tcx.int, false);
+        let expr = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(x));
+        let ret_stmt = set_root_return(&mut body, Some(expr));
+        let return_ty = tcx.long;
+
+        check_body_with_context(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+            BodyCheckContext { return_ty: Some(return_ty) },
+        );
+
+        let HirStmtKind::Return(Some(ret_expr)) = body.stmts[ret_stmt].kind else {
+            panic!("expected return expression");
+        };
+        assert_eq!(body.exprs[ret_expr].ty, tcx.long);
+        assert!(
+            matches!(body.exprs[ret_expr].kind, HirExprKind::Convert { .. }),
+            "return x should be coerced to long, got {:?}",
+            body.exprs[ret_expr].kind
+        );
+        assert!(!session.handler.has_errors());
+    }
+
+    #[test]
+    fn return_value_from_void_function_emits_e0081() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let mut body = Body::default();
+        let expr = push_kind(&mut body, tcx.error, HirExprKind::IntConst(1));
+        set_root_return(&mut body, Some(expr));
+        let return_ty = tcx.void;
+
+        check_body_with_context(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+            BodyCheckContext { return_ty: Some(return_ty) },
+        );
+
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0081)),
+            "expected E0081, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn return_bare_from_nonvoid_function_emits_e0081() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let mut body = Body::default();
+        set_root_return(&mut body, None);
+        let return_ty = tcx.int;
+
+        check_body_with_context(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+            BodyCheckContext { return_ty: Some(return_ty) },
+        );
+
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0081)),
+            "expected E0081, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn return_incompatible_record_type_emits_e0081() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let record_a = tcx.intern(Ty::Record(DefId(20)));
+        let record_b = tcx.intern(Ty::Record(DefId(21)));
+        let mut body = Body::default();
+        let b = push_local(&mut body, Some(session.interner.intern("b")), record_b, true);
+        let expr = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(b));
+        set_root_return(&mut body, Some(expr));
+
+        check_body_with_context(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+            BodyCheckContext { return_ty: Some(record_a) },
+        );
+
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0081)),
+            "expected E0081, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn return_complex_to_real_preserves_w0012_warning() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let mut body = Body::default();
+        let c = push_local(&mut body, Some(session.interner.intern("c")), tcx.complex_double, true);
+        let expr = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(c));
+        let ret_stmt = set_root_return(&mut body, Some(expr));
+        let return_ty = tcx.double;
+
+        check_body_with_context(
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+            BodyCheckContext { return_ty: Some(return_ty) },
+        );
+
+        let HirStmtKind::Return(Some(ret_expr)) = body.stmts[ret_stmt].kind else {
+            panic!("expected return expression");
+        };
+        assert_eq!(body.exprs[ret_expr].ty, tcx.double);
+        assert!(
+            matches!(
+                body.exprs[ret_expr].kind,
+                HirExprKind::Convert { kind: ConvertKind::ComplexToReal, .. }
+            ),
+            "expected ComplexToReal return conversion, got {:?}",
+            body.exprs[ret_expr].kind
+        );
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::W0012)),
+            "expected W0012, got {:?}",
+            cap.diagnostics()
+        );
+        assert!(!session.handler.has_errors());
     }
 
     /// Acceptance: `1 + 2.0` — IntConst is wrapped in `Convert(IntToFloat, f64)`
