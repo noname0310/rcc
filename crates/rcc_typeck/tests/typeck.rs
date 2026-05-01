@@ -909,6 +909,128 @@ fn conditional_incompatible_pointer_arms_emit_e0083() {
     assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
 }
 
+#[test]
+fn call_prototype_converts_fixed_argument() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: vec![tcx.long], variadic: false, proto: true });
+    let callee = push_local_ref(&mut body, fn_ty);
+    let arg = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![arg] });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().is_empty());
+    let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+        panic!("expected call");
+    };
+    assert_eq!(body.exprs[args[0]].ty, tcx.long);
+    assert!(matches!(
+        body.exprs[args[0]].kind,
+        HirExprKind::Convert { kind: ConvertKind::UsualArithmetic, .. }
+    ));
+}
+
+#[test]
+fn call_prototype_too_many_arguments_emits_e0083() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: vec![tcx.int], variadic: false, proto: true });
+    let callee = push_local_ref(&mut body, fn_ty);
+    let a = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let b = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![a, b] });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn call_prototype_too_few_arguments_emits_e0083() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: vec![tcx.int], variadic: false, proto: true });
+    let callee = push_local_ref(&mut body, fn_ty);
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: Vec::new() });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn call_variadic_trailing_char_is_promoted_to_int() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let char_ptr = ptr_to_char(&mut tcx);
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: vec![char_ptr], variadic: true, proto: true });
+    let callee = push_local_ref(&mut body, fn_ty);
+    let fmt = push_local_ref(&mut body, char_ptr);
+    let ch = push_local_ref(&mut body, tcx.char_);
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![fmt, ch] });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().is_empty());
+    let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+        panic!("expected call");
+    };
+    assert_eq!(body.exprs[args[1]].ty, tcx.int);
+    assert!(matches!(
+        body.exprs[args[1]].kind,
+        HirExprKind::Convert { kind: ConvertKind::IntegerPromotion, .. }
+    ));
+}
+
+#[test]
+fn call_unprototyped_float_promotes_to_double() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: false });
+    let callee = push_local_ref(&mut body, fn_ty);
+    let arg = push_kind(&mut body, tcx.float, HirExprKind::FloatConst(1.0));
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![arg] });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(cap.diagnostics().is_empty());
+    let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+        panic!("expected call");
+    };
+    assert_eq!(body.exprs[args[0]].ty, tcx.double);
+}
+
+#[test]
+fn call_non_function_callee_emits_e0083() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let callee = push_local_ref(&mut body, tcx.int);
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: Vec::new() });
+    root_stmt(&mut body, call);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert_eq!(body.exprs[call].ty, tcx.error);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
 // ─── 9d. E0084 — non-constant in static init ─────────────────────────────
 
 #[test]

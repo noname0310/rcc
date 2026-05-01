@@ -851,11 +851,14 @@ assigned to any pointer type.
 
 ---
 
-## E0083 — invalid operands to operator or controlling expression
+## E0083 — invalid operands, controlling expression, or function call
 
 Raised by the type-checker when operand types do not match any rule
 the operator allows, or when a statement / conditional controlling
-expression is not scalar (C99 §6.5.5–§6.5.15, §6.8.4).
+expression is not scalar. It also covers call-expression constraints:
+the callee must have function or pointer-to-function type, and a
+prototyped call must pass the required number of fixed arguments
+(C99 §6.5.2.2, §6.5.5–§6.5.15, §6.8.4).
 
 ```c
 struct S { int x; } s1, s2;
@@ -868,12 +871,14 @@ void f(int *p, int i, double d) {
                       //               with a common type
     if (s1) {}         // error[E0083]: condition must be scalar
     p ? p : d;         // error[E0083]: conditional arms incompatible
+    i();               // error[E0083]: called expression is not a function
+    printf();          // error[E0083]: too few prototype arguments
 }
 ```
 
-The diagnostic is emitted at the operator's span; the operand
-types are included in the message so the user can see what the
-type-checker inferred for each side.
+The diagnostic is emitted at the operator, controlling expression, or
+call span. Operand types or expected / actual argument counts are
+included when they help explain the failed rule.
 
 ---
 

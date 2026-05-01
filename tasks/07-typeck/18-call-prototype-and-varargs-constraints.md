@@ -1,5 +1,7 @@
 # 07-18: Function call prototype and varargs constraints
 
+> ✓ done — 2026-05-01
+
 **Phase:** 07-typeck    **Depends on:** 07-17    **Milestone:** M6
 
 ## Goal

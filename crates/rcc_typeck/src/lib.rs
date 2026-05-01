@@ -1351,6 +1351,7 @@ fn type_call(
     let (ret, params, variadic, proto) = match pointee.map(|p| tcx.get(p).clone()) {
         Some(Ty::Func { ret, params, variadic, proto }) => (ret, params, variadic, proto),
         _ => {
+            invalid_call(session, body.exprs[callee].span, "called expression is not a function");
             body.exprs[expr_id].ty = tcx.error;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Call { callee, args };
@@ -1359,10 +1360,13 @@ fn type_call(
     };
 
     if proto {
-        // Coerce each prototyped argument to its parameter type. Surplus
-        // args go through default argument promotion (only valid when the
-        // function is variadic; the diagnostic for arity mismatch is
-        // task 07-11's job).
+        check_call_arity(args.len(), params.len(), variadic, body.exprs[expr_id].span, session);
+
+        // Coerce each prototyped argument to its parameter type. Variadic
+        // trailing args go through default argument promotions. Surplus
+        // args on a non-variadic function are already diagnosed above;
+        // still default-promote them so downstream HIR never contains raw
+        // pre-promotion argument types.
         for (i, arg) in args.iter_mut().enumerate() {
             if let Some(param_ty) = params.get(i) {
                 *arg = match coerce_to(*arg, *param_ty, body, tcx, session) {
@@ -1370,7 +1374,7 @@ fn type_call(
                     | CoerceResult::Converted(expr)
                     | CoerceResult::Error(expr) => expr,
                 };
-            } else if variadic {
+            } else {
                 *arg = default_arg_promote(*arg, body, tcx);
             }
         }
@@ -1386,6 +1390,30 @@ fn type_call(
     body.exprs[expr_id].value_cat = ValueCat::RValue;
     body.exprs[expr_id].kind = HirExprKind::Call { callee, args };
     expr_id
+}
+
+fn check_call_arity(
+    actual: usize,
+    expected: usize,
+    variadic: bool,
+    span: rcc_span::Span,
+    session: &mut Session,
+) -> bool {
+    let ok = if variadic { actual >= expected } else { actual == expected };
+    if ok {
+        return true;
+    }
+    let msg = if actual < expected {
+        format!("function call has too few arguments: expected {expected}, got {actual}")
+    } else {
+        format!("function call has too many arguments: expected {expected}, got {actual}")
+    };
+    invalid_call(session, span, msg);
+    false
+}
+
+fn invalid_call(session: &mut Session, span: rcc_span::Span, msg: impl Into<String>) {
+    session.handler.struct_err(span, msg.into()).code(rcc_errors::codes::E0083).emit();
 }
 
 /// Apply default argument promotions to `expr` (C99 §6.5.2.2p6 +

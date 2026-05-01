@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcc_cfg::{
-    build_bodies, pretty::dump_body, verify::verify_body, BasicBlockId, Body, Const, ConstKind,
-    Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
+    build_bodies, pretty::dump_body, verify::verify_body, BasicBlockId, Body, CastKind, Const,
+    ConstKind, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, Local, TyCtxt};
@@ -456,6 +456,35 @@ fn edge_complex_conversions_are_explicit_from_source_pipeline() {
 }
 
 #[test]
+fn call_prototype_argument_conversion_reaches_cfg_operand() {
+    let lowered =
+        lower_snippet("call_proto_arg_conversion", "long f(long); long g(int x) { return f(x); }");
+    let body = &lowered.bodies[0].1;
+    let Some(arg_temp) = first_call_arg_temp(body) else {
+        panic!(
+            "expected prototype call to pass an argument temp:\n{}",
+            dump_body(body, &lowered.tcx)
+        );
+    };
+
+    assert!(
+        body.blocks.iter().any(|block| {
+            block.statements.iter().any(|stmt| match &stmt.kind {
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Cast { to, kind: CastKind::IntToInt, .. },
+                } => {
+                    place.base == arg_temp && place.projection.is_empty() && *to == lowered.tcx.long
+                }
+                _ => false,
+            })
+        }),
+        "prototype argument must be converted to long before the Call terminator:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn sizeof_layout_service_lowers_fixed_sizes() {
     let cases = [("sizeof_int_array", "unsigned long f(void) { int a[3]; return sizeof a; }", 12)];
 
@@ -548,6 +577,18 @@ fn complex_conversion_counts(body: &Body) -> (usize, usize) {
         }
     }
     (to_complex, to_real)
+}
+
+fn first_call_arg_temp(body: &Body) -> Option<Local> {
+    body.blocks.iter().find_map(|block| match &block.terminator.kind {
+        TerminatorKind::Call { args, .. } => match args.first()? {
+            Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => {
+                Some(place.base)
+            }
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 fn body_contains_int_const(body: &Body, expected: i128) -> bool {
