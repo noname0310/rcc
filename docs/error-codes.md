@@ -971,6 +971,25 @@ guess which field was intended.
 
 ---
 
+## E0088 — typed HIR invariant violation
+
+Raised by the typeck-to-CFG boundary verifier when a supposedly clean
+type-checking pass still leaves `Ty::Error`, an unresolved placeholder,
+or an untyped initializer leaf in HIR.
+
+This is an internal compiler invariant diagnostic, not the first error
+users should normally see. It means an earlier phase parsed and lowered
+a construct but failed to either:
+
+- emit the real source-language diagnostic,
+- assign a concrete C99 type, or
+- reject / feature-gate an unsupported extension before CFG/codegen.
+
+The diagnostic points at the HIR node's source span so the missing
+semantic check can be routed back to the responsible phase.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

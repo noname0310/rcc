@@ -17,9 +17,11 @@ use rcc_span::Symbol;
 
 pub mod const_eval;
 pub mod init_const;
+mod verify;
 
 pub use const_eval::{ConstEval, ConstScalar, ConstValue};
 pub use init_const::{check_init_const, is_const_init_expr};
+pub use verify::verify_typed_hir;
 
 /// Width in bits of `int` assumed by the type checker.
 ///

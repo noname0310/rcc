@@ -89,6 +89,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0085, E0085_DESC),
     (E0086, E0086_DESC),
     (E0087, E0087_DESC),
+    (E0088, E0088_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -608,6 +609,18 @@ const E0086_DESC: &str = "invalid switch label";
 /// receives only numeric field indices.
 pub const E0087: &str = "E0087";
 const E0087_DESC: &str = "invalid member access";
+
+/// Typed-HIR invariant violation at the typeck -> CFG/codegen boundary.
+///
+/// This is an internal phase-boundary diagnostic rather than a primary
+/// source-language constraint: if type checking completed without any
+/// user-facing errors, no expression, definition, initializer leaf, or
+/// unresolved placeholder is allowed to carry `Ty::Error` into CFG or
+/// LLVM codegen. Seeing this code means a previous phase accepted a
+/// construct without assigning it a real type or without feature-gating
+/// the unsupported shape.
+pub const E0088: &str = "E0088";
+const E0088_DESC: &str = "typed HIR invariant violation";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

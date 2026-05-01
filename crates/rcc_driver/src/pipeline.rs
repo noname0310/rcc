@@ -10,7 +10,7 @@ use rcc_hir_lower::lower;
 use rcc_lexer::{PpToken, PpTokenKind};
 use rcc_preprocess::preprocess;
 use rcc_session::{EmitKind, Session};
-use rcc_typeck::check;
+use rcc_typeck::{check, verify_typed_hir};
 
 /// Compile a single file end-to-end. Errors are written to the session's
 /// diagnostic handler; this function only returns `Err` for unrecoverable
@@ -74,6 +74,10 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
 
     // 5. Type check.
     check(session, &mut tcx, &mut hir);
+    if session.handler.has_errors() {
+        return Ok(());
+    }
+    verify_typed_hir(session, &tcx, &hir);
     if session.handler.has_errors() {
         return Ok(());
     }

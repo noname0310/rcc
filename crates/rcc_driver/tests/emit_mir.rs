@@ -8,7 +8,7 @@ use rcc_errors::{codes, CaptureEmitter, Handler};
 use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
 use rcc_session::{Options, Session};
-use rcc_typeck::check;
+use rcc_typeck::{check, verify_typed_hir};
 
 fn render(src: &str) -> String {
     let cap = CaptureEmitter::new();
@@ -20,6 +20,7 @@ fn render(src: &str) -> String {
     let mut tcx = TyCtxt::new();
     let mut hir = lower(&ast, &mut tcx, &mut session);
     check(&mut session, &mut tcx, &mut hir);
+    verify_typed_hir(&mut session, &tcx, &hir);
     assert!(!session.handler.has_errors(), "unexpected diagnostics: {:?}", cap.diagnostics());
     let bodies = build_bodies(&mut session, &tcx, &hir);
 
@@ -45,6 +46,7 @@ fn diagnostics_after_mir_build(src: &str) -> CaptureEmitter {
     let mut tcx = TyCtxt::new();
     let mut hir = lower(&ast, &mut tcx, &mut session);
     check(&mut session, &mut tcx, &mut hir);
+    verify_typed_hir(&mut session, &tcx, &hir);
     let _ = build_bodies(&mut session, &tcx, &hir);
     cap
 }

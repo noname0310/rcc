@@ -25,17 +25,18 @@ use rcc_data_structures::IndexVec;
 use rcc_errors::codes;
 use rcc_hir::rcc_hir_binop::{BinOp, UnOp};
 use rcc_hir::{
-    Body, ConvertKind, Def, DefId, DefKind, FloatKind, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, IntRank, Linkage, Local, LocalDecl, Qual, Ty, TyCtxt, TyId, ValueCat,
+    Body, ConvertKind, Def, DefId, DefKind, FloatKind, HirCrate, HirExpr, HirExprId, HirExprKind,
+    HirStmt, HirStmtId, HirStmtKind, IntRank, Linkage, Local, LocalDecl, Qual, Ty, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_session::Session;
-use rcc_span::DUMMY_SP;
+use rcc_span::{Symbol, DUMMY_SP};
 use rcc_typeck::const_eval::{ConstEval, ConstScalar, ConstValue};
 use rcc_typeck::{
     check_assignment_lhs, check_body, check_init_const, decay_if_needed, integer_promotion,
     is_assignable, is_compatible_type, is_const_init_expr, is_null_pointer_constant,
-    lvalue_to_rvalue_if_needed, pointer_convert, usual_arithmetic, value_category, AssignError,
-    ConvertError, DecayContext,
+    lvalue_to_rvalue_if_needed, pointer_convert, usual_arithmetic, value_category,
+    verify_typed_hir, AssignError, ConvertError, DecayContext,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -106,6 +107,28 @@ fn push_null_stmt(body: &mut Body) -> HirStmtId {
 
 fn ptr_to(tcx: &mut TyCtxt, pointee: TyId) -> TyId {
     tcx.intern(Ty::Ptr(Qual::plain(pointee)))
+}
+
+fn hir_with_function_body(tcx: &mut TyCtxt, body: Body) -> HirCrate {
+    let ret = tcx.int;
+    let fn_ty = tcx.intern(Ty::Func { ret, params: Vec::new(), variadic: false, proto: true });
+    let mut hir = HirCrate::default();
+    let def_id = hir.defs.push(Def {
+        id: DefId(0),
+        name: Symbol(0),
+        span: DUMMY_SP,
+        kind: DefKind::Function {
+            ty: fn_ty,
+            has_body: true,
+            is_static: false,
+            is_inline: false,
+            is_extern_inline: false,
+            variadic: false,
+        },
+    });
+    hir.defs[def_id].id = def_id;
+    hir.bodies.insert(def_id, body);
+    hir
 }
 
 fn const_ptr_to(tcx: &mut TyCtxt, pointee: TyId) -> TyId {
@@ -1029,6 +1052,53 @@ fn call_non_function_callee_emits_e0083() {
 
     assert_eq!(body.exprs[call].ty, tcx.error);
     assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0083)));
+}
+
+#[test]
+fn verify_typed_hir_accepts_clean_checked_body() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::IntConst(1));
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    let hir = hir_with_function_body(&mut tcx, body);
+
+    assert!(verify_typed_hir(&mut session, &tcx, &hir));
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn verify_typed_hir_reports_silent_error_type() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::IntConst(1));
+    root_stmt(&mut body, expr);
+    let hir = hir_with_function_body(&mut tcx, body);
+
+    let (mut session, cap) = Session::for_test();
+    assert!(!verify_typed_hir(&mut session, &tcx, &hir));
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0088)));
+}
+
+#[test]
+fn verify_typed_hir_reports_unresolved_field_placeholder() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let rec = record(&mut tcx, 0);
+    let base = push_local_ref(&mut body, rec);
+    let expr = push_kind(
+        &mut body,
+        tcx.int,
+        HirExprKind::UnresolvedField { base, field: Symbol(1), field_span: DUMMY_SP },
+    );
+    root_stmt(&mut body, expr);
+    let hir = hir_with_function_body(&mut tcx, body);
+
+    let (mut session, cap) = Session::for_test();
+    assert!(!verify_typed_hir(&mut session, &tcx, &hir));
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0088)));
 }
 
 // ─── 9d. E0084 — non-constant in static init ─────────────────────────────

@@ -11,7 +11,7 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, Local, TyCtxt};
 use rcc_hir_lower::lower;
 use rcc_session::{Options, Session};
-use rcc_typeck::check;
+use rcc_typeck::{check, verify_typed_hir};
 
 struct Fixture {
     name: &'static str,
@@ -552,6 +552,7 @@ fn lower_snippet(name: &str, src: &str) -> Lowered {
     let mut tcx = TyCtxt::new();
     let mut hir = lower(&ast, &mut tcx, &mut session);
     check(&mut session, &mut tcx, &mut hir);
+    verify_typed_hir(&mut session, &tcx, &hir);
     assert!(
         !session.handler.has_errors(),
         "{name}: unexpected diagnostics: {:?}",

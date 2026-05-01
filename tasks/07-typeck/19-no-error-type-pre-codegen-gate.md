@@ -1,5 +1,7 @@
 # 07-19: No-error-type pre-codegen gate
 
+> ✓ done — 2026-05-01
+
 **Phase:** 07-typeck    **Depends on:** 07-18    **Milestone:** M3/M6 release gate
 
 ## Goal
