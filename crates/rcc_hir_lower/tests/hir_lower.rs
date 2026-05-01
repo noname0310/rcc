@@ -621,9 +621,9 @@ fn composite_struct_two_named_fields() {
         None,
         Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Int])]),
     );
-    let resolver = Resolver::default();
-    let crate_ = HirCrate::default();
-    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
     match kind {
         DefKind::Record { kind: RecordKind::Struct, fields, .. } => {
             assert_eq!(fields.len(), 2);
@@ -646,9 +646,9 @@ fn composite_struct_with_named_bitfield() {
         None,
         Some(vec![bitfield_field(Some(x), vec![TypeSpec::Int], int_lit("3", &mut sess))]),
     );
-    let resolver = Resolver::default();
-    let crate_ = HirCrate::default();
-    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
     match kind {
         DefKind::Record { fields, .. } => {
             assert_eq!(fields.len(), 1);
@@ -671,9 +671,9 @@ fn composite_union_kind_propagates() {
         None,
         Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Long])]),
     );
-    let resolver = Resolver::default();
-    let crate_ = HirCrate::default();
-    let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
     assert!(matches!(kind, DefKind::Record { kind: RecordKind::Union, .. }));
 }
 
@@ -703,9 +703,9 @@ fn composite_anonymous_struct_member_flattens() {
         None,
         Some(vec![inner_field, named_field(c, vec![TypeSpec::Int])]),
     );
-    let resolver = Resolver::default();
-    let crate_ = HirCrate::default();
-    let kind = lower_record(&outer, &mut tcx, &resolver, &crate_, &mut sess);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    let kind = lower_record(&outer, &mut tcx, &mut resolver, &mut crate_, &mut sess);
     match kind {
         DefKind::Record { fields, .. } => {
             let names: Vec<_> = fields.iter().map(|f| f.name).collect();

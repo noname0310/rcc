@@ -53,8 +53,15 @@ fn lower_function_bodies(
             continue;
         };
 
-        let base = lower_declspecs_to_base_ty(&func_def.specs, tcx, session);
-        let fn_ty = apply_declarator(base, &func_def.declarator, DeclScope::File, tcx, session);
+        let fn_ty = lower_type_from_parts(
+            &func_def.specs,
+            &func_def.declarator,
+            DeclScope::File,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        );
         let variadic = match tcx.get(fn_ty) {
             Ty::Func { variadic, .. } => *variadic,
             _ => false,
@@ -68,7 +75,15 @@ fn lower_function_bodies(
         let mut body = Body::default();
         let mut scope = ScopeStack::new();
         scope.push_scope();
-        lower_function_params(&func_def.declarator, &mut body, &mut scope, tcx, session);
+        lower_function_params(
+            &func_def.declarator,
+            &mut body,
+            &mut scope,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        );
 
         resolver.labels.clear();
         resolve_labels(&func_def.body, resolver, session);
@@ -91,6 +106,8 @@ fn lower_function_params(
     body: &mut Body,
     scope: &mut ScopeStack,
     tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
     session: &mut Session,
 ) {
     let Some(func_decl) = declarator.derived.iter().find_map(|d| match d {
@@ -101,9 +118,15 @@ fn lower_function_params(
     };
 
     for param in &func_decl.params {
-        let param_base = lower_declspecs_to_base_ty(&param.specs, tcx, session);
-        let raw_ty =
-            apply_declarator(param_base, &param.declarator, DeclScope::Param, tcx, session);
+        let raw_ty = lower_type_from_parts(
+            &param.specs,
+            &param.declarator,
+            DeclScope::Param,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        );
         let ty = adjust_param_type(raw_ty, tcx);
         let name = param.declarator.name.map(|(sym, _)| sym);
         let local = body.locals.push(LocalDecl {
@@ -707,7 +730,6 @@ fn lower_block_decl(
     out: &mut Vec<HirStmtId>,
 ) {
     let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
-    let base = lower_block_specs_to_base_ty(&decl.specs, tcx, resolver, _crate, session);
 
     for init_decl in &decl.inits {
         let Some((name, _name_span)) = init_decl.declarator.name else {
@@ -724,7 +746,15 @@ fn lower_block_decl(
             continue;
         }
 
-        let ty = apply_declarator(base, &init_decl.declarator, DeclScope::Block, tcx, session);
+        let ty = lower_type_from_parts(
+            &decl.specs,
+            &init_decl.declarator,
+            DeclScope::Block,
+            tcx,
+            resolver,
+            _crate,
+            session,
+        );
         let vla_len = lower_top_level_vla_len(
             &init_decl.declarator,
             ty,
@@ -1299,37 +1329,6 @@ fn lower_for_init_decl(
     }
 }
 
-/// Lower block-scope declaration specifiers to a base `TyId`.
-///
-/// A thin wrapper around the parameter-scope lowering that additionally
-/// expands `typedef` names and handles record / enum tag references by
-/// interning a `Ty::Record` / `Ty::Enum` that points at the resolved
-/// `DefId`. This is sufficient for statement-lowering tests that only
-/// ever ask for plain-int shaped declarations.
-fn lower_block_specs_to_base_ty(
-    specs: &rcc_ast::DeclSpecs,
-    tcx: &mut TyCtxt,
-    resolver: &Resolver,
-    crate_: &HirCrate,
-    session: &mut Session,
-) -> TyId {
-    for ts in &specs.type_specs {
-        if let TypeSpec::TypedefName(sym) = ts {
-            let mut expanding = FxHashSet::default();
-            return lower_typedef_name(
-                *sym,
-                specs.span,
-                &mut expanding,
-                resolver,
-                crate_,
-                tcx,
-                session,
-            );
-        }
-    }
-    lower_declspecs_to_base_ty(specs, tcx, session)
-}
-
 /// Lower an AST expression into an `HirExprId` in `body.exprs`.
 ///
 /// Task 06-10: maps every [`rcc_ast::ExprKind`] variant to a
@@ -1890,6 +1889,159 @@ pub fn lower_typedef_name(
     }
 }
 
+/// Lower declaration specifiers plus a declarator into a complete HIR type.
+///
+/// This is the canonical type-construction entry point for HIR lowering.
+/// It first resolves the declaration-specifier base type (builtin scalar,
+/// typedef, record, enum, or complex type), then folds the declarator chain
+/// over that base. Every source declaration path should route through this
+/// helper instead of open-coding specifier resolution.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_type_from_parts(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &Declarator,
+    scope: DeclScope,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    let base = lower_specs_to_base_ty(specs, tcx, resolver, crate_, session);
+    if base == tcx.error {
+        return tcx.error;
+    }
+    apply_declarator_with_context(base, declarator, scope, tcx, resolver, crate_, session)
+}
+
+/// Lower an AST `type-name` (used by casts, `sizeof(type)`, and compound
+/// literals) into a `TyId`.
+///
+/// Expression lowering still wires the result into dedicated HIR shapes in
+/// later tasks; this helper exists now so every type-name lowering path uses
+/// the same service as declarations.
+#[allow(clippy::too_many_arguments)]
+pub fn lower_type_name(
+    ty: &rcc_ast::TypeName,
+    scope: DeclScope,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    lower_type_from_parts(&ty.specs, &ty.declarator, scope, tcx, resolver, crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_specs_to_base_ty(
+    specs: &rcc_ast::DeclSpecs,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    for ts in &specs.type_specs {
+        match ts {
+            TypeSpec::TypedefName(sym) => {
+                let mut expanding = FxHashSet::default();
+                return lower_typedef_name(
+                    *sym,
+                    specs.span,
+                    &mut expanding,
+                    resolver,
+                    crate_,
+                    tcx,
+                    session,
+                );
+            }
+            TypeSpec::Record(spec) => {
+                return lower_record_spec_to_ty(spec, tcx, resolver, crate_, session);
+            }
+            TypeSpec::Enum(spec) => {
+                return lower_enum_spec_to_ty(spec, tcx, resolver, crate_, session);
+            }
+            _ => {}
+        }
+    }
+
+    lower_builtin_specs_to_base_ty(specs, tcx, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_record_spec_to_ty(
+    spec: &RecordSpec,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    let expected = match spec.kind {
+        rcc_ast::RecordKind::Struct => TagKind::Struct,
+        rcc_ast::RecordKind::Union => TagKind::Union,
+    };
+    let hir_kind = match spec.kind {
+        rcc_ast::RecordKind::Struct => RecordKind::Struct,
+        rcc_ast::RecordKind::Union => RecordKind::Union,
+    };
+
+    let def_id = if let Some(tag) = spec.tag {
+        let Some(id) = resolve_tag(tag, spec.span, expected, crate_, tcx, resolver, session) else {
+            return tcx.error;
+        };
+        id
+    } else {
+        let name = session.interner.intern("<anonymous record>");
+        let id = crate_.defs.push(Def {
+            id: DefId(0),
+            name,
+            span: spec.span,
+            kind: DefKind::Record { kind: hir_kind, layout: None, fields: Vec::new() },
+        });
+        crate_.defs[id].id = id;
+        id
+    };
+
+    if spec.fields.is_some() {
+        let lowered = lower_record(spec, tcx, resolver, crate_, session);
+        crate_.defs[def_id].kind = lowered;
+    }
+
+    tcx.intern(Ty::Record(def_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_enum_spec_to_ty(
+    spec: &EnumSpec,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    let def_id = if let Some(tag) = spec.tag {
+        let Some(id) = resolve_tag(tag, spec.span, TagKind::Enum, crate_, tcx, resolver, session)
+        else {
+            return tcx.error;
+        };
+        id
+    } else {
+        let name = session.interner.intern("<anonymous enum>");
+        let id = crate_.defs.push(Def {
+            id: DefId(0),
+            name,
+            span: spec.span,
+            kind: DefKind::Enum { repr: tcx.int, variants: Vec::new() },
+        });
+        crate_.defs[id].id = id;
+        id
+    };
+
+    if spec.enumerators.is_some() {
+        let lowered = lower_enum(spec, tcx, resolver, crate_, session);
+        crate_.defs[def_id].kind = lowered;
+    }
+
+    tcx.intern(Ty::Enum(def_id))
+}
+
 /// Whether the declaration occurs at file scope, function (block) scope,
 /// or as a function parameter.
 ///
@@ -1949,6 +2101,21 @@ pub fn apply_declarator(
     d: &Declarator,
     scope: DeclScope,
     tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+    apply_declarator_with_context(base, d, scope, tcx, &mut resolver, &mut crate_, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_declarator_with_context(
+    base: TyId,
+    d: &Declarator,
+    scope: DeclScope,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
     let mut ty = base;
@@ -2032,12 +2199,13 @@ pub fn apply_declarator(
                 // Lower parameter types.
                 let mut param_tys = Vec::new();
                 for param in &func_decl.params {
-                    let param_base = lower_declspecs_to_base_ty(&param.specs, tcx, session);
-                    let param_ty = apply_declarator(
-                        param_base,
+                    let param_ty = lower_type_from_parts(
+                        &param.specs,
                         &param.declarator,
                         DeclScope::Param,
                         tcx,
+                        resolver,
+                        crate_,
                         session,
                     );
                     // C99 §6.7.5.3p7: array parameter types are
@@ -2093,17 +2261,15 @@ fn adjust_param_type(ty: TyId, tcx: &mut TyCtxt) -> TyId {
     }
 }
 
-/// Minimal DeclSpecs-to-base-type lowering for parameter declarations.
+/// Lower builtin scalar declaration specifiers to a base type.
 ///
-/// This is a simplified version that handles the common cases needed by
-/// `apply_declarator` when lowering function parameter types. A full
-/// implementation lives in a later task; here we cover the basics:
-/// `void`, `int`, `char`, `short`, `long`, `long long`, `float`,
-/// `double`, `signed`/`unsigned` variants, and `_Bool`.
-fn lower_declspecs_to_base_ty(
+/// Typedef names, records, and enums are handled before this helper by
+/// [`lower_specs_to_base_ty`]. This function must therefore never silently
+/// swallow non-builtin specifiers and turn them into `int`.
+fn lower_builtin_specs_to_base_ty(
     specs: &rcc_ast::DeclSpecs,
     tcx: &mut TyCtxt,
-    _session: &mut Session,
+    session: &mut Session,
 ) -> TyId {
     // Classify the type specifiers.
     let mut has_void = false;
@@ -2116,24 +2282,82 @@ fn lower_declspecs_to_base_ty(
     let mut has_signed = false;
     let mut has_unsigned = false;
     let mut has_bool = false;
+    let mut has_complex = false;
+    let mut saw_builtin = false;
+    let mut saw_unsupported = false;
 
     for ts in &specs.type_specs {
         match ts {
-            TypeSpec::Void => has_void = true,
-            TypeSpec::Char => has_char = true,
-            TypeSpec::Short => has_short = true,
-            TypeSpec::Int => has_int = true,
-            TypeSpec::Long => long_count += 1,
-            TypeSpec::Float => has_float = true,
-            TypeSpec::Double => has_double = true,
-            TypeSpec::Signed => has_signed = true,
-            TypeSpec::Unsigned => has_unsigned = true,
-            TypeSpec::Bool => has_bool = true,
-            _ => {
-                // TypedefName, Record, Enum, Complex, Imaginary
-                // are handled by later tasks.
+            TypeSpec::Void => {
+                has_void = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Char => {
+                has_char = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Short => {
+                has_short = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Int => {
+                has_int = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Long => {
+                long_count += 1;
+                saw_builtin = true;
+            }
+            TypeSpec::Float => {
+                has_float = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Double => {
+                has_double = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Signed => {
+                has_signed = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Unsigned => {
+                has_unsigned = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Bool => {
+                has_bool = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Complex => {
+                has_complex = true;
+                saw_builtin = true;
+            }
+            TypeSpec::Imaginary => {
+                saw_unsupported = true;
+            }
+            TypeSpec::TypedefName(_) | TypeSpec::Record(_) | TypeSpec::Enum(_) => {
+                saw_unsupported = true;
             }
         }
+    }
+
+    if saw_unsupported {
+        session
+            .handler
+            .struct_err(specs.span, "unsupported type specifier in HIR lowering".to_string())
+            .code(rcc_errors::codes::E0061)
+            .emit();
+        return tcx.error;
+    }
+
+    if has_complex {
+        if has_float {
+            return tcx.complex_float;
+        }
+        if has_double && long_count >= 1 {
+            return tcx.complex_long_double;
+        }
+        return tcx.complex_double;
     }
 
     if has_void {
@@ -2172,8 +2396,14 @@ fn lower_declspecs_to_base_ty(
         return tcx.int;
     }
 
-    // Fallback for unrecognised combos — tcx.int is a safe default.
-    tcx.int
+    if saw_builtin {
+        session
+            .handler
+            .struct_err(specs.span, "invalid builtin type specifier combination".to_string())
+            .code(rcc_errors::codes::E0061)
+            .emit();
+    }
+    tcx.error
 }
 
 /// Stub constant-expression evaluator for array sizes.
@@ -2377,8 +2607,8 @@ pub fn lower_enum(
 ///
 /// Field lowering:
 /// - Shared `DeclSpecs` are lowered once per `FieldDecl` group to a
-///   base `TyId` via [`lower_declspecs_to_base_ty`] (plus typedef
-///   expansion).
+///   base `TyId` via [`lower_specs_to_base_ty`] (including typedef,
+///   record, and enum references).
 /// - Each `FieldDeclarator` is folded over the base with
 ///   [`apply_declarator`] in `DeclScope::Block` (fields require
 ///   complete types — no incomplete arrays like `int x[];`).
@@ -2399,8 +2629,8 @@ pub fn lower_enum(
 pub fn lower_record(
     spec: &RecordSpec,
     tcx: &mut TyCtxt,
-    resolver: &Resolver,
-    crate_: &HirCrate,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
     session: &mut Session,
 ) -> DefKind {
     let kind = match spec.kind {
@@ -2418,7 +2648,7 @@ pub fn lower_record(
 
     for fd in field_decls {
         // Lower shared specifiers once per field-decl group.
-        let base = lower_field_specs_to_base_ty(&fd.specs, tcx, resolver, crate_, session);
+        let base = lower_specs_to_base_ty(&fd.specs, tcx, resolver, crate_, session);
 
         for fdd in &fd.declarators {
             match (&fdd.declarator, &fdd.bit_width) {
@@ -2456,7 +2686,15 @@ pub fn lower_record(
                 }
                 // ── Named field (with or without bit-width). ────────
                 (Some(decl), bw) => {
-                    let ty = apply_declarator(base, decl, DeclScope::Block, tcx, session);
+                    let ty = apply_declarator_with_context(
+                        base,
+                        decl,
+                        DeclScope::Block,
+                        tcx,
+                        resolver,
+                        crate_,
+                        session,
+                    );
                     let name = decl.name.map(|(n, _)| n);
                     let bit_width = if let Some(width_expr) = bw {
                         let (ok, bw_val) = validate_bit_width(
@@ -2494,49 +2732,6 @@ fn find_anon_record_in_specs(specs: &rcc_ast::DeclSpecs) -> Option<&RecordSpec> 
         }
     }
     None
-}
-
-/// Lower a field's `DeclSpecs` to a base `TyId`.
-///
-/// Mirrors [`lower_declspecs_to_base_ty`] but additionally resolves
-/// `TypedefName` references (so `typedef int T; struct S { T x; };`
-/// ends up with `x: int`) and recognises inline anonymous record
-/// specs (returning `tcx.error` for those — they're handled at the
-/// declarator level by flattening).
-fn lower_field_specs_to_base_ty(
-    specs: &rcc_ast::DeclSpecs,
-    tcx: &mut TyCtxt,
-    resolver: &Resolver,
-    crate_: &HirCrate,
-    session: &mut Session,
-) -> TyId {
-    for ts in &specs.type_specs {
-        match ts {
-            TypeSpec::TypedefName(sym) => {
-                let mut expanding = FxHashSet::default();
-                return lower_typedef_name(
-                    *sym,
-                    specs.span,
-                    &mut expanding,
-                    resolver,
-                    crate_,
-                    tcx,
-                    session,
-                );
-            }
-            TypeSpec::Record(_) | TypeSpec::Enum(_) => {
-                // Anonymous inline records are flattened at the
-                // field-declarator layer; named record/enum tag
-                // references would need full lookup wiring which a
-                // later task handles. Return `error` for these cases;
-                // the declarator-layer flattening logic will override
-                // for the anonymous case.
-                return tcx.error;
-            }
-            _ => {}
-        }
-    }
-    lower_declspecs_to_base_ty(specs, tcx, session)
 }
 
 /// Validate a bit-field width expression against the field type.
@@ -3931,6 +4126,170 @@ mod tests {
         }
     }
 
+    // ── Central type-spec service (task 06-14) tests ───────────────────
+
+    #[test]
+    fn type_service_typedef_name_lowers_to_alias() {
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let t = sym(&mut sess, "T");
+        let x = sym(&mut sess, "x");
+        register_typedef(t, tcx.long, &mut crate_, &mut resolver);
+
+        let specs =
+            DeclSpecs { type_specs: vec![TypeSpec::TypedefName(t)], ..DeclSpecs::default() };
+        let d = make_declarator(x, Vec::new());
+        let ty = lower_type_from_parts(
+            &specs,
+            &d,
+            DeclScope::Block,
+            &mut tcx,
+            &mut resolver,
+            &mut crate_,
+            &mut sess,
+        );
+
+        assert_eq!(ty, tcx.long);
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn type_service_record_spec_returns_record_ty() {
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let s = sym(&mut sess, "S");
+        let a = sym(&mut sess, "a");
+        let obj = sym(&mut sess, "obj");
+        let rec = record_spec(
+            rcc_ast::RecordKind::Struct,
+            Some(s),
+            Some(vec![named_field(a, vec![TypeSpec::Int])]),
+        );
+        let specs = DeclSpecs { type_specs: vec![TypeSpec::Record(rec)], ..DeclSpecs::default() };
+        let d = make_declarator(obj, Vec::new());
+
+        let ty = lower_type_from_parts(
+            &specs,
+            &d,
+            DeclScope::Block,
+            &mut tcx,
+            &mut resolver,
+            &mut crate_,
+            &mut sess,
+        );
+
+        let Ty::Record(def_id) = *tcx.get(ty) else {
+            panic!("expected record type, got {:?}", tcx.get(ty));
+        };
+        match &crate_.defs[def_id].kind {
+            DefKind::Record { kind: RecordKind::Struct, fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, Some(a));
+                assert_eq!(fields[0].ty, tcx.int);
+            }
+            other => panic!("expected record def, got {other:?}"),
+        }
+        assert_eq!(resolver.tags.get(&s).copied(), Some(def_id));
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn type_service_enum_spec_returns_enum_ty() {
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let e = sym(&mut sess, "E");
+        let a = sym(&mut sess, "A");
+        let obj = sym(&mut sess, "obj");
+        let en = enum_spec(Some(e), Some(vec![(a, None)]));
+        let specs = DeclSpecs { type_specs: vec![TypeSpec::Enum(en)], ..DeclSpecs::default() };
+        let d = make_declarator(obj, Vec::new());
+
+        let ty = lower_type_from_parts(
+            &specs,
+            &d,
+            DeclScope::Block,
+            &mut tcx,
+            &mut resolver,
+            &mut crate_,
+            &mut sess,
+        );
+
+        let Ty::Enum(def_id) = *tcx.get(ty) else {
+            panic!("expected enum type, got {:?}", tcx.get(ty));
+        };
+        match &crate_.defs[def_id].kind {
+            DefKind::Enum { repr, variants } => {
+                assert_eq!(*repr, tcx.int);
+                assert_eq!(variants.len(), 1);
+                assert_eq!(variants[0].name, a);
+            }
+            other => panic!("expected enum def, got {other:?}"),
+        }
+        assert_eq!(resolver.tags.get(&e).copied(), Some(def_id));
+        assert!(resolver.ordinary.contains_key(&a), "enumerator must enter ordinary namespace");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn type_service_unsigned_long_pointer_still_lowers() {
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let p = sym(&mut sess, "p");
+        let specs = DeclSpecs {
+            type_specs: vec![TypeSpec::Unsigned, TypeSpec::Long],
+            ..DeclSpecs::default()
+        };
+        let d = make_declarator(p, vec![ptr()]);
+
+        let ty = lower_type_from_parts(
+            &specs,
+            &d,
+            DeclScope::Block,
+            &mut tcx,
+            &mut resolver,
+            &mut crate_,
+            &mut sess,
+        );
+
+        let expected = tcx.intern(Ty::Ptr(Qual::plain(tcx.ulong)));
+        assert_eq!(ty, expected);
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn type_service_imaginary_is_error_not_int() {
+        let (mut sess, cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let x = sym(&mut sess, "x");
+        let specs = DeclSpecs { type_specs: vec![TypeSpec::Imaginary], ..DeclSpecs::default() };
+        let d = make_declarator(x, Vec::new());
+
+        let ty = lower_type_from_parts(
+            &specs,
+            &d,
+            DeclScope::Block,
+            &mut tcx,
+            &mut resolver,
+            &mut crate_,
+            &mut sess,
+        );
+
+        assert_eq!(ty, tcx.error);
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(rcc_errors::codes::E0061));
+    }
+
     #[test]
     fn declarator_simple_int() {
         // `int x;` — base int, no derivations → int
@@ -4277,10 +4636,10 @@ mod tests {
             None,
             Some(vec![named_field(a, vec![TypeSpec::Int]), named_field(b, vec![TypeSpec::Int])]),
         );
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { kind: RecordKind::Struct, fields, .. } => {
                 assert_eq!(fields.len(), 2);
@@ -4307,10 +4666,10 @@ mod tests {
             vec![(Some(a), Vec::new(), None), (Some(b), Vec::new(), None)],
         );
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { fields, .. } => {
                 assert_eq!(fields.len(), 2);
@@ -4334,10 +4693,10 @@ mod tests {
             None,
             Some(vec![named_field(a, vec![TypeSpec::Int])]),
         );
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { kind: RecordKind::Union, .. } => {}
             other => panic!("expected Union, got {other:?}"),
@@ -4356,10 +4715,10 @@ mod tests {
         let named = named_field(a, vec![TypeSpec::Int]);
 
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![sep, named]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         let diags = cap.diagnostics();
         assert!(diags.is_empty(), "zero-width anonymous bit-field should be accepted: {diags:?}");
         match kind {
@@ -4384,10 +4743,10 @@ mod tests {
         let neg = neg_lit("1", &mut sess);
         let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(neg))]);
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
 
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);
@@ -4413,10 +4772,10 @@ mod tests {
         let big = int_lit("64", &mut sess);
         let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(big))]);
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let _ = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let _ = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
 
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);
@@ -4434,10 +4793,10 @@ mod tests {
         let zero = int_lit("0", &mut sess);
         let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(zero))]);
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let _ = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let _ = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
 
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);
@@ -4455,10 +4814,10 @@ mod tests {
         let width = int_lit("32", &mut sess);
         let fd = field_decl(vec![TypeSpec::Int], vec![(Some(x), Vec::new(), Some(width))]);
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         assert!(cap.diagnostics().is_empty());
         match kind {
             DefKind::Record { fields, .. } => {
@@ -4494,10 +4853,10 @@ mod tests {
             None,
             Some(vec![named_field(a, vec![TypeSpec::Int]), anon_member]),
         );
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&outer_spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&outer_spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         assert!(cap.diagnostics().is_empty(), "anon flattening should not error");
 
         match kind {
@@ -4536,10 +4895,10 @@ mod tests {
             None,
             Some(vec![named_field(a, vec![TypeSpec::Int]), anon_member]),
         );
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&outer_spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&outer_spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { fields, .. } => {
                 let names: Vec<_> = fields.iter().filter_map(|f| f.name).collect();
@@ -4560,10 +4919,10 @@ mod tests {
         let mut tcx = TyCtxt::new();
         let s = sym(&mut sess, "S");
         let spec = record_spec(rcc_ast::RecordKind::Struct, Some(s), None);
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { fields, .. } => assert!(fields.is_empty()),
             other => panic!("expected Record, got {other:?}"),
@@ -4579,10 +4938,10 @@ mod tests {
 
         let fd = field_decl(vec![TypeSpec::Int], vec![(Some(p), vec![ptr()], None)]);
         let spec = record_spec(rcc_ast::RecordKind::Struct, None, Some(vec![fd]));
-        let resolver = Resolver::default();
-        let crate_ = HirCrate::default();
+        let mut resolver = Resolver::default();
+        let mut crate_ = HirCrate::default();
 
-        let kind = lower_record(&spec, &mut tcx, &resolver, &crate_, &mut sess);
+        let kind = lower_record(&spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
         match kind {
             DefKind::Record { fields, .. } => {

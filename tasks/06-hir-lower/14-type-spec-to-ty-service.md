@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-01
+
 # 06-14: central `DeclSpecs` / `TypeName` to `TyId` service
 
 **Phase:** 06-hir-lower    **Depends on:** 06-13    **Milestone:** M5 stabilization
@@ -40,4 +42,3 @@ declarator into a complete HIR `TyId`.
 - `crates/rcc_hir_lower/src/lib.rs`:
   `lower_declspecs_to_base_ty`, `lower_block_specs_to_base_ty`,
   `lower_field_specs_to_base_ty`, `apply_declarator`.
-
