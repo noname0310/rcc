@@ -2319,6 +2319,30 @@ fn intern_string_literal(
     let array_ty =
         tcx.intern(Ty::Array { elem: Qual::plain(char_ty), len: Some(len as u64), is_vla: false });
 
+    // Build byte-level GlobalInit entries from the already-decoded
+    // `lit.bytes` (parser phase-7 output).  This avoids re-parsing
+    // source spelling in codegen, which would break adjacent string
+    // concatenation (`"a" "b"` → single `ab` payload).
+    let mut entries = Vec::with_capacity(len);
+    for (i, &b) in lit.bytes.iter().enumerate() {
+        entries.push(GlobalInitEntry {
+            path: vec![GlobalInitDesignator::Index(i as u64)],
+            ty: char_ty,
+            expr: None,
+            value: GlobalInitValue::Int(i128::from(b)),
+            span,
+        });
+    }
+    // Trailing NUL.
+    entries.push(GlobalInitEntry {
+        path: vec![GlobalInitDesignator::Index(lit.bytes.len() as u64)],
+        ty: char_ty,
+        expr: None,
+        value: GlobalInitValue::Int(0),
+        span,
+    });
+    let init = GlobalInit { ty: array_ty, entries };
+
     // Create a synthetic anonymous global for this literal. The
     // name is the interned string itself so diagnostics can surface
     // something sensible; codegen emits it as an internal-linkage
@@ -2331,7 +2355,7 @@ fn intern_string_literal(
             ty: array_ty,
             quals: ObjectQuals::none(),
             linkage: Linkage::Internal,
-            init: None,
+            init: Some(init),
         },
     });
     crate_.defs[def_id].id = def_id;

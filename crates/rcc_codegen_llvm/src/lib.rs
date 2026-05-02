@@ -14,6 +14,8 @@ use rcc_cfg::Body;
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::IndexVec;
 use rcc_hir::{Def, DefId, DefKind, FloatKind, HirCrate, Layout, LayoutError, Ty, TyCtxt, TyId};
+#[cfg(feature = "llvm")]
+use rcc_hir::{GlobalInit, GlobalInitDesignator, GlobalInitEntry, GlobalInitValue};
 use rcc_session::Session;
 
 pub mod layout;
@@ -1819,6 +1821,550 @@ pub mod backend {
         CodegenError::TypeLowering { ty, reason: reason.into() }
     }
 
+    // ---------------------------------------------------------------
+    // 09-11: Global initializer materialization
+    // ---------------------------------------------------------------
+
+    /// Helper for lowering HIR `GlobalInit` values into LLVM constants and
+    /// interning string literals into module-private globals.
+    /// Build an LLVM array constant whose elements are arbitrary
+    /// Build an LLVM array constant whose elements are arbitrary
+    /// `BasicValueEnum`s.  `ArrayType::const_array` in inkwell 0.6 only
+    /// accepts `&[ArrayValue]`; this helper uses the generic
+    /// `ArrayValue::new_const_array` which accepts any `AsValueRef`.
+    #[allow(unsafe_code)]
+    fn const_array<'ctx>(
+        ty: inkwell::types::ArrayType<'ctx>,
+        values: &[BasicValueEnum<'ctx>],
+    ) -> inkwell::values::ArrayValue<'ctx> {
+        unsafe { inkwell::values::ArrayValue::new_const_array(&ty, values) }
+    }
+
+    /// Constant `inbounds GEP` on a pointer by an i8 offset.
+    #[allow(unsafe_code)]
+    fn const_ptr_offset<'ctx>(
+        ptr: PointerValue<'ctx>,
+        elem_ty: inkwell::types::IntType<'ctx>,
+        offset: inkwell::values::IntValue<'ctx>,
+    ) -> PointerValue<'ctx> {
+        unsafe { ptr.const_in_bounds_gep(elem_ty, &[offset]) }
+    }
+
+    /// Shared state for lowering HIR global initializers into LLVM constants.
+    pub struct GlobalCx<'a, 'ctx> {
+        context: &'ctx Context,
+        tcx: &'a TyCtxt,
+        hir: &'a HirCrate,
+        type_cx: TypeCx<'a, 'ctx>,
+        globals: FxHashMap<DefId, GlobalValue<'ctx>>,
+        functions: FxHashMap<DefId, FunctionValue<'ctx>>,
+        string_literals: FxHashMap<DefId, GlobalValue<'ctx>>,
+    }
+
+    impl<'a, 'ctx> GlobalCx<'a, 'ctx> {
+        /// Build a global-materialization helper sharing the codegen context.
+        pub fn new(cx: &'a CodegenCx<'a, 'ctx>) -> Self {
+            Self {
+                context: cx.context(),
+                tcx: cx.tcx(),
+                hir: cx.hir(),
+                type_cx: cx.type_cx(),
+                globals: cx.global_decls().clone(),
+                functions: cx.function_decls().clone(),
+                string_literals: FxHashMap::default(),
+            }
+        }
+
+        /// Lower every `GlobalInit` attached to file-scope objects into LLVM
+        /// constants and attach them as initializers to the declared globals.
+        pub fn materialize_all_globals(&mut self) -> Result<(), CodegenError> {
+            for (def, def_data) in self.hir.defs.iter_enumerated() {
+                if let DefKind::Global { init: Some(ref global_init), .. } = def_data.kind {
+                    self.materialize_global_init(def, global_init)?;
+                }
+            }
+            Ok(())
+        }
+
+        /// Lower one HIR `GlobalInit` into an LLVM constant and attach it to
+        /// the previously-declared global for `def`.
+        pub fn materialize_global_init(
+            &mut self,
+            def: DefId,
+            init: &GlobalInit,
+        ) -> Result<(), CodegenError> {
+            for entry in &init.entries {
+                if matches!(entry.value, GlobalInitValue::Error) {
+                    return Err(CodegenError::Internal(format!(
+                        "global initializer for {:?} contains an error leaf",
+                        def
+                    )));
+                }
+            }
+
+            let global = self.globals.get(&def).copied().ok_or_else(|| {
+                CodegenError::Internal(format!("global {:?} was not declared", def))
+            })?;
+
+            let init_value = self.build_const_value(init.ty, &init.entries)?;
+            global.set_initializer(&init_value);
+
+            Ok(())
+        }
+
+        /// Recursively build an LLVM constant from a (possibly empty) list of
+        /// flattened `GlobalInitEntry` leaves.
+        ///
+        /// * If `entries` is empty the result is a zero initializer.
+        /// * If `entries` has a single leaf with an empty path the result is a
+        ///   scalar constant.
+        /// * Otherwise the type must be an array or record and the entries are
+        ///   dispatched by their first designator component.
+        fn build_const_value(
+            &mut self,
+            ty: TyId,
+            entries: &[GlobalInitEntry],
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            if entries.is_empty() {
+                return Ok(self.type_cx.basic_type_of(ty)?.const_zero());
+            }
+
+            if entries.len() == 1 && entries[0].path.is_empty() {
+                return self.global_init_value_to_llvm(&entries[0].value, ty);
+            }
+
+            match self.tcx.get(ty) {
+                Ty::Array { elem, len: Some(len), is_vla: false } => {
+                    self.build_array_const(elem.ty, *len, entries)
+                }
+                Ty::Record(def_id) => self.build_record_const(ty, *def_id, entries),
+                other => Err(CodegenError::Internal(format!(
+                    "expected aggregate type for nested global initializer, got {:?}",
+                    other
+                ))),
+            }
+        }
+
+        fn build_array_const(
+            &mut self,
+            elem_ty: TyId,
+            len: u64,
+            entries: &[GlobalInitEntry],
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let llvm_elem_ty = self.type_cx.basic_type_of(elem_ty)?;
+            let u32_len = u32::try_from(len)
+                .map_err(|_| CodegenError::Internal("array length exceeds u32".to_owned()))?;
+            let mut elements = Vec::with_capacity(len as usize);
+
+            for i in 0..len {
+                let sub_entries: Vec<GlobalInitEntry> = entries
+                    .iter()
+                    .filter(|e| {
+                        matches!(e.path.first(), Some(GlobalInitDesignator::Index(idx)) if *idx == i)
+                    })
+                    .cloned()
+                    .map(|mut e| {
+                        e.path = e.path.into_iter().skip(1).collect();
+                        e
+                    })
+                    .collect();
+                elements.push(self.build_const_value(elem_ty, &sub_entries)?);
+            }
+
+            let array_ty = llvm_elem_ty.array_type(u32_len);
+            Ok(const_array(array_ty, &elements).into())
+        }
+
+        fn build_record_const(
+            &mut self,
+            ty: TyId,
+            def_id: DefId,
+            entries: &[GlobalInitEntry],
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let def_data = self.hir.defs.get(def_id).ok_or_else(|| {
+                CodegenError::Internal(format!("record definition {:?} not found", def_id))
+            })?;
+            let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                return Err(CodegenError::Internal(format!("{:?} is not a record", def_id)));
+            };
+
+            match kind {
+                RecordKind::Struct => {
+                    let mut field_values = Vec::with_capacity(fields.len());
+                    for (i, field) in fields.iter().enumerate() {
+                        let sub_entries: Vec<GlobalInitEntry> = entries
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.path.first(),
+                                    Some(GlobalInitDesignator::Field(idx)) if *idx as usize == i
+                                )
+                            })
+                            .cloned()
+                            .map(|mut e| {
+                                e.path = e.path.into_iter().skip(1).collect();
+                                e
+                            })
+                            .collect();
+                        field_values.push(self.build_const_value(field.ty, &sub_entries)?);
+                    }
+                    let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+                    Ok(struct_ty.const_named_struct(&field_values).into())
+                }
+                RecordKind::Union => {
+                    // C99 §6.7.8: only the first named member is initialized
+                    // unless a designator specifies another. We approximate by
+                    // finding the first entry that names a field.
+                    let first_field_entry = entries
+                        .iter()
+                        .find(|e| matches!(e.path.first(), Some(GlobalInitDesignator::Field(_))));
+
+                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(ty)
+                        .map_err(|err| type_error(ty, err.to_string()))?;
+                    let size = u32::try_from(layout.size)
+                        .map_err(|_| CodegenError::Internal("union size exceeds u32".to_owned()))?;
+
+                    if let Some(entry) = first_field_entry {
+                        let field_idx = match entry.path.first().unwrap() {
+                            GlobalInitDesignator::Field(idx) => *idx as usize,
+                            _ => unreachable!(),
+                        };
+                        let field = fields.get(field_idx).ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "union field index {} out of bounds",
+                                field_idx
+                            ))
+                        })?;
+
+                        let sub_entries: Vec<GlobalInitEntry> = entries
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.path.first(),
+                                    Some(GlobalInitDesignator::Field(idx)) if *idx as usize == field_idx
+                                )
+                            })
+                            .cloned()
+                            .map(|mut e| {
+                                e.path = e.path.into_iter().skip(1).collect();
+                                e
+                            })
+                            .collect();
+
+                        let bytes = self.build_const_bytes(field.ty, &sub_entries, size)?;
+                        let byte_array_ty = self.context.i8_type().array_type(size);
+                        let byte_array = const_array(byte_array_ty, &bytes);
+                        let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+                        return Ok(struct_ty.const_named_struct(&[byte_array.into()]).into());
+                    }
+
+                    let byte_array_ty = self.context.i8_type().array_type(size);
+                    let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+                    Ok(struct_ty.const_named_struct(&[byte_array_ty.const_zero().into()]).into())
+                }
+            }
+        }
+
+        fn global_init_value_to_llvm(
+            &mut self,
+            value: &GlobalInitValue,
+            ty: TyId,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match value {
+                GlobalInitValue::Int(n) => {
+                    let BasicTypeEnum::IntType(int_ty) = self.type_cx.basic_type_of(ty)? else {
+                        return Err(CodegenError::Internal(
+                            "Int value for non-int type".to_owned(),
+                        ));
+                    };
+                    Ok(int_ty.const_int(*n as u64, *n < 0).into())
+                }
+                GlobalInitValue::Float(f) => match self.type_cx.basic_type_of(ty)? {
+                    BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(*f).into()),
+                    other => Err(CodegenError::Internal(format!(
+                        "Float value for non-float type {:?}",
+                        other
+                    ))),
+                },
+                GlobalInitValue::Address { def, offset } => {
+                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    let base = if let Some(def_id) = def {
+                        if let Some(&global) = self.globals.get(def_id) {
+                            global.as_pointer_value()
+                        } else if let Some(&function) = self.functions.get(def_id) {
+                            function.as_global_value().as_pointer_value()
+                        } else {
+                            return Err(CodegenError::Internal(format!(
+                                "address-of references undeclared symbol {:?}",
+                                def_id
+                            )));
+                        }
+                    } else {
+                        ptr_ty.const_null()
+                    };
+
+                    if *offset != 0 {
+                        let i8_ty = self.context.i8_type();
+                        let offset_val =
+                            self.context.i64_type().const_int(*offset as u64, *offset < 0);
+                        let result = const_ptr_offset(base, i8_ty, offset_val);
+                        return Ok(result.into());
+                    }
+
+                    Ok(base.into())
+                }
+                GlobalInitValue::StringLiteral(def_id) => {
+                    let global = self.get_or_create_string_literal(*def_id)?;
+                    Ok(global.as_pointer_value().into())
+                }
+                GlobalInitValue::Zero => Ok(self.type_cx.basic_type_of(ty)?.const_zero()),
+                GlobalInitValue::Error => Err(CodegenError::Internal(
+                    "GlobalInitValue::Error should have been rejected earlier".to_owned(),
+                )),
+            }
+        }
+
+        fn zero_bytes(&self, size: u32) -> Vec<BasicValueEnum<'ctx>> {
+            let zero = self.context.i8_type().const_zero().into();
+            vec![zero; size as usize]
+        }
+
+        fn write_bytes_at(
+            dst: &mut [BasicValueEnum<'ctx>],
+            offset: u64,
+            src: Vec<BasicValueEnum<'ctx>>,
+        ) {
+            let start = offset as usize;
+            for (idx, byte) in src.into_iter().enumerate() {
+                if let Some(slot) = dst.get_mut(start + idx) {
+                    *slot = byte;
+                }
+            }
+        }
+
+        /// Build the object representation bytes for a constant initializer.
+        ///
+        /// This is used for union members, whose LLVM storage is `{ [N x i8] }`.
+        /// For aggregate members, derive offsets from HIR layout metadata instead
+        /// of trying to reverse-engineer bytes from an LLVM aggregate constant.
+        fn build_const_bytes(
+            &mut self,
+            ty: TyId,
+            entries: &[GlobalInitEntry],
+            size: u32,
+        ) -> Result<Vec<BasicValueEnum<'ctx>>, CodegenError> {
+            let mut bytes = self.zero_bytes(size);
+            if entries.is_empty() {
+                return Ok(bytes);
+            }
+
+            if entries.len() == 1 && entries[0].path.is_empty() {
+                let value = self.global_init_value_to_llvm(&entries[0].value, ty)?;
+                return Ok(self.collect_scalar_bytes(value, size));
+            }
+
+            let layout_cx = LayoutCx::with_defs(self.tcx, &self.hir.defs);
+            match self.tcx.get(ty) {
+                Ty::Array { elem, len: Some(len), is_vla: false } => {
+                    let elem_ty = elem.ty;
+                    let elem_size = u32::try_from(
+                        layout_cx
+                            .array_layout_of(ty)
+                            .map_err(|err| type_error(ty, err.to_string()))?
+                            .elem
+                            .size,
+                    )
+                    .map_err(|_| {
+                        CodegenError::Internal("array element size exceeds u32".to_owned())
+                    })?;
+
+                    for i in 0..*len {
+                        let sub_entries: Vec<GlobalInitEntry> = entries
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.path.first(),
+                                    Some(GlobalInitDesignator::Index(idx)) if *idx == i
+                                )
+                            })
+                            .cloned()
+                            .map(|mut e| {
+                                e.path = e.path.into_iter().skip(1).collect();
+                                e
+                            })
+                            .collect();
+                        let elem_bytes =
+                            self.build_const_bytes(elem_ty, &sub_entries, elem_size)?;
+                        Self::write_bytes_at(&mut bytes, i * u64::from(elem_size), elem_bytes);
+                    }
+                    Ok(bytes)
+                }
+                Ty::Record(def_id) => {
+                    let def_data = self.hir.defs.get(*def_id).ok_or_else(|| {
+                        CodegenError::Internal(format!("record definition {:?} not found", def_id))
+                    })?;
+                    let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                        return Err(CodegenError::Internal(format!(
+                            "{:?} is not a record",
+                            def_id
+                        )));
+                    };
+                    let kind = *kind;
+                    let field_tys = fields.iter().map(|field| field.ty).collect::<Vec<_>>();
+                    let record_layout = layout_cx
+                        .record_layout_of(ty)
+                        .map_err(|err| type_error(ty, err.to_string()))?;
+
+                    match kind {
+                        RecordKind::Struct => {
+                            for (i, field_ty) in field_tys.into_iter().enumerate() {
+                                let field_layout = record_layout.fields[i];
+                                let field_size =
+                                    u32::try_from(field_layout.storage_size).map_err(|_| {
+                                        CodegenError::Internal(
+                                            "struct field size exceeds u32".to_owned(),
+                                        )
+                                    })?;
+                                let sub_entries: Vec<GlobalInitEntry> = entries
+                                    .iter()
+                                    .filter(|e| {
+                                        matches!(
+                                            e.path.first(),
+                                            Some(GlobalInitDesignator::Field(idx)) if *idx as usize == i
+                                        )
+                                    })
+                                    .cloned()
+                                    .map(|mut e| {
+                                        e.path = e.path.into_iter().skip(1).collect();
+                                        e
+                                    })
+                                    .collect();
+                                let field_bytes =
+                                    self.build_const_bytes(field_ty, &sub_entries, field_size)?;
+                                Self::write_bytes_at(&mut bytes, field_layout.offset, field_bytes);
+                            }
+                            Ok(bytes)
+                        }
+                        RecordKind::Union => {
+                            if let Some(entry) = entries.iter().find(|e| {
+                                matches!(e.path.first(), Some(GlobalInitDesignator::Field(_)))
+                            }) {
+                                let field_idx = match entry.path.first().unwrap() {
+                                    GlobalInitDesignator::Field(idx) => *idx as usize,
+                                    _ => unreachable!(),
+                                };
+                                let field_ty =
+                                    field_tys.get(field_idx).copied().ok_or_else(|| {
+                                        CodegenError::Internal(format!(
+                                            "union field index {} out of bounds",
+                                            field_idx
+                                        ))
+                                    })?;
+                                let field_size =
+                                    u32::try_from(record_layout.fields[field_idx].storage_size)
+                                        .map_err(|_| {
+                                            CodegenError::Internal(
+                                                "union field size exceeds u32".to_owned(),
+                                            )
+                                        })?;
+                                let sub_entries: Vec<GlobalInitEntry> = entries
+                                    .iter()
+                                    .filter(|e| {
+                                        matches!(
+                                            e.path.first(),
+                                            Some(GlobalInitDesignator::Field(idx)) if *idx as usize == field_idx
+                                        )
+                                    })
+                                    .cloned()
+                                    .map(|mut e| {
+                                        e.path = e.path.into_iter().skip(1).collect();
+                                        e
+                                    })
+                                    .collect();
+                                let field_bytes =
+                                    self.build_const_bytes(field_ty, &sub_entries, field_size)?;
+                                Self::write_bytes_at(&mut bytes, 0, field_bytes);
+                            }
+                            Ok(bytes)
+                        }
+                    }
+                }
+                other => Err(CodegenError::Internal(format!(
+                    "expected scalar leaf or aggregate type for byte initializer, got {:?}",
+                    other
+                ))),
+            }
+        }
+
+        /// Extract the little-endian byte representation of an LLVM scalar
+        /// constant value, zero-padding or truncating to `expected_size`.
+        fn collect_scalar_bytes(
+            &self,
+            value: BasicValueEnum<'ctx>,
+            expected_size: u32,
+        ) -> Vec<BasicValueEnum<'ctx>> {
+            let i8_ty = self.context.i8_type();
+            let mut bytes = Vec::with_capacity(expected_size as usize);
+
+            match value {
+                BasicValueEnum::IntValue(int_val) => {
+                    let val = int_val.get_zero_extended_constant().unwrap_or(0);
+                    for i in 0..expected_size {
+                        let byte = (val >> (i * 8)) & 0xFF;
+                        bytes.push(i8_ty.const_int(byte, false).into());
+                    }
+                }
+                BasicValueEnum::FloatValue(float_val) => {
+                    let (val, _loses_info) = float_val.get_constant().unwrap_or((0.0, false));
+                    let (bits, byte_count) = if float_val.get_type() == self.context.f32_type() {
+                        ((val as f32).to_bits() as u64, 4u32)
+                    } else {
+                        (val.to_bits(), 8u32)
+                    };
+                    for i in 0..byte_count {
+                        let byte = (bits >> (i * 8)) & 0xFF;
+                        bytes.push(i8_ty.const_int(byte, false).into());
+                    }
+                }
+                _ => {}
+            }
+
+            bytes.truncate(expected_size as usize);
+            while bytes.len() < expected_size as usize {
+                bytes.push(i8_ty.const_zero().into());
+            }
+            bytes
+        }
+
+        /// Look up (or cache) the LLVM global for a string literal `DefId`.
+        ///
+        /// The synthetic global's `GlobalInit` is populated by
+        /// `rcc_hir_lower::intern_string_literal` with the already-decoded
+        /// byte payload, so `materialize_all_globals` handles emitting the
+        /// `[N x i8]` constant through the normal array path.  This
+        /// function just returns the pointer.
+        fn get_or_create_string_literal(
+            &mut self,
+            def_id: DefId,
+        ) -> Result<GlobalValue<'ctx>, CodegenError> {
+            if let Some(&global) = self.string_literals.get(&def_id) {
+                return Ok(global);
+            }
+
+            let global = self.globals.get(&def_id).copied().ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "string literal global {:?} was not declared",
+                    def_id
+                ))
+            })?;
+
+            global.set_constant(true);
+            self.string_literals.insert(def_id, global);
+            Ok(global)
+        }
+    }
+
     fn basic_type_as_any<'ctx>(ty: BasicTypeEnum<'ctx>) -> AnyTypeEnum<'ctx> {
         match ty {
             BasicTypeEnum::ArrayType(ty) => ty.into(),
@@ -1860,6 +2406,7 @@ pub mod backend {
         let context = Context::create();
         let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
         cx.declare_all()?;
+        GlobalCx::new(&cx).materialize_all_globals()?;
         Ok(CodegenArtifact { ir_text: cx.ir_text() })
     }
 
@@ -3357,5 +3904,586 @@ mod tests {
             inkwell::values::BasicValueEnum::PointerValue(_) => {}
             other => panic!("expected PointerValue, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-11: Global initializer materialization
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn global_def_with_init(
+        defs: &mut IndexVec<DefId, Def>,
+        name: Symbol,
+        ty: TyId,
+        linkage: Linkage,
+        init: GlobalInit,
+    ) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Global { ty, quals: ObjectQuals::none(), linkage, init: Some(init) },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    /// `static int x = 5;` emits `@x = internal global i32 5`.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn scalar_global_emits_initializer() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("x");
+        let init = GlobalInit {
+            ty: tcx.int,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: tcx.int,
+                expr: None,
+                value: GlobalInitValue::Int(5),
+                span: DUMMY_SP,
+            }],
+        };
+        let _g = global_def_with_init(&mut defs, name, tcx.int, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("@x = internal global i32 5"), "IR:\n{ir}");
+    }
+
+    /// Missing initializer entries produce zero-fill.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn zero_fill_for_missing_entries() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("arr");
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+        let init = GlobalInit {
+            ty: arr_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![GlobalInitDesignator::Index(1)],
+                ty: tcx.int,
+                expr: None,
+                value: GlobalInitValue::Int(42),
+                span: DUMMY_SP,
+            }],
+        };
+        let _g = global_def_with_init(&mut defs, name, arr_ty, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        // [3 x i32] [i32 0, i32 42, i32 0]
+        assert!(ir.contains("[i32 0, i32 42, i32 0]"), "IR:\n{ir}");
+    }
+
+    /// Struct fields are initialized from designator paths.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn struct_global_emits_field_initializers() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let name = session.interner.intern("s");
+        let init = GlobalInit {
+            ty: rec_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(0)],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(1),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(1)],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(2),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _g = global_def_with_init(&mut defs, name, rec_ty, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        // { i32, i32 } { i32 1, i32 2 }
+        assert!(ir.contains("{ i32 1, i32 2 }"), "IR:\n{ir}");
+    }
+
+    /// GlobalInitValue::Error is rejected before emitting invalid IR.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn error_leaf_is_rejected() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("bad");
+        let init = GlobalInit {
+            ty: tcx.int,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: tcx.int,
+                expr: None,
+                value: GlobalInitValue::Error,
+                span: DUMMY_SP,
+            }],
+        };
+        let _g = global_def_with_init(&mut defs, name, tcx.int, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        let result = backend::GlobalCx::new(&cx).materialize_all_globals();
+
+        assert!(result.is_err(), "expected error for GlobalInitValue::Error");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn address_offset_global_init() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let arr_name = session.interner.intern("arr");
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(10), is_vla: false });
+        let arr_def = global_def_with_init(
+            &mut defs,
+            arr_name,
+            arr_ty,
+            Linkage::Internal,
+            GlobalInit { ty: arr_ty, entries: vec![] },
+        );
+
+        let ptr_name = session.interner.intern("p");
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let init = GlobalInit {
+            ty: ptr_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: ptr_ty,
+                expr: None,
+                value: GlobalInitValue::Address { def: Some(arr_def), offset: 8 },
+                span: DUMMY_SP,
+            }],
+        };
+        let _ptr_def = global_def_with_init(&mut defs, ptr_name, ptr_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(
+            ir.contains("@p = internal global ptr getelementptr inbounds (i8, ptr @arr, i64 8)")
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn union_scalar_initializer() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let char_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(4), is_vla: false });
+        let union_def_id =
+            record_def(&mut defs, RecordKind::Union, vec![field(tcx.int), field(char_arr_ty)]);
+        let union_ty = tcx.intern(Ty::Record(union_def_id));
+
+        let u_name = session.interner.intern("u");
+        let init = GlobalInit {
+            ty: union_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![rcc_hir::GlobalInitDesignator::Field(0)],
+                ty: tcx.int,
+                expr: None,
+                value: GlobalInitValue::Int(5),
+                span: DUMMY_SP,
+            }],
+        };
+        let _u = global_def_with_init(&mut defs, u_name, union_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("c\"\\05\\00\\00\\00\"") || ir.contains("[i8 5, i8 0, i8 0, i8 0]"));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn union_array_initializer_preserves_member_bytes() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let char_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(4), is_vla: false });
+        let union_def_id =
+            record_def(&mut defs, RecordKind::Union, vec![field(tcx.int), field(char_arr_ty)]);
+        let union_ty = tcx.intern(Ty::Record(union_def_id));
+
+        let u_name = session.interner.intern("u_arr");
+        let init = GlobalInit {
+            ty: union_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Index(0),
+                    ],
+                    ty: tcx.char_,
+                    expr: None,
+                    value: GlobalInitValue::Int(i128::from(b'A')),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Index(1),
+                    ],
+                    ty: tcx.char_,
+                    expr: None,
+                    value: GlobalInitValue::Int(i128::from(b'B')),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Index(2),
+                    ],
+                    ty: tcx.char_,
+                    expr: None,
+                    value: GlobalInitValue::Int(i128::from(b'C')),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _u = global_def_with_init(&mut defs, u_name, union_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(
+            ir.contains("c\"ABC\\00\"") || ir.contains("[i8 65, i8 66, i8 67, i8 0]"),
+            "IR:\n{ir}"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn union_struct_initializer_preserves_member_bytes_with_padding() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let struct_def_id =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.char_), field(tcx.int)]);
+        let struct_ty = tcx.intern(Ty::Record(struct_def_id));
+        let union_def_id =
+            record_def(&mut defs, RecordKind::Union, vec![field(tcx.int), field(struct_ty)]);
+        let union_ty = tcx.intern(Ty::Record(union_def_id));
+
+        let u_name = session.interner.intern("u_struct");
+        let init = GlobalInit {
+            ty: union_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Field(0),
+                    ],
+                    ty: tcx.char_,
+                    expr: None,
+                    value: GlobalInitValue::Int(1),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                    ],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(0x0203_0405),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _u = global_def_with_init(&mut defs, u_name, union_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(
+            ir.contains("c\"\\01\\00\\00\\00\\05\\04\\03\\02\"")
+                || ir.contains("[i8 1, i8 0, i8 0, i8 0, i8 5, i8 4, i8 3, i8 2]"),
+            "IR:\n{ir}"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn nested_designator_initializer() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(2), is_vla: false });
+        let struct_def_id = record_def(&mut defs, RecordKind::Struct, vec![field(arr_ty)]);
+        let struct_ty = tcx.intern(Ty::Record(struct_def_id));
+
+        let s_name = session.interner.intern("s");
+        let init = GlobalInit {
+            ty: struct_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![
+                    rcc_hir::GlobalInitDesignator::Field(0),
+                    rcc_hir::GlobalInitDesignator::Index(1),
+                ],
+                ty: tcx.int,
+                expr: None,
+                value: GlobalInitValue::Int(7),
+                span: DUMMY_SP,
+            }],
+        };
+        let _s = global_def_with_init(&mut defs, s_name, struct_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("i32 7"));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn float_and_zero_leaf_initializer() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let s_name = session.interner.intern("s");
+        let s_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.double), len: Some(2), is_vla: false });
+        let init = GlobalInit {
+            ty: s_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![rcc_hir::GlobalInitDesignator::Index(0)],
+                    ty: tcx.double,
+                    expr: None,
+                    value: GlobalInitValue::Float(1.25),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![rcc_hir::GlobalInitDesignator::Index(1)],
+                    ty: tcx.double,
+                    expr: None,
+                    value: GlobalInitValue::Zero,
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _s = global_def_with_init(&mut defs, s_name, s_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("double"));
+        assert!(ir.contains("1.25"));
+    }
+    /// Helper: build a `GlobalInit` for a string literal from raw bytes
+    /// (mimicking what `rcc_hir_lower::intern_string_literal` now does).
+    #[cfg(feature = "llvm")]
+    fn string_literal_init(raw_bytes: &[u8], char_arr_ty: TyId, char_ty: TyId) -> GlobalInit {
+        let mut entries = Vec::with_capacity(raw_bytes.len() + 1);
+        for (i, &b) in raw_bytes.iter().enumerate() {
+            entries.push(GlobalInitEntry {
+                path: vec![rcc_hir::GlobalInitDesignator::Index(i as u64)],
+                ty: char_ty,
+                expr: None,
+                value: GlobalInitValue::Int(i128::from(b)),
+                span: DUMMY_SP,
+            });
+        }
+        entries.push(GlobalInitEntry {
+            path: vec![rcc_hir::GlobalInitDesignator::Index(raw_bytes.len() as u64)],
+            ty: char_ty,
+            expr: None,
+            value: GlobalInitValue::Int(0),
+            span: DUMMY_SP,
+        });
+        GlobalInit { ty: char_arr_ty, entries }
+    }
+
+    /// String literals referenced by GlobalInitValue::StringLiteral get a
+    /// constant byte-array initializer.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn string_literal_global_is_materialized() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let text_sym = session.interner.intern("\"hi\"");
+        let char_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(3), is_vla: false });
+        let str_init = string_literal_init(b"hi", char_arr_ty, tcx.char_);
+        let str_def = defs.push(Def {
+            id: DefId(0),
+            name: text_sym,
+            span: DUMMY_SP,
+            kind: DefKind::Global {
+                ty: char_arr_ty,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::Internal,
+                init: Some(str_init),
+            },
+        });
+        defs[str_def].id = str_def;
+
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let ptr_name = session.interner.intern("ptr_to_str");
+        let init = GlobalInit {
+            ty: ptr_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: ptr_ty,
+                expr: None,
+                value: GlobalInitValue::StringLiteral(str_def),
+                span: DUMMY_SP,
+            }],
+        };
+        let _ptr_def = global_def_with_init(&mut defs, ptr_name, ptr_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("c\"hi\\00\""), "IR:\n{ir}");
+    }
+
+    /// Identical string literal DefIds share the same LLVM global.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn identical_string_literals_share_global() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let text_sym = session.interner.intern("\"shared\"");
+        let char_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(7), is_vla: false });
+        let str_init = string_literal_init(b"shared", char_arr_ty, tcx.char_);
+        let str_def = defs.push(Def {
+            id: DefId(0),
+            name: text_sym,
+            span: DUMMY_SP,
+            kind: DefKind::Global {
+                ty: char_arr_ty,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::Internal,
+                init: Some(str_init),
+            },
+        });
+        defs[str_def].id = str_def;
+
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let ptr1_name = session.interner.intern("p1");
+        let ptr2_name = session.interner.intern("p2");
+
+        let init1 = GlobalInit {
+            ty: ptr_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: ptr_ty,
+                expr: None,
+                value: GlobalInitValue::StringLiteral(str_def),
+                span: DUMMY_SP,
+            }],
+        };
+        let _p1 = global_def_with_init(&mut defs, ptr1_name, ptr_ty, Linkage::Internal, init1);
+
+        let init2 = GlobalInit {
+            ty: ptr_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: ptr_ty,
+                expr: None,
+                value: GlobalInitValue::StringLiteral(str_def),
+                span: DUMMY_SP,
+            }],
+        };
+        let _p2 = global_def_with_init(&mut defs, ptr2_name, ptr_ty, Linkage::Internal, init2);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains(r#"@p1 = internal global ptr @"\22shared\22""#), "IR:\n{ir}");
+        assert!(ir.contains(r#"@p2 = internal global ptr @"\22shared\22""#), "IR:\n{ir}");
     }
 }
