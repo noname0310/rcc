@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-12: Basic block and terminator wiring
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-06, 09-09, 09-10    **Milestone:** M3

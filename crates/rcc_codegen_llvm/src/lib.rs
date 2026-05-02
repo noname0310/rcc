@@ -711,6 +711,7 @@ pub mod backend {
     use super::*;
 
     use inkwell::attributes::{Attribute, AttributeLoc};
+    use inkwell::basic_block::BasicBlock as LlvmBasicBlock;
     use inkwell::builder::Builder;
     use inkwell::context::Context;
     use inkwell::module::Linkage as LlvmLinkage;
@@ -723,7 +724,10 @@ pub mod backend {
         BasicValue, BasicValueEnum, FunctionValue, GlobalValue, InstructionOpcode, PointerValue,
     };
     use inkwell::AddressSpace;
-    use rcc_cfg::{Body, ConstKind, Operand, Place, Projection, Rvalue};
+    use rcc_cfg::{
+        BasicBlockId, Body, ConstKind, Operand, Place, Projection, Rvalue, Statement,
+        StatementKind, TerminatorKind,
+    };
     use rcc_hir::{
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, Qual, RecordKind, Ty,
     };
@@ -855,7 +859,7 @@ pub mod backend {
         pub fn declare_all(&mut self) -> Result<(), CodegenError> {
             let defs = self.hir.defs.iter_enumerated().map(|(id, _)| id).collect::<Vec<_>>();
             for def in defs {
-                match self.hir.defs[def].kind {
+                match &self.hir.defs[def].kind {
                     DefKind::Function { .. } => {
                         self.declare_function(def)?;
                     }
@@ -968,6 +972,42 @@ pub mod backend {
         /// Return all declared globals keyed by HIR definition id.
         pub fn global_decls(&self) -> &FxHashMap<DefId, GlobalValue<'ctx>> {
             &self.globals
+        }
+
+        // ---------------------------------------------------------------
+        // 09-12: Basic block and terminator wiring
+        // ---------------------------------------------------------------
+
+        /// Emit every CFG body in HIR definition order.
+        pub fn codegen_all_bodies(&self) -> Result<(), CodegenError> {
+            for (def, def_data) in self.hir.defs.iter_enumerated() {
+                if !matches!(&def_data.kind, DefKind::Function { has_body: true, .. }) {
+                    continue;
+                }
+                let Some(body) = self.bodies.get(&def) else {
+                    continue;
+                };
+                let function = self.functions.get(&def).copied().ok_or_else(|| {
+                    CodegenError::Internal(format!("function definition {def:?} was not declared"))
+                })?;
+                self.codegen_body(function, body)?;
+            }
+            Ok(())
+        }
+
+        /// Lower one CFG body into its declared LLVM function.
+        pub fn codegen_body(
+            &self,
+            function: FunctionValue<'ctx>,
+            body: &Body,
+        ) -> Result<(), CodegenError> {
+            rcc_cfg::verify::verify_body_with_hir(body, self.tcx, self.hir).map_err(|errors| {
+                CodegenError::Internal(format!(
+                    "CFG verifier failed before LLVM codegen: {}",
+                    format_cfg_errors(&errors)
+                ))
+            })?;
+            FnCodegen::new(self, function, body)?.codegen_body()
         }
 
         fn def_name(&self, def: &Def) -> String {
@@ -1198,12 +1238,12 @@ pub mod backend {
             let def_data = self.hir.defs.get(def).ok_or_else(|| {
                 CodegenError::Internal(format!("function definition {def:?} is missing"))
             })?;
-            let DefKind::Function { ty, .. } = def_data.kind else {
+            let DefKind::Function { ty, .. } = &def_data.kind else {
                 return Err(CodegenError::Internal(format!(
                     "body definition {def:?} is not a function"
                 )));
             };
-            sysv_fn_abi(self.tcx, &self.hir.defs, ty).map(Some)
+            sysv_fn_abi(self.tcx, &self.hir.defs, *ty).map(Some)
         }
 
         fn store_abi_param(
@@ -1579,6 +1619,232 @@ pub mod backend {
         }
     }
 
+    struct FnCodegen<'cg, 'a, 'ctx> {
+        cx: &'cg CodegenCx<'a, 'ctx>,
+        body: &'cg Body,
+        locals: LocalMap<'ctx>,
+        blocks: IndexVec<BasicBlockId, LlvmBasicBlock<'ctx>>,
+    }
+
+    impl<'cg, 'a, 'ctx> FnCodegen<'cg, 'a, 'ctx> {
+        fn new(
+            cx: &'cg CodegenCx<'a, 'ctx>,
+            function: FunctionValue<'ctx>,
+            body: &'cg Body,
+        ) -> Result<Self, CodegenError> {
+            if function.get_first_basic_block().is_some() {
+                return Err(CodegenError::Internal(format!(
+                    "function {} already has LLVM basic blocks",
+                    function.get_name().to_string_lossy()
+                )));
+            }
+
+            let mut blocks = IndexVec::with_capacity(body.blocks.len());
+            for (bb, _) in body.blocks.iter_enumerated() {
+                let llvm_block = cx.context.append_basic_block(function, &block_name(bb));
+                let inserted = blocks.push(llvm_block);
+                debug_assert_eq!(inserted, bb);
+            }
+
+            let entry = *blocks
+                .get(BasicBlockId(0))
+                .ok_or_else(|| CodegenError::Internal("CFG body has no entry block".to_owned()))?;
+            cx.builder.position_at_end(entry);
+            let locals = cx.materialize_locals(function, body)?;
+
+            Ok(Self { cx, body, locals, blocks })
+        }
+
+        fn codegen_body(&self) -> Result<(), CodegenError> {
+            for (bb, block) in self.body.blocks.iter_enumerated() {
+                let llvm_block = self.llvm_block(bb)?;
+                self.cx.builder.position_at_end(llvm_block);
+                self.ensure_no_terminator(bb, llvm_block)?;
+
+                for statement in &block.statements {
+                    self.emit_statement(statement)?;
+                    self.ensure_no_terminator(bb, llvm_block)?;
+                }
+
+                self.emit_terminator(bb, &block.terminator.kind)?;
+                if llvm_block.get_terminator().is_none() {
+                    return Err(CodegenError::Internal(format!(
+                        "CFG block {bb:?} did not emit an LLVM terminator"
+                    )));
+                }
+            }
+
+            Ok(())
+        }
+
+        fn emit_statement(&self, statement: &Statement) -> Result<(), CodegenError> {
+            match &statement.kind {
+                StatementKind::Assign { place, rvalue } => {
+                    let value = self.cx.emit_rvalue_value(rvalue, &self.locals, self.body)?;
+                    self.cx.emit_store_place(place, value, &self.locals, self.body)
+                }
+                StatementKind::StorageLive(local) => {
+                    self.cx.emit_storage_live(*local, &self.locals, self.body)
+                }
+                StatementKind::StorageDead(local) => {
+                    self.cx.emit_storage_dead(*local, &self.locals, self.body)
+                }
+                StatementKind::Nop => Ok(()),
+            }
+        }
+
+        fn emit_terminator(
+            &self,
+            bb: BasicBlockId,
+            terminator: &TerminatorKind,
+        ) -> Result<(), CodegenError> {
+            let llvm_block = self.llvm_block(bb)?;
+            self.ensure_no_terminator(bb, llvm_block)?;
+
+            match terminator {
+                TerminatorKind::Goto(target) => self.emit_goto(*target),
+                TerminatorKind::SwitchInt { discr, targets } => {
+                    self.emit_switch_int(discr, targets.as_slice())
+                }
+                TerminatorKind::Return => self.emit_return(),
+                TerminatorKind::Call { .. } => Err(CodegenError::Internal(
+                    "call terminator lowering is deferred to task 09-13".to_owned(),
+                )),
+                TerminatorKind::Unreachable => {
+                    self.cx.builder.build_unreachable().map(|_| ()).map_err(builder_error)
+                }
+            }
+        }
+
+        fn emit_goto(&self, target: BasicBlockId) -> Result<(), CodegenError> {
+            let target = self.llvm_block(target)?;
+            self.cx.builder.build_unconditional_branch(target).map(|_| ()).map_err(builder_error)
+        }
+
+        fn emit_switch_int(
+            &self,
+            discr: &Operand,
+            targets: &[(Option<i128>, BasicBlockId)],
+        ) -> Result<(), CodegenError> {
+            let discr = match self.cx.emit_operand_value(discr, &self.locals, self.body)? {
+                BasicValueEnum::IntValue(value) => value,
+                other => {
+                    return Err(CodegenError::Internal(format!(
+                        "SwitchInt discriminator must be an integer, got {:?}",
+                        other.get_type()
+                    )));
+                }
+            };
+            let Some(((default_value, default_target), cases)) = targets.split_last() else {
+                return Err(CodegenError::Internal("SwitchInt has no targets".to_owned()));
+            };
+            if default_value.is_some() {
+                return Err(CodegenError::Internal(
+                    "SwitchInt default target must be last".to_owned(),
+                ));
+            }
+
+            let default_block = self.llvm_block(*default_target)?;
+            let mut llvm_cases = Vec::with_capacity(cases.len());
+            for (case_value, target) in cases {
+                let Some(case_value) = case_value else {
+                    return Err(CodegenError::Internal(
+                        "SwitchInt non-default target is missing a case value".to_owned(),
+                    ));
+                };
+                let case_value = discr.get_type().const_int(*case_value as u64, *case_value < 0);
+                llvm_cases.push((case_value, self.llvm_block(*target)?));
+            }
+
+            self.cx
+                .builder
+                .build_switch(discr, default_block, &llvm_cases)
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
+        fn emit_return(&self) -> Result<(), CodegenError> {
+            let ret_ty = self.body.ret_ty.ok_or_else(|| {
+                CodegenError::Internal("CFG body is missing its return type".to_owned())
+            })?;
+            if matches!(self.cx.tcx.get(ret_ty), Ty::Void) {
+                return self.cx.builder.build_return(None).map(|_| ()).map_err(builder_error);
+            }
+
+            match self.cx.body_abi(self.body)? {
+                Some(abi) => match &abi.ret.kind {
+                    AbiReturnKind::Void => {
+                        self.cx.builder.build_return(None).map(|_| ()).map_err(builder_error)
+                    }
+                    AbiReturnKind::Direct { units }
+                        if matches!(
+                            units.as_slice(),
+                            [AbiParamUnit { kind: AbiParamUnitKind::Source(source), .. }]
+                                if *source == ret_ty
+                        ) =>
+                    {
+                        self.emit_direct_return(ret_ty)
+                    }
+                    AbiReturnKind::Direct { .. } => Err(CodegenError::Internal(
+                        "coerced aggregate return lowering is deferred to task 09-16".to_owned(),
+                    )),
+                    AbiReturnKind::Indirect { .. } => Err(CodegenError::Internal(
+                        "indirect sret return lowering is deferred to task 09-16".to_owned(),
+                    )),
+                },
+                None => self.emit_direct_return(ret_ty),
+            }
+        }
+
+        fn emit_direct_return(&self, ret_ty: TyId) -> Result<(), CodegenError> {
+            let value = self.cx.emit_operand_value(
+                &Operand::Copy(Place { base: Local(0), projection: Vec::new() }),
+                &self.locals,
+                self.body,
+            )?;
+            let expected = self.cx.type_cx().basic_type_of(ret_ty)?;
+            if value.get_type() != expected {
+                return Err(CodegenError::Internal(format!(
+                    "return slot lowered to {:?}, expected {:?}",
+                    value.get_type(),
+                    expected
+                )));
+            }
+            self.cx.builder.build_return(Some(&value)).map(|_| ()).map_err(builder_error)
+        }
+
+        fn llvm_block(&self, bb: BasicBlockId) -> Result<LlvmBasicBlock<'ctx>, CodegenError> {
+            self.blocks.get(bb).copied().ok_or_else(|| {
+                CodegenError::Internal(format!("CFG branch target {bb:?} has no LLVM block"))
+            })
+        }
+
+        fn ensure_no_terminator(
+            &self,
+            bb: BasicBlockId,
+            llvm_block: LlvmBasicBlock<'ctx>,
+        ) -> Result<(), CodegenError> {
+            if llvm_block.get_terminator().is_some() {
+                return Err(CodegenError::Internal(format!(
+                    "CFG block {bb:?} already has an LLVM terminator"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    fn block_name(bb: BasicBlockId) -> String {
+        if bb == BasicBlockId(0) {
+            "entry".to_owned()
+        } else {
+            format!("bb{}", bb.0)
+        }
+    }
+
+    fn format_cfg_errors(errors: &[rcc_cfg::verify::CfgError]) -> String {
+        errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    }
+
     fn invalid_place_projection(projection: &str, ty: TyId) -> CodegenError {
         CodegenError::Internal(format!("invalid {projection} projection for place type {ty:?}"))
     }
@@ -1879,7 +2145,7 @@ pub mod backend {
         /// constants and attach them as initializers to the declared globals.
         pub fn materialize_all_globals(&mut self) -> Result<(), CodegenError> {
             for (def, def_data) in self.hir.defs.iter_enumerated() {
-                if let DefKind::Global { init: Some(ref global_init), .. } = def_data.kind {
+                if let DefKind::Global { init: Some(global_init), .. } = &def_data.kind {
                     self.materialize_global_init(def, global_init)?;
                 }
             }
@@ -2407,6 +2673,8 @@ pub mod backend {
         let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
         cx.declare_all()?;
         GlobalCx::new(&cx).materialize_all_globals()?;
+        cx.codegen_all_bodies()?;
+        cx.verify_module()?;
         Ok(CodegenArtifact { ir_text: cx.ir_text() })
     }
 
@@ -3267,7 +3535,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[cfg(feature = "llvm")]
-    use rcc_cfg::{Body, Const, ConstKind, LocalDecl, Operand, Place, Projection, Rvalue};
+    use rcc_cfg::{
+        BasicBlock, BasicBlockId, Body, Const, ConstKind, LocalDecl, Operand, Place, Projection,
+        Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    };
     #[cfg(feature = "llvm")]
     use rcc_hir::Local;
 
@@ -3412,6 +3683,296 @@ mod tests {
         assert!(ir.contains("@llvm.lifetime.start.p0"));
         assert!(ir.contains("@llvm.lifetime.end.p0"));
         assert!(ir.contains("i64 4"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-12: Basic-block and terminator wiring
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn cfg_block(statements: Vec<Statement>, kind: TerminatorKind) -> BasicBlock {
+        BasicBlock { statements, terminator: Terminator { kind, span: DUMMY_SP } }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn cfg_body(ret_ty: TyId, blocks: Vec<BasicBlock>) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        let mut cfg_blocks = IndexVec::new();
+        for block in blocks {
+            cfg_blocks.push(block);
+        }
+        Body { def: None, locals, blocks: cfg_blocks, ret_ty: Some(ret_ty) }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn int_const(ty: TyId, value: i128) -> Operand {
+        Operand::Const(Const { kind: ConstKind::Int(value), ty })
+    }
+
+    #[cfg(feature = "llvm")]
+    fn ret_slot() -> Place {
+        Place { base: Local(0), projection: Vec::new() }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn assign_ret(ty: TyId, value: i128) -> Statement {
+        Statement {
+            kind: StatementKind::Assign {
+                place: ret_slot(),
+                rvalue: Rvalue::Use(int_const(ty, value)),
+            },
+            span: DUMMY_SP,
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn codegen_fixture_ir(
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+        name: &str,
+        ret_ty: TyId,
+        mut body: Body,
+    ) -> Result<String, CodegenError> {
+        let fn_ty = func_ty(tcx, ret_ty, Vec::new(), false);
+        let fn_name = session.interner.intern(name);
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        body.def = Some(def);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        codegen(session, tcx, &hir, &bodies).map(|artifact| artifact.ir_text)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn assert_codegen_fixture_verifies(
+        tcx: &mut TyCtxt,
+        name: &str,
+        ret_ty: TyId,
+        body: Body,
+    ) -> String {
+        let (mut session, _cap) = Session::for_test();
+        codegen_fixture_ir(&mut session, tcx, name, ret_ty, body).unwrap()
+    }
+
+    /// A simple `return 42;` body emits a valid LLVM return from the CFG return slot.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn simple_return_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let body =
+            cfg_body(ret_ty, vec![cfg_block(vec![assign_ret(ret_ty, 42)], TerminatorKind::Return)]);
+
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_return", ret_ty, body);
+
+        assert!(ir.contains("ret i32 42") || ir.contains("ret i32 %load"), "IR:\n{ir}");
+    }
+
+    /// `if`-shaped CFG lowers a `SwitchInt` diamond and verifies as an LLVM module.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn if_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(ret_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(2)), (None, BasicBlockId(1))],
+            },
+        );
+        let then_bb = cfg_block(vec![assign_ret(ret_ty, 1)], TerminatorKind::Goto(BasicBlockId(3)));
+        let else_bb = cfg_block(vec![assign_ret(ret_ty, 0)], TerminatorKind::Goto(BasicBlockId(3)));
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let body = cfg_body(ret_ty, vec![entry, then_bb, else_bb, join]);
+
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_if", ret_ty, body);
+
+        assert!(ir.contains("switch i32 1"), "IR:\n{ir}");
+    }
+
+    /// `while`-shaped CFG verifies with entry/header/body/exit branch wiring.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn while_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let int_ty = tcx.int;
+        let entry = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let header = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(int_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(3)), (None, BasicBlockId(2))],
+            },
+        );
+        let body_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let exit = cfg_block(Vec::new(), TerminatorKind::Return);
+        let body = cfg_body(ret_ty, vec![entry, header, body_bb, exit]);
+
+        let _ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_while", ret_ty, body);
+    }
+
+    /// `for`-shaped CFG verifies with init, header, body, step, and exit blocks.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn for_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let int_ty = tcx.int;
+        let init = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let header = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(int_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(4)), (None, BasicBlockId(2))],
+            },
+        );
+        let body_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(3)));
+        let step = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let exit = cfg_block(Vec::new(), TerminatorKind::Return);
+        let body = cfg_body(ret_ty, vec![init, header, body_bb, step, exit]);
+
+        let _ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_for", ret_ty, body);
+    }
+
+    /// `break`-shaped CFG verifies when a loop body jumps directly to the exit block.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn break_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let int_ty = tcx.int;
+        let entry = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let header = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(int_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(3)), (None, BasicBlockId(2))],
+            },
+        );
+        let body_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(3)));
+        let exit = cfg_block(Vec::new(), TerminatorKind::Return);
+        let body = cfg_body(ret_ty, vec![entry, header, body_bb, exit]);
+
+        let _ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_break", ret_ty, body);
+    }
+
+    /// `continue`-shaped CFG verifies when a loop body jumps back to the header.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn continue_fixture_verifies() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let int_ty = tcx.int;
+        let entry = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let header = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(int_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(3)), (None, BasicBlockId(2))],
+            },
+        );
+        let body_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(1)));
+        let exit = cfg_block(Vec::new(), TerminatorKind::Return);
+        let body = cfg_body(ret_ty, vec![entry, header, body_bb, exit]);
+
+        let _ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_continue", ret_ty, body);
+    }
+
+    /// Bad branch targets are rejected before LLVM receives malformed IR.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn invalid_branch_target_is_codegen_error() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let body =
+            cfg_body(ret_ty, vec![cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(99)))]);
+
+        let err = codegen_fixture_ir(&mut session, &mut tcx, "__cfg_bad_target", ret_ty, body)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("InvalidBlockTarget"), "{err}");
+    }
+
+    /// A reachable default `Unreachable` sentinel is reported as a missing CFG terminator.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn missing_cfg_terminator_is_codegen_error() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let body = cfg_body(ret_ty, vec![BasicBlock::default()]);
+
+        let err = codegen_fixture_ir(&mut session, &mut tcx, "__cfg_missing_term", ret_ty, body)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("ReachableUnreachableTerminator"), "{err}");
+    }
+
+    /// Every emitted LLVM block has exactly one terminator instruction.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn branch_wiring_emits_one_terminator_per_block() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let int_ty = tcx.int;
+        let fn_ty = func_ty(&mut tcx, ret_ty, Vec::new(), false);
+        let fn_name = session.interner.intern("__cfg_terms");
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::SwitchInt {
+                discr: int_const(int_ty, 1),
+                targets: vec![(Some(0), BasicBlockId(2)), (None, BasicBlockId(1))],
+            },
+        );
+        let then_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(3)));
+        let else_bb = cfg_block(Vec::new(), TerminatorKind::Goto(BasicBlockId(3)));
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let mut body = cfg_body(ret_ty, vec![entry, then_bb, else_bb, join]);
+        body.def = Some(def);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body.clone());
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        let function = cx.declare_function(def).unwrap();
+
+        cx.codegen_body(function, &body).unwrap();
+        cx.verify_module().unwrap();
+
+        for block in function.get_basic_blocks() {
+            let terminators = block
+                .get_instructions()
+                .filter(|inst| {
+                    matches!(
+                        inst.get_opcode(),
+                        inkwell::values::InstructionOpcode::Br
+                            | inkwell::values::InstructionOpcode::Return
+                            | inkwell::values::InstructionOpcode::Switch
+                            | inkwell::values::InstructionOpcode::Unreachable
+                    )
+                })
+                .count();
+            assert_eq!(terminators, 1);
+        }
     }
 
     // -----------------------------------------------------------------------
