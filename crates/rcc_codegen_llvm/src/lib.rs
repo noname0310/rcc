@@ -721,12 +721,13 @@ pub mod backend {
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
     use inkwell::values::{
-        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FunctionValue,
-        GlobalValue, InstructionOpcode, PointerValue,
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
+        FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue,
     };
-    use inkwell::AddressSpace;
+    use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+    use rcc_cfg::UnOp;
     use rcc_cfg::{
-        BasicBlockId, Body, ConstKind, Operand, Place, Projection, Rvalue, Statement,
+        BasicBlockId, BinOp, Body, ConstKind, Operand, Place, Projection, Rvalue, Statement,
         StatementKind, TerminatorKind,
     };
     use rcc_hir::{
@@ -1551,12 +1552,488 @@ pub mod backend {
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             match rvalue {
                 Rvalue::Use(operand) => self.emit_operand_value(operand, locals, body),
+                Rvalue::BinaryOp(op, lhs, rhs) => self.emit_binop(*op, lhs, rhs, locals, body),
+                Rvalue::UnaryOp(op, operand) => self.emit_unop(*op, operand, locals, body),
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
                 _ => Err(CodegenError::Internal(
                     "rvalue emission is not implemented for this CFG rvalue yet".to_owned(),
                 )),
+            }
+        }
+
+        fn emit_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match op {
+                BinOp::Add => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::Sub => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::Mul => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::SDiv => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::UDiv => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::SRem => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::URem => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::FDiv => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::Shl => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::AShr => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::LShr => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::BitAnd => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::BitXor => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::BitOr => self.emit_int_binop(op, lhs, rhs, locals, body),
+                BinOp::Eq => self.emit_eq_ne_binop(op, lhs, rhs, locals, body),
+                BinOp::Ne => self.emit_eq_ne_binop(op, lhs, rhs, locals, body),
+                BinOp::SLt => self.emit_int_compare(IntPredicate::SLT, lhs, rhs, locals, body),
+                BinOp::SLe => self.emit_int_compare(IntPredicate::SLE, lhs, rhs, locals, body),
+                BinOp::SGt => self.emit_int_compare(IntPredicate::SGT, lhs, rhs, locals, body),
+                BinOp::SGe => self.emit_int_compare(IntPredicate::SGE, lhs, rhs, locals, body),
+                BinOp::ULt => self.emit_int_compare(IntPredicate::ULT, lhs, rhs, locals, body),
+                BinOp::ULe => self.emit_int_compare(IntPredicate::ULE, lhs, rhs, locals, body),
+                BinOp::UGt => self.emit_int_compare(IntPredicate::UGT, lhs, rhs, locals, body),
+                BinOp::UGe => self.emit_int_compare(IntPredicate::UGE, lhs, rhs, locals, body),
+                BinOp::FLt => self.emit_float_compare(FloatPredicate::OLT, lhs, rhs, locals, body),
+                BinOp::FLe => self.emit_float_compare(FloatPredicate::OLE, lhs, rhs, locals, body),
+                BinOp::FGt => self.emit_float_compare(FloatPredicate::OGT, lhs, rhs, locals, body),
+                BinOp::FGe => self.emit_float_compare(FloatPredicate::OGE, lhs, rhs, locals, body),
+                BinOp::FAdd => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::FSub => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::FMul => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::PtrAdd => self.emit_ptr_add(lhs, rhs, locals, body),
+                BinOp::PtrSub => self.emit_ptr_sub(lhs, rhs, locals, body),
+                BinOp::PtrDiff => self.emit_ptr_diff(lhs, rhs, locals, body),
+            }
+        }
+
+        fn emit_unop(
+            &self,
+            op: UnOp,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match op {
+                UnOp::Neg => {
+                    let value = self.emit_int_operand(operand, locals, body)?;
+                    self.builder
+                        .build_int_neg(value, "neg")
+                        .map(|value| value.as_basic_value_enum())
+                        .map_err(builder_error)
+                }
+                UnOp::FNeg => {
+                    let value = self.emit_float_operand(operand, locals, body)?;
+                    self.builder
+                        .build_float_neg(value, "fneg")
+                        .map(|value| value.as_basic_value_enum())
+                        .map_err(builder_error)
+                }
+                UnOp::BitNot => {
+                    let value = self.emit_int_operand(operand, locals, body)?;
+                    self.builder
+                        .build_not(value, "not")
+                        .map(|value| value.as_basic_value_enum())
+                        .map_err(builder_error)
+                }
+                UnOp::LogNot => {
+                    let value = self.emit_operand_value(operand, locals, body)?;
+                    let bool_value = match value {
+                        BasicValueEnum::IntValue(value) => self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                value,
+                                value.get_type().const_zero(),
+                                "lnot",
+                            )
+                            .map_err(builder_error)?,
+                        BasicValueEnum::FloatValue(value) => self
+                            .builder
+                            .build_float_compare(
+                                FloatPredicate::OEQ,
+                                value,
+                                value.get_type().const_zero(),
+                                "lnot",
+                            )
+                            .map_err(builder_error)?,
+                        BasicValueEnum::PointerValue(value) => {
+                            self.builder.build_is_null(value, "lnot").map_err(builder_error)?
+                        }
+                        other => {
+                            return Err(CodegenError::Internal(format!(
+                                "logical not requires scalar operand, got {:?}",
+                                other.get_type()
+                            )));
+                        }
+                    };
+                    self.bool_to_c_int(bool_value)
+                }
+            }
+        }
+
+        fn emit_int_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs = self.emit_int_operand(lhs, locals, body)?;
+            let rhs = self.emit_int_operand(rhs, locals, body)?;
+            let value = match op {
+                BinOp::Add => self.builder.build_int_add(lhs, rhs, "add"),
+                BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "sub"),
+                BinOp::Mul => self.builder.build_int_mul(lhs, rhs, "mul"),
+                BinOp::SDiv => self.builder.build_int_signed_div(lhs, rhs, "sdiv"),
+                BinOp::UDiv => self.builder.build_int_unsigned_div(lhs, rhs, "udiv"),
+                BinOp::SRem => self.builder.build_int_signed_rem(lhs, rhs, "srem"),
+                BinOp::URem => self.builder.build_int_unsigned_rem(lhs, rhs, "urem"),
+                BinOp::Shl => self.builder.build_left_shift(lhs, rhs, "shl"),
+                BinOp::AShr => self.builder.build_right_shift(lhs, rhs, true, "ashr"),
+                BinOp::LShr => self.builder.build_right_shift(lhs, rhs, false, "lshr"),
+                BinOp::BitAnd => self.builder.build_and(lhs, rhs, "and"),
+                BinOp::BitXor => self.builder.build_xor(lhs, rhs, "xor"),
+                BinOp::BitOr => self.builder.build_or(lhs, rhs, "or"),
+                BinOp::FDiv
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::SLt
+                | BinOp::SLe
+                | BinOp::SGt
+                | BinOp::SGe
+                | BinOp::ULt
+                | BinOp::ULe
+                | BinOp::UGt
+                | BinOp::UGe
+                | BinOp::FLt
+                | BinOp::FLe
+                | BinOp::FGt
+                | BinOp::FGe
+                | BinOp::FAdd
+                | BinOp::FSub
+                | BinOp::FMul
+                | BinOp::PtrAdd
+                | BinOp::PtrSub
+                | BinOp::PtrDiff => unreachable!("non-integer binop routed to emit_int_binop"),
+            }
+            .map_err(builder_error)?;
+            Ok(value.as_basic_value_enum())
+        }
+
+        fn emit_float_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs = self.emit_float_operand(lhs, locals, body)?;
+            let rhs = self.emit_float_operand(rhs, locals, body)?;
+            let value = match op {
+                BinOp::FAdd => self.builder.build_float_add(lhs, rhs, "fadd"),
+                BinOp::FSub => self.builder.build_float_sub(lhs, rhs, "fsub"),
+                BinOp::FMul => self.builder.build_float_mul(lhs, rhs, "fmul"),
+                BinOp::FDiv => self.builder.build_float_div(lhs, rhs, "fdiv"),
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::SDiv
+                | BinOp::UDiv
+                | BinOp::SRem
+                | BinOp::URem
+                | BinOp::Shl
+                | BinOp::AShr
+                | BinOp::LShr
+                | BinOp::BitAnd
+                | BinOp::BitXor
+                | BinOp::BitOr
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::SLt
+                | BinOp::SLe
+                | BinOp::SGt
+                | BinOp::SGe
+                | BinOp::ULt
+                | BinOp::ULe
+                | BinOp::UGt
+                | BinOp::UGe
+                | BinOp::FLt
+                | BinOp::FLe
+                | BinOp::FGt
+                | BinOp::FGe
+                | BinOp::PtrAdd
+                | BinOp::PtrSub
+                | BinOp::PtrDiff => unreachable!("non-floating binop routed to emit_float_binop"),
+            }
+            .map_err(builder_error)?;
+            Ok(value.as_basic_value_enum())
+        }
+
+        fn emit_eq_ne_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs = self.emit_operand_value(lhs, locals, body)?;
+            let rhs = self.emit_operand_value(rhs, locals, body)?;
+            match (lhs, rhs) {
+                (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
+                    let predicate = match op {
+                        BinOp::Eq => IntPredicate::EQ,
+                        BinOp::Ne => IntPredicate::NE,
+                        _ => unreachable!("non-equality op routed to emit_eq_ne_binop"),
+                    };
+                    self.emit_int_compare_values(predicate, lhs, rhs)
+                }
+                (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => {
+                    let predicate = match op {
+                        BinOp::Eq => FloatPredicate::OEQ,
+                        BinOp::Ne => FloatPredicate::ONE,
+                        _ => unreachable!("non-equality op routed to emit_eq_ne_binop"),
+                    };
+                    self.emit_float_compare_values(predicate, lhs, rhs)
+                }
+                (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
+                    let int_ty = self.context.i64_type();
+                    let lhs = self
+                        .builder
+                        .build_ptr_to_int(lhs, int_ty, "ptreq.l")
+                        .map_err(builder_error)?;
+                    let rhs = self
+                        .builder
+                        .build_ptr_to_int(rhs, int_ty, "ptreq.r")
+                        .map_err(builder_error)?;
+                    let predicate = match op {
+                        BinOp::Eq => IntPredicate::EQ,
+                        BinOp::Ne => IntPredicate::NE,
+                        _ => unreachable!("non-equality op routed to emit_eq_ne_binop"),
+                    };
+                    self.emit_int_compare_values(predicate, lhs, rhs)
+                }
+                (lhs, rhs) => Err(CodegenError::Internal(format!(
+                    "equality operands have incompatible LLVM types {:?} and {:?}",
+                    lhs.get_type(),
+                    rhs.get_type()
+                ))),
+            }
+        }
+
+        fn emit_int_compare(
+            &self,
+            predicate: IntPredicate,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs = self.emit_int_operand(lhs, locals, body)?;
+            let rhs = self.emit_int_operand(rhs, locals, body)?;
+            self.emit_int_compare_values(predicate, lhs, rhs)
+        }
+
+        fn emit_int_compare_values(
+            &self,
+            predicate: IntPredicate,
+            lhs: IntValue<'ctx>,
+            rhs: IntValue<'ctx>,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self
+                .builder
+                .build_int_compare(predicate, lhs, rhs, "icmp")
+                .map_err(builder_error)?;
+            self.bool_to_c_int(value)
+        }
+
+        fn emit_float_compare(
+            &self,
+            predicate: FloatPredicate,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs = self.emit_float_operand(lhs, locals, body)?;
+            let rhs = self.emit_float_operand(rhs, locals, body)?;
+            self.emit_float_compare_values(predicate, lhs, rhs)
+        }
+
+        fn emit_float_compare_values(
+            &self,
+            predicate: FloatPredicate,
+            lhs: FloatValue<'ctx>,
+            rhs: FloatValue<'ctx>,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self
+                .builder
+                .build_float_compare(predicate, lhs, rhs, "fcmp")
+                .map_err(builder_error)?;
+            self.bool_to_c_int(value)
+        }
+
+        fn emit_ptr_add(
+            &self,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let rhs_ty = self.operand_ty(rhs, body)?;
+            match (self.tcx.get(lhs_ty), self.tcx.get(rhs_ty)) {
+                (Ty::Ptr(pointee), Ty::Int { .. }) => {
+                    let ptr = self.emit_pointer_operand(lhs, locals, body)?;
+                    let index = self.emit_int_operand(rhs, locals, body)?;
+                    let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
+                    Ok(self.build_gep(elem_ty, ptr, &[index], "ptradd")?.as_basic_value_enum())
+                }
+                (Ty::Int { .. }, Ty::Ptr(pointee)) => {
+                    let ptr = self.emit_pointer_operand(rhs, locals, body)?;
+                    let index = self.emit_int_operand(lhs, locals, body)?;
+                    let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
+                    Ok(self.build_gep(elem_ty, ptr, &[index], "ptradd")?.as_basic_value_enum())
+                }
+                _ => Err(CodegenError::Internal(format!(
+                    "PtrAdd requires pointer and integer operands, got {:?} and {:?}",
+                    lhs_ty, rhs_ty
+                ))),
+            }
+        }
+
+        fn emit_ptr_sub(
+            &self,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let Ty::Ptr(pointee) = self.tcx.get(lhs_ty) else {
+                return Err(CodegenError::Internal(format!(
+                    "PtrSub left operand must be a pointer, got {:?}",
+                    lhs_ty
+                )));
+            };
+            let ptr = self.emit_pointer_operand(lhs, locals, body)?;
+            let index = self.emit_int_operand(rhs, locals, body)?;
+            let neg_index =
+                self.builder.build_int_neg(index, "ptrsub.neg").map_err(builder_error)?;
+            let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
+            Ok(self.build_gep(elem_ty, ptr, &[neg_index], "ptrsub")?.as_basic_value_enum())
+        }
+
+        fn emit_ptr_diff(
+            &self,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let Ty::Ptr(pointee) = self.tcx.get(lhs_ty) else {
+                return Err(CodegenError::Internal(format!(
+                    "PtrDiff operands must be pointers, got {:?}",
+                    lhs_ty
+                )));
+            };
+            let ptr_ty = self.operand_ty(rhs, body)?;
+            if !matches!(self.tcx.get(ptr_ty), Ty::Ptr(_)) {
+                return Err(CodegenError::Internal(format!(
+                    "PtrDiff right operand must be a pointer, got {:?}",
+                    ptr_ty
+                )));
+            }
+            let elem_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                .layout_of(pointee.ty)
+                .map_err(|err| type_lowering_error(pointee.ty, err.to_string()))?;
+            if elem_layout.size == 0 {
+                return Err(type_lowering_error(
+                    pointee.ty,
+                    "pointer difference element has zero size",
+                ));
+            }
+            let int_ty = self.context.i64_type();
+            let lhs_ptr = self.emit_pointer_operand(lhs, locals, body)?;
+            let rhs_ptr = self.emit_pointer_operand(rhs, locals, body)?;
+            let lhs_int = self
+                .builder
+                .build_ptr_to_int(lhs_ptr, int_ty, "ptrdiff.l")
+                .map_err(builder_error)?;
+            let rhs_int = self
+                .builder
+                .build_ptr_to_int(rhs_ptr, int_ty, "ptrdiff.r")
+                .map_err(builder_error)?;
+            let byte_delta = self
+                .builder
+                .build_int_sub(lhs_int, rhs_int, "ptrdiff.bytes")
+                .map_err(builder_error)?;
+            let elem_size = int_ty.const_int(elem_layout.size, false);
+            let diff = self
+                .builder
+                .build_int_signed_div(byte_delta, elem_size, "ptrdiff")
+                .map_err(builder_error)?;
+            Ok(diff.as_basic_value_enum())
+        }
+
+        fn bool_to_c_int(
+            &self,
+            value: IntValue<'ctx>,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            self.builder
+                .build_int_z_extend(value, self.context.i32_type(), "booltoint")
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)
+        }
+
+        fn emit_int_operand(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            match self.emit_operand_value(operand, locals, body)? {
+                BasicValueEnum::IntValue(value) => Ok(value),
+                other => Err(CodegenError::Internal(format!(
+                    "expected integer operand, got {:?}",
+                    other.get_type()
+                ))),
+            }
+        }
+
+        fn emit_float_operand(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<FloatValue<'ctx>, CodegenError> {
+            match self.emit_operand_value(operand, locals, body)? {
+                BasicValueEnum::FloatValue(value) => Ok(value),
+                other => Err(CodegenError::Internal(format!(
+                    "expected floating operand, got {:?}",
+                    other.get_type()
+                ))),
+            }
+        }
+
+        fn emit_pointer_operand(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            match self.emit_operand_value(operand, locals, body)? {
+                BasicValueEnum::PointerValue(value) => Ok(value),
+                other => Err(CodegenError::Internal(format!(
+                    "expected pointer operand, got {:?}",
+                    other.get_type()
+                ))),
             }
         }
 
@@ -1603,6 +2080,13 @@ pub mod backend {
                 }
             }
             Ok(ty)
+        }
+
+        fn operand_ty(&self, operand: &Operand, body: &Body) -> Result<TyId, CodegenError> {
+            match operand {
+                Operand::Copy(place) | Operand::Move(place) => self.place_ty(place, body),
+                Operand::Const(c) => Ok(c.ty),
+            }
         }
 
         /// Materialise a CFG [`Const`] as an LLVM value.
@@ -3841,8 +4325,8 @@ mod tests {
 
     #[cfg(feature = "llvm")]
     use rcc_cfg::{
-        BasicBlock, BasicBlockId, Body, Const, ConstKind, LocalDecl, Operand, Place, Projection,
-        Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+        BasicBlock, BasicBlockId, BinOp, Body, Const, ConstKind, LocalDecl, Operand, Place,
+        Projection, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnOp,
     };
     #[cfg(feature = "llvm")]
     use rcc_hir::Local;
@@ -4306,6 +4790,251 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn local_copy(local: Local) -> Operand {
         Operand::Copy(local_place(local))
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-14: Binary and unary op emission
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn binop_return_body(ret_ty: TyId, op: BinOp, lhs: Operand, rhs: Operand) -> Body {
+        cfg_body(
+            ret_ty,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::BinaryOp(op, lhs, rhs),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        )
+    }
+
+    #[cfg(feature = "llvm")]
+    fn local_binop_return_body(ret_ty: TyId, lhs_ty: TyId, rhs_ty: TyId, op: BinOp) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(410)), lhs_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(411)), rhs_ty, false));
+        cfg_body_with_locals(
+            ret_ty,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::BinaryOp(op, local_copy(Local(1)), local_copy(Local(2))),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        )
+    }
+
+    #[cfg(feature = "llvm")]
+    fn local_unop_return_body(ret_ty: TyId, operand_ty: TyId, op: UnOp) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(412)), operand_ty, false));
+        cfg_body_with_locals(
+            ret_ty,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::UnaryOp(op, local_copy(Local(1))),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        )
+    }
+
+    /// Integer, bitwise, and comparison binops emit the expected LLVM opcode
+    /// while preserving the CFG result type.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn binop_integer_opcode_table() {
+        let int_cases: &[(BinOp, &str, &str)] = &[
+            (BinOp::Add, " add ", "i32"),
+            (BinOp::Sub, " sub ", "i32"),
+            (BinOp::Mul, " mul ", "i32"),
+            (BinOp::SDiv, " sdiv ", "i32"),
+            (BinOp::UDiv, " udiv ", "i32"),
+            (BinOp::SRem, " srem ", "i32"),
+            (BinOp::URem, " urem ", "i32"),
+            (BinOp::Shl, " shl ", "i32"),
+            (BinOp::AShr, " ashr ", "i32"),
+            (BinOp::LShr, " lshr ", "i32"),
+            (BinOp::BitAnd, " and ", "i32"),
+            (BinOp::BitXor, " xor ", "i32"),
+            (BinOp::BitOr, " or ", "i32"),
+        ];
+        for (op, opcode, result_ty) in int_cases {
+            let mut tcx = TyCtxt::new();
+            let int_ty = tcx.int;
+            let body = local_binop_return_body(int_ty, int_ty, int_ty, *op);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__binop_{op:?}").to_lowercase(),
+                int_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing opcode {opcode:?} in IR:\n{ir}");
+            assert!(ir.contains(&format!("{opcode}{result_ty}")), "bad result type in IR:\n{ir}");
+        }
+
+        let cmp_cases: &[(BinOp, &str)] = &[
+            (BinOp::Eq, "icmp eq i32"),
+            (BinOp::Ne, "icmp ne i32"),
+            (BinOp::SLt, "icmp slt i32"),
+            (BinOp::SLe, "icmp sle i32"),
+            (BinOp::SGt, "icmp sgt i32"),
+            (BinOp::SGe, "icmp sge i32"),
+            (BinOp::ULt, "icmp ult i32"),
+            (BinOp::ULe, "icmp ule i32"),
+            (BinOp::UGt, "icmp ugt i32"),
+            (BinOp::UGe, "icmp uge i32"),
+        ];
+        for (op, opcode) in cmp_cases {
+            let mut tcx = TyCtxt::new();
+            let int_ty = tcx.int;
+            let body = local_binop_return_body(int_ty, int_ty, int_ty, *op);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__binop_{op:?}").to_lowercase(),
+                int_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing opcode {opcode:?} in IR:\n{ir}");
+            assert!(ir.contains("zext i1"), "comparison did not widen to int in IR:\n{ir}");
+        }
+    }
+
+    /// Floating binops and unary `FNeg` use floating LLVM opcodes and result
+    /// types.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn binop_float_opcode_table() {
+        let cases: &[(BinOp, &str)] = &[
+            (BinOp::FAdd, " fadd double"),
+            (BinOp::FSub, " fsub double"),
+            (BinOp::FMul, " fmul double"),
+            (BinOp::FDiv, " fdiv double"),
+            (BinOp::FLt, "fcmp olt double"),
+            (BinOp::FLe, "fcmp ole double"),
+            (BinOp::FGt, "fcmp ogt double"),
+            (BinOp::FGe, "fcmp oge double"),
+            (BinOp::Eq, "fcmp oeq double"),
+            (BinOp::Ne, "fcmp one double"),
+        ];
+        for (op, opcode) in cases {
+            let mut tcx = TyCtxt::new();
+            let result_ty = if matches!(op, BinOp::FAdd | BinOp::FSub | BinOp::FMul | BinOp::FDiv) {
+                tcx.double
+            } else {
+                tcx.int
+            };
+            let body =
+                binop_return_body(result_ty, *op, local_copy(Local(1)), local_copy(Local(2)));
+            let mut body = body;
+            let mut locals = IndexVec::new();
+            locals.push(cfg_local_decl(None, result_ty, false));
+            locals.push(cfg_local_decl(Some(Symbol(413)), tcx.double, false));
+            locals.push(cfg_local_decl(Some(Symbol(414)), tcx.double, false));
+            body.locals = locals;
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__float_binop_{op:?}").to_lowercase(),
+                result_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing opcode {opcode:?} in IR:\n{ir}");
+        }
+    }
+
+    /// Unary op emission covers integer negate, floating negate, bitwise not,
+    /// and logical not.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn unop_opcode_table() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let int_cases: &[(UnOp, &str)] = &[
+            (UnOp::Neg, " sub i32 0,"),
+            (UnOp::BitNot, " xor i32"),
+            (UnOp::LogNot, "icmp eq i32"),
+        ];
+        for (op, opcode) in int_cases {
+            let body = local_unop_return_body(int_ty, int_ty, *op);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__unop_{op:?}").to_lowercase(),
+                int_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing opcode {opcode:?} in IR:\n{ir}");
+        }
+
+        let double_ty = tcx.double;
+        let body = local_unop_return_body(double_ty, double_ty, UnOp::FNeg);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__unop_fneg", double_ty, body);
+        assert!(ir.contains(" fneg double"), "missing fneg in IR:\n{ir}");
+    }
+
+    /// Pointer arithmetic is expressed as typed GEP over the pointed-to
+    /// element, and pointer difference divides the byte delta by element size.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn pointer_arithmetic_uses_element_layout() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(int_ty)));
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ptr_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(401)), ptr_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(402)), ptr_ty, false));
+
+        let add_body = cfg_body_with_locals(
+            ptr_ty,
+            locals.clone(),
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::BinaryOp(
+                            BinOp::PtrAdd,
+                            local_copy(Local(1)),
+                            int_const(int_ty, 3),
+                        ),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+        let add_ir = assert_codegen_fixture_verifies(&mut tcx, "__ptr_add", ptr_ty, add_body);
+        assert!(add_ir.contains("getelementptr i32"), "IR:\n{add_ir}");
+
+        let long_ty = tcx.long;
+        let mut diff_locals = IndexVec::new();
+        diff_locals.push(cfg_local_decl(None, long_ty, false));
+        diff_locals.push(cfg_local_decl(Some(Symbol(403)), ptr_ty, false));
+        diff_locals.push(cfg_local_decl(Some(Symbol(404)), ptr_ty, false));
+        let diff_body =
+            binop_return_body(long_ty, BinOp::PtrDiff, local_copy(Local(1)), local_copy(Local(2)));
+        let mut diff_body = diff_body;
+        diff_body.locals = diff_locals;
+        let diff_ir = assert_codegen_fixture_verifies(&mut tcx, "__ptr_diff", long_ty, diff_body);
+        assert!(diff_ir.contains("ptrtoint ptr"), "IR:\n{diff_ir}");
+        assert!(diff_ir.contains("sdiv i64") && diff_ir.contains(", 4"), "IR:\n{diff_ir}");
     }
 
     /// Forward declarations are callable before any callee body is emitted.
