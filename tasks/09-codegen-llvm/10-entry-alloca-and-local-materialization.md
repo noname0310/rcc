@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-10: Entry-block alloca and local materialization
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-09    **Milestone:** M3

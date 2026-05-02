@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-09: Place address, operand load, and store helpers
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-06    **Milestone:** M3
