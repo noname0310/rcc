@@ -13,7 +13,7 @@
 use rcc_cfg::Body;
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::IndexVec;
-use rcc_hir::{Def, DefId, HirCrate, Layout, LayoutError, Ty, TyCtxt, TyId};
+use rcc_hir::{Def, DefId, DefKind, FloatKind, HirCrate, Layout, LayoutError, Ty, TyCtxt, TyId};
 use rcc_session::Session;
 
 pub mod layout;
@@ -61,6 +61,137 @@ pub struct CodegenArtifact {
     pub ir_text: String,
 }
 
+/// Final SysV x86-64 ABI class assigned to an argument eightbyte.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum AbiClass {
+    /// Empty or padding-only eightbyte before cleanup.
+    #[default]
+    NoClass,
+    /// General-purpose integer register class.
+    Integer,
+    /// SSE/vector register class.
+    Sse,
+    /// Upper half of a vector register.
+    SseUp,
+    /// x87 long-double payload class.
+    X87,
+    /// x87 long-double exponent/padding class.
+    X87Up,
+    /// Complex long-double class.
+    ComplexX87,
+    /// Stack memory class.
+    Memory,
+}
+
+/// ABI lowering for one C function parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiParam {
+    /// Original HIR type being lowered.
+    pub source: TyId,
+    /// ABI-passing strategy.
+    pub kind: AbiParamKind,
+    /// Final eightbyte classes after SysV cleanup.
+    pub classes: Vec<AbiClass>,
+}
+
+impl AbiParam {
+    /// Number of LLVM IR parameters emitted for this one C parameter.
+    pub fn llvm_param_count(&self) -> usize {
+        match &self.kind {
+            AbiParamKind::Direct(units) => units.len(),
+            AbiParamKind::Indirect { .. } => 1,
+        }
+    }
+}
+
+/// ABI-passing strategy for one C function parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbiParamKind {
+    /// Pass directly as one or more LLVM scalar/vector parameters.
+    Direct(Vec<AbiParamUnit>),
+    /// Pass indirectly through a pointer to caller-owned storage.
+    Indirect {
+        /// Whether LLVM should treat the pointer as a by-value aggregate.
+        byval: bool,
+        /// Required alignment of the pointed-to storage in bytes.
+        align: u32,
+        /// Size of the original object in bytes.
+        size: u64,
+    },
+}
+
+/// One LLVM IR parameter produced by direct ABI lowering.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AbiParamUnit {
+    /// SysV ABI class for this unit.
+    pub class: AbiClass,
+    /// LLVM type shape for this unit.
+    pub kind: AbiParamUnitKind,
+}
+
+/// LLVM type shape for a direct ABI parameter unit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AbiParamUnitKind {
+    /// Use the source type's natural LLVM lowering.
+    Source(TyId),
+    /// Coerce an aggregate eightbyte to an integer of this bit width.
+    Integer {
+        /// Integer bit width.
+        bits: u32,
+    },
+    /// Coerce an aggregate eightbyte to a floating-point scalar.
+    Float(FloatKind),
+    /// Coerce an aggregate eightbyte to a fixed-width vector.
+    Vector {
+        /// Element floating-point kind.
+        elem: FloatKind,
+        /// Number of vector lanes.
+        lanes: u32,
+    },
+}
+
+/// ABI lowering for a whole C function signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnAbi {
+    /// Original HIR return type. Return ABI lowering is handled by task 09-08.
+    pub ret: TyId,
+    /// Lowered fixed parameters in source order.
+    pub params: Vec<AbiParam>,
+    /// Whether the C function has an ellipsis.
+    pub variadic: bool,
+    /// LLVM IR parameter index where variadic call-site arguments begin.
+    pub fixed_param_count: usize,
+}
+
+/// Classify a C function type's parameters for the baseline SysV x86-64 ABI.
+pub fn sysv_fn_abi(
+    tcx: &TyCtxt,
+    defs: &IndexVec<DefId, Def>,
+    ty: TyId,
+) -> Result<FnAbi, CodegenError> {
+    let (ret, params, variadic) = match tcx.get(ty) {
+        Ty::Func { ret, params, variadic, .. } => (*ret, params.clone(), *variadic),
+        _ => return Err(type_lowering_error(ty, "not a function type")),
+    };
+
+    let mut lowered = Vec::with_capacity(params.len());
+    for param in params {
+        lowered.push(sysv_param_abi(tcx, defs, param)?);
+    }
+    let fixed_param_count = lowered.iter().map(AbiParam::llvm_param_count).sum();
+
+    Ok(FnAbi { ret, params: lowered, variadic, fixed_param_count })
+}
+
+/// Classify one C function parameter for the baseline SysV x86-64 ABI.
+pub fn sysv_param_abi(
+    tcx: &TyCtxt,
+    defs: &IndexVec<DefId, Def>,
+    ty: TyId,
+) -> Result<AbiParam, CodegenError> {
+    SysvParamClassifier::new(tcx, defs).classify_param(ty)
+}
+
 /// Codegen entry point. Consumes HIR (for globals / layout info) and the
 /// CFG body map produced by `rcc_cfg::build_bodies`.
 pub fn codegen(
@@ -79,12 +210,388 @@ pub fn codegen(
     }
 }
 
+const EIGHTBYTE_SIZE: u64 = 8;
+const MAX_REGISTER_EIGHTBYTES: usize = 2;
+
+struct SysvParamClassifier<'tcx> {
+    tcx: &'tcx TyCtxt,
+    defs: &'tcx IndexVec<DefId, Def>,
+    layout: LayoutCx<'tcx>,
+}
+
+impl<'tcx> SysvParamClassifier<'tcx> {
+    fn new(tcx: &'tcx TyCtxt, defs: &'tcx IndexVec<DefId, Def>) -> Self {
+        Self { tcx, defs, layout: LayoutCx::with_defs(tcx, defs) }
+    }
+
+    fn classify_param(&self, ty: TyId) -> Result<AbiParam, CodegenError> {
+        match self.tcx.get(ty) {
+            Ty::Void => Err(type_lowering_error(ty, "void is not a parameter type")),
+            Ty::Func { .. } => Err(type_lowering_error(ty, "function parameters must decay")),
+            Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
+            Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_param(ty)),
+            Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => self.aggregate_param(ty),
+        }
+    }
+
+    fn scalar_param(&self, ty: TyId) -> AbiParam {
+        let classes = match self.tcx.get(ty) {
+            Ty::Float(FloatKind::F80) => vec![AbiClass::X87, AbiClass::X87Up],
+            Ty::Float(FloatKind::F32 | FloatKind::F64) => vec![AbiClass::Sse],
+            Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) => vec![AbiClass::Integer],
+            _ => unreachable!("scalar_param called for non-scalar type"),
+        };
+        AbiParam {
+            source: ty,
+            kind: AbiParamKind::Direct(vec![AbiParamUnit {
+                class: classes[0],
+                kind: AbiParamUnitKind::Source(ty),
+            }]),
+            classes,
+        }
+    }
+
+    fn aggregate_param(&self, ty: TyId) -> Result<AbiParam, CodegenError> {
+        let layout =
+            self.layout.layout_of(ty).map_err(|err| type_lowering_error(ty, err.to_string()))?;
+        let eightbytes = eightbyte_count(layout.size, ty)?;
+        if eightbytes > 4 {
+            return Ok(indirect_param(ty, layout));
+        }
+
+        let mut chunks = vec![Eightbyte::default(); eightbytes];
+        self.classify_ty_into(ty, 0, &mut chunks)?;
+        post_cleanup(&mut chunks);
+
+        if chunks.iter().any(|chunk| chunk.class == AbiClass::Memory)
+            || needs_memory_after_cleanup(&chunks)
+        {
+            return Ok(indirect_param(ty, layout));
+        }
+
+        let mut units = Vec::with_capacity(chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            if chunk.class == AbiClass::NoClass {
+                continue;
+            }
+            let size = eightbyte_payload_size(layout.size, idx);
+            units.push(AbiParamUnit { class: chunk.class, kind: unit_kind(chunk, size, ty)? });
+        }
+        let classes = units.iter().map(|unit| unit.class).collect();
+        Ok(AbiParam { source: ty, kind: AbiParamKind::Direct(units), classes })
+    }
+
+    fn classify_ty_into(
+        &self,
+        ty: TyId,
+        offset: u64,
+        chunks: &mut [Eightbyte],
+    ) -> Result<(), CodegenError> {
+        match self.tcx.get(ty) {
+            Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) => {
+                let layout = self
+                    .layout
+                    .layout_of(ty)
+                    .map_err(|err| type_lowering_error(ty, err.to_string()))?;
+                merge_range(chunks, offset, layout.size, AbiClass::Integer, ty)?;
+                self.record_integer_part(offset, layout.size, chunks, ty)
+            }
+            Ty::Float(FloatKind::F32) => self.classify_float(offset, FloatKind::F32, chunks, ty),
+            Ty::Float(FloatKind::F64) => self.classify_float(offset, FloatKind::F64, chunks, ty),
+            Ty::Float(FloatKind::F80) => {
+                merge_range(chunks, offset, 8, AbiClass::X87, ty)?;
+                merge_range(chunks, offset + 8, 8, AbiClass::X87Up, ty)
+            }
+            Ty::Complex(FloatKind::F32) => {
+                self.classify_float(offset, FloatKind::F32, chunks, ty)?;
+                self.classify_float(offset + 4, FloatKind::F32, chunks, ty)
+            }
+            Ty::Complex(FloatKind::F64) => {
+                self.classify_float(offset, FloatKind::F64, chunks, ty)?;
+                self.classify_float(offset + 8, FloatKind::F64, chunks, ty)
+            }
+            Ty::Complex(FloatKind::F80) => {
+                merge_range(chunks, offset, 32, AbiClass::ComplexX87, ty)
+            }
+            Ty::Array { elem, .. } => self.classify_array(ty, elem.ty, offset, chunks),
+            Ty::Record(_) => self.classify_record(ty, offset, chunks),
+            Ty::Void | Ty::Func { .. } | Ty::Error => {
+                Err(type_lowering_error(ty, "type cannot appear inside an ABI aggregate"))
+            }
+        }
+    }
+
+    fn classify_float(
+        &self,
+        offset: u64,
+        kind: FloatKind,
+        chunks: &mut [Eightbyte],
+        ty: TyId,
+    ) -> Result<(), CodegenError> {
+        let size = float_size(kind);
+        merge_range(chunks, offset, size, AbiClass::Sse, ty)?;
+        let idx = chunk_index(offset, ty)?;
+        let Some(chunk) = chunks.get_mut(idx) else {
+            return Err(type_lowering_error(ty, "ABI float escaped its aggregate"));
+        };
+        chunk.floats.push(FloatPart { offset: (offset % EIGHTBYTE_SIZE) as u8, kind });
+        Ok(())
+    }
+
+    fn record_integer_part(
+        &self,
+        offset: u64,
+        size: u64,
+        chunks: &mut [Eightbyte],
+        ty: TyId,
+    ) -> Result<(), CodegenError> {
+        if size == 0 || chunk_index(offset, ty)? != chunk_index(offset + size - 1, ty)? {
+            return Ok(());
+        }
+        let idx = chunk_index(offset, ty)?;
+        let Some(chunk) = chunks.get_mut(idx) else {
+            return Err(type_lowering_error(ty, "ABI integer escaped its aggregate"));
+        };
+        chunk.ints.push(IntPart {
+            offset: (offset % EIGHTBYTE_SIZE) as u8,
+            bits: bits_for_size(size, ty)?,
+        });
+        Ok(())
+    }
+
+    fn classify_array(
+        &self,
+        ty: TyId,
+        elem: TyId,
+        offset: u64,
+        chunks: &mut [Eightbyte],
+    ) -> Result<(), CodegenError> {
+        let array = self.array_layout(ty)?;
+        let Some(len) = array.len else {
+            return Err(type_lowering_error(ty, "incomplete arrays cannot be ABI-classified"));
+        };
+        for idx in 0..len {
+            let elem_offset = offset
+                .checked_add(
+                    idx.checked_mul(array.elem.size)
+                        .ok_or_else(|| type_lowering_error(ty, "array ABI offset overflow"))?,
+                )
+                .ok_or_else(|| type_lowering_error(ty, "array ABI offset overflow"))?;
+            self.classify_ty_into(elem, elem_offset, chunks)?;
+        }
+        Ok(())
+    }
+
+    fn classify_record(
+        &self,
+        ty: TyId,
+        offset: u64,
+        chunks: &mut [Eightbyte],
+    ) -> Result<(), CodegenError> {
+        let Ty::Record(def) = self.tcx.get(ty) else {
+            unreachable!("classify_record called for non-record type")
+        };
+        let record = self
+            .layout
+            .record_layout_of(ty)
+            .map_err(|err| type_lowering_error(ty, err.to_string()))?;
+        let def_data = self.defs.get(*def).ok_or_else(|| {
+            type_lowering_error(ty, format!("record definition {def:?} is missing"))
+        })?;
+        let DefKind::Record { fields, .. } = &def_data.kind else {
+            return Err(type_lowering_error(
+                ty,
+                "record type does not reference a record definition",
+            ));
+        };
+
+        for (field, field_layout) in fields.iter().zip(record.fields.iter()) {
+            if field_layout.storage_size == 0 {
+                continue;
+            }
+            let field_offset = offset
+                .checked_add(field_layout.offset)
+                .ok_or_else(|| type_lowering_error(ty, "record field ABI offset overflow"))?;
+            if field_offset % u64::from(field_layout.storage_align) != 0 {
+                mark_memory(chunks);
+                return Ok(());
+            }
+            self.classify_ty_into(field.ty, field_offset, chunks)?;
+        }
+        Ok(())
+    }
+
+    fn array_layout(&self, ty: TyId) -> Result<rcc_hir::ArrayLayout, CodegenError> {
+        self.layout.array_layout_of(ty).map_err(|err| type_lowering_error(ty, err.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Eightbyte {
+    class: AbiClass,
+    ints: Vec<IntPart>,
+    floats: Vec<FloatPart>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct FloatPart {
+    offset: u8,
+    kind: FloatKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct IntPart {
+    offset: u8,
+    bits: u32,
+}
+
+fn indirect_param(ty: TyId, layout: Layout) -> AbiParam {
+    AbiParam {
+        source: ty,
+        kind: AbiParamKind::Indirect { byval: true, align: layout.align, size: layout.size },
+        classes: vec![AbiClass::Memory],
+    }
+}
+
+fn merge_range(
+    chunks: &mut [Eightbyte],
+    offset: u64,
+    size: u64,
+    class: AbiClass,
+    ty: TyId,
+) -> Result<(), CodegenError> {
+    if size == 0 {
+        return Ok(());
+    }
+    let start = chunk_index(offset, ty)?;
+    let end = chunk_index(
+        offset
+            .checked_add(size - 1)
+            .ok_or_else(|| type_lowering_error(ty, "ABI range overflow"))?,
+        ty,
+    )?;
+    for idx in start..=end {
+        let Some(chunk) = chunks.get_mut(idx) else {
+            return Err(type_lowering_error(ty, "ABI range escaped its aggregate"));
+        };
+        chunk.class = merge_class(chunk.class, class);
+    }
+    Ok(())
+}
+
+fn merge_class(lhs: AbiClass, rhs: AbiClass) -> AbiClass {
+    use AbiClass::{ComplexX87, Integer, Memory, NoClass, Sse, X87Up, X87};
+
+    match (lhs, rhs) {
+        (a, b) if a == b => a,
+        (NoClass, b) => b,
+        (a, NoClass) => a,
+        (Memory, _) | (_, Memory) => Memory,
+        (Integer, _) | (_, Integer) => Integer,
+        (X87 | X87Up | ComplexX87, _) | (_, X87 | X87Up | ComplexX87) => Memory,
+        _ => Sse,
+    }
+}
+
+fn post_cleanup(chunks: &mut [Eightbyte]) {
+    for idx in 0..chunks.len() {
+        if chunks[idx].class == AbiClass::SseUp
+            && (idx == 0 || !matches!(chunks[idx - 1].class, AbiClass::Sse | AbiClass::SseUp))
+        {
+            chunks[idx].class = AbiClass::Sse;
+        }
+    }
+}
+
+fn needs_memory_after_cleanup(chunks: &[Eightbyte]) -> bool {
+    if chunks.len() <= MAX_REGISTER_EIGHTBYTES {
+        return false;
+    }
+    chunks.first().map(|chunk| chunk.class != AbiClass::Sse).unwrap_or(false)
+        || chunks.iter().skip(1).any(|chunk| chunk.class != AbiClass::SseUp)
+}
+
+fn mark_memory(chunks: &mut [Eightbyte]) {
+    for chunk in chunks {
+        chunk.class = AbiClass::Memory;
+    }
+}
+
+fn unit_kind(chunk: &Eightbyte, size: u64, ty: TyId) -> Result<AbiParamUnitKind, CodegenError> {
+    match chunk.class {
+        AbiClass::Integer => {
+            let mut ints = chunk.ints.clone();
+            ints.sort_by_key(|part| part.offset);
+            match ints.as_slice() {
+                [IntPart { offset: 0, bits }] => Ok(AbiParamUnitKind::Integer { bits: *bits }),
+                _ => Ok(AbiParamUnitKind::Integer { bits: bits_for_size(size, ty)? }),
+            }
+        }
+        AbiClass::Sse => Ok(sse_unit_kind(chunk)),
+        AbiClass::SseUp => Ok(sse_unit_kind(chunk)),
+        AbiClass::NoClass
+        | AbiClass::X87
+        | AbiClass::X87Up
+        | AbiClass::ComplexX87
+        | AbiClass::Memory => Err(type_lowering_error(ty, "unsupported direct ABI class")),
+    }
+}
+
+fn sse_unit_kind(chunk: &Eightbyte) -> AbiParamUnitKind {
+    let mut floats = chunk.floats.clone();
+    floats.sort_by_key(|part| part.offset);
+    match floats.as_slice() {
+        [FloatPart { offset: 0, kind: FloatKind::F32 }, FloatPart { offset: 4, kind: FloatKind::F32 }] => {
+            AbiParamUnitKind::Vector { elem: FloatKind::F32, lanes: 2 }
+        }
+        [FloatPart { offset: 0, kind }] => AbiParamUnitKind::Float(*kind),
+        _ => AbiParamUnitKind::Float(FloatKind::F64),
+    }
+}
+
+fn eightbyte_count(size: u64, ty: TyId) -> Result<usize, CodegenError> {
+    let rounded = size
+        .checked_add(EIGHTBYTE_SIZE - 1)
+        .ok_or_else(|| type_lowering_error(ty, "ABI size overflow"))?
+        / EIGHTBYTE_SIZE;
+    usize::try_from(rounded).map_err(|_| type_lowering_error(ty, "ABI size overflow"))
+}
+
+fn eightbyte_payload_size(total_size: u64, idx: usize) -> u64 {
+    let offset = (idx as u64) * EIGHTBYTE_SIZE;
+    (total_size - offset).min(EIGHTBYTE_SIZE)
+}
+
+fn bits_for_size(size: u64, ty: TyId) -> Result<u32, CodegenError> {
+    let bits =
+        size.checked_mul(8).ok_or_else(|| type_lowering_error(ty, "ABI integer width overflow"))?;
+    u32::try_from(bits).map_err(|_| type_lowering_error(ty, "ABI integer width overflow"))
+}
+
+fn chunk_index(offset: u64, ty: TyId) -> Result<usize, CodegenError> {
+    usize::try_from(offset / EIGHTBYTE_SIZE)
+        .map_err(|_| type_lowering_error(ty, "ABI chunk index overflow"))
+}
+
+fn float_size(kind: FloatKind) -> u64 {
+    match kind {
+        FloatKind::F32 => 4,
+        FloatKind::F64 => 8,
+        FloatKind::F80 => 16,
+    }
+}
+
+fn type_lowering_error(ty: TyId, reason: impl Into<String>) -> CodegenError {
+    CodegenError::TypeLowering { ty, reason: reason.into() }
+}
+
 #[cfg(feature = "llvm")]
 pub mod backend {
     //! The real inkwell-backed codegen.
 
     use super::*;
 
+    use inkwell::attributes::{Attribute, AttributeLoc};
     use inkwell::builder::Builder;
     use inkwell::context::Context;
     use inkwell::module::Linkage as LlvmLinkage;
@@ -265,10 +772,15 @@ pub mod backend {
                 )
             };
             let fn_ty = self.type_cx().fn_type_of(ty)?;
-            let function = self
-                .module
-                .get_function(&name)
-                .unwrap_or_else(|| self.module.add_function(&name, fn_ty, Some(linkage)));
+            let abi = sysv_fn_abi(self.tcx, &self.hir.defs, ty)?;
+            let function = match self.module.get_function(&name) {
+                Some(function) => function,
+                None => {
+                    let function = self.module.add_function(&name, fn_ty, Some(linkage));
+                    self.apply_param_abi_attrs(function, &abi)?;
+                    function
+                }
+            };
             function.set_linkage(linkage);
             self.functions.insert(def, function);
             Ok(function)
@@ -333,6 +845,51 @@ pub mod backend {
 
         fn def_name(&self, def: &Def) -> String {
             self.session.interner.get(def.name).to_owned()
+        }
+
+        fn apply_param_abi_attrs(
+            &self,
+            function: FunctionValue<'ctx>,
+            abi: &FnAbi,
+        ) -> Result<(), CodegenError> {
+            let byval_kind = Attribute::get_named_enum_kind_id("byval");
+            let align_kind = Attribute::get_named_enum_kind_id("align");
+            let mut param_index = 0_u32;
+
+            for param in &abi.params {
+                match &param.kind {
+                    AbiParamKind::Direct(units) => {
+                        param_index = param_index
+                            .checked_add(u32::try_from(units.len()).map_err(|_| {
+                                CodegenError::Internal(
+                                    "function parameter index overflowed".to_owned(),
+                                )
+                            })?)
+                            .ok_or_else(|| {
+                                CodegenError::Internal(
+                                    "function parameter index overflowed".to_owned(),
+                                )
+                            })?;
+                    }
+                    AbiParamKind::Indirect { byval, align, .. } => {
+                        if *byval {
+                            let pointee = self.type_cx().basic_type_of(param.source)?;
+                            let attr = self
+                                .context
+                                .create_type_attribute(byval_kind, basic_type_as_any(pointee));
+                            function.add_attribute(AttributeLoc::Param(param_index), attr);
+                        }
+                        let attr =
+                            self.context.create_enum_attribute(align_kind, u64::from(*align));
+                        function.add_attribute(AttributeLoc::Param(param_index), attr);
+                        param_index = param_index.checked_add(1).ok_or_else(|| {
+                            CodegenError::Internal("function parameter index overflowed".to_owned())
+                        })?;
+                    }
+                }
+            }
+
+            Ok(())
         }
     }
 
@@ -400,19 +957,12 @@ pub mod backend {
 
         /// Lower a C function type to an LLVM function type.
         pub fn fn_type_of(&mut self, ty: TyId) -> Result<FunctionType<'ctx>, CodegenError> {
-            let (ret, params, variadic) = match self.tcx.get(ty) {
-                Ty::Func { ret, params, variadic, .. } => (*ret, params.clone(), *variadic),
-                _ => return self.type_error(ty, "not a function type"),
-            };
+            let abi = sysv_fn_abi(self.tcx, &self.hir.defs, ty)?;
+            let params = self.abi_param_types(&abi)?;
 
-            let params: Vec<BasicMetadataTypeEnum<'ctx>> = params
-                .into_iter()
-                .map(|param| self.basic_type_of(param).map(Into::into))
-                .collect::<Result<_, _>>()?;
-
-            match self.tcx.get(ret) {
-                Ty::Void => Ok(self.context.void_type().fn_type(&params, variadic)),
-                _ => Ok(self.basic_type_of(ret)?.fn_type(&params, variadic)),
+            match self.tcx.get(abi.ret) {
+                Ty::Void => Ok(self.context.void_type().fn_type(&params, abi.variadic)),
+                _ => Ok(self.basic_type_of(abi.ret)?.fn_type(&params, abi.variadic)),
             }
         }
 
@@ -450,6 +1000,40 @@ pub mod backend {
 
         fn basic_type_of_qual(&mut self, qual: Qual) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
             self.basic_type_of(qual.ty)
+        }
+
+        fn abi_param_types(
+            &mut self,
+            abi: &FnAbi,
+        ) -> Result<Vec<BasicMetadataTypeEnum<'ctx>>, CodegenError> {
+            let mut params = Vec::with_capacity(abi.fixed_param_count);
+            for param in &abi.params {
+                match &param.kind {
+                    AbiParamKind::Direct(units) => {
+                        for unit in units {
+                            params.push(self.abi_unit_type(*unit)?.into());
+                        }
+                    }
+                    AbiParamKind::Indirect { .. } => params.push(self.ptr_type().into()),
+                }
+            }
+            Ok(params)
+        }
+
+        fn abi_unit_type(
+            &mut self,
+            unit: AbiParamUnit,
+        ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            match unit.kind {
+                AbiParamUnitKind::Source(ty) => self.basic_type_of(ty),
+                AbiParamUnitKind::Integer { bits } => {
+                    Ok(self.context.custom_width_int_type(bits).into())
+                }
+                AbiParamUnitKind::Float(kind) => Ok(self.float_type(kind).into()),
+                AbiParamUnitKind::Vector { elem, lanes } => {
+                    Ok(self.float_type(elem).vec_type(lanes).into())
+                }
+            }
         }
 
         fn record_type(
@@ -821,6 +1405,123 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn hir_with_defs(defs: IndexVec<DefId, Def>) -> HirCrate {
         HirCrate { defs, ..HirCrate::default() }
+    }
+
+    fn func_ty(tcx: &mut TyCtxt, ret: TyId, params: Vec<TyId>, variadic: bool) -> TyId {
+        tcx.intern(Ty::Func { ret, params, variadic, proto: true })
+    }
+
+    fn abi_shapes(tcx: &TyCtxt, param: &AbiParam) -> Vec<String> {
+        match &param.kind {
+            AbiParamKind::Direct(units) => {
+                units.iter().map(|unit| abi_unit_shape(tcx, unit.kind)).collect()
+            }
+            AbiParamKind::Indirect { .. } => vec!["ptr".to_owned()],
+        }
+    }
+
+    fn abi_unit_shape(tcx: &TyCtxt, unit: AbiParamUnitKind) -> String {
+        match unit {
+            AbiParamUnitKind::Source(ty) => llvm_source_shape(tcx, ty),
+            AbiParamUnitKind::Integer { bits } => format!("i{bits}"),
+            AbiParamUnitKind::Float(kind) => llvm_float_shape(kind).to_owned(),
+            AbiParamUnitKind::Vector { elem, lanes } => {
+                format!("<{lanes} x {}>", llvm_float_shape(elem))
+            }
+        }
+    }
+
+    fn llvm_source_shape(tcx: &TyCtxt, ty: TyId) -> String {
+        match tcx.get(ty) {
+            Ty::Int { rank, .. } => match rank {
+                IntRank::Bool => "i1",
+                IntRank::Char => "i8",
+                IntRank::Short => "i16",
+                IntRank::Int => "i32",
+                IntRank::Long | IntRank::LongLong => "i64",
+            }
+            .to_owned(),
+            Ty::Float(kind) => llvm_float_shape(*kind).to_owned(),
+            Ty::Ptr(_) => "ptr".to_owned(),
+            Ty::Enum(_) => "i32".to_owned(),
+            other => panic!("unexpected source ABI unit: {other:?}"),
+        }
+    }
+
+    fn llvm_float_shape(kind: FloatKind) -> &'static str {
+        match kind {
+            FloatKind::F32 => "float",
+            FloatKind::F64 => "double",
+            FloatKind::F80 => "x86_fp80",
+        }
+    }
+
+    #[test]
+    fn sysv_abi_classifies_scalar_params_and_variadic_boundary() {
+        let mut tcx = TyCtxt::new();
+        let ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+        let ret = tcx.void;
+        let int = tcx.int;
+        let double = tcx.double;
+        let fn_ty = func_ty(&mut tcx, ret, vec![int, double, ptr], true);
+        let defs = IndexVec::new();
+
+        let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+        assert!(abi.variadic);
+        assert_eq!(abi.fixed_param_count, 3);
+        assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["i32"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["double"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[2]), ["ptr"]);
+        assert_eq!(abi.params[0].classes, [AbiClass::Integer]);
+        assert_eq!(abi.params[1].classes, [AbiClass::Sse]);
+        assert_eq!(abi.params[2].classes, [AbiClass::Integer]);
+    }
+
+    #[test]
+    fn sysv_abi_golden_shapes_match_clang_for_aggregate_params() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let pair = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let pair_ty = tcx.intern(Ty::Record(pair));
+        let mix =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.double)]);
+        let mix_ty = tcx.intern(Ty::Record(mix));
+        let two_floats =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.float), field(tcx.float)]);
+        let two_floats_ty = tcx.intern(Ty::Record(two_floats));
+        let char_array =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(3), is_vla: false });
+        let three_chars = record_def(&mut defs, RecordKind::Struct, vec![field(char_array)]);
+        let three_chars_ty = tcx.intern(Ty::Record(three_chars));
+        let big = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.long), field(tcx.long), field(tcx.long)],
+        );
+        let big_ty = tcx.intern(Ty::Record(big));
+        let ret = tcx.void;
+        let fn_ty = func_ty(
+            &mut tcx,
+            ret,
+            vec![pair_ty, mix_ty, two_floats_ty, three_chars_ty, big_ty],
+            false,
+        );
+
+        let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+        assert_eq!(abi.fixed_param_count, 6);
+        assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["i64"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["i32", "double"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[2]), ["<2 x float>"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[3]), ["i24"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[4]), ["ptr"]);
+        assert_eq!(abi.params[1].classes, [AbiClass::Integer, AbiClass::Sse]);
+        assert_eq!(abi.params[4].classes, [AbiClass::Memory]);
+        assert!(matches!(
+            abi.params[4].kind,
+            AbiParamKind::Indirect { byval: true, align: 8, size: 24 }
+        ));
     }
 
     #[test]
