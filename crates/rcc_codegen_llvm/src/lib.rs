@@ -7,7 +7,7 @@
 //! Activate the actual backend with `--features llvm` once LLVM 18 and
 //! `llvm-config` are on `PATH`.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 use rcc_cfg::Body;
@@ -717,9 +717,12 @@ pub mod backend {
     use inkwell::types::{
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
-    use inkwell::values::{FunctionValue, GlobalValue};
+    use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
     use inkwell::AddressSpace;
-    use rcc_hir::{DefKind, FloatKind, IntRank, Linkage as HirLinkage, Qual, RecordKind};
+    use rcc_cfg::{Body, ConstKind, Operand, Place, Projection, Rvalue};
+    use rcc_hir::{
+        DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, Qual, RecordKind, Ty,
+    };
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -1039,6 +1042,270 @@ pub mod backend {
 
             Ok(())
         }
+
+        // ---------------------------------------------------------------
+        // 09-09: Place address, operand load, and store helpers
+        // ---------------------------------------------------------------
+
+        /// Compute the LLVM pointer for a CFG [`Place`].
+        ///
+        /// Walks the projection chain and emits `getelementptr` / pointer
+        /// loads as needed. The returned `PointerValue` is the address where
+        /// the place's value lives.
+        ///
+        /// `locals` maps each [`Local`] index to the alloca created for it
+        /// (populated by the entry-block alloca pass, task 09-10).
+        pub fn emit_place_addr(
+            &self,
+            place: &Place,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            let mut ptr = *locals.get(place.base).ok_or_else(|| {
+                CodegenError::Internal(format!("missing LLVM storage for local {:?}", place.base))
+            })?;
+            let mut current_ty = body
+                .locals
+                .get(place.base)
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+                })?
+                .ty;
+
+            for proj in &place.projection {
+                match proj {
+                    Projection::Deref => {
+                        let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
+                            return Err(invalid_place_projection("dereference", current_ty));
+                        };
+                        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                        ptr = self
+                            .builder
+                            .build_load(ptr_ty, ptr, "deref_load")
+                            .map_err(builder_error)?
+                            .into_pointer_value();
+                        current_ty = pointee.ty;
+                    }
+                    Projection::Field(idx) => {
+                        let (record_kind, field_ty) = self.record_field_ty(current_ty, *idx)?;
+                        if record_kind == RecordKind::Struct {
+                            let record_ty = self.type_cx().basic_type_of(current_ty)?;
+                            ptr = self
+                                .builder
+                                .build_struct_gep(record_ty, ptr, *idx, "field_gep")
+                                .map_err(builder_error)?;
+                        }
+                        current_ty = field_ty;
+                    }
+                    Projection::Index(index_op) => {
+                        let index_val = match self.emit_operand_value(index_op, locals, body)? {
+                            BasicValueEnum::IntValue(value) => value,
+                            other => {
+                                return Err(CodegenError::Internal(format!(
+                                    "place index must be an integer, got {:?}",
+                                    other.get_type()
+                                )));
+                            }
+                        };
+                        match self.tcx.get(current_ty) {
+                            Ty::Array { elem, .. } => {
+                                let zero = self.context.i32_type().const_zero();
+                                let array_ty = self.type_cx().basic_type_of(current_ty)?;
+                                ptr =
+                                    self.build_gep(array_ty, ptr, &[zero, index_val], "index_gep")?;
+                                current_ty = elem.ty;
+                            }
+                            Ty::Ptr(pointee) => {
+                                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                                let base = self
+                                    .builder
+                                    .build_load(ptr_ty, ptr, "index_base_load")
+                                    .map_err(builder_error)?
+                                    .into_pointer_value();
+                                let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
+                                ptr = self.build_gep(elem_ty, base, &[index_val], "index_gep")?;
+                                current_ty = pointee.ty;
+                            }
+                            _ => return Err(invalid_place_projection("index", current_ty)),
+                        }
+                    }
+                }
+            }
+
+            Ok(ptr)
+        }
+
+        /// Load the value of a CFG [`Operand`] as an LLVM `BasicValueEnum`.
+        ///
+        /// - `Operand::Copy(place)` / `Operand::Move(place)` → address + load.
+        /// - `Operand::Const(c)` → materialise the constant.
+        pub fn emit_operand_value(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match operand {
+                Operand::Copy(place) | Operand::Move(place) => {
+                    let addr = self.emit_place_addr(place, locals, body)?;
+                    let ty = self.place_ty(place, body)?;
+                    let llvm_ty = self.type_cx().basic_type_of(ty)?;
+                    self.builder.build_load(llvm_ty, addr, "load").map_err(builder_error)
+                }
+                Operand::Const(c) => self.emit_const(c),
+            }
+        }
+
+        /// Emit the subset of CFG rvalues whose memory semantics are owned by this task.
+        ///
+        /// Later lowering tasks extend this entry point for arithmetic, casts, calls,
+        /// and aggregate intrinsics; `AddressOf` is handled here so address formation
+        /// stays centralized with place projection.
+        pub fn emit_rvalue_value(
+            &self,
+            rvalue: &Rvalue,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match rvalue {
+                Rvalue::Use(operand) => self.emit_operand_value(operand, locals, body),
+                Rvalue::AddressOf(place) => {
+                    Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
+                }
+                _ => Err(CodegenError::Internal(
+                    "rvalue emission is not implemented for this CFG rvalue yet".to_owned(),
+                )),
+            }
+        }
+
+        /// Store an LLVM value into a CFG [`Place`].
+        pub fn emit_store_place(
+            &self,
+            place: &Place,
+            value: BasicValueEnum<'ctx>,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<(), CodegenError> {
+            let addr = self.emit_place_addr(place, locals, body)?;
+            self.builder.build_store(addr, value).map(|_| ()).map_err(builder_error)
+        }
+
+        /// Resolve the HIR type of a place from the body's local declarations.
+        fn place_ty(&self, place: &Place, body: &Body) -> Result<TyId, CodegenError> {
+            let mut ty = body
+                .locals
+                .get(place.base)
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+                })?
+                .ty;
+            for proj in &place.projection {
+                match proj {
+                    Projection::Deref => {
+                        let Ty::Ptr(pointee) = self.tcx.get(ty) else {
+                            return Err(invalid_place_projection("dereference", ty));
+                        };
+                        ty = pointee.ty;
+                    }
+                    Projection::Field(idx) => {
+                        let (_, field_ty) = self.record_field_ty(ty, *idx)?;
+                        ty = field_ty;
+                    }
+                    Projection::Index(_) => {
+                        ty = match self.tcx.get(ty) {
+                            Ty::Array { elem, .. } => elem.ty,
+                            Ty::Ptr(pointee) => pointee.ty,
+                            _ => return Err(invalid_place_projection("index", ty)),
+                        };
+                    }
+                }
+            }
+            Ok(ty)
+        }
+
+        /// Materialise a CFG [`Const`] as an LLVM value.
+        fn emit_const(&self, c: &rcc_cfg::Const) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match &c.kind {
+                ConstKind::Int(n) => {
+                    let BasicTypeEnum::IntType(ty) = self.type_cx().basic_type_of(c.ty)? else {
+                        return Err(CodegenError::Internal(format!(
+                            "integer constant has non-integer type {:?}",
+                            c.ty
+                        )));
+                    };
+                    Ok(ty.const_int(*n as u64, *n < 0).as_basic_value_enum())
+                }
+                ConstKind::Float(f) => {
+                    let BasicTypeEnum::FloatType(ty) = self.type_cx().basic_type_of(c.ty)? else {
+                        return Err(CodegenError::Internal(format!(
+                            "floating constant has non-floating type {:?}",
+                            c.ty
+                        )));
+                    };
+                    Ok(ty.const_float(*f).as_basic_value_enum())
+                }
+                ConstKind::Global(def) => {
+                    if let Some(gv) = self.globals.get(def) {
+                        Ok(gv.as_pointer_value().as_basic_value_enum())
+                    } else if let Some(fv) = self.functions.get(def) {
+                        Ok(fv.as_global_value().as_pointer_value().as_basic_value_enum())
+                    } else {
+                        Err(CodegenError::Internal(format!(
+                            "global constant references undeclared definition {:?}",
+                            def
+                        )))
+                    }
+                }
+                ConstKind::ZeroInit => {
+                    let ty = self.type_cx().basic_type_of(c.ty)?;
+                    Ok(ty.const_zero())
+                }
+            }
+        }
+
+        fn record_field_ty(
+            &self,
+            ty: TyId,
+            index: u32,
+        ) -> Result<(RecordKind, TyId), CodegenError> {
+            let Ty::Record(def) = self.tcx.get(ty) else {
+                return Err(invalid_place_projection("field", ty));
+            };
+            let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                CodegenError::Internal(format!("record definition {:?} is missing", def))
+            })?;
+            let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                return Err(CodegenError::Internal(format!(
+                    "definition {:?} is not a record",
+                    def
+                )));
+            };
+            let field = fields.get(index as usize).ok_or_else(|| {
+                CodegenError::Internal(format!("record {:?} has no field at index {}", def, index))
+            })?;
+            Ok((*kind, field.ty))
+        }
+
+        #[allow(unsafe_code)]
+        fn build_gep<T: BasicType<'ctx>>(
+            &self,
+            pointee_ty: T,
+            ptr: PointerValue<'ctx>,
+            indices: &[inkwell::values::IntValue<'ctx>],
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            // SAFETY: `emit_place_addr` selects indices from validated CFG projection
+            // types, so the pointee type and index arity match the address calculation.
+            unsafe { self.builder.build_gep(pointee_ty, ptr, indices, name) }.map_err(builder_error)
+        }
+    }
+
+    fn invalid_place_projection(projection: &str, ty: TyId) -> CodegenError {
+        CodegenError::Internal(format!("invalid {projection} projection for place type {ty:?}"))
+    }
+
+    fn builder_error(error: impl std::fmt::Display) -> CodegenError {
+        CodegenError::Internal(format!("LLVM builder failed: {error}"))
     }
 
     /// Recursive `TyId` to LLVM type lowering service for one LLVM context.
@@ -2169,5 +2436,502 @@ mod tests {
             types.type_of(vla),
             Err(CodegenError::TypeLowering { ty, .. }) if ty == vla
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-09: Place address, operand load, and store helpers
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    use rcc_cfg::{Body, Const, ConstKind, LocalDecl, Operand, Place, Projection, Rvalue};
+    #[cfg(feature = "llvm")]
+    use rcc_hir::Local;
+
+    /// Create a minimal Body with int/ptr locals for place tests.
+    #[cfg(feature = "llvm")]
+    fn place_test_body(tcx: &mut TyCtxt) -> Body {
+        use rcc_data_structures::IndexVec;
+        use rcc_hir::ObjectQuals;
+
+        let mut locals = IndexVec::new();
+        // Local(0) = return slot (void)
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.void,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        // Local(1) = int param
+        locals.push(LocalDecl {
+            name: Some(Symbol(100)),
+            ty: tcx.int,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: true,
+            span: DUMMY_SP,
+        });
+        // Local(2) = int local
+        locals.push(LocalDecl {
+            name: Some(Symbol(101)),
+            ty: tcx.int,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        // Local(3) = int* pointer
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        locals.push(LocalDecl {
+            name: Some(Symbol(102)),
+            ty: int_ptr,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let mut blocks = IndexVec::new();
+        blocks.push(rcc_cfg::BasicBlock::default());
+        Body { def: None, locals, blocks, ret_ty: Some(tcx.void) }
+    }
+
+    /// Position a test function so helper methods can append instructions.
+    #[cfg(feature = "llvm")]
+    fn start_test_function<'ctx>(
+        cx: &backend::CodegenCx<'_, 'ctx>,
+        context: &'ctx inkwell::context::Context,
+        name: &str,
+    ) {
+        let fn_ty = context.void_type().fn_type(&[], false);
+        let function = cx.module().add_function(name, fn_ty, None);
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+    }
+
+    /// Create allocas matching `place_test_body`.
+    #[cfg(feature = "llvm")]
+    fn place_test_allocas<'ctx>(
+        cx: &backend::CodegenCx<'_, 'ctx>,
+        context: &'ctx inkwell::context::Context,
+    ) -> IndexVec<Local, inkwell::values::PointerValue<'ctx>> {
+        let mut allocas: IndexVec<Local, inkwell::values::PointerValue<'ctx>> = IndexVec::new();
+        allocas.push(cx.builder().build_alloca(context.i8_type(), "ret").unwrap());
+        allocas.push(cx.builder().build_alloca(context.i32_type(), "a").unwrap());
+        allocas.push(cx.builder().build_alloca(context.i32_type(), "x").unwrap());
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        allocas.push(cx.builder().build_alloca(ptr_ty, "p").unwrap());
+        allocas
+    }
+
+    /// Add a void terminator to the current test function before verifier checks.
+    #[cfg(feature = "llvm")]
+    fn finish_void_test_function(cx: &backend::CodegenCx<'_, '_>) {
+        cx.builder().build_return(None).unwrap();
+    }
+
+    /// emit_place_addr on a bare local returns its alloca.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_base_local() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_base");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(2), projection: vec![] };
+        let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
+        assert_eq!(addr, allocas[Local(2)]);
+    }
+
+    /// emit_place_addr with Deref loads the pointer then returns that address.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_deref() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_deref");
+        let allocas = place_test_allocas(&cx, &context);
+
+        // Local(3) is int*. Deref means *p.
+        let place = Place { base: Local(3), projection: vec![Projection::Deref] };
+        let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
+        // Result differs from the alloca (it's the loaded pointer).
+        assert_ne!(addr, allocas[Local(3)]);
+        // Module should verify.
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// emit_place_addr with Field projection emits struct GEP.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_field() {
+        use rcc_data_structures::IndexVec;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+
+        // Build struct { i32, i32 }
+        let mut defs = IndexVec::new();
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        let fn_ty = context.void_type().fn_type(&[], false);
+        let function = cx.module().add_function("__test_field", fn_ty, None);
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+
+        let rec_llvm = cx.type_cx().basic_type_of(rec_ty).unwrap();
+        let alloca = cx.builder().build_alloca(rec_llvm, "s").unwrap();
+
+        let mut allocas: IndexVec<Local, inkwell::values::PointerValue<'_>> = IndexVec::new();
+        allocas.push(cx.builder().build_alloca(context.i8_type(), "ret").unwrap());
+        allocas.push(alloca);
+
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.void,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: Some(Symbol(200)),
+            ty: rec_ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let mut blocks = IndexVec::new();
+        blocks.push(rcc_cfg::BasicBlock::default());
+        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+
+        let place = Place { base: Local(1), projection: vec![Projection::Field(1)] };
+        let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
+        assert_ne!(addr, alloca);
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// emit_place_addr with Index projection emits GEP.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_index() {
+        use rcc_data_structures::IndexVec;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(4), is_vla: false });
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        let fn_ty = context.void_type().fn_type(&[], false);
+        let function = cx.module().add_function("__test_index", fn_ty, None);
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+
+        let arr_llvm = cx.type_cx().basic_type_of(arr_ty).unwrap();
+        let alloca = cx.builder().build_alloca(arr_llvm, "a").unwrap();
+
+        let mut allocas: IndexVec<Local, inkwell::values::PointerValue<'_>> = IndexVec::new();
+        allocas.push(cx.builder().build_alloca(context.i8_type(), "ret").unwrap());
+        allocas.push(alloca);
+
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.void,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: Some(Symbol(300)),
+            ty: arr_ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let mut blocks = IndexVec::new();
+        blocks.push(rcc_cfg::BasicBlock::default());
+        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+
+        let idx = Operand::Const(Const { kind: ConstKind::Int(2), ty: tcx.int });
+        let place = Place { base: Local(1), projection: vec![Projection::Index(idx)] };
+        let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
+        assert_ne!(addr, alloca);
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// emit_place_addr handles chained deref/field/index projections.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_nested_projection() {
+        use rcc_data_structures::IndexVec;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+
+        let mut defs = IndexVec::new();
+        let inner = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let inner_ty = tcx.intern(Ty::Record(inner));
+        let inner_array =
+            tcx.intern(Ty::Array { elem: Qual::plain(inner_ty), len: Some(4), is_vla: false });
+        let outer = record_def(&mut defs, RecordKind::Struct, vec![field(inner_array)]);
+        let outer_ty = tcx.intern(Ty::Record(outer));
+        let outer_ptr = tcx.intern(Ty::Ptr(Qual::plain(outer_ty)));
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_nested_projection");
+
+        let mut allocas: IndexVec<Local, inkwell::values::PointerValue<'_>> = IndexVec::new();
+        allocas.push(cx.builder().build_alloca(context.i8_type(), "ret").unwrap());
+        allocas.push(
+            cx.builder()
+                .build_alloca(context.ptr_type(inkwell::AddressSpace::default()), "p")
+                .unwrap(),
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.void,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: Some(Symbol(301)),
+            ty: outer_ptr,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let mut blocks = IndexVec::new();
+        blocks.push(rcc_cfg::BasicBlock::default());
+        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+
+        let idx = Operand::Const(Const { kind: ConstKind::Int(2), ty: tcx.int });
+        let place = Place {
+            base: Local(1),
+            projection: vec![
+                Projection::Deref,
+                Projection::Field(0),
+                Projection::Index(idx),
+                Projection::Field(1),
+            ],
+        };
+        let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
+
+        assert_ne!(addr, allocas[Local(1)]);
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// Rvalue::AddressOf emits the projected place address as a pointer value.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_rvalue_address_of() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_address_of");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(2), projection: vec![] };
+        let value = cx.emit_rvalue_value(&Rvalue::AddressOf(place), &allocas, &body).unwrap();
+
+        match value {
+            inkwell::values::BasicValueEnum::PointerValue(ptr) => {
+                assert_eq!(ptr, allocas[Local(2)]);
+            }
+            other => panic!("expected PointerValue, got {other:?}"),
+        }
+    }
+
+    /// Invalid projections are reported as backend errors instead of panicking.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_place_addr_rejects_invalid_projection() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_invalid_projection");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(2), projection: vec![Projection::Deref] };
+
+        assert!(matches!(
+            cx.emit_place_addr(&place, &allocas, &body),
+            Err(CodegenError::Internal(message)) if message.contains("invalid dereference projection")
+        ));
+    }
+
+    /// emit_operand_value on IntConst returns the LLVM constant.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_operand_value_int_const() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_int_const");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let operand = Operand::Const(Const { kind: ConstKind::Int(42), ty: tcx.int });
+        let val = cx.emit_operand_value(&operand, &allocas, &body).unwrap();
+
+        match val {
+            inkwell::values::BasicValueEnum::IntValue(i) => {
+                assert_eq!(i.get_type().get_bit_width(), 32);
+            }
+            other => panic!("expected IntValue, got {other:?}"),
+        }
+    }
+
+    /// emit_operand_value on Copy(place) loads from the alloca.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_operand_value_copy() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_copy");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(1), projection: vec![] };
+        let val = cx.emit_operand_value(&Operand::Copy(place), &allocas, &body).unwrap();
+
+        match val {
+            inkwell::values::BasicValueEnum::IntValue(i) => {
+                assert_eq!(i.get_type().get_bit_width(), 32);
+            }
+            other => panic!("expected IntValue, got {other:?}"),
+        }
+    }
+
+    /// emit_store_place writes a value and module verifies.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_store_place_basic() {
+        use inkwell::values::BasicValue;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_store");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(2), projection: vec![] };
+        let val = context.i32_type().const_int(99, false);
+        cx.emit_store_place(&place, val.as_basic_value_enum(), &allocas, &body).unwrap();
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// store then load round-trips correctly.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn store_then_load_roundtrip() {
+        use inkwell::values::BasicValue;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let body = place_test_body(&mut tcx);
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        start_test_function(&cx, &context, "__test_roundtrip");
+        let allocas = place_test_allocas(&cx, &context);
+
+        let place = Place { base: Local(2), projection: vec![] };
+        let val = context.i32_type().const_int(77, false);
+        cx.emit_store_place(&place, val.as_basic_value_enum(), &allocas, &body).unwrap();
+
+        let loaded = cx.emit_operand_value(&Operand::Copy(place), &allocas, &body).unwrap();
+        match loaded {
+            inkwell::values::BasicValueEnum::IntValue(i) => {
+                assert_eq!(i.get_type().get_bit_width(), 32);
+            }
+            other => panic!("expected IntValue, got {other:?}"),
+        }
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+    }
+
+    /// emit_operand_value on ConstKind::Global returns a pointer.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn emit_operand_value_global_const() {
+        use rcc_data_structures::IndexVec;
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+
+        // Intern the pointer type before borrowing tcx immutably.
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+
+        // Declare a global so emit_const can find it.
+        let mut defs = IndexVec::new();
+        let global_name = session.interner.intern("global_for_const");
+        let g = global_def(&mut defs, global_name, tcx.int, Linkage::External);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_global(g).unwrap();
+
+        let operand = Operand::Const(Const { kind: ConstKind::Global(g), ty: ptr_ty });
+        let val = cx.emit_operand_value(&operand, &IndexVec::new(), &Body::default()).unwrap();
+
+        match val {
+            inkwell::values::BasicValueEnum::PointerValue(_) => {}
+            other => panic!("expected PointerValue, got {other:?}"),
+        }
     }
 }
