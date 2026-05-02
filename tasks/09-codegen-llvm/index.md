@@ -20,7 +20,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [10-entry-alloca-and-local-materialization](10-entry-alloca-and-local-materialization.md)
 - [x] [11-global-initializer-materialization](11-global-initializer-materialization.md)
 - [x] [12-basic-block-and-terminator-wiring](12-basic-block-and-terminator-wiring.md)
-- [ ] [13-call-emission-with-abi](13-call-emission-with-abi.md)
+- [x] [13-call-emission-with-abi](13-call-emission-with-abi.md)
 - [ ] [14-binop-and-unary-emission](14-binop-and-unary-emission.md)
 - [ ] [15-cast-emission](15-cast-emission.md)
 - [ ] [16-aggregate-copy-memset](16-aggregate-copy-memset.md)

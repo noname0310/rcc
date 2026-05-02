@@ -721,7 +721,8 @@ pub mod backend {
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
     use inkwell::values::{
-        BasicValue, BasicValueEnum, FunctionValue, GlobalValue, InstructionOpcode, PointerValue,
+        BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FunctionValue,
+        GlobalValue, InstructionOpcode, PointerValue,
     };
     use inkwell::AddressSpace;
     use rcc_cfg::{
@@ -1085,6 +1086,68 @@ pub mod backend {
                 let align_kind = Attribute::get_named_enum_kind_id("align");
                 let attr = self.context.create_enum_attribute(align_kind, u64::from(*align));
                 function.add_attribute(AttributeLoc::Param(0), attr);
+            }
+
+            Ok(())
+        }
+
+        fn apply_call_abi_attrs(
+            &self,
+            call: CallSiteValue<'ctx>,
+            abi: &FnAbi,
+        ) -> Result<(), CodegenError> {
+            if abi.ret.zeroext {
+                let zeroext_kind = Attribute::get_named_enum_kind_id("zeroext");
+                let attr = self.context.create_enum_attribute(zeroext_kind, 0);
+                call.add_attribute(AttributeLoc::Return, attr);
+            }
+
+            let sret_kind = Attribute::get_named_enum_kind_id("sret");
+            let byval_kind = Attribute::get_named_enum_kind_id("byval");
+            let align_kind = Attribute::get_named_enum_kind_id("align");
+
+            let mut param_index = 0u32;
+            if let AbiReturnKind::Indirect { sret, align, .. } = &abi.ret.kind {
+                if *sret {
+                    let pointee = self.type_cx().basic_type_of(abi.ret.source)?;
+                    let attr =
+                        self.context.create_type_attribute(sret_kind, basic_type_as_any(pointee));
+                    call.add_attribute(AttributeLoc::Param(param_index), attr);
+                }
+                let attr = self.context.create_enum_attribute(align_kind, u64::from(*align));
+                call.add_attribute(AttributeLoc::Param(param_index), attr);
+                param_index = param_index.checked_add(1).ok_or_else(|| {
+                    CodegenError::Internal("call parameter index overflowed".to_owned())
+                })?;
+            }
+
+            for param in &abi.params {
+                match &param.kind {
+                    AbiParamKind::Direct(units) => {
+                        param_index = param_index
+                            .checked_add(u32::try_from(units.len()).map_err(|_| {
+                                CodegenError::Internal("call parameter index overflowed".to_owned())
+                            })?)
+                            .ok_or_else(|| {
+                                CodegenError::Internal("call parameter index overflowed".to_owned())
+                            })?;
+                    }
+                    AbiParamKind::Indirect { byval, align, .. } => {
+                        if *byval {
+                            let pointee = self.type_cx().basic_type_of(param.source)?;
+                            let attr = self
+                                .context
+                                .create_type_attribute(byval_kind, basic_type_as_any(pointee));
+                            call.add_attribute(AttributeLoc::Param(param_index), attr);
+                        }
+                        let attr =
+                            self.context.create_enum_attribute(align_kind, u64::from(*align));
+                        call.add_attribute(AttributeLoc::Param(param_index), attr);
+                        param_index = param_index.checked_add(1).ok_or_else(|| {
+                            CodegenError::Internal("call parameter index overflowed".to_owned())
+                        })?;
+                    }
+                }
             }
 
             Ok(())
@@ -1707,9 +1770,9 @@ pub mod backend {
                     self.emit_switch_int(discr, targets.as_slice())
                 }
                 TerminatorKind::Return => self.emit_return(),
-                TerminatorKind::Call { .. } => Err(CodegenError::Internal(
-                    "call terminator lowering is deferred to task 09-13".to_owned(),
-                )),
+                TerminatorKind::Call { callee, args, destination, target } => {
+                    self.emit_call_terminator(callee, args, destination.as_ref(), *target)
+                }
                 TerminatorKind::Unreachable => {
                     self.cx.builder.build_unreachable().map(|_| ()).map_err(builder_error)
                 }
@@ -1761,6 +1824,241 @@ pub mod backend {
                 .build_switch(discr, default_block, &llvm_cases)
                 .map(|_| ())
                 .map_err(builder_error)
+        }
+
+        fn emit_call_terminator(
+            &self,
+            callee: &Operand,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+        ) -> Result<(), CodegenError> {
+            let fn_ty = self.callee_fn_ty(callee)?;
+            let abi = sysv_fn_abi(self.cx.tcx, &self.cx.hir.defs, fn_ty)?;
+            if args.len() != abi.params.len() {
+                return Err(CodegenError::Internal(format!(
+                    "call argument count {} does not match ABI parameter count {}",
+                    args.len(),
+                    abi.params.len()
+                )));
+            }
+
+            let mut llvm_args = Vec::with_capacity(abi.fixed_param_count);
+            if matches!(abi.ret.kind, AbiReturnKind::Indirect { .. }) {
+                let dest = destination.ok_or_else(|| {
+                    CodegenError::Internal(
+                        "indirect ABI return requires a call destination".to_owned(),
+                    )
+                })?;
+                llvm_args.push(self.cx.emit_place_addr(dest, &self.locals, self.body)?.into());
+            }
+
+            for (arg, param_abi) in args.iter().zip(abi.params.iter()) {
+                self.push_call_arg(arg, param_abi, &mut llvm_args)?;
+            }
+
+            let fn_type = self.cx.type_cx().fn_type_of(fn_ty)?;
+            let returns_value =
+                !matches!(abi.ret.kind, AbiReturnKind::Void | AbiReturnKind::Indirect { .. });
+            let call_name = if returns_value { "call" } else { "" };
+            let call = if let Some(function) = self.direct_callee(callee)? {
+                self.cx
+                    .builder
+                    .build_call(function, &llvm_args, call_name)
+                    .map_err(builder_error)?
+            } else {
+                let callee = self.cx.emit_operand_value(callee, &self.locals, self.body)?;
+                let BasicValueEnum::PointerValue(callee_ptr) = callee else {
+                    return Err(CodegenError::Internal(format!(
+                        "callee operand must lower to a pointer, got {:?}",
+                        callee.get_type()
+                    )));
+                };
+                self.cx
+                    .builder
+                    .build_indirect_call(fn_type, callee_ptr, &llvm_args, call_name)
+                    .map_err(builder_error)?
+            };
+
+            self.cx.apply_call_abi_attrs(call, &abi)?;
+            self.store_call_result(call, &abi.ret, destination)?;
+
+            match target {
+                Some(target) => self.emit_goto(target),
+                None => self.cx.builder.build_unreachable().map(|_| ()).map_err(builder_error),
+            }
+        }
+
+        fn callee_fn_ty(&self, callee: &Operand) -> Result<TyId, CodegenError> {
+            let ty = self.operand_ty(callee)?;
+            match self.cx.tcx.get(ty) {
+                Ty::Func { .. } => Ok(ty),
+                Ty::Ptr(q) => match self.cx.tcx.get(q.ty) {
+                    Ty::Func { .. } => Ok(q.ty),
+                    _ => Err(CodegenError::Internal(format!(
+                        "callee pointer does not point to a function type: {:?}",
+                        q.ty
+                    ))),
+                },
+                _ => Err(CodegenError::Internal(format!(
+                    "callee operand is not a function or function pointer: {:?}",
+                    ty
+                ))),
+            }
+        }
+
+        fn direct_callee(
+            &self,
+            callee: &Operand,
+        ) -> Result<Option<FunctionValue<'ctx>>, CodegenError> {
+            let Operand::Const(c) = callee else {
+                return Ok(None);
+            };
+            let ConstKind::Global(def) = &c.kind else {
+                return Ok(None);
+            };
+            if !matches!(self.cx.tcx.get(c.ty), Ty::Func { .. }) {
+                return Ok(None);
+            }
+            let function = self.cx.function_decl(*def).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "function constant references undeclared definition {:?}",
+                    *def
+                ))
+            })?;
+            Ok(Some(function))
+        }
+
+        fn push_call_arg(
+            &self,
+            arg: &Operand,
+            param_abi: &AbiParam,
+            llvm_args: &mut Vec<BasicMetadataValueEnum<'ctx>>,
+        ) -> Result<(), CodegenError> {
+            match &param_abi.kind {
+                AbiParamKind::Direct(units) => {
+                    if matches!(
+                        units.as_slice(),
+                        [AbiParamUnit { kind: AbiParamUnitKind::Source(source), .. }]
+                            if *source == param_abi.source
+                    ) {
+                        let value = self.cx.emit_operand_value(arg, &self.locals, self.body)?;
+                        llvm_args.push(value.into());
+                        return Ok(());
+                    }
+
+                    let addr = self.operand_addr(arg)?;
+                    for (unit_idx, unit) in units.iter().enumerate() {
+                        let value = self.load_abi_unit(
+                            addr,
+                            abi_unit_offset(unit_idx, "call argument")?,
+                            *unit,
+                        )?;
+                        llvm_args.push(value.into());
+                    }
+                    Ok(())
+                }
+                AbiParamKind::Indirect { .. } => {
+                    let addr = self.operand_addr(arg)?;
+                    llvm_args.push(addr.into());
+                    Ok(())
+                }
+            }
+        }
+
+        fn load_abi_unit(
+            &self,
+            addr: PointerValue<'ctx>,
+            offset: u64,
+            unit: AbiParamUnit,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let offset = self.cx.context.i64_type().const_int(offset, false);
+            let byte_ptr =
+                self.cx.build_gep(self.cx.context.i8_type(), addr, &[offset], "abi.unit")?;
+            let unit_ty = self.cx.type_cx().abi_unit_type(unit)?;
+            self.cx.builder.build_load(unit_ty, byte_ptr, "abi.unit").map_err(builder_error)
+        }
+
+        fn store_call_result(
+            &self,
+            call: CallSiteValue<'ctx>,
+            ret: &AbiReturn,
+            destination: Option<&Place>,
+        ) -> Result<(), CodegenError> {
+            match &ret.kind {
+                AbiReturnKind::Void => {
+                    if destination.is_some() {
+                        return Err(CodegenError::Internal(
+                            "void call cannot write a destination".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                }
+                AbiReturnKind::Indirect { .. } => {
+                    if destination.is_none() {
+                        return Err(CodegenError::Internal(
+                            "indirect ABI return requires a call destination".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                }
+                AbiReturnKind::Direct { units } => {
+                    let dest = destination.ok_or_else(|| {
+                        CodegenError::Internal(
+                            "direct ABI return requires a call destination".to_owned(),
+                        )
+                    })?;
+                    let value = call.try_as_basic_value().left().ok_or_else(|| {
+                        CodegenError::Internal("direct ABI call did not produce a value".to_owned())
+                    })?;
+                    let dest_addr = self.cx.emit_place_addr(dest, &self.locals, self.body)?;
+
+                    if units.len() == 1 {
+                        return self.cx.store_abi_unit(dest_addr, 0, value);
+                    }
+
+                    let BasicValueEnum::StructValue(return_struct) = value else {
+                        return Err(CodegenError::Internal(format!(
+                            "multi-unit ABI return produced non-struct value {:?}",
+                            value.get_type()
+                        )));
+                    };
+                    for (unit_idx, _) in units.iter().enumerate() {
+                        let index = u32::try_from(unit_idx).map_err(|_| {
+                            CodegenError::Internal("ABI return unit index overflowed".to_owned())
+                        })?;
+                        let unit_value = self
+                            .cx
+                            .builder
+                            .build_extract_value(return_struct, index, "ret.unit")
+                            .map_err(builder_error)?;
+                        self.cx.store_abi_unit(
+                            dest_addr,
+                            abi_unit_offset(unit_idx, "call return")?,
+                            unit_value,
+                        )?;
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        fn operand_ty(&self, operand: &Operand) -> Result<TyId, CodegenError> {
+            match operand {
+                Operand::Copy(place) | Operand::Move(place) => self.cx.place_ty(place, self.body),
+                Operand::Const(c) => Ok(c.ty),
+            }
+        }
+
+        fn operand_addr(&self, operand: &Operand) -> Result<PointerValue<'ctx>, CodegenError> {
+            match operand {
+                Operand::Copy(place) | Operand::Move(place) => {
+                    self.cx.emit_place_addr(place, &self.locals, self.body)
+                }
+                Operand::Const(_) => Err(CodegenError::Internal(
+                    "ABI aggregate call arguments must be addressable operands".to_owned(),
+                )),
+            }
         }
 
         fn emit_return(&self) -> Result<(), CodegenError> {
@@ -1839,6 +2137,13 @@ pub mod backend {
         } else {
             format!("bb{}", bb.0)
         }
+    }
+
+    fn abi_unit_offset(index: usize, context: &str) -> Result<u64, CodegenError> {
+        u64::try_from(index)
+            .map_err(|_| CodegenError::Internal(format!("{context} unit index overflowed")))?
+            .checked_mul(8)
+            .ok_or_else(|| CodegenError::Internal(format!("{context} unit offset overflowed")))
     }
 
     fn format_cfg_errors(errors: &[rcc_cfg::verify::CfgError]) -> String {
@@ -3698,6 +4003,15 @@ mod tests {
     fn cfg_body(ret_ty: TyId, blocks: Vec<BasicBlock>) -> Body {
         let mut locals = IndexVec::new();
         locals.push(cfg_local_decl(None, ret_ty, false));
+        cfg_body_with_locals(ret_ty, locals, blocks)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn cfg_body_with_locals(
+        ret_ty: TyId,
+        locals: IndexVec<Local, LocalDecl>,
+        blocks: Vec<BasicBlock>,
+    ) -> Body {
         let mut cfg_blocks = IndexVec::new();
         for block in blocks {
             cfg_blocks.push(block);
@@ -3973,6 +4287,401 @@ mod tests {
                 .count();
             assert_eq!(terminators, 1);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-13: Call emission with ABI lowering
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn call_global(def: DefId, ty: TyId) -> Operand {
+        Operand::Const(Const { kind: ConstKind::Global(def), ty })
+    }
+
+    #[cfg(feature = "llvm")]
+    fn local_place(local: Local) -> Place {
+        Place { base: local, projection: Vec::new() }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn local_copy(local: Local) -> Operand {
+        Operand::Copy(local_place(local))
+    }
+
+    /// Forward declarations are callable before any callee body is emitted.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_forward_decl_scalar_return_verifies() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let callee_ty = func_ty(&mut tcx, int_ty, vec![int_ty], false);
+        let caller_ty = func_ty(&mut tcx, int_ty, Vec::new(), false);
+        let mut defs = IndexVec::new();
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("callee"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false));
+        locals.push(cfg_local_decl(None, int_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: call_global(callee, callee_ty),
+                args: vec![int_const(int_ty, 7)],
+                destination: Some(local_place(Local(1))),
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(local_copy(Local(1))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let mut body = cfg_body_with_locals(int_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(artifact.ir_text.contains("declare i32 @callee(i32)"), "IR:\n{}", artifact.ir_text);
+        assert!(artifact.ir_text.contains("call i32 @callee(i32 7)"), "IR:\n{}", artifact.ir_text);
+    }
+
+    /// Function pointer operands lower to LLVM indirect calls with the declared ABI type.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_function_pointer_scalar_return_verifies() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let pointee_ty = func_ty(&mut tcx, int_ty, vec![int_ty], false);
+        let fn_ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(pointee_ty)));
+        let caller_ty = func_ty(&mut tcx, int_ty, vec![fn_ptr_ty], false);
+        let mut defs = IndexVec::new();
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("call_ptr"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false));
+        locals.push(cfg_local_decl(Some(session.interner.intern("fp")), fn_ptr_ty, true));
+        locals.push(cfg_local_decl(None, int_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: local_copy(Local(1)),
+                args: vec![int_const(int_ty, 11)],
+                destination: Some(local_place(Local(2))),
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(local_copy(Local(2))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let mut body = cfg_body_with_locals(int_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(artifact.ir_text.contains("call i32 %"), "IR:\n{}", artifact.ir_text);
+        assert!(artifact.ir_text.contains("(i32 11)"), "IR:\n{}", artifact.ir_text);
+    }
+
+    /// A call with no normal CFG target still leaves the LLVM block well-terminated.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_without_normal_target_emits_unreachable_path() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let void_ty = tcx.void;
+        let callee_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let caller_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let mut defs = IndexVec::new();
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("fatal"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller_no_edge"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let body = cfg_body(
+            void_ty,
+            vec![cfg_block(
+                Vec::new(),
+                TerminatorKind::Call {
+                    callee: call_global(callee, callee_ty),
+                    args: Vec::new(),
+                    destination: None,
+                    target: None,
+                },
+            )],
+        );
+        let mut body = body;
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(artifact.ir_text.contains("call void @fatal()"), "IR:\n{}", artifact.ir_text);
+        assert!(artifact.ir_text.contains("unreachable"), "IR:\n{}", artifact.ir_text);
+    }
+
+    /// Large aggregate arguments are passed indirectly with byval call-site ABI attributes.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_large_aggregate_arg_uses_byval() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let long_ty = tcx.long;
+        let void_ty = tcx.void;
+        let mut defs = IndexVec::new();
+        let big_def = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(long_ty), field(long_ty), field(long_ty), field(long_ty), field(long_ty)],
+        );
+        let big_ty = tcx.intern(Ty::Record(big_def));
+        let callee_ty = func_ty(&mut tcx, void_ty, vec![big_ty], false);
+        let caller_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("take_big"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller_big_arg"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, void_ty, false));
+        locals.push(cfg_local_decl(None, big_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: call_global(callee, callee_ty),
+                args: vec![local_copy(Local(1))],
+                destination: None,
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let mut body = cfg_body_with_locals(void_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(
+            artifact.ir_text.contains("call void @take_big(ptr byval"),
+            "IR:\n{}",
+            artifact.ir_text
+        );
+    }
+
+    /// Register-sized aggregate arguments are split into direct ABI units.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_small_aggregate_arg_splits_into_direct_units() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let long_ty = tcx.long;
+        let void_ty = tcx.void;
+        let mut defs = IndexVec::new();
+        let duo_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(long_ty), field(long_ty)]);
+        let duo_ty = tcx.intern(Ty::Record(duo_def));
+        let callee_ty = func_ty(&mut tcx, void_ty, vec![duo_ty], false);
+        let caller_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("take_duo"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller_duo_arg"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, void_ty, false));
+        locals.push(cfg_local_decl(None, duo_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: call_global(callee, callee_ty),
+                args: vec![local_copy(Local(1))],
+                destination: None,
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let mut body = cfg_body_with_locals(void_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(
+            artifact.ir_text.contains("declare void @take_duo(i64, i64)"),
+            "IR:\n{}",
+            artifact.ir_text
+        );
+        assert!(artifact.ir_text.contains("call void @take_duo(i64"), "IR:\n{}", artifact.ir_text);
+    }
+
+    /// Large aggregate returns use a hidden sret destination pointer.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_large_aggregate_return_uses_sret_destination() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let long_ty = tcx.long;
+        let void_ty = tcx.void;
+        let mut defs = IndexVec::new();
+        let big_def = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(long_ty), field(long_ty), field(long_ty), field(long_ty), field(long_ty)],
+        );
+        let big_ty = tcx.intern(Ty::Record(big_def));
+        let callee_ty = func_ty(&mut tcx, big_ty, Vec::new(), false);
+        let caller_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("make_big"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller_big_ret"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, void_ty, false));
+        locals.push(cfg_local_decl(None, big_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: call_global(callee, callee_ty),
+                args: Vec::new(),
+                destination: Some(local_place(Local(1))),
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let mut body = cfg_body_with_locals(void_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(
+            artifact.ir_text.contains("call void @make_big(ptr sret"),
+            "IR:\n{}",
+            artifact.ir_text
+        );
+    }
+
+    /// Small aggregate returns are stored from their ABI register unit into the destination.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn call_small_aggregate_return_stores_direct_unit() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let void_ty = tcx.void;
+        let mut defs = IndexVec::new();
+        let pair_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(int_ty), field(int_ty)]);
+        let pair_ty = tcx.intern(Ty::Record(pair_def));
+        let callee_ty = func_ty(&mut tcx, pair_ty, Vec::new(), false);
+        let caller_ty = func_ty(&mut tcx, void_ty, Vec::new(), false);
+        let callee = function_def(
+            &mut defs,
+            session.interner.intern("make_pair"),
+            callee_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("caller_pair_ret"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, void_ty, false));
+        locals.push(cfg_local_decl(None, pair_ty, false));
+        let entry = cfg_block(
+            Vec::new(),
+            TerminatorKind::Call {
+                callee: call_global(callee, callee_ty),
+                args: Vec::new(),
+                destination: Some(local_place(Local(1))),
+                target: Some(BasicBlockId(1)),
+            },
+        );
+        let join = cfg_block(Vec::new(), TerminatorKind::Return);
+        let mut body = cfg_body_with_locals(void_ty, locals, vec![entry, join]);
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        let artifact = codegen(&mut session, &tcx, &hir, &bodies).unwrap();
+
+        assert!(artifact.ir_text.contains("call i64 @make_pair()"), "IR:\n{}", artifact.ir_text);
+        assert!(artifact.ir_text.contains("store i64"), "IR:\n{}", artifact.ir_text);
     }
 
     // -----------------------------------------------------------------------

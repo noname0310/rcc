@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-13: Call emission with ABI lowering
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-07, 09-08, 09-09, 09-12    **Milestone:** M3
