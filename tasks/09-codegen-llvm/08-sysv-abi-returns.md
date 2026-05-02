@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-02
+
 # 09-08: SysV ABI return lowering
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-06, 09-07    **Milestone:** M3

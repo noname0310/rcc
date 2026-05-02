@@ -61,7 +61,7 @@ pub struct CodegenArtifact {
     pub ir_text: String,
 }
 
-/// Final SysV x86-64 ABI class assigned to an argument eightbyte.
+/// Final SysV x86-64 ABI class assigned to a parameter/return eightbyte.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum AbiClass {
     /// Empty or padding-only eightbyte before cleanup.
@@ -102,6 +102,50 @@ impl AbiParam {
             AbiParamKind::Indirect { .. } => 1,
         }
     }
+}
+
+/// ABI lowering for one C function return value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbiReturn {
+    /// Original HIR return type being lowered.
+    pub source: TyId,
+    /// ABI return strategy.
+    pub kind: AbiReturnKind,
+    /// Final eightbyte classes after SysV cleanup.
+    pub classes: Vec<AbiClass>,
+    /// Whether the LLVM return value needs `zeroext` normalization.
+    pub zeroext: bool,
+}
+
+impl AbiReturn {
+    /// Number of hidden LLVM IR parameters emitted for this return value.
+    pub fn llvm_param_count(&self) -> usize {
+        match self.kind {
+            AbiReturnKind::Void | AbiReturnKind::Direct { .. } => 0,
+            AbiReturnKind::Indirect { .. } => 1,
+        }
+    }
+}
+
+/// ABI return strategy for one C function return value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbiReturnKind {
+    /// `void` return.
+    Void,
+    /// Return directly in one or more ABI-classified registers.
+    Direct {
+        /// LLVM return units. Multiple units are wrapped in an LLVM struct.
+        units: Vec<AbiParamUnit>,
+    },
+    /// Return indirectly through a hidden caller-provided pointer.
+    Indirect {
+        /// Whether LLVM should mark the hidden pointer as `sret`.
+        sret: bool,
+        /// Required alignment of the pointed-to storage in bytes.
+        align: u32,
+        /// Size of the original returned object in bytes.
+        size: u64,
+    },
 }
 
 /// ABI-passing strategy for one C function parameter.
@@ -153,8 +197,8 @@ pub enum AbiParamUnitKind {
 /// ABI lowering for a whole C function signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnAbi {
-    /// Original HIR return type. Return ABI lowering is handled by task 09-08.
-    pub ret: TyId,
+    /// Lowered return value.
+    pub ret: AbiReturn,
     /// Lowered fixed parameters in source order.
     pub params: Vec<AbiParam>,
     /// Whether the C function has an ellipsis.
@@ -174,13 +218,24 @@ pub fn sysv_fn_abi(
         _ => return Err(type_lowering_error(ty, "not a function type")),
     };
 
+    let ret = sysv_return_abi(tcx, defs, ret)?;
     let mut lowered = Vec::with_capacity(params.len());
     for param in params {
         lowered.push(sysv_param_abi(tcx, defs, param)?);
     }
-    let fixed_param_count = lowered.iter().map(AbiParam::llvm_param_count).sum();
+    let fixed_param_count =
+        ret.llvm_param_count() + lowered.iter().map(AbiParam::llvm_param_count).sum::<usize>();
 
     Ok(FnAbi { ret, params: lowered, variadic, fixed_param_count })
+}
+
+/// Classify one C function return type for the baseline SysV x86-64 ABI.
+pub fn sysv_return_abi(
+    tcx: &TyCtxt,
+    defs: &IndexVec<DefId, Def>,
+    ty: TyId,
+) -> Result<AbiReturn, CodegenError> {
+    SysvParamClassifier::new(tcx, defs).classify_return(ty)
 }
 
 /// Classify one C function parameter for the baseline SysV x86-64 ABI.
@@ -234,6 +289,32 @@ impl<'tcx> SysvParamClassifier<'tcx> {
         }
     }
 
+    fn classify_return(&self, ty: TyId) -> Result<AbiReturn, CodegenError> {
+        match self.tcx.get(ty) {
+            Ty::Void => Ok(AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Void,
+                classes: Vec::new(),
+                zeroext: false,
+            }),
+            Ty::Func { .. } => Err(type_lowering_error(ty, "function return types must decay")),
+            Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
+            Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_return(ty)),
+            Ty::Complex(FloatKind::F80) => Ok(AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Direct {
+                    units: vec![AbiParamUnit {
+                        class: AbiClass::ComplexX87,
+                        kind: AbiParamUnitKind::Source(ty),
+                    }],
+                },
+                classes: vec![AbiClass::ComplexX87],
+                zeroext: false,
+            }),
+            Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => self.aggregate_return(ty),
+        }
+    }
+
     fn scalar_param(&self, ty: TyId) -> AbiParam {
         let classes = match self.tcx.get(ty) {
             Ty::Float(FloatKind::F80) => vec![AbiClass::X87, AbiClass::X87Up],
@@ -248,6 +329,23 @@ impl<'tcx> SysvParamClassifier<'tcx> {
                 kind: AbiParamUnitKind::Source(ty),
             }]),
             classes,
+        }
+    }
+
+    fn scalar_return(&self, ty: TyId) -> AbiReturn {
+        let classes = match self.tcx.get(ty) {
+            Ty::Float(FloatKind::F80) => vec![AbiClass::X87, AbiClass::X87Up],
+            Ty::Float(FloatKind::F32 | FloatKind::F64) => vec![AbiClass::Sse],
+            Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) => vec![AbiClass::Integer],
+            _ => unreachable!("scalar_return called for non-scalar type"),
+        };
+        AbiReturn {
+            source: ty,
+            kind: AbiReturnKind::Direct {
+                units: vec![AbiParamUnit { class: classes[0], kind: AbiParamUnitKind::Source(ty) }],
+            },
+            classes,
+            zeroext: matches!(self.tcx.get(ty), Ty::Int { rank: rcc_hir::IntRank::Bool, .. }),
         }
     }
 
@@ -279,6 +377,25 @@ impl<'tcx> SysvParamClassifier<'tcx> {
         }
         let classes = units.iter().map(|unit| unit.class).collect();
         Ok(AbiParam { source: ty, kind: AbiParamKind::Direct(units), classes })
+    }
+
+    fn aggregate_return(&self, ty: TyId) -> Result<AbiReturn, CodegenError> {
+        let param = self.aggregate_param(ty)?;
+        let ret = match param.kind {
+            AbiParamKind::Direct(units) => AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Direct { units },
+                classes: param.classes,
+                zeroext: false,
+            },
+            AbiParamKind::Indirect { align, size, .. } => AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Indirect { sret: true, align, size },
+                classes: vec![AbiClass::Memory],
+                zeroext: false,
+            },
+        };
+        Ok(ret)
     }
 
     fn classify_ty_into(
@@ -852,9 +969,13 @@ pub mod backend {
             function: FunctionValue<'ctx>,
             abi: &FnAbi,
         ) -> Result<(), CodegenError> {
+            self.apply_return_abi_attrs(function, &abi.ret)?;
+
             let byval_kind = Attribute::get_named_enum_kind_id("byval");
             let align_kind = Attribute::get_named_enum_kind_id("align");
-            let mut param_index = 0_u32;
+            let mut param_index = u32::try_from(abi.ret.llvm_param_count()).map_err(|_| {
+                CodegenError::Internal("function parameter index overflowed".to_owned())
+            })?;
 
             for param in &abi.params {
                 match &param.kind {
@@ -887,6 +1008,33 @@ pub mod backend {
                         })?;
                     }
                 }
+            }
+
+            Ok(())
+        }
+
+        fn apply_return_abi_attrs(
+            &self,
+            function: FunctionValue<'ctx>,
+            ret: &AbiReturn,
+        ) -> Result<(), CodegenError> {
+            if ret.zeroext {
+                let zeroext_kind = Attribute::get_named_enum_kind_id("zeroext");
+                let attr = self.context.create_enum_attribute(zeroext_kind, 0);
+                function.add_attribute(AttributeLoc::Return, attr);
+            }
+
+            if let AbiReturnKind::Indirect { sret, align, .. } = &ret.kind {
+                if *sret {
+                    let sret_kind = Attribute::get_named_enum_kind_id("sret");
+                    let pointee = self.type_cx().basic_type_of(ret.source)?;
+                    let attr =
+                        self.context.create_type_attribute(sret_kind, basic_type_as_any(pointee));
+                    function.add_attribute(AttributeLoc::Param(0), attr);
+                }
+                let align_kind = Attribute::get_named_enum_kind_id("align");
+                let attr = self.context.create_enum_attribute(align_kind, u64::from(*align));
+                function.add_attribute(AttributeLoc::Param(0), attr);
             }
 
             Ok(())
@@ -960,9 +1108,9 @@ pub mod backend {
             let abi = sysv_fn_abi(self.tcx, &self.hir.defs, ty)?;
             let params = self.abi_param_types(&abi)?;
 
-            match self.tcx.get(abi.ret) {
-                Ty::Void => Ok(self.context.void_type().fn_type(&params, abi.variadic)),
-                _ => Ok(self.basic_type_of(abi.ret)?.fn_type(&params, abi.variadic)),
+            match self.abi_return_type(&abi.ret)? {
+                None => Ok(self.context.void_type().fn_type(&params, abi.variadic)),
+                Some(ret_ty) => Ok(ret_ty.fn_type(&params, abi.variadic)),
             }
         }
 
@@ -1007,6 +1155,9 @@ pub mod backend {
             abi: &FnAbi,
         ) -> Result<Vec<BasicMetadataTypeEnum<'ctx>>, CodegenError> {
             let mut params = Vec::with_capacity(abi.fixed_param_count);
+            if matches!(abi.ret.kind, AbiReturnKind::Indirect { .. }) {
+                params.push(self.ptr_type().into());
+            }
             for param in &abi.params {
                 match &param.kind {
                     AbiParamKind::Direct(units) => {
@@ -1018,6 +1169,25 @@ pub mod backend {
                 }
             }
             Ok(params)
+        }
+
+        fn abi_return_type(
+            &mut self,
+            ret: &AbiReturn,
+        ) -> Result<Option<BasicTypeEnum<'ctx>>, CodegenError> {
+            match &ret.kind {
+                AbiReturnKind::Void | AbiReturnKind::Indirect { .. } => Ok(None),
+                AbiReturnKind::Direct { units } if units.len() == 1 => {
+                    self.abi_unit_type(units[0]).map(Some)
+                }
+                AbiReturnKind::Direct { units } => {
+                    let fields = units
+                        .iter()
+                        .map(|unit| self.abi_unit_type(*unit))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Some(self.context.struct_type(&fields, false).into()))
+                }
+            }
         }
 
         fn abi_unit_type(
@@ -1420,6 +1590,25 @@ mod tests {
         }
     }
 
+    fn return_shape(tcx: &TyCtxt, ret: &AbiReturn) -> String {
+        match &ret.kind {
+            AbiReturnKind::Void => "void".to_owned(),
+            AbiReturnKind::Direct { units, .. } if units.len() == 1 => {
+                abi_unit_shape(tcx, units[0].kind)
+            }
+            AbiReturnKind::Direct { units, .. } => {
+                let fields =
+                    units.iter().map(|unit| abi_unit_shape(tcx, unit.kind)).collect::<Vec<_>>();
+                format!("{{ {} }}", fields.join(", "))
+            }
+            AbiReturnKind::Indirect { .. } => "void".to_owned(),
+        }
+    }
+
+    fn return_uses_sret(ret: &AbiReturn) -> bool {
+        matches!(ret.kind, AbiReturnKind::Indirect { sret: true, .. })
+    }
+
     fn abi_unit_shape(tcx: &TyCtxt, unit: AbiParamUnitKind) -> String {
         match unit {
             AbiParamUnitKind::Source(ty) => llvm_source_shape(tcx, ty),
@@ -1454,6 +1643,63 @@ mod tests {
             FloatKind::F64 => "double",
             FloatKind::F80 => "x86_fp80",
         }
+    }
+
+    #[test]
+    fn sysv_abi_classifies_direct_return_shapes_and_bool_zeroext() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let pair = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let pair_ty = tcx.intern(Ty::Record(pair));
+        let mix =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.double)]);
+        let mix_ty = tcx.intern(Ty::Record(mix));
+        let ret_void = tcx.void;
+        let ret_bool = tcx.bool_;
+        let ret_int = tcx.int;
+        let ret_double = tcx.double;
+
+        let cases = [
+            (func_ty(&mut tcx, ret_void, Vec::new(), false), "void", false),
+            (func_ty(&mut tcx, ret_bool, Vec::new(), false), "i1", true),
+            (func_ty(&mut tcx, ret_int, Vec::new(), false), "i32", false),
+            (func_ty(&mut tcx, ret_double, Vec::new(), false), "double", false),
+            (func_ty(&mut tcx, pair_ty, Vec::new(), false), "i64", false),
+            (func_ty(&mut tcx, mix_ty, Vec::new(), false), "{ i32, double }", false),
+        ];
+
+        for (fn_ty, expected_shape, expected_zeroext) in cases {
+            let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+            assert_eq!(return_shape(&tcx, &abi.ret), expected_shape);
+            assert_eq!(abi.ret.zeroext, expected_zeroext);
+            assert_eq!(abi.fixed_param_count, 0);
+        }
+    }
+
+    #[test]
+    fn sysv_abi_classifies_sret_return_before_user_params() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let big = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.long), field(tcx.long), field(tcx.long)],
+        );
+        let big_ty = tcx.intern(Ty::Record(big));
+        let int = tcx.int;
+        let double = tcx.double;
+        let fn_ty = func_ty(&mut tcx, big_ty, vec![int, double], false);
+
+        let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+        assert_eq!(return_shape(&tcx, &abi.ret), "void");
+        assert!(return_uses_sret(&abi.ret));
+        assert_eq!(abi.ret.classes, [AbiClass::Memory]);
+        assert!(matches!(abi.ret.kind, AbiReturnKind::Indirect { sret: true, align: 8, size: 24 }));
+        assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["i32"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["double"]);
+        assert_eq!(abi.fixed_param_count, 3);
     }
 
     #[test]
