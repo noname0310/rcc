@@ -17,7 +17,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [07-sysv-abi-params](07-sysv-abi-params.md)
 - [x] [08-sysv-abi-returns](08-sysv-abi-returns.md)
 - [x] [09-place-address-load-store](09-place-address-load-store.md)
-- [ ] [10-entry-alloca-and-local-materialization](10-entry-alloca-and-local-materialization.md)
+- [x] [10-entry-alloca-and-local-materialization](10-entry-alloca-and-local-materialization.md)
 - [ ] [11-global-initializer-materialization](11-global-initializer-materialization.md)
 - [ ] [12-basic-block-and-terminator-wiring](12-basic-block-and-terminator-wiring.md)
 - [ ] [13-call-emission-with-abi](13-call-emission-with-abi.md)

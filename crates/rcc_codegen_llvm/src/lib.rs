@@ -717,7 +717,9 @@ pub mod backend {
     use inkwell::types::{
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
-    use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
+    use inkwell::values::{
+        BasicValue, BasicValueEnum, FunctionValue, GlobalValue, InstructionOpcode, PointerValue,
+    };
     use inkwell::AddressSpace;
     use rcc_cfg::{Body, ConstKind, Operand, Place, Projection, Rvalue};
     use rcc_hir::{
@@ -732,6 +734,9 @@ pub mod backend {
         "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
 
     const FALLBACK_MODULE_NAME: &str = "rcc_module";
+
+    /// LLVM storage addresses for CFG locals.
+    pub type LocalMap<'ctx> = IndexVec<Local, PointerValue<'ctx>>;
 
     /// Shared state for one LLVM module emission.
     pub struct CodegenCx<'a, 'ctx> {
@@ -1041,6 +1046,278 @@ pub mod backend {
             }
 
             Ok(())
+        }
+
+        // ---------------------------------------------------------------
+        // 09-10: Entry alloca and local materialization
+        // ---------------------------------------------------------------
+
+        /// Allocate storage for every CFG local in the function entry block and
+        /// initialize parameter locals from LLVM IR parameters.
+        pub fn materialize_locals(
+            &self,
+            function: FunctionValue<'ctx>,
+            body: &Body,
+        ) -> Result<LocalMap<'ctx>, CodegenError> {
+            let mut locals = LocalMap::with_capacity(body.locals.len());
+
+            for (local, decl) in body.locals.iter_enumerated() {
+                let storage_ty = self.local_storage_type(decl.ty)?;
+                let alloca = self.build_entry_alloca(
+                    function,
+                    storage_ty,
+                    &self.local_storage_name(local, decl),
+                )?;
+                locals.push(alloca);
+            }
+
+            self.store_function_params(function, body, &mut locals)?;
+            Ok(locals)
+        }
+
+        /// Emit an LLVM lifetime.start marker for a CFG `StorageLive`.
+        pub fn emit_storage_live(
+            &self,
+            local: Local,
+            locals: &LocalMap<'ctx>,
+            body: &Body,
+        ) -> Result<(), CodegenError> {
+            self.emit_lifetime_marker("llvm.lifetime.start.p0", local, locals, body)
+        }
+
+        /// Emit an LLVM lifetime.end marker for a CFG `StorageDead`.
+        pub fn emit_storage_dead(
+            &self,
+            local: Local,
+            locals: &LocalMap<'ctx>,
+            body: &Body,
+        ) -> Result<(), CodegenError> {
+            self.emit_lifetime_marker("llvm.lifetime.end.p0", local, locals, body)
+        }
+
+        fn local_storage_type(&self, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            match self.tcx.get(ty) {
+                Ty::Void => Ok(self.context.i8_type().into()),
+                Ty::Array { is_vla: true, .. } => Err(CodegenError::Internal(
+                    "VLA local materialization is deferred to task 09-17".to_owned(),
+                )),
+                _ => self.type_cx().basic_type_of(ty),
+            }
+        }
+
+        fn local_storage_name(&self, local: Local, decl: &rcc_cfg::LocalDecl) -> String {
+            if local == Local(0) {
+                return "ret.addr".to_owned();
+            }
+
+            match (decl.is_param, decl.name) {
+                (true, Some(name)) => format!("param{}.addr", name.0),
+                (false, Some(name)) => format!("local{}.addr", name.0),
+                (true, None) => format!("param{}.addr", local.0),
+                (false, None) => format!("tmp{}.addr", local.0),
+            }
+        }
+
+        fn build_entry_alloca(
+            &self,
+            function: FunctionValue<'ctx>,
+            ty: BasicTypeEnum<'ctx>,
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            let entry = function.get_first_basic_block().ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "function {} has no entry block",
+                    function.get_name().to_string_lossy()
+                ))
+            })?;
+            let saved_block = self.builder.get_insert_block();
+
+            if let Some(first_non_alloca) =
+                entry.get_instructions().find(|inst| inst.get_opcode() != InstructionOpcode::Alloca)
+            {
+                self.builder.position_before(&first_non_alloca);
+            } else {
+                self.builder.position_at_end(entry);
+            }
+
+            let alloca = self.builder.build_alloca(ty, name).map_err(builder_error)?;
+            if let Some(block) = saved_block {
+                self.builder.position_at_end(block);
+            }
+            Ok(alloca)
+        }
+
+        fn store_function_params(
+            &self,
+            function: FunctionValue<'ctx>,
+            body: &Body,
+            locals: &mut LocalMap<'ctx>,
+        ) -> Result<(), CodegenError> {
+            if body.locals.iter().all(|decl| !decl.is_param) {
+                return Ok(());
+            }
+
+            if let Some(abi) = self.body_abi(body)? {
+                let mut llvm_index = u32::try_from(abi.ret.llvm_param_count()).map_err(|_| {
+                    CodegenError::Internal("function parameter index overflowed".to_owned())
+                })?;
+                for ((local, _decl), param_abi) in body
+                    .locals
+                    .iter_enumerated()
+                    .filter(|(_, decl)| decl.is_param)
+                    .zip(abi.params.iter())
+                {
+                    self.store_abi_param(function, local, param_abi, &mut llvm_index, locals)?;
+                }
+            } else {
+                for (llvm_index, (local, _decl)) in
+                    body.locals.iter_enumerated().filter(|(_, decl)| decl.is_param).enumerate()
+                {
+                    let llvm_index = u32::try_from(llvm_index).map_err(|_| {
+                        CodegenError::Internal("function parameter index overflowed".to_owned())
+                    })?;
+                    let value = function.get_nth_param(llvm_index).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing LLVM parameter {} for local {:?}",
+                            llvm_index, local
+                        ))
+                    })?;
+                    self.builder.build_store(locals[local], value).map_err(builder_error)?;
+                }
+            }
+
+            Ok(())
+        }
+
+        fn body_abi(&self, body: &Body) -> Result<Option<FnAbi>, CodegenError> {
+            let Some(def) = body.def else {
+                return Ok(None);
+            };
+            let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                CodegenError::Internal(format!("function definition {def:?} is missing"))
+            })?;
+            let DefKind::Function { ty, .. } = def_data.kind else {
+                return Err(CodegenError::Internal(format!(
+                    "body definition {def:?} is not a function"
+                )));
+            };
+            sysv_fn_abi(self.tcx, &self.hir.defs, ty).map(Some)
+        }
+
+        fn store_abi_param(
+            &self,
+            function: FunctionValue<'ctx>,
+            local: Local,
+            param_abi: &AbiParam,
+            llvm_index: &mut u32,
+            locals: &mut LocalMap<'ctx>,
+        ) -> Result<(), CodegenError> {
+            match &param_abi.kind {
+                AbiParamKind::Direct(units) => {
+                    for (unit_idx, _) in units.iter().enumerate() {
+                        let value = function.get_nth_param(*llvm_index).ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "missing LLVM parameter {} for local {:?}",
+                                *llvm_index, local
+                            ))
+                        })?;
+                        let offset = u64::try_from(unit_idx)
+                            .map_err(|_| {
+                                CodegenError::Internal(
+                                    "ABI parameter unit index overflowed".to_owned(),
+                                )
+                            })?
+                            .checked_mul(8)
+                            .ok_or_else(|| {
+                                CodegenError::Internal(
+                                    "ABI parameter unit offset overflowed".to_owned(),
+                                )
+                            })?;
+                        self.store_abi_unit(locals[local], offset, value)?;
+                        *llvm_index = llvm_index.checked_add(1).ok_or_else(|| {
+                            CodegenError::Internal("function parameter index overflowed".to_owned())
+                        })?;
+                    }
+                }
+                AbiParamKind::Indirect { .. } => {
+                    let value = function.get_nth_param(*llvm_index).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing LLVM parameter {} for local {:?}",
+                            *llvm_index, local
+                        ))
+                    })?;
+                    locals[local] = value.into_pointer_value();
+                    *llvm_index = llvm_index.checked_add(1).ok_or_else(|| {
+                        CodegenError::Internal("function parameter index overflowed".to_owned())
+                    })?;
+                }
+            }
+
+            Ok(())
+        }
+
+        fn store_abi_unit(
+            &self,
+            local_addr: PointerValue<'ctx>,
+            offset: u64,
+            value: BasicValueEnum<'ctx>,
+        ) -> Result<(), CodegenError> {
+            let offset = self.context.i64_type().const_int(offset, false);
+            let byte_ptr =
+                self.build_gep(self.context.i8_type(), local_addr, &[offset], "param.unit")?;
+            self.builder.build_store(byte_ptr, value).map(|_| ()).map_err(builder_error)
+        }
+
+        fn emit_lifetime_marker(
+            &self,
+            intrinsic: &str,
+            local: Local,
+            locals: &LocalMap<'ctx>,
+            body: &Body,
+        ) -> Result<(), CodegenError> {
+            let ptr = *locals.get(local).ok_or_else(|| {
+                CodegenError::Internal(format!("missing LLVM storage for local {local:?}"))
+            })?;
+            let decl = body.locals.get(local).ok_or_else(|| {
+                CodegenError::Internal(format!("local {local:?} is missing from body"))
+            })?;
+            let size = self.local_lifetime_size(decl.ty)?;
+            let intrinsic = self.lifetime_intrinsic(intrinsic);
+            self.builder
+                .build_call(intrinsic, &[size.into(), ptr.into()], "")
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
+        fn local_lifetime_size(
+            &self,
+            ty: TyId,
+        ) -> Result<inkwell::values::IntValue<'ctx>, CodegenError> {
+            let size = match self.tcx.get(ty) {
+                Ty::Void => 0,
+                Ty::Array { is_vla: true, .. } => {
+                    return Err(CodegenError::Internal(
+                        "VLA lifetime markers are deferred to task 09-17".to_owned(),
+                    ));
+                }
+                _ => {
+                    LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(ty)
+                        .map_err(|err| type_error(ty, err.to_string()))?
+                        .size
+                }
+            };
+            Ok(self.context.i64_type().const_int(size, false))
+        }
+
+        fn lifetime_intrinsic(&self, name: &str) -> FunctionValue<'ctx> {
+            self.module.get_function(name).unwrap_or_else(|| {
+                let i64_ty = self.context.i64_type();
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let fn_ty =
+                    self.context.void_type().fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+                self.module.add_function(name, fn_ty, None)
+            })
         }
 
         // ---------------------------------------------------------------
@@ -2446,6 +2723,153 @@ mod tests {
     use rcc_cfg::{Body, Const, ConstKind, LocalDecl, Operand, Place, Projection, Rvalue};
     #[cfg(feature = "llvm")]
     use rcc_hir::Local;
+
+    // -----------------------------------------------------------------------
+    // 09-10: Entry-block alloca and local materialization
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn cfg_local_decl(name: Option<Symbol>, ty: TyId, is_param: bool) -> LocalDecl {
+        LocalDecl {
+            name,
+            ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param,
+            span: DUMMY_SP,
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn local_materialization_body(
+        def: DefId,
+        tcx: &TyCtxt,
+        param_name: Symbol,
+        local_name: Symbol,
+    ) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(Some(param_name), tcx.int, true));
+        locals.push(cfg_local_decl(Some(local_name), tcx.int, false));
+        let mut blocks = IndexVec::new();
+        blocks.push(rcc_cfg::BasicBlock::default());
+        Body { def: Some(def), locals, blocks, ret_ty: Some(tcx.void) }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn materialization_inputs(
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+    ) -> (HirCrate, FxHashMap<DefId, Body>, DefId, Body) {
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.void,
+            params: vec![tcx.int],
+            variadic: false,
+            proto: true,
+        });
+        let fn_name = session.interner.intern("materialize_one_int");
+        let param_name = session.interner.intern("p");
+        let local_name = session.interner.intern("x");
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let body = local_materialization_body(def, tcx, param_name, local_name);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        (hir, bodies, def, body)
+    }
+
+    /// Local materialization inserts all allocas before any non-alloca entry instruction.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn materialize_locals_keeps_allocas_first() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let (hir, bodies, def, body) = materialization_inputs(&mut session, &mut tcx);
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        let function = cx.declare_function(def).unwrap();
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+
+        let sink = cx.module().add_global(context.i32_type(), None, "__sink");
+        sink.set_initializer(&context.i32_type().const_zero());
+        cx.builder()
+            .build_store(sink.as_pointer_value(), context.i32_type().const_int(1, false))
+            .unwrap();
+
+        let locals = cx.materialize_locals(function, &body).unwrap();
+        assert_eq!(locals.len(), body.locals.len());
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+
+        let entry = function.get_first_basic_block().unwrap();
+        let mut seen_non_alloca = false;
+        let mut alloca_count = 0;
+        for instruction in entry.get_instructions() {
+            if instruction.get_opcode() == inkwell::values::InstructionOpcode::Alloca {
+                assert!(!seen_non_alloca, "alloca appeared after a non-alloca instruction");
+                alloca_count += 1;
+            } else {
+                seen_non_alloca = true;
+            }
+        }
+        assert_eq!(alloca_count, body.locals.len());
+    }
+
+    /// Scalar parameters are stored into their local slots during materialization.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn materialize_locals_stores_scalar_params() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let (hir, bodies, def, body) = materialization_inputs(&mut session, &mut tcx);
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        let function = cx.declare_function(def).unwrap();
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+
+        let _locals = cx.materialize_locals(function, &body).unwrap();
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("store i32 %0, ptr %param"));
+    }
+
+    /// StorageLive/StorageDead lower to LLVM lifetime intrinsics.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn storage_markers_emit_lifetime_intrinsics() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let (hir, bodies, def, body) = materialization_inputs(&mut session, &mut tcx);
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        let function = cx.declare_function(def).unwrap();
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+        let locals = cx.materialize_locals(function, &body).unwrap();
+
+        cx.emit_storage_live(Local(2), &locals, &body).unwrap();
+        cx.emit_storage_dead(Local(2), &locals, &body).unwrap();
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("@llvm.lifetime.start.p0"));
+        assert!(ir.contains("@llvm.lifetime.end.p0"));
+        assert!(ir.contains("i64 4"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-09: Place address, operand load, and store helpers
+    // -----------------------------------------------------------------------
 
     /// Create a minimal Body with int/ptr locals for place tests.
     #[cfg(feature = "llvm")]
