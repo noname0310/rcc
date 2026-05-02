@@ -22,7 +22,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [12-basic-block-and-terminator-wiring](12-basic-block-and-terminator-wiring.md)
 - [x] [13-call-emission-with-abi](13-call-emission-with-abi.md)
 - [x] [14-binop-and-unary-emission](14-binop-and-unary-emission.md)
-- [ ] [15-cast-emission](15-cast-emission.md)
+- [x] [15-cast-emission](15-cast-emission.md)
 - [ ] [16-aggregate-copy-memset](16-aggregate-copy-memset.md)
 - [ ] [17-vla-stack-and-len](17-vla-stack-and-len.md)
 - [ ] [18-complex-rvalue-emission](18-complex-rvalue-emission.md)

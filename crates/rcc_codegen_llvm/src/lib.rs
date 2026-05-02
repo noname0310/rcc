@@ -727,8 +727,8 @@ pub mod backend {
     use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
     use rcc_cfg::UnOp;
     use rcc_cfg::{
-        BasicBlockId, BinOp, Body, ConstKind, Operand, Place, Projection, Rvalue, Statement,
-        StatementKind, TerminatorKind,
+        BasicBlockId, BinOp, Body, CastKind, ConstKind, Operand, Place, Projection, Rvalue,
+        Statement, StatementKind, TerminatorKind,
     };
     use rcc_hir::{
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, Qual, RecordKind, Ty,
@@ -1554,6 +1554,7 @@ pub mod backend {
                 Rvalue::Use(operand) => self.emit_operand_value(operand, locals, body),
                 Rvalue::BinaryOp(op, lhs, rhs) => self.emit_binop(*op, lhs, rhs, locals, body),
                 Rvalue::UnaryOp(op, operand) => self.emit_unop(*op, operand, locals, body),
+                Rvalue::Cast { op, to, kind } => self.emit_cast(op, *to, *kind, locals, body),
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
@@ -1561,6 +1562,205 @@ pub mod backend {
                     "rvalue emission is not implemented for this CFG rvalue yet".to_owned(),
                 )),
             }
+        }
+
+        fn emit_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            kind: CastKind,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match kind {
+                CastKind::IntToInt => self.emit_int_to_int_cast(operand, to, locals, body),
+                CastKind::IntToFloat => self.emit_int_to_float_cast(operand, to, locals, body),
+                CastKind::FloatToInt => self.emit_float_to_int_cast(operand, to, locals, body),
+                CastKind::FloatToFloat => self.emit_float_to_float_cast(operand, to, locals, body),
+                CastKind::PtrToPtr => self.emit_ptr_to_ptr_cast(operand, to, locals, body),
+                CastKind::PtrToInt => self.emit_ptr_to_int_cast(operand, to, locals, body),
+                CastKind::IntToPtr => self.emit_int_to_ptr_cast(operand, to, locals, body),
+            }
+        }
+
+        fn emit_int_to_int_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let value = self.emit_int_operand(operand, locals, body)?;
+            let BasicTypeEnum::IntType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "integer cast target is not an integer"));
+            };
+
+            if self.is_bool_ty(to) {
+                if value.get_type().get_bit_width() == 1 {
+                    return Ok(value.as_basic_value_enum());
+                }
+                let bool_value = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        value,
+                        value.get_type().const_zero(),
+                        "tobool",
+                    )
+                    .map_err(builder_error)?;
+                return Ok(bool_value.as_basic_value_enum());
+            }
+
+            let from_width = value.get_type().get_bit_width();
+            let to_width = to_ty.get_bit_width();
+            let cast = if from_width == to_width {
+                value
+            } else if from_width > to_width {
+                self.builder.build_int_truncate(value, to_ty, "trunc").map_err(builder_error)?
+            } else if self.is_signed_integer_ty(from_ty)? {
+                self.builder.build_int_s_extend(value, to_ty, "sext").map_err(builder_error)?
+            } else {
+                self.builder.build_int_z_extend(value, to_ty, "zext").map_err(builder_error)?
+            };
+            Ok(cast.as_basic_value_enum())
+        }
+
+        fn emit_int_to_float_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let value = self.emit_int_operand(operand, locals, body)?;
+            let BasicTypeEnum::FloatType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "integer-to-float target is not floating"));
+            };
+            let cast = if self.is_signed_integer_ty(from_ty)? {
+                self.builder
+                    .build_signed_int_to_float(value, to_ty, "sitofp")
+                    .map_err(builder_error)?
+            } else {
+                self.builder
+                    .build_unsigned_int_to_float(value, to_ty, "uitofp")
+                    .map_err(builder_error)?
+            };
+            Ok(cast.as_basic_value_enum())
+        }
+
+        fn emit_float_to_int_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_float_operand(operand, locals, body)?;
+            let BasicTypeEnum::IntType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "float-to-integer target is not an integer"));
+            };
+
+            if self.is_bool_ty(to) {
+                let bool_value = self
+                    .builder
+                    .build_float_compare(
+                        FloatPredicate::ONE,
+                        value,
+                        value.get_type().const_zero(),
+                        "tobool",
+                    )
+                    .map_err(builder_error)?;
+                return Ok(bool_value.as_basic_value_enum());
+            }
+
+            let cast = if self.is_signed_integer_ty(to)? {
+                self.builder
+                    .build_float_to_signed_int(value, to_ty, "fptosi")
+                    .map_err(builder_error)?
+            } else {
+                self.builder
+                    .build_float_to_unsigned_int(value, to_ty, "fptoui")
+                    .map_err(builder_error)?
+            };
+            Ok(cast.as_basic_value_enum())
+        }
+
+        fn emit_float_to_float_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let value = self.emit_float_operand(operand, locals, body)?;
+            let BasicTypeEnum::FloatType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "float cast target is not floating"));
+            };
+            let from_width = self.float_ty_width(from_ty)?;
+            let to_width = self.float_ty_width(to)?;
+            let cast = if from_width == to_width {
+                value
+            } else if from_width < to_width {
+                self.builder.build_float_ext(value, to_ty, "fpext").map_err(builder_error)?
+            } else {
+                self.builder.build_float_trunc(value, to_ty, "fptrunc").map_err(builder_error)?
+            };
+            Ok(cast.as_basic_value_enum())
+        }
+
+        fn emit_ptr_to_ptr_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            if !matches!(self.tcx.get(to), Ty::Ptr(_)) {
+                return Err(type_lowering_error(to, "pointer cast target is not a pointer"));
+            }
+            Ok(self.emit_pointer_operand(operand, locals, body)?.as_basic_value_enum())
+        }
+
+        fn emit_ptr_to_int_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_pointer_operand(operand, locals, body)?;
+            let BasicTypeEnum::IntType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "pointer-to-integer target is not an integer"));
+            };
+            if self.is_bool_ty(to) {
+                let bool_value =
+                    self.builder.build_is_not_null(value, "tobool").map_err(builder_error)?;
+                return Ok(bool_value.as_basic_value_enum());
+            }
+            self.builder
+                .build_ptr_to_int(value, to_ty, "ptrtoint")
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)
+        }
+
+        fn emit_int_to_ptr_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_int_operand(operand, locals, body)?;
+            let BasicTypeEnum::PointerType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "integer-to-pointer target is not a pointer"));
+            };
+            self.builder
+                .build_int_to_ptr(value, to_ty, "inttoptr")
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)
         }
 
         fn emit_binop(
@@ -2086,6 +2286,44 @@ pub mod backend {
             match operand {
                 Operand::Copy(place) | Operand::Move(place) => self.place_ty(place, body),
                 Operand::Const(c) => Ok(c.ty),
+            }
+        }
+
+        fn is_bool_ty(&self, ty: TyId) -> bool {
+            matches!(self.tcx.get(ty), Ty::Int { rank: IntRank::Bool, .. })
+        }
+
+        fn is_signed_integer_ty(&self, ty: TyId) -> Result<bool, CodegenError> {
+            match self.tcx.get(ty) {
+                Ty::Int { signed, .. } => Ok(*signed),
+                Ty::Enum(def) => {
+                    let Some(def_data) = self.hir.defs.get(*def) else {
+                        return Ok(true);
+                    };
+                    let DefKind::Enum { repr, .. } = &def_data.kind else {
+                        return Err(CodegenError::Internal(format!(
+                            "definition {:?} is not an enum",
+                            def
+                        )));
+                    };
+                    self.is_signed_integer_ty(*repr)
+                }
+                other => Err(CodegenError::Internal(format!(
+                    "expected integer type for signedness, got {:?}",
+                    other
+                ))),
+            }
+        }
+
+        fn float_ty_width(&self, ty: TyId) -> Result<u32, CodegenError> {
+            match self.tcx.get(ty) {
+                Ty::Float(FloatKind::F32) => Ok(32),
+                Ty::Float(FloatKind::F64) => Ok(64),
+                Ty::Float(FloatKind::F80) => Ok(80),
+                other => Err(CodegenError::Internal(format!(
+                    "expected floating type for cast width, got {:?}",
+                    other
+                ))),
             }
         }
 
@@ -4325,8 +4563,8 @@ mod tests {
 
     #[cfg(feature = "llvm")]
     use rcc_cfg::{
-        BasicBlock, BasicBlockId, BinOp, Body, Const, ConstKind, LocalDecl, Operand, Place,
-        Projection, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnOp,
+        BasicBlock, BasicBlockId, BinOp, Body, CastKind, Const, ConstKind, LocalDecl, Operand,
+        Place, Projection, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnOp,
     };
     #[cfg(feature = "llvm")]
     use rcc_hir::Local;
@@ -5035,6 +5273,169 @@ mod tests {
         let diff_ir = assert_codegen_fixture_verifies(&mut tcx, "__ptr_diff", long_ty, diff_body);
         assert!(diff_ir.contains("ptrtoint ptr"), "IR:\n{diff_ir}");
         assert!(diff_ir.contains("sdiv i64") && diff_ir.contains(", 4"), "IR:\n{diff_ir}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-15: Cast emission
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn cast_return_body(ret_ty: TyId, operand_ty: TyId, kind: CastKind) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(420)), operand_ty, false));
+        cfg_body_with_locals(
+            ret_ty,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::Cast { op: local_copy(Local(1)), to: ret_ty, kind },
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        )
+    }
+
+    #[cfg(feature = "llvm")]
+    type PickTy = fn(&TyCtxt) -> TyId;
+
+    #[cfg(feature = "llvm")]
+    type IntCastCase = (PickTy, PickTy, &'static str, &'static str);
+
+    #[cfg(feature = "llvm")]
+    type IntToFloatCase = (PickTy, &'static str);
+
+    #[cfg(feature = "llvm")]
+    type FloatCastCase = (PickTy, PickTy, CastKind, &'static str, &'static str);
+
+    /// Integer casts choose truncation, sign extension, or zero extension from
+    /// HIR source/target types and materialize the destination LLVM type.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_int_to_int_opcode_table() {
+        let cases: &[IntCastCase] = &[
+            (|tcx| tcx.long, |tcx| tcx.int, "trunc i64", "store i32"),
+            (|tcx| tcx.int, |tcx| tcx.long, "sext i32", "store i64"),
+            (|tcx| tcx.uint, |tcx| tcx.ulong, "zext i32", "store i64"),
+            (|tcx| tcx.int, |tcx| tcx.bool_, "icmp ne i32", "store i1"),
+        ];
+
+        for (src, dst, opcode, store_ty) in cases {
+            let mut tcx = TyCtxt::new();
+            let src_ty = src(&tcx);
+            let dst_ty = dst(&tcx);
+            let body = cast_return_body(dst_ty, src_ty, CastKind::IntToInt);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__cast_{opcode}").replace([' ', '\t'], "_"),
+                dst_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing cast opcode {opcode:?} in IR:\n{ir}");
+            assert!(ir.contains(store_ty), "missing destination type {store_ty:?} in IR:\n{ir}");
+        }
+    }
+
+    /// Integer to float casts use source signedness from HIR, not the runtime
+    /// integer value.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_int_to_float_uses_source_signedness() {
+        let cases: &[IntToFloatCase] =
+            &[(|tcx| tcx.int, "sitofp i32"), (|tcx| tcx.uint, "uitofp i32")];
+
+        for (src, opcode) in cases {
+            let mut tcx = TyCtxt::new();
+            let src_ty = src(&tcx);
+            let dst_ty = tcx.double;
+            let body = cast_return_body(dst_ty, src_ty, CastKind::IntToFloat);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__cast_{opcode}").replace([' ', '\t'], "_"),
+                dst_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing signedness opcode {opcode:?} in IR:\n{ir}");
+            assert!(ir.contains("to double"), "missing double destination in IR:\n{ir}");
+        }
+    }
+
+    /// Float casts cover float/int, float/float, and `_Bool` normalization.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_float_opcode_table() {
+        let cases: &[FloatCastCase] = &[
+            (|tcx| tcx.double, |tcx| tcx.int, CastKind::FloatToInt, "fptosi double", "store i32"),
+            (|tcx| tcx.double, |tcx| tcx.uint, CastKind::FloatToInt, "fptoui double", "store i32"),
+            (
+                |tcx| tcx.float,
+                |tcx| tcx.double,
+                CastKind::FloatToFloat,
+                "fpext float",
+                "store double",
+            ),
+            (
+                |tcx| tcx.double,
+                |tcx| tcx.float,
+                CastKind::FloatToFloat,
+                "fptrunc double",
+                "store float",
+            ),
+            (
+                |tcx| tcx.double,
+                |tcx| tcx.bool_,
+                CastKind::FloatToInt,
+                "fcmp one double",
+                "store i1",
+            ),
+        ];
+
+        for (src, dst, kind, opcode, store_ty) in cases {
+            let mut tcx = TyCtxt::new();
+            let src_ty = src(&tcx);
+            let dst_ty = dst(&tcx);
+            let body = cast_return_body(dst_ty, src_ty, *kind);
+            let ir = assert_codegen_fixture_verifies(
+                &mut tcx,
+                &format!("__cast_{opcode}").replace([' ', '\t'], "_"),
+                dst_ty,
+                body,
+            );
+            assert!(ir.contains(opcode), "missing cast opcode {opcode:?} in IR:\n{ir}");
+            assert!(ir.contains(store_ty), "missing destination type {store_ty:?} in IR:\n{ir}");
+        }
+    }
+
+    /// Pointer casts cover pointer-pointer no-op shape, pointer-integer, and
+    /// integer-pointer casts.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_pointer_opcode_table() {
+        let mut tcx = TyCtxt::new();
+        let int_ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let char_ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+
+        let ptr_to_ptr = cast_return_body(char_ptr_ty, int_ptr_ty, CastKind::PtrToPtr);
+        let ptr_ir =
+            assert_codegen_fixture_verifies(&mut tcx, "__cast_ptr_to_ptr", char_ptr_ty, ptr_to_ptr);
+        assert!(ptr_ir.contains("store ptr"), "IR:\n{ptr_ir}");
+
+        let ulong_ty = tcx.ulong;
+        let ptr_to_int = cast_return_body(ulong_ty, int_ptr_ty, CastKind::PtrToInt);
+        let ptr_to_int_ir =
+            assert_codegen_fixture_verifies(&mut tcx, "__cast_ptr_to_int", ulong_ty, ptr_to_int);
+        assert!(ptr_to_int_ir.contains("ptrtoint ptr"), "IR:\n{ptr_to_int_ir}");
+        assert!(ptr_to_int_ir.contains("to i64"), "IR:\n{ptr_to_int_ir}");
+
+        let int_to_ptr = cast_return_body(int_ptr_ty, ulong_ty, CastKind::IntToPtr);
+        let int_to_ptr_ir =
+            assert_codegen_fixture_verifies(&mut tcx, "__cast_int_to_ptr", int_ptr_ty, int_to_ptr);
+        assert!(int_to_ptr_ir.contains("inttoptr i64"), "IR:\n{int_to_ptr_ir}");
+        assert!(int_to_ptr_ir.contains("to ptr"), "IR:\n{int_to_ptr_ir}");
     }
 
     /// Forward declarations are callable before any callee body is emitted.
