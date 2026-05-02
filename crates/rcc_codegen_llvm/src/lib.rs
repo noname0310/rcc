@@ -2237,6 +2237,76 @@ pub mod backend {
             }
         }
 
+        fn try_emit_aggregate_assign(
+            &self,
+            place: &Place,
+            rvalue: &Rvalue,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<bool, CodegenError> {
+            let dest_ty = self.place_ty(place, body)?;
+            if !self.is_memory_aggregate_ty(dest_ty) {
+                return Ok(false);
+            }
+
+            let dest = self.emit_place_addr(place, locals, body)?;
+            match rvalue {
+                Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) => {
+                    let src_ty = self.place_ty(src, body)?;
+                    let src = self.emit_place_addr(src, locals, body)?;
+                    self.emit_memcpy(dest, dest_ty, src, src_ty)?;
+                    Ok(true)
+                }
+                Rvalue::Use(Operand::Const(c)) if matches!(c.kind, ConstKind::ZeroInit) => {
+                    self.emit_memset_zero(dest, dest_ty)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+
+        fn emit_memcpy(
+            &self,
+            dest: PointerValue<'ctx>,
+            dest_ty: TyId,
+            src: PointerValue<'ctx>,
+            src_ty: TyId,
+        ) -> Result<(), CodegenError> {
+            let dest_layout = self.memory_layout(dest_ty)?;
+            let src_layout = self.memory_layout(src_ty)?;
+            if dest_layout.size != src_layout.size {
+                return Err(CodegenError::Internal(format!(
+                    "aggregate copy size mismatch: dest {} bytes, source {} bytes",
+                    dest_layout.size, src_layout.size
+                )));
+            }
+            let size = self.context.i64_type().const_int(dest_layout.size, false);
+            self.builder
+                .build_memcpy(
+                    dest,
+                    layout_align(dest_ty, dest_layout)?,
+                    src,
+                    layout_align(src_ty, src_layout)?,
+                    size,
+                )
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
+        fn emit_memset_zero(
+            &self,
+            dest: PointerValue<'ctx>,
+            dest_ty: TyId,
+        ) -> Result<(), CodegenError> {
+            let layout = self.memory_layout(dest_ty)?;
+            let value = self.context.i8_type().const_zero();
+            let size = self.context.i64_type().const_int(layout.size, false);
+            self.builder
+                .build_memset(dest, layout_align(dest_ty, layout)?, value, size)
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
         /// Store an LLVM value into a CFG [`Place`].
         pub fn emit_store_place(
             &self,
@@ -2327,6 +2397,16 @@ pub mod backend {
             }
         }
 
+        fn is_memory_aggregate_ty(&self, ty: TyId) -> bool {
+            matches!(self.tcx.get(ty), Ty::Array { .. } | Ty::Record(_))
+        }
+
+        fn memory_layout(&self, ty: TyId) -> Result<Layout, CodegenError> {
+            LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                .layout_of(ty)
+                .map_err(|err| type_error(ty, err.to_string()))
+        }
+
         /// Materialise a CFG [`Const`] as an LLVM value.
         fn emit_const(&self, c: &rcc_cfg::Const) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             match &c.kind {
@@ -2406,6 +2486,7 @@ pub mod backend {
 
     struct FnCodegen<'cg, 'a, 'ctx> {
         cx: &'cg CodegenCx<'a, 'ctx>,
+        function: FunctionValue<'ctx>,
         body: &'cg Body,
         locals: LocalMap<'ctx>,
         blocks: IndexVec<BasicBlockId, LlvmBasicBlock<'ctx>>,
@@ -2437,7 +2518,7 @@ pub mod backend {
             cx.builder.position_at_end(entry);
             let locals = cx.materialize_locals(function, body)?;
 
-            Ok(Self { cx, body, locals, blocks })
+            Ok(Self { cx, function, body, locals, blocks })
         }
 
         fn codegen_body(&self) -> Result<(), CodegenError> {
@@ -2465,6 +2546,9 @@ pub mod backend {
         fn emit_statement(&self, statement: &Statement) -> Result<(), CodegenError> {
             match &statement.kind {
                 StatementKind::Assign { place, rvalue } => {
+                    if self.cx.try_emit_aggregate_assign(place, rvalue, &self.locals, self.body)? {
+                        return Ok(());
+                    }
                     let value = self.cx.emit_rvalue_value(rvalue, &self.locals, self.body)?;
                     self.cx.emit_store_place(place, value, &self.locals, self.body)
                 }
@@ -2805,15 +2889,63 @@ pub mod backend {
                     {
                         self.emit_direct_return(ret_ty)
                     }
-                    AbiReturnKind::Direct { .. } => Err(CodegenError::Internal(
-                        "coerced aggregate return lowering is deferred to task 09-16".to_owned(),
-                    )),
-                    AbiReturnKind::Indirect { .. } => Err(CodegenError::Internal(
-                        "indirect sret return lowering is deferred to task 09-16".to_owned(),
-                    )),
+                    AbiReturnKind::Direct { units } => self.emit_coerced_direct_return(units),
+                    AbiReturnKind::Indirect { .. } => self.emit_indirect_return(ret_ty),
                 },
                 None => self.emit_direct_return(ret_ty),
             }
+        }
+
+        fn emit_indirect_return(&self, ret_ty: TyId) -> Result<(), CodegenError> {
+            let dest = self.function.get_nth_param(0).ok_or_else(|| {
+                CodegenError::Internal("sret function is missing hidden return pointer".to_owned())
+            })?;
+            let BasicValueEnum::PointerValue(dest) = dest else {
+                return Err(CodegenError::Internal(format!(
+                    "sret hidden parameter must be a pointer, got {:?}",
+                    dest.get_type()
+                )));
+            };
+            let src = self.locals[Local(0)];
+            self.cx.emit_memcpy(dest, ret_ty, src, ret_ty)?;
+            self.cx.builder.build_return(None).map(|_| ()).map_err(builder_error)
+        }
+
+        fn emit_coerced_direct_return(&self, units: &[AbiParamUnit]) -> Result<(), CodegenError> {
+            let ret_addr = self.locals[Local(0)];
+            if units.len() == 1 {
+                let value = self.load_abi_unit(ret_addr, 0, units[0])?;
+                return self
+                    .cx
+                    .builder
+                    .build_return(Some(&value))
+                    .map(|_| ())
+                    .map_err(builder_error);
+            }
+
+            let fields = units
+                .iter()
+                .map(|unit| self.cx.type_cx().abi_unit_type(*unit))
+                .collect::<Result<Vec<_>, _>>()?;
+            let ret_ty = self.cx.context.struct_type(&fields, false);
+            let mut aggregate = ret_ty.get_undef();
+            for (unit_idx, unit) in units.iter().enumerate() {
+                let index = u32::try_from(unit_idx).map_err(|_| {
+                    CodegenError::Internal("ABI return unit index overflowed".to_owned())
+                })?;
+                let value = self.load_abi_unit(
+                    ret_addr,
+                    abi_unit_offset(unit_idx, "function return")?,
+                    *unit,
+                )?;
+                aggregate = self
+                    .cx
+                    .builder
+                    .build_insert_value(aggregate, value, index, "ret.unit")
+                    .map_err(builder_error)?
+                    .into_struct_value();
+            }
+            self.cx.builder.build_return(Some(&aggregate)).map(|_| ()).map_err(builder_error)
         }
 
         fn emit_direct_return(&self, ret_ty: TyId) -> Result<(), CodegenError> {
@@ -2878,6 +3010,13 @@ pub mod backend {
 
     fn builder_error(error: impl std::fmt::Display) -> CodegenError {
         CodegenError::Internal(format!("LLVM builder failed: {error}"))
+    }
+
+    fn layout_align(ty: TyId, layout: Layout) -> Result<u32, CodegenError> {
+        if layout.align == 0 || !layout.align.is_power_of_two() {
+            return Err(type_error(ty, format!("invalid memory alignment {}", layout.align)));
+        }
+        Ok(layout.align)
     }
 
     /// Recursive `TyId` to LLVM type lowering service for one LLVM context.
@@ -5436,6 +5575,130 @@ mod tests {
             assert_codegen_fixture_verifies(&mut tcx, "__cast_int_to_ptr", int_ptr_ty, int_to_ptr);
         assert!(int_to_ptr_ir.contains("inttoptr i64"), "IR:\n{int_to_ptr_ir}");
         assert!(int_to_ptr_ir.contains("to ptr"), "IR:\n{int_to_ptr_ir}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-16: Aggregate copy and memset intrinsics
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    fn aggregate_body_with_assign(void_ty: TyId, ty: TyId, rvalue: Rvalue) -> Body {
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, void_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(430)), ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(431)), ty, false));
+        cfg_body_with_locals(
+            void_ty,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign { place: local_place(Local(1)), rvalue },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        )
+    }
+
+    #[cfg(feature = "llvm")]
+    fn codegen_aggregate_fixture(
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+        defs: IndexVec<DefId, Def>,
+        name: &str,
+        body: Body,
+    ) -> String {
+        let fn_name = session.interner.intern(name);
+        let mut defs = defs;
+        let void_ty = tcx.void;
+        let fn_ty = func_ty(tcx, void_ty, Vec::new(), false);
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let mut body = body;
+        body.def = Some(def);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+        codegen(session, tcx, &hir, &bodies).unwrap().ir_text
+    }
+
+    /// Struct assignment lowers to an LLVM memcpy intrinsic instead of an
+    /// aggregate load/store pair.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn aggregate_struct_assignment_emits_memcpy() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let pair_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(tcx.int)]);
+        let pair_ty = tcx.intern(Ty::Record(pair_def));
+        let body = aggregate_body_with_assign(tcx.void, pair_ty, Rvalue::Use(local_copy(Local(2))));
+
+        let ir =
+            codegen_aggregate_fixture(&mut session, &mut tcx, defs, "__aggregate_copy_pair", body);
+
+        assert!(ir.contains("@llvm.memcpy.p0.p0.i64"), "IR:\n{ir}");
+        assert!(ir.contains("i64 8"), "IR:\n{ir}");
+    }
+
+    /// Aggregate ZeroInit lowers to memset with the array byte size from
+    /// LayoutCx.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn aggregate_array_zero_init_emits_memset() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(5), is_vla: false });
+        let body = aggregate_body_with_assign(
+            tcx.void,
+            arr_ty,
+            Rvalue::Use(Operand::Const(Const { kind: ConstKind::ZeroInit, ty: arr_ty })),
+        );
+
+        let ir = codegen_aggregate_fixture(
+            &mut session,
+            &mut tcx,
+            IndexVec::new(),
+            "__aggregate_zero_array",
+            body,
+        );
+
+        assert!(ir.contains("@llvm.memset.p0.i64"), "IR:\n{ir}");
+        assert!(ir.contains("i8 0"), "IR:\n{ir}");
+        assert!(ir.contains("i64 20"), "IR:\n{ir}");
+    }
+
+    /// Nested aggregate copies use the full outer object size, including
+    /// padding, as reported by LayoutCx.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn aggregate_nested_copy_uses_layout_size() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(3), is_vla: false });
+        let rec_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(arr_ty), field(tcx.long)]);
+        let rec_ty = tcx.intern(Ty::Record(rec_def));
+        let body = aggregate_body_with_assign(tcx.void, rec_ty, Rvalue::Use(local_copy(Local(2))));
+
+        let ir = codegen_aggregate_fixture(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__aggregate_copy_nested",
+            body,
+        );
+
+        assert!(ir.contains("@llvm.memcpy.p0.p0.i64"), "IR:\n{ir}");
+        assert!(ir.contains("i64 24"), "IR:\n{ir}");
     }
 
     /// Forward declarations are callable before any callee body is emitted.
