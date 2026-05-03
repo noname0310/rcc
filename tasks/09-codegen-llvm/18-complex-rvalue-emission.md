@@ -1,5 +1,7 @@
 # 09-18: Complex rvalue emission
 
+> ✓ done — 2026-05-03
+
 **Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-09, 09-14, 09-15    **Milestone:** M7
 
 ## Goal

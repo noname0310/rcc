@@ -25,7 +25,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [15-cast-emission](15-cast-emission.md)
 - [x] [16-aggregate-copy-memset](16-aggregate-copy-memset.md)
 - [x] [17-vla-stack-and-len](17-vla-stack-and-len.md)
-- [ ] [18-complex-rvalue-emission](18-complex-rvalue-emission.md)
+- [x] [18-complex-rvalue-emission](18-complex-rvalue-emission.md)
 - [ ] [19-varargs-va-intrinsics](19-varargs-va-intrinsics.md)
 - [ ] [20-volatile-access](20-volatile-access.md)
 - [ ] [21-bitfield-access-codegen](21-bitfield-access-codegen.md)

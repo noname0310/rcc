@@ -722,7 +722,7 @@ pub mod backend {
     };
     use inkwell::values::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
-        FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue,
+        FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
     use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
     use rcc_cfg::UnOp;
@@ -1656,6 +1656,12 @@ pub mod backend {
                 Rvalue::BinaryOp(op, lhs, rhs) => self.emit_binop(*op, lhs, rhs, locals, body),
                 Rvalue::UnaryOp(op, operand) => self.emit_unop(*op, operand, locals, body),
                 Rvalue::Cast { op, to, kind } => self.emit_cast(op, *to, *kind, locals, body),
+                Rvalue::ComplexFromReal { real, to } => {
+                    self.emit_complex_from_real(real, *to, locals, body)
+                }
+                Rvalue::RealFromComplex { complex, to } => {
+                    self.emit_real_from_complex(complex, *to, locals, body)
+                }
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
@@ -1679,10 +1685,38 @@ pub mod backend {
                     let len_llvm_ty = self.type_cx().basic_type_of(self.tcx.ulong)?;
                     self.builder.build_load(len_llvm_ty, len_ptr, "len").map_err(builder_error)
                 }
-                _ => Err(CodegenError::Internal(
-                    "rvalue emission is not implemented for this CFG rvalue yet".to_owned(),
-                )),
             }
+        }
+
+        fn emit_complex_from_real(
+            &self,
+            real: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let Ty::Complex(kind) = self.tcx.get(to) else {
+                return Err(type_lowering_error(to, "real-to-complex target is not complex"));
+            };
+            let real = self.emit_real_operand_as_float_kind(real, *kind, locals, body)?;
+            let imag = real.get_type().const_zero();
+            self.build_complex_value(to, real, imag)
+        }
+
+        fn emit_real_from_complex(
+            &self,
+            complex: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(complex, body)?;
+            let Ty::Complex(kind) = self.tcx.get(from_ty) else {
+                return Err(type_lowering_error(from_ty, "complex-to-real operand is not complex"));
+            };
+            let complex = self.emit_complex_operand(complex, locals, body)?;
+            let real = self.extract_complex_part(complex, 0, "complex.real")?;
+            self.emit_float_value_as_real_ty(real, self.real_ty_for_float_kind(*kind), to)
         }
 
         fn emit_cast(
@@ -1884,6 +1918,178 @@ pub mod backend {
                 .map_err(builder_error)
         }
 
+        fn emit_real_operand_as_float_kind(
+            &self,
+            operand: &Operand,
+            kind: FloatKind,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<FloatValue<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let BasicTypeEnum::FloatType(to_ty) =
+                self.type_cx().basic_type_of(self.real_ty_for_float_kind(kind))?
+            else {
+                return Err(CodegenError::Internal(
+                    "complex element type is not floating".to_owned(),
+                ));
+            };
+
+            match self.emit_operand_value(operand, locals, body)? {
+                BasicValueEnum::FloatValue(value) => {
+                    let from_width = self.float_ty_width(from_ty)?;
+                    let to_width = self.float_ty_width(self.real_ty_for_float_kind(kind))?;
+                    if from_width == to_width {
+                        Ok(value)
+                    } else if from_width < to_width {
+                        self.builder.build_float_ext(value, to_ty, "fpext").map_err(builder_error)
+                    } else {
+                        self.builder
+                            .build_float_trunc(value, to_ty, "fptrunc")
+                            .map_err(builder_error)
+                    }
+                }
+                BasicValueEnum::IntValue(value) => {
+                    if self.is_signed_integer_ty(from_ty)? {
+                        self.builder
+                            .build_signed_int_to_float(value, to_ty, "sitofp")
+                            .map_err(builder_error)
+                    } else {
+                        self.builder
+                            .build_unsigned_int_to_float(value, to_ty, "uitofp")
+                            .map_err(builder_error)
+                    }
+                }
+                other => Err(CodegenError::Internal(format!(
+                    "expected real operand for complex conversion, got {:?}",
+                    other.get_type()
+                ))),
+            }
+        }
+
+        fn emit_float_value_as_real_ty(
+            &self,
+            value: FloatValue<'ctx>,
+            from_ty: TyId,
+            to: TyId,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match self.tcx.get(to) {
+                Ty::Float(_) => {
+                    let BasicTypeEnum::FloatType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                        return Err(type_lowering_error(
+                            to,
+                            "complex-to-real target is not floating",
+                        ));
+                    };
+                    let from_width = self.float_ty_width(from_ty)?;
+                    let to_width = self.float_ty_width(to)?;
+                    let cast = if from_width == to_width {
+                        value
+                    } else if from_width < to_width {
+                        self.builder
+                            .build_float_ext(value, to_ty, "fpext")
+                            .map_err(builder_error)?
+                    } else {
+                        self.builder
+                            .build_float_trunc(value, to_ty, "fptrunc")
+                            .map_err(builder_error)?
+                    };
+                    Ok(cast.as_basic_value_enum())
+                }
+                Ty::Int { .. } | Ty::Enum(_) => {
+                    let BasicTypeEnum::IntType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                        return Err(type_lowering_error(
+                            to,
+                            "complex-to-real target is not integer",
+                        ));
+                    };
+                    if self.is_bool_ty(to) {
+                        let bool_value = self
+                            .builder
+                            .build_float_compare(
+                                FloatPredicate::ONE,
+                                value,
+                                value.get_type().const_zero(),
+                                "tobool",
+                            )
+                            .map_err(builder_error)?;
+                        return Ok(bool_value.as_basic_value_enum());
+                    }
+                    let cast = if self.is_signed_integer_ty(to)? {
+                        self.builder
+                            .build_float_to_signed_int(value, to_ty, "fptosi")
+                            .map_err(builder_error)?
+                    } else {
+                        self.builder
+                            .build_float_to_unsigned_int(value, to_ty, "fptoui")
+                            .map_err(builder_error)?
+                    };
+                    Ok(cast.as_basic_value_enum())
+                }
+                _ => Err(type_lowering_error(to, "complex-to-real target is not a real type")),
+            }
+        }
+
+        fn build_complex_value(
+            &self,
+            ty: TyId,
+            real: FloatValue<'ctx>,
+            imag: FloatValue<'ctx>,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let BasicTypeEnum::StructType(ty) = self.type_cx().basic_type_of(ty)? else {
+                return Err(type_lowering_error(ty, "complex type did not lower to a struct"));
+            };
+            let aggregate = ty.get_undef();
+            let aggregate = self
+                .builder
+                .build_insert_value(aggregate, real, 0, "complex.real")
+                .map_err(builder_error)?
+                .into_struct_value();
+            let aggregate = self
+                .builder
+                .build_insert_value(aggregate, imag, 1, "complex.imag")
+                .map_err(builder_error)?
+                .into_struct_value();
+            Ok(aggregate.as_basic_value_enum())
+        }
+
+        fn emit_complex_operand(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<StructValue<'ctx>, CodegenError> {
+            match self.emit_operand_value(operand, locals, body)? {
+                BasicValueEnum::StructValue(value) => Ok(value),
+                other => Err(CodegenError::Internal(format!(
+                    "expected complex operand, got {:?}",
+                    other.get_type()
+                ))),
+            }
+        }
+
+        fn extract_complex_part(
+            &self,
+            complex: StructValue<'ctx>,
+            index: u32,
+            name: &str,
+        ) -> Result<FloatValue<'ctx>, CodegenError> {
+            match self.builder.build_extract_value(complex, index, name).map_err(builder_error)? {
+                BasicValueEnum::FloatValue(value) => Ok(value),
+                other => Err(CodegenError::Internal(format!(
+                    "complex component is not floating, got {:?}",
+                    other.get_type()
+                ))),
+            }
+        }
+
+        fn real_ty_for_float_kind(&self, kind: FloatKind) -> TyId {
+            match kind {
+                FloatKind::F32 => self.tcx.float,
+                FloatKind::F64 => self.tcx.double,
+                FloatKind::F80 => self.tcx.long_double,
+            }
+        }
+
         fn emit_binop(
             &self,
             op: BinOp,
@@ -1900,7 +2106,7 @@ pub mod backend {
                 BinOp::UDiv => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::SRem => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::URem => self.emit_int_binop(op, lhs, rhs, locals, body),
-                BinOp::FDiv => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::FDiv => self.emit_float_or_complex_binop(op, lhs, rhs, locals, body),
                 BinOp::Shl => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::AShr => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::LShr => self.emit_int_binop(op, lhs, rhs, locals, body),
@@ -1921,9 +2127,9 @@ pub mod backend {
                 BinOp::FLe => self.emit_float_compare(FloatPredicate::OLE, lhs, rhs, locals, body),
                 BinOp::FGt => self.emit_float_compare(FloatPredicate::OGT, lhs, rhs, locals, body),
                 BinOp::FGe => self.emit_float_compare(FloatPredicate::OGE, lhs, rhs, locals, body),
-                BinOp::FAdd => self.emit_float_binop(op, lhs, rhs, locals, body),
-                BinOp::FSub => self.emit_float_binop(op, lhs, rhs, locals, body),
-                BinOp::FMul => self.emit_float_binop(op, lhs, rhs, locals, body),
+                BinOp::FAdd => self.emit_float_or_complex_binop(op, lhs, rhs, locals, body),
+                BinOp::FSub => self.emit_float_or_complex_binop(op, lhs, rhs, locals, body),
+                BinOp::FMul => self.emit_float_or_complex_binop(op, lhs, rhs, locals, body),
                 BinOp::PtrAdd => self.emit_ptr_add(lhs, rhs, locals, body),
                 BinOp::PtrSub => self.emit_ptr_sub(lhs, rhs, locals, body),
                 BinOp::PtrDiff => self.emit_ptr_diff(lhs, rhs, locals, body),
@@ -1946,11 +2152,15 @@ pub mod backend {
                         .map_err(builder_error)
                 }
                 UnOp::FNeg => {
-                    let value = self.emit_float_operand(operand, locals, body)?;
-                    self.builder
-                        .build_float_neg(value, "fneg")
-                        .map(|value| value.as_basic_value_enum())
-                        .map_err(builder_error)
+                    if matches!(self.tcx.get(self.operand_ty(operand, body)?), Ty::Complex(_)) {
+                        self.emit_complex_neg(operand, locals, body)
+                    } else {
+                        let value = self.emit_float_operand(operand, locals, body)?;
+                        self.builder
+                            .build_float_neg(value, "fneg")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(builder_error)
+                    }
                 }
                 UnOp::BitNot => {
                     let value = self.emit_int_operand(operand, locals, body)?;
@@ -2093,6 +2303,168 @@ pub mod backend {
             }
             .map_err(builder_error)?;
             Ok(value.as_basic_value_enum())
+        }
+
+        fn emit_float_or_complex_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            if matches!(self.tcx.get(self.operand_ty(lhs, body)?), Ty::Complex(_))
+                || matches!(self.tcx.get(self.operand_ty(rhs, body)?), Ty::Complex(_))
+            {
+                self.emit_complex_binop(op, lhs, rhs, locals, body)
+            } else {
+                self.emit_float_binop(op, lhs, rhs, locals, body)
+            }
+        }
+
+        fn emit_complex_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let rhs_ty = self.operand_ty(rhs, body)?;
+            let Ty::Complex(_) = self.tcx.get(lhs_ty) else {
+                return Err(type_lowering_error(lhs_ty, "complex lhs is not complex"));
+            };
+            let Ty::Complex(_) = self.tcx.get(rhs_ty) else {
+                return Err(type_lowering_error(rhs_ty, "complex rhs is not complex"));
+            };
+            if lhs_ty != rhs_ty {
+                return Err(CodegenError::Internal(format!(
+                    "complex operands were not coerced to the same type: {:?} and {:?}",
+                    lhs_ty, rhs_ty
+                )));
+            }
+
+            let lhs = self.emit_complex_operand(lhs, locals, body)?;
+            let rhs = self.emit_complex_operand(rhs, locals, body)?;
+            let lhs_real = self.extract_complex_part(lhs, 0, "complex.l.real")?;
+            let lhs_imag = self.extract_complex_part(lhs, 1, "complex.l.imag")?;
+            let rhs_real = self.extract_complex_part(rhs, 0, "complex.r.real")?;
+            let rhs_imag = self.extract_complex_part(rhs, 1, "complex.r.imag")?;
+
+            let (real, imag) = match op {
+                BinOp::FAdd => (
+                    self.builder
+                        .build_float_add(lhs_real, rhs_real, "complex.add.real")
+                        .map_err(builder_error)?,
+                    self.builder
+                        .build_float_add(lhs_imag, rhs_imag, "complex.add.imag")
+                        .map_err(builder_error)?,
+                ),
+                BinOp::FSub => (
+                    self.builder
+                        .build_float_sub(lhs_real, rhs_real, "complex.sub.real")
+                        .map_err(builder_error)?,
+                    self.builder
+                        .build_float_sub(lhs_imag, rhs_imag, "complex.sub.imag")
+                        .map_err(builder_error)?,
+                ),
+                BinOp::FMul => {
+                    let real_l = self
+                        .builder
+                        .build_float_mul(lhs_real, rhs_real, "complex.mul.rr")
+                        .map_err(builder_error)?;
+                    let real_r = self
+                        .builder
+                        .build_float_mul(lhs_imag, rhs_imag, "complex.mul.ii")
+                        .map_err(builder_error)?;
+                    let imag_l = self
+                        .builder
+                        .build_float_mul(lhs_real, rhs_imag, "complex.mul.ri")
+                        .map_err(builder_error)?;
+                    let imag_r = self
+                        .builder
+                        .build_float_mul(lhs_imag, rhs_real, "complex.mul.ir")
+                        .map_err(builder_error)?;
+                    (
+                        self.builder
+                            .build_float_sub(real_l, real_r, "complex.mul.real")
+                            .map_err(builder_error)?,
+                        self.builder
+                            .build_float_add(imag_l, imag_r, "complex.mul.imag")
+                            .map_err(builder_error)?,
+                    )
+                }
+                BinOp::FDiv => {
+                    let denom_real = self
+                        .builder
+                        .build_float_mul(rhs_real, rhs_real, "complex.div.rr")
+                        .map_err(builder_error)?;
+                    let denom_imag = self
+                        .builder
+                        .build_float_mul(rhs_imag, rhs_imag, "complex.div.ii")
+                        .map_err(builder_error)?;
+                    let denom = self
+                        .builder
+                        .build_float_add(denom_real, denom_imag, "complex.div.denom")
+                        .map_err(builder_error)?;
+                    let real_l = self
+                        .builder
+                        .build_float_mul(lhs_real, rhs_real, "complex.div.rr.num")
+                        .map_err(builder_error)?;
+                    let real_r = self
+                        .builder
+                        .build_float_mul(lhs_imag, rhs_imag, "complex.div.ii.num")
+                        .map_err(builder_error)?;
+                    let imag_l = self
+                        .builder
+                        .build_float_mul(lhs_imag, rhs_real, "complex.div.ir.num")
+                        .map_err(builder_error)?;
+                    let imag_r = self
+                        .builder
+                        .build_float_mul(lhs_real, rhs_imag, "complex.div.ri.num")
+                        .map_err(builder_error)?;
+                    let real_num = self
+                        .builder
+                        .build_float_add(real_l, real_r, "complex.div.real.num")
+                        .map_err(builder_error)?;
+                    let imag_num = self
+                        .builder
+                        .build_float_sub(imag_l, imag_r, "complex.div.imag.num")
+                        .map_err(builder_error)?;
+                    (
+                        self.builder
+                            .build_float_div(real_num, denom, "complex.div.real")
+                            .map_err(builder_error)?,
+                        self.builder
+                            .build_float_div(imag_num, denom, "complex.div.imag")
+                            .map_err(builder_error)?,
+                    )
+                }
+                _ => unreachable!("non-complex arithmetic routed to emit_complex_binop"),
+            };
+
+            self.build_complex_value(lhs_ty, real, imag)
+        }
+
+        fn emit_complex_neg(
+            &self,
+            operand: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let ty = self.operand_ty(operand, body)?;
+            let Ty::Complex(_) = self.tcx.get(ty) else {
+                return Err(type_lowering_error(ty, "complex negation operand is not complex"));
+            };
+            let value = self.emit_complex_operand(operand, locals, body)?;
+            let real = self.extract_complex_part(value, 0, "complex.neg.real.in")?;
+            let imag = self.extract_complex_part(value, 1, "complex.neg.imag.in")?;
+            let real =
+                self.builder.build_float_neg(real, "complex.neg.real").map_err(builder_error)?;
+            let imag =
+                self.builder.build_float_neg(imag, "complex.neg.imag").map_err(builder_error)?;
+            self.build_complex_value(ty, real, imag)
         }
 
         fn emit_eq_ne_binop(
@@ -5224,6 +5596,202 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 09-18: Complex rvalue emission
+    // -----------------------------------------------------------------------
+
+    /// `ComplexFromReal` constructs `{ real, 0.0 }` with the target complex layout.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn complex_from_real_constructs_zero_imaginary() {
+        let mut tcx = TyCtxt::new();
+        let double = tcx.double;
+        let complex = tcx.complex_double;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(None, complex, false));
+
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(1), projection: vec![] },
+                    rvalue: Rvalue::ComplexFromReal { real: float_const(double, 1.5), to: complex },
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__complex_from_real", ret_ty, body);
+
+        assert!(
+            ir.contains("{ double 1.500000e+00, double 0.000000e+00 }"),
+            "complex real plus zero imaginary expected:\n{ir}"
+        );
+    }
+
+    /// `RealFromComplex` extracts only the real component and ignores the imaginary field.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn real_from_complex_extracts_only_real_component() {
+        let mut tcx = TyCtxt::new();
+        let double = tcx.double;
+        let complex = tcx.complex_double;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, double, false));
+        locals.push(cfg_local_decl(None, complex, false));
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::ComplexFromReal {
+                            real: float_const(double, 3.25),
+                            to: complex,
+                        },
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(0), projection: vec![] },
+                        rvalue: Rvalue::RealFromComplex {
+                            complex: Operand::Copy(local_place(Local(1))),
+                            to: double,
+                        },
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let body = cfg_body_with_locals(double, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__complex_to_real", double, body);
+        let extracts = ir
+            .lines()
+            .filter(|line| line.contains("extractvalue { double, double }"))
+            .collect::<Vec<_>>();
+
+        assert!(extracts.iter().any(|line| line.contains(", 0")), "real extract expected:\n{ir}");
+        assert!(
+            !extracts.iter().any(|line| line.contains(", 1")),
+            "imaginary extract must not be emitted:\n{ir}"
+        );
+    }
+
+    /// Complex locals can be loaded, assigned, and stored without layout mismatch.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn complex_assignment_passes_through_locals() {
+        let mut tcx = TyCtxt::new();
+        let double = tcx.double;
+        let complex = tcx.complex_double;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(None, complex, false));
+        locals.push(cfg_local_decl(None, complex, false));
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::ComplexFromReal {
+                            real: float_const(double, 2.0),
+                            to: complex,
+                        },
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(2), projection: vec![] },
+                        rvalue: Rvalue::Use(Operand::Copy(local_place(Local(1)))),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__complex_assign", ret_ty, body);
+
+        assert!(ir.contains("load { double, double }"), "complex load expected:\n{ir}");
+        assert!(ir.contains("store { double, double }"), "complex store expected:\n{ir}");
+    }
+
+    /// Complex multiplication lowers to component-wise floating arithmetic.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn complex_multiply_emits_component_arithmetic() {
+        let mut tcx = TyCtxt::new();
+        let double = tcx.double;
+        let complex = tcx.complex_double;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(None, complex, false));
+        locals.push(cfg_local_decl(None, complex, false));
+        locals.push(cfg_local_decl(None, complex, false));
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::ComplexFromReal {
+                            real: float_const(double, 2.0),
+                            to: complex,
+                        },
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(2), projection: vec![] },
+                        rvalue: Rvalue::ComplexFromReal {
+                            real: float_const(double, 3.0),
+                            to: complex,
+                        },
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(3), projection: vec![] },
+                        rvalue: Rvalue::BinaryOp(
+                            BinOp::FMul,
+                            Operand::Copy(local_place(Local(1))),
+                            Operand::Copy(local_place(Local(2))),
+                        ),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__complex_mul", ret_ty, body);
+
+        assert!(ir.contains("fmul double"), "complex multiply should multiply components:\n{ir}");
+        assert!(ir.contains("fsub double"), "complex multiply should compute real part:\n{ir}");
+        assert!(
+            ir.contains("fadd double"),
+            "complex multiply should compute imaginary part:\n{ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // 09-12: Basic-block and terminator wiring
     // -----------------------------------------------------------------------
 
@@ -5255,6 +5823,11 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn int_const(ty: TyId, value: i128) -> Operand {
         Operand::Const(Const { kind: ConstKind::Int(value), ty })
+    }
+
+    #[cfg(feature = "llvm")]
+    fn float_const(ty: TyId, value: f64) -> Operand {
+        Operand::Const(Const { kind: ConstKind::Float(value), ty })
     }
 
     #[cfg(feature = "llvm")]
