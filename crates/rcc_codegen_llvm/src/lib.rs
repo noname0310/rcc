@@ -746,6 +746,9 @@ pub mod backend {
     /// LLVM storage addresses for CFG locals.
     pub type LocalMap<'ctx> = IndexVec<Local, PointerValue<'ctx>>;
 
+    /// Saved stack tokens for VLA locals, restored on `StorageDead`.
+    pub type VlaStackMap<'ctx> = IndexVec<Local, Option<PointerValue<'ctx>>>;
+
     /// Shared state for one LLVM module emission.
     pub struct CodegenCx<'a, 'ctx> {
         context: &'ctx Context,
@@ -1009,7 +1012,8 @@ pub mod backend {
                     format_cfg_errors(&errors)
                 ))
             })?;
-            FnCodegen::new(self, function, body)?.codegen_body()
+            let mut fn_codegen = FnCodegen::new(self, function, body)?;
+            fn_codegen.codegen_body()
         }
 
         fn def_name(&self, def: &Def) -> String {
@@ -1168,37 +1172,94 @@ pub mod backend {
             let mut locals = LocalMap::with_capacity(body.locals.len());
 
             for (local, decl) in body.locals.iter_enumerated() {
-                let storage_ty = self.local_storage_type(decl.ty)?;
-                let alloca = self.build_entry_alloca(
-                    function,
-                    storage_ty,
-                    &self.local_storage_name(local, decl),
-                )?;
-                locals.push(alloca);
+                let is_vla = matches!(self.tcx.get(decl.ty), Ty::Array { is_vla: true, .. });
+                if is_vla {
+                    let placeholder = self.context.ptr_type(AddressSpace::default()).const_null();
+                    locals.push(placeholder);
+                } else {
+                    let storage_ty = self.local_storage_type(decl.ty)?;
+                    let alloca = self.build_entry_alloca(
+                        function,
+                        storage_ty,
+                        &self.local_storage_name(local, decl),
+                    )?;
+                    locals.push(alloca);
+                }
             }
 
             self.store_function_params(function, body, &mut locals)?;
             Ok(locals)
         }
 
-        /// Emit an LLVM lifetime.start marker for a CFG `StorageLive`.
+        /// Emit an LLVM lifetime.start marker for a CFG `StorageLive`, or
+        /// perform dynamic stack allocation for a VLA local.
         pub fn emit_storage_live(
             &self,
             local: Local,
-            locals: &LocalMap<'ctx>,
+            locals: &mut LocalMap<'ctx>,
+            vla_stacks: &mut VlaStackMap<'ctx>,
             body: &Body,
         ) -> Result<(), CodegenError> {
-            self.emit_lifetime_marker("llvm.lifetime.start.p0", local, locals, body)
+            let decl = body.locals.get(local).ok_or_else(|| {
+                CodegenError::Internal(format!("local {local:?} is missing from body"))
+            })?;
+            match self.tcx.get(decl.ty) {
+                Ty::Array { is_vla: true, elem, .. } => {
+                    let len_local = decl.vla_len.ok_or_else(|| {
+                        CodegenError::Internal(format!("VLA local {local:?} is missing vla_len"))
+                    })?;
+                    let len_ptr = *locals.get(len_local).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing LLVM storage for vla_len local {len_local:?}"
+                        ))
+                    })?;
+                    let len_llvm_ty = self.type_cx().basic_type_of(self.tcx.ulong)?;
+                    let len_val = self
+                        .builder
+                        .build_load(len_llvm_ty, len_ptr, "vla_len")
+                        .map_err(builder_error)?
+                        .into_int_value();
+                    let elem_llvm_ty = self.type_cx().basic_type_of(elem.ty)?;
+                    let stack_token = self.emit_stack_save()?;
+                    let alloca = self
+                        .builder
+                        .build_array_alloca(
+                            elem_llvm_ty,
+                            len_val,
+                            &self.local_storage_name(local, decl),
+                        )
+                        .map_err(builder_error)?;
+                    locals[local] = alloca;
+                    vla_stacks[local] = Some(stack_token);
+                    Ok(())
+                }
+                _ => self.emit_lifetime_marker("llvm.lifetime.start.p0", local, locals, body),
+            }
         }
 
-        /// Emit an LLVM lifetime.end marker for a CFG `StorageDead`.
+        /// Emit an LLVM lifetime.end marker for a CFG `StorageDead`, or restore
+        /// the saved stack position for a VLA local.
         pub fn emit_storage_dead(
             &self,
             local: Local,
             locals: &LocalMap<'ctx>,
+            vla_stacks: &mut VlaStackMap<'ctx>,
             body: &Body,
         ) -> Result<(), CodegenError> {
-            self.emit_lifetime_marker("llvm.lifetime.end.p0", local, locals, body)
+            let decl = body.locals.get(local).ok_or_else(|| {
+                CodegenError::Internal(format!("local {local:?} is missing from body"))
+            })?;
+            if matches!(self.tcx.get(decl.ty), Ty::Array { is_vla: true, .. }) {
+                let stack_token =
+                    vla_stacks.get_mut(local).and_then(Option::take).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "VLA local {local:?} reached StorageDead before StorageLive"
+                        ))
+                    })?;
+                self.emit_stack_restore(stack_token)
+            } else {
+                self.emit_lifetime_marker("llvm.lifetime.end.p0", local, locals, body)
+            }
         }
 
         fn local_storage_type(&self, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
@@ -1395,6 +1456,25 @@ pub mod backend {
                 .map_err(builder_error)
         }
 
+        fn emit_stack_save(&self) -> Result<PointerValue<'ctx>, CodegenError> {
+            let intrinsic = self.stack_save_intrinsic();
+            let args: &[BasicMetadataValueEnum<'ctx>] = &[];
+            let call =
+                self.builder.build_call(intrinsic, args, "vla_stack").map_err(builder_error)?;
+            let value = call.try_as_basic_value().left().ok_or_else(|| {
+                CodegenError::Internal("llvm.stacksave did not produce a value".to_owned())
+            })?;
+            Ok(value.into_pointer_value())
+        }
+
+        fn emit_stack_restore(&self, stack_token: PointerValue<'ctx>) -> Result<(), CodegenError> {
+            let intrinsic = self.stack_restore_intrinsic();
+            self.builder
+                .build_call(intrinsic, &[stack_token.into()], "")
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
         fn local_lifetime_size(
             &self,
             ty: TyId,
@@ -1403,7 +1483,7 @@ pub mod backend {
                 Ty::Void => 0,
                 Ty::Array { is_vla: true, .. } => {
                     return Err(CodegenError::Internal(
-                        "VLA lifetime markers are deferred to task 09-17".to_owned(),
+                        "VLA locals use stackrestore instead of lifetime markers".to_owned(),
                     ));
                 }
                 _ => {
@@ -1423,6 +1503,22 @@ pub mod backend {
                 let fn_ty =
                     self.context.void_type().fn_type(&[i64_ty.into(), ptr_ty.into()], false);
                 self.module.add_function(name, fn_ty, None)
+            })
+        }
+
+        fn stack_save_intrinsic(&self) -> FunctionValue<'ctx> {
+            self.module.get_function("llvm.stacksave.p0").unwrap_or_else(|| {
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let fn_ty = ptr_ty.fn_type(&[], false);
+                self.module.add_function("llvm.stacksave.p0", fn_ty, None)
+            })
+        }
+
+        fn stack_restore_intrinsic(&self) -> FunctionValue<'ctx> {
+            self.module.get_function("llvm.stackrestore.p0").unwrap_or_else(|| {
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into()], false);
+                self.module.add_function("llvm.stackrestore.p0", fn_ty, None)
             })
         }
 
@@ -1491,6 +1587,11 @@ pub mod backend {
                             }
                         };
                         match self.tcx.get(current_ty) {
+                            Ty::Array { elem, is_vla: true, .. } => {
+                                let elem_ty = self.type_cx().basic_type_of(elem.ty)?;
+                                ptr = self.build_gep(elem_ty, ptr, &[index_val], "index_gep")?;
+                                current_ty = elem.ty;
+                            }
                             Ty::Array { elem, .. } => {
                                 let zero = self.context.i32_type().const_zero();
                                 let array_ty = self.type_cx().basic_type_of(current_ty)?;
@@ -1557,6 +1658,26 @@ pub mod backend {
                 Rvalue::Cast { op, to, kind } => self.emit_cast(op, *to, *kind, locals, body),
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
+                }
+                Rvalue::Len(place) => {
+                    let base = place.base;
+                    let decl = body.locals.get(base).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "Rvalue::Len base local {base:?} is missing from body"
+                        ))
+                    })?;
+                    let len_local = decl.vla_len.ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "Rvalue::Len local {base:?} is missing vla_len"
+                        ))
+                    })?;
+                    let len_ptr = *locals.get(len_local).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing LLVM storage for vla_len local {len_local:?}"
+                        ))
+                    })?;
+                    let len_llvm_ty = self.type_cx().basic_type_of(self.tcx.ulong)?;
+                    self.builder.build_load(len_llvm_ty, len_ptr, "len").map_err(builder_error)
                 }
                 _ => Err(CodegenError::Internal(
                     "rvalue emission is not implemented for this CFG rvalue yet".to_owned(),
@@ -2489,6 +2610,7 @@ pub mod backend {
         function: FunctionValue<'ctx>,
         body: &'cg Body,
         locals: LocalMap<'ctx>,
+        vla_stacks: VlaStackMap<'ctx>,
         blocks: IndexVec<BasicBlockId, LlvmBasicBlock<'ctx>>,
     }
 
@@ -2517,11 +2639,15 @@ pub mod backend {
                 .ok_or_else(|| CodegenError::Internal("CFG body has no entry block".to_owned()))?;
             cx.builder.position_at_end(entry);
             let locals = cx.materialize_locals(function, body)?;
+            let mut vla_stacks = VlaStackMap::with_capacity(body.locals.len());
+            for _ in body.locals.iter() {
+                vla_stacks.push(None);
+            }
 
-            Ok(Self { cx, function, body, locals, blocks })
+            Ok(Self { cx, function, body, locals, vla_stacks, blocks })
         }
 
-        fn codegen_body(&self) -> Result<(), CodegenError> {
+        fn codegen_body(&mut self) -> Result<(), CodegenError> {
             for (bb, block) in self.body.blocks.iter_enumerated() {
                 let llvm_block = self.llvm_block(bb)?;
                 self.cx.builder.position_at_end(llvm_block);
@@ -2543,7 +2669,7 @@ pub mod backend {
             Ok(())
         }
 
-        fn emit_statement(&self, statement: &Statement) -> Result<(), CodegenError> {
+        fn emit_statement(&mut self, statement: &Statement) -> Result<(), CodegenError> {
             match &statement.kind {
                 StatementKind::Assign { place, rvalue } => {
                     if self.cx.try_emit_aggregate_assign(place, rvalue, &self.locals, self.body)? {
@@ -2552,11 +2678,14 @@ pub mod backend {
                     let value = self.cx.emit_rvalue_value(rvalue, &self.locals, self.body)?;
                     self.cx.emit_store_place(place, value, &self.locals, self.body)
                 }
-                StatementKind::StorageLive(local) => {
-                    self.cx.emit_storage_live(*local, &self.locals, self.body)
-                }
+                StatementKind::StorageLive(local) => self.cx.emit_storage_live(
+                    *local,
+                    &mut self.locals,
+                    &mut self.vla_stacks,
+                    self.body,
+                ),
                 StatementKind::StorageDead(local) => {
-                    self.cx.emit_storage_dead(*local, &self.locals, self.body)
+                    self.cx.emit_storage_dead(*local, &self.locals, &mut self.vla_stacks, self.body)
                 }
                 StatementKind::Nop => Ok(()),
             }
@@ -4838,10 +4967,14 @@ mod tests {
         let function = cx.declare_function(def).unwrap();
         let entry = context.append_basic_block(function, "entry");
         cx.builder().position_at_end(entry);
-        let locals = cx.materialize_locals(function, &body).unwrap();
+        let mut locals = cx.materialize_locals(function, &body).unwrap();
+        let mut vla_stacks = backend::VlaStackMap::with_capacity(body.locals.len());
+        for _ in body.locals.iter() {
+            vla_stacks.push(None);
+        }
 
-        cx.emit_storage_live(Local(2), &locals, &body).unwrap();
-        cx.emit_storage_dead(Local(2), &locals, &body).unwrap();
+        cx.emit_storage_live(Local(2), &mut locals, &mut vla_stacks, &body).unwrap();
+        cx.emit_storage_dead(Local(2), &locals, &mut vla_stacks, &body).unwrap();
         finish_void_test_function(&cx);
         cx.verify_module().unwrap();
 
@@ -4849,6 +4982,245 @@ mod tests {
         assert!(ir.contains("@llvm.lifetime.start.p0"));
         assert!(ir.contains("@llvm.lifetime.end.p0"));
         assert!(ir.contains("i64 4"));
+    }
+
+    #[cfg(feature = "llvm")]
+    fn cfg_vla_local_decl(name: Option<Symbol>, ty: TyId, vla_len: Local) -> LocalDecl {
+        LocalDecl {
+            name,
+            ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: Some(vla_len),
+            is_param: false,
+            span: DUMMY_SP,
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn vla_ty(tcx: &mut TyCtxt) -> TyId {
+        tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: true })
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-17: VLA stack allocation and length values
+    // -----------------------------------------------------------------------
+
+    /// VLA locals do not get an entry-block alloca during materialization.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vla_materialization_skips_entry_alloca() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let vla_ty = vla_ty(&mut tcx);
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(None, tcx.ulong, false));
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(1)));
+        let body = cfg_body_with_locals(tcx.void, locals, vec![BasicBlock::default()]);
+
+        let hir = HirCrate::default();
+        let bodies = FxHashMap::default();
+        let cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        let function = cx.module().add_function(
+            "__vla_materialize",
+            context.void_type().fn_type(&[], false),
+            None,
+        );
+        let entry = context.append_basic_block(function, "entry");
+        cx.builder().position_at_end(entry);
+
+        let llvm_locals = cx.materialize_locals(function, &body).unwrap();
+        assert_eq!(llvm_locals.len(), body.locals.len());
+        finish_void_test_function(&cx);
+        cx.verify_module().unwrap();
+
+        let entry = function.get_first_basic_block().unwrap();
+        let mut alloca_names = Vec::new();
+        for instruction in entry.get_instructions() {
+            if instruction.get_opcode() == inkwell::values::InstructionOpcode::Alloca {
+                alloca_names.push(
+                    instruction
+                        .get_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        assert!(
+            !alloca_names.iter().any(|n| n.contains("local2") || n.contains("tmp2")),
+            "VLA local should not have an entry alloca, got: {:?}",
+            alloca_names
+        );
+    }
+
+    /// Dynamic VLA alloca is emitted at the `StorageLive` point (non-entry block).
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vla_storage_live_emits_dynamic_alloca() {
+        let mut tcx = TyCtxt::new();
+        let vla_ty = vla_ty(&mut tcx);
+        let ulong = tcx.ulong;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false)); // ret
+        locals.push(cfg_local_decl(None, ulong, false)); // len
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(1))); // vla
+
+        let entry_block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(1), projection: vec![] },
+                    rvalue: Rvalue::Use(int_const(ulong, 5)),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Goto(BasicBlockId(1)),
+        );
+        let live_block = cfg_block(
+            vec![Statement { kind: StatementKind::StorageLive(Local(2)), span: DUMMY_SP }],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![entry_block, live_block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__vla_live", ret_ty, body);
+
+        assert!(ir.contains("bb1:"), "IR should contain bb1:\n{ir}");
+        let after_bb1 = ir.split("bb1:").nth(1).expect("bb1 present");
+        assert!(after_bb1.contains("alloca"), "dynamic alloca expected in bb1:\n{ir}");
+    }
+
+    /// `Rvalue::Len(place)` loads the saved runtime length local.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vla_len_rvalue_loads_saved_length() {
+        let mut tcx = TyCtxt::new();
+        let vla_ty = vla_ty(&mut tcx);
+        let ulong = tcx.ulong;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ulong, false)); // ret
+        locals.push(cfg_local_decl(None, ulong, false)); // len
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(1))); // vla
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::Use(int_const(ulong, 7)),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement { kind: StatementKind::StorageLive(Local(2)), span: DUMMY_SP },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(0), projection: vec![] },
+                        rvalue: Rvalue::Len(local_place(Local(2))),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let body = cfg_body_with_locals(ulong, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__vla_len", ulong, body);
+
+        assert!(ir.contains("load i64"), "IR should load i64 length:\n{ir}");
+    }
+
+    /// VLA element access uses a single-index GEP over the element type.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vla_index_addressing_emits_gep() {
+        let mut tcx = TyCtxt::new();
+        let vla_ty = vla_ty(&mut tcx);
+        let ulong = tcx.ulong;
+        let int = tcx.int;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false)); // ret
+        locals.push(cfg_local_decl(None, ulong, false)); // len
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(1))); // vla
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::Use(int_const(ulong, 5)),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement { kind: StatementKind::StorageLive(Local(2)), span: DUMMY_SP },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place {
+                            base: Local(2),
+                            projection: vec![Projection::Index(int_const(int, 2))],
+                        },
+                        rvalue: Rvalue::Use(int_const(int, 42)),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__vla_index", ret_ty, body);
+
+        assert!(ir.contains("getelementptr i32"), "IR should contain GEP over i32:\n{ir}");
+    }
+
+    /// Nested VLA locals restore dynamic stack allocations on StorageDead.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn nested_vla_storage_live_dead_does_not_error() {
+        let mut tcx = TyCtxt::new();
+        let vla_ty = vla_ty(&mut tcx);
+        let ulong = tcx.ulong;
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false)); // ret
+        locals.push(cfg_local_decl(None, ulong, false)); // len_a
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(1))); // vla_a
+        locals.push(cfg_local_decl(None, ulong, false)); // len_b
+        locals.push(cfg_vla_local_decl(None, vla_ty, Local(3))); // vla_b
+
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(1), projection: vec![] },
+                        rvalue: Rvalue::Use(int_const(ulong, 3)),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement { kind: StatementKind::StorageLive(Local(2)), span: DUMMY_SP },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: Local(3), projection: vec![] },
+                        rvalue: Rvalue::Use(int_const(ulong, 4)),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement { kind: StatementKind::StorageLive(Local(4)), span: DUMMY_SP },
+                Statement { kind: StatementKind::StorageDead(Local(4)), span: DUMMY_SP },
+                Statement { kind: StatementKind::StorageDead(Local(2)), span: DUMMY_SP },
+            ],
+            TerminatorKind::Return,
+        );
+
+        let ret_ty = tcx.void;
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__vla_nested", ret_ty, body);
+
+        assert!(ir.contains("@llvm.stacksave.p0"), "IR should save VLA stack state:\n{ir}");
+        assert!(ir.contains("@llvm.stackrestore.p0"), "IR should restore VLA stack state:\n{ir}");
     }
 
     // -----------------------------------------------------------------------
