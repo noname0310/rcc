@@ -87,6 +87,16 @@ fn compare_pass_nonempty_expected() {
 }
 
 #[test]
+fn compare_normalizes_crlf_expected_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = tmp.path().join("out.expected");
+    std::fs::write(&expected, b"42\r\n64\r\n").unwrap();
+
+    let outcome = CTestSuiteAdapter::compare_outcome(b"42\n64\n", Some(0), &expected);
+    assert_eq!(outcome, Outcome::Pass);
+}
+
+#[test]
 fn compare_fail_stdout_mismatch() {
     let expected = fixtures_root().join("tests").join("single-exec").join("00002.c.expected");
     let outcome = CTestSuiteAdapter::compare_outcome(b"wrong\n", Some(0), &expected);

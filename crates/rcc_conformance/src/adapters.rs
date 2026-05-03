@@ -44,12 +44,36 @@ impl CTestSuiteAdapter {
             };
         }
 
-        if actual_stdout != expected.as_slice() {
+        let actual_stdout = normalize_stdout_newlines(actual_stdout);
+        let expected = normalize_stdout_newlines(&expected);
+
+        if actual_stdout != expected {
             return Outcome::Fail { reason: "stdout mismatch".into() };
         }
 
         Outcome::Pass
     }
+}
+
+/// Normalize text-mode stdout for vendored c-testsuite expected files.
+///
+/// The upstream suite's `.expected` files are text fixtures. On Windows
+/// checkouts they may appear with CRLF line endings while Linux test
+/// executables print LF. Normalize CRLF to LF so the conformance result does
+/// not depend on the host Git checkout policy.
+fn normalize_stdout_newlines(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            out.push(b'\n');
+            i += 2;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 impl Adapter for CTestSuiteAdapter {
