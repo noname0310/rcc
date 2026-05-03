@@ -16,7 +16,7 @@
 - [x] [04-insta-snapshot-harness](04-insta-snapshot-harness.md)
 - [x] [05-e2e-runner](05-e2e-runner.md)
 - [x] [06-differential-cc](06-differential-cc.md)
-- [ ] [07-standard-stop-flags](07-standard-stop-flags.md)
+- [x] [07-standard-stop-flags](07-standard-stop-flags.md)
 - [ ] [08-target-cli-wiring](08-target-cli-wiring.md)
 - [ ] [09-warning-control](09-warning-control.md)
 - [ ] [10-linker-flags](10-linker-flags.md)

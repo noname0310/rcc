@@ -16,6 +16,18 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
+    /// Compile to object file and stop before linking (`-c`).
+    #[arg(short = 'c', conflicts_with_all = ["emit_assembly", "preprocess_only", "emit"])]
+    pub compile_only: bool,
+
+    /// Compile to assembly text and stop (`-S`).
+    #[arg(short = 'S', conflicts_with_all = ["compile_only", "preprocess_only", "emit"])]
+    pub emit_assembly: bool,
+
+    /// Preprocess only and stop (`-E`).
+    #[arg(short = 'E', conflicts_with_all = ["compile_only", "emit_assembly", "emit"])]
+    pub preprocess_only: bool,
+
     /// Preprocessor include path (`-I`). May repeat.
     #[arg(short = 'I', long = "include-path")]
     pub include_paths: Vec<PathBuf>,
