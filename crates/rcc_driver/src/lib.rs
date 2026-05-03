@@ -124,7 +124,14 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> i32 {
     let mut temps = TempObjects::default();
     let mut failed = false;
     for input in &cli.input {
-        let output = temps.alloc(input);
+        let output = match temps.alloc(input) {
+            Ok(output) => output,
+            Err(msg) => {
+                eprintln!("rcc: {msg}");
+                failed = true;
+                continue;
+            }
+        };
         if compile_one_to_object(input, &output, base_opts) {
             temps.keep(output);
         } else {
@@ -136,6 +143,10 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> i32 {
         return 1;
     }
     let output = cli.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
+    if cli.input.iter().any(|input| same_file_or_same_path(&output, input)) {
+        eprintln!("rcc: refusing to overwrite input file {}", output.display());
+        return 1;
+    }
     match pipeline::link_objects_with_options(temps.paths(), &output, &base_opts.link) {
         Ok(()) => 0,
         Err(msg) => {
@@ -168,6 +179,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         target: cli.target.clone().unwrap_or_else(TargetInfo::host),
         emit,
         output,
+        save_temps: cli.save_temps.clone(),
         opt_level: cli.opt_level,
         warning_config: warning_config_from_cli(cli),
         link: link_options_from_cli(cli),
@@ -272,18 +284,30 @@ fn default_output_path(input: &Path, extension: &str) -> PathBuf {
 
 #[derive(Default)]
 struct TempObjects {
+    dir: Option<PathBuf>,
     paths: Vec<PathBuf>,
 }
 
 impl TempObjects {
-    fn alloc(&self, input: &Path) -> PathBuf {
+    fn alloc(&mut self, input: &Path) -> Result<PathBuf, String> {
         let id = NEXT_MULTI_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = match &self.dir {
+            Some(dir) => dir.clone(),
+            None => {
+                let dir =
+                    std::env::temp_dir().join(format!("rcc-multi-{}-{id}.tmp", std::process::id()));
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir)
+                    .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+                self.dir = Some(dir.clone());
+                dir
+            }
+        };
         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("input");
-        let mut path =
-            std::env::temp_dir().join(format!("rcc-multi-{}-{id}-{stem}", std::process::id()));
+        let mut path = dir.join(format!("{id}-{stem}"));
         path.set_extension("o");
         let _ = fs::remove_file(&path);
-        path
+        Ok(path)
     }
 
     fn keep(&mut self, path: PathBuf) {
@@ -297,9 +321,24 @@ impl TempObjects {
 
 impl Drop for TempObjects {
     fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = fs::remove_file(path);
+        if let Some(dir) = &self.dir {
+            let _ = fs::remove_dir_all(dir);
         }
+    }
+}
+
+fn same_file_or_same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => absolutize(a) == absolutize(b),
+    }
+}
+
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
     }
 }
 

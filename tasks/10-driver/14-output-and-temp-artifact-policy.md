@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-14: Output and temporary artifact policy
 
 **Phase:** 10-driver    **Depends on:** 10-01, 10-02, 10-07    **Milestone:** M4    **Size:** Medium

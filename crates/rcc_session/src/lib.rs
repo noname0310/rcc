@@ -65,6 +65,9 @@ pub struct Options {
     pub emit: Vec<EmitKind>,
     /// Output path. `None` = stdout / default.
     pub output: Option<PathBuf>,
+    /// Preserve intermediate artifacts. `None` removes private temporaries;
+    /// `Some(dir)` writes saved temporaries under `dir`.
+    pub save_temps: Option<PathBuf>,
     /// Optimisation level.
     pub opt_level: OptLevel,
     /// Warning filtering and promotion policy.
@@ -150,6 +153,7 @@ impl Default for Options {
             target: TargetInfo::baseline(),
             emit: Vec::new(),
             output: None,
+            save_temps: None,
             opt_level: OptLevel::None,
             warning_config: WarningConfig::default(),
             link: LinkOptions::default(),

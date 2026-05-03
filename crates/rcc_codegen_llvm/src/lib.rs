@@ -5498,9 +5498,11 @@ pub mod backend {
         hir: &HirCrate,
         bodies: &FxHashMap<DefId, Body>,
     ) -> Result<CodegenArtifact, CodegenError> {
-        let needs_object =
-            session.opts.emit.is_empty() || session.opts.emit.contains(&rcc_session::EmitKind::Obj);
-        let needs_assembly = session.opts.emit.contains(&rcc_session::EmitKind::Asm);
+        let save_temps = session.opts.save_temps.is_some();
+        let needs_object = session.opts.emit.is_empty()
+            || session.opts.emit.contains(&rcc_session::EmitKind::Obj)
+            || save_temps;
+        let needs_assembly = session.opts.emit.contains(&rcc_session::EmitKind::Asm) || save_temps;
         let context = Context::create();
         let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
         cx.declare_all()?;

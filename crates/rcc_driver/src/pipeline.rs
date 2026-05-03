@@ -22,6 +22,7 @@ use rcc_typeck::{check, verify_typed_hir};
 /// diagnostic handler; this function only returns `Err` for unrecoverable
 /// I/O or backend failures.
 pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
+    let output_plan = OutputPlan::new(session, input);
     let mut stage_outputs = Vec::new();
 
     // 1. Load.
@@ -43,15 +44,25 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         let out = rcc_lexer::pretty::format_tokens(&src, &sm, file);
         stage_outputs.push(StageOutput::text(EmitKind::Tokens, out));
         if !has_later_emit_than_tokens(&session.opts.emit) {
-            return flush_stage_outputs(session, input, &stage_outputs);
+            return output_plan.write_stage_outputs(&stage_outputs);
         }
     }
 
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
+    let pp_output = if session.opts.emit.contains(&EmitKind::Pp) || output_plan.saves_temps() {
+        Some(format_preprocessed(session, &pp_tokens))
+    } else {
+        None
+    };
+    if let Some(output) = pp_output.as_ref().filter(|_| output_plan.saves_temps()) {
+        output_plan.write_saved_temp(EmitKind::Pp, output.as_bytes())?;
+    }
     if session.opts.emit.contains(&EmitKind::Pp) {
-        stage_outputs
-            .push(StageOutput::text(EmitKind::Pp, format_preprocessed(session, &pp_tokens)));
+        stage_outputs.push(StageOutput::text(
+            EmitKind::Pp,
+            pp_output.expect("preprocessed output was computed for --emit=pp"),
+        ));
         // When `--emit=pp` is requested and no later stage is asked
         // for, the driver stops here: it would be surprising for
         // `rcc --emit=pp foo.c` to then try to parse / typecheck /
@@ -67,7 +78,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         // on this short-circuit so a conformance adapter can run
         // preprocess-only checks.
         if !has_later_emit_than_pp(&session.opts.emit) {
-            return flush_stage_outputs(session, input, &stage_outputs);
+            return output_plan.write_stage_outputs(&stage_outputs);
         }
     }
 
@@ -80,7 +91,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         stage_outputs
             .push(StageOutput::text(EmitKind::Ast, rcc_ast::pretty::dump_translation_unit(&ast)));
         if !has_later_emit_than_ast(&session.opts.emit) {
-            return flush_stage_outputs(session, input, &stage_outputs);
+            return output_plan.write_stage_outputs(&stage_outputs);
         }
     }
 
@@ -100,7 +111,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     if session.opts.emit.contains(&EmitKind::Hir) {
         stage_outputs.push(StageOutput::text(EmitKind::Hir, rcc_hir::pretty::dump_crate(&hir)));
         if !has_later_emit_than_hir(&session.opts.emit) {
-            return flush_stage_outputs(session, input, &stage_outputs);
+            return output_plan.write_stage_outputs(&stage_outputs);
         }
     }
 
@@ -109,13 +120,22 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     if session.opts.emit.contains(&EmitKind::Mir) {
         stage_outputs.push(StageOutput::text(EmitKind::Mir, format_mir(&tcx, &bodies)));
         if !backend_required(&session.opts.emit) {
-            return flush_stage_outputs(session, input, &stage_outputs);
+            return output_plan.write_stage_outputs(&stage_outputs);
         }
     }
 
     // 7. Codegen.
     match codegen(session, &tcx, &hir, &bodies) {
         Ok(art) => {
+            if output_plan.saves_temps() {
+                output_plan.write_saved_temp(EmitKind::LlvmIr, art.ir_text.as_bytes())?;
+                if let Some(assembly) = &art.assembly_text {
+                    output_plan.write_saved_temp(EmitKind::Asm, assembly.as_bytes())?;
+                }
+                if let Some(object) = &art.object_bytes {
+                    output_plan.write_saved_temp(EmitKind::Obj, object)?;
+                }
+            }
             if session.opts.emit.contains(&EmitKind::LlvmIr) {
                 stage_outputs.push(StageOutput::text(EmitKind::LlvmIr, art.ir_text));
             }
@@ -129,10 +149,12 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
                 let object = art
                     .object_bytes
                     .ok_or_else(|| "LLVM backend did not return object output".to_string())?;
-                let exe = output_executable_path(session, input);
-                let obj = TempObject::new(input);
-                fs::write(obj.path(), object)
-                    .map_err(|e| format!("cannot write {}: {e}", obj.path().display()))?;
+                let exe = output_plan.executable_path()?;
+                if let Some(saved_obj) = output_plan.saved_temp_path(EmitKind::Obj)? {
+                    return link_with_options(&saved_obj, &exe, &session.opts.link);
+                }
+                let obj = TempObject::new(input)?;
+                obj.write(&object)?;
                 return link_with_options(obj.path(), &exe, &session.opts.link);
             }
             if session.opts.emit.contains(&EmitKind::Obj) {
@@ -141,7 +163,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
                     .ok_or_else(|| "LLVM backend did not return object output".to_string())?;
                 stage_outputs.push(StageOutput::bytes(EmitKind::Obj, object));
             }
-            flush_stage_outputs(session, input, &stage_outputs)
+            output_plan.write_stage_outputs(&stage_outputs)
         }
         Err(CodegenError::BackendDisabled) => Err(CodegenError::BackendDisabled.to_string()),
         Err(e) => Err(e.to_string()),
@@ -163,34 +185,115 @@ impl StageOutput {
     }
 }
 
-fn flush_stage_outputs(
-    session: &Session,
-    input: &Path,
-    outputs: &[StageOutput],
-) -> Result<(), String> {
-    if outputs.is_empty() {
-        return Ok(());
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArtifactPlan {
+    Stdout,
+    File(PathBuf),
+    StageFile(PathBuf),
+    SavedTemp(PathBuf),
+    PrivateTemp(PathBuf),
+}
 
-    if outputs.len() == 1 && session.opts.emit.len() == 1 {
-        if let Some(path) = &session.opts.output {
-            fs::write(path, &outputs[0].bytes)
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        } else {
-            io::stdout()
-                .write_all(&outputs[0].bytes)
-                .map_err(|e| format!("cannot write stdout: {e}"))?;
+impl ArtifactPlan {
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Stdout => {
+                io::stdout().write_all(bytes).map_err(|e| format!("cannot write stdout: {e}"))
+            }
+            Self::File(path)
+            | Self::StageFile(path)
+            | Self::SavedTemp(path)
+            | Self::PrivateTemp(path) => {
+                if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+                }
+                fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
+            }
         }
-        return Ok(());
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OutputPlan {
+    input: PathBuf,
+    output: Option<PathBuf>,
+    save_temps: Option<PathBuf>,
+    emit: Vec<EmitKind>,
+}
+
+impl OutputPlan {
+    fn new(session: &Session, input: &Path) -> Self {
+        Self {
+            input: input.to_path_buf(),
+            output: session.opts.output.clone(),
+            save_temps: session.opts.save_temps.clone(),
+            emit: session.opts.emit.clone(),
+        }
     }
 
-    let base = session.opts.output.as_deref().unwrap_or(input);
-    for output in outputs {
-        let path = stage_output_path(base, output.kind);
-        fs::write(&path, &output.bytes)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    fn saves_temps(&self) -> bool {
+        self.save_temps.is_some()
     }
-    Ok(())
+
+    fn executable_path(&self) -> Result<PathBuf, String> {
+        let output = self.output.clone().unwrap_or_else(default_executable_path);
+        self.ensure_output_does_not_clobber_input(&output)?;
+        Ok(output)
+    }
+
+    fn write_stage_outputs(&self, outputs: &[StageOutput]) -> Result<(), String> {
+        if outputs.is_empty() {
+            return Ok(());
+        }
+
+        if outputs.len() == 1 && self.emit.len() == 1 {
+            let artifact = if let Some(path) = &self.output {
+                self.ensure_output_does_not_clobber_input(path)?;
+                ArtifactPlan::File(path.clone())
+            } else {
+                ArtifactPlan::Stdout
+            };
+            return artifact.write(&outputs[0].bytes);
+        }
+
+        for output in outputs {
+            let artifact = ArtifactPlan::StageFile(self.stage_output_path(output.kind));
+            artifact.write(&output.bytes)?;
+        }
+        Ok(())
+    }
+
+    fn write_saved_temp(&self, kind: EmitKind, bytes: &[u8]) -> Result<(), String> {
+        let Some(path) = self.saved_temp_path(kind)? else {
+            return Ok(());
+        };
+        ArtifactPlan::SavedTemp(path).write(bytes)
+    }
+
+    fn saved_temp_path(&self, kind: EmitKind) -> Result<Option<PathBuf>, String> {
+        let Some(dir) = &self.save_temps else {
+            return Ok(None);
+        };
+        let stem = self.input.file_stem().and_then(OsStr::to_str).unwrap_or("input");
+        let path = dir.join(format!("{stem}.{}", saved_temp_extension(kind)));
+        self.ensure_output_does_not_clobber_input(&path)?;
+        Ok(Some(path))
+    }
+
+    fn stage_output_path(&self, kind: EmitKind) -> PathBuf {
+        let base = self.output.as_deref().unwrap_or(&self.input);
+        PathBuf::from(format!("{}.{}", base.display(), stage_extension(kind)))
+    }
+
+    fn ensure_output_does_not_clobber_input(&self, output: &Path) -> Result<(), String> {
+        if same_file_or_same_path(output, &self.input) {
+            Err(format!("refusing to overwrite input file {}", self.input.display()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Link one native object file into an executable using the host C compiler.
@@ -376,10 +479,6 @@ fn quote_arg(arg: &OsStr) -> String {
     }
 }
 
-fn output_executable_path(session: &Session, _input: &Path) -> PathBuf {
-    session.opts.output.clone().unwrap_or_else(default_executable_path)
-}
-
 fn default_executable_path() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from("a.exe")
@@ -391,31 +490,34 @@ fn default_executable_path() -> PathBuf {
 static NEXT_TEMP_OBJECT_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct TempObject {
+    dir: PathBuf,
     path: PathBuf,
 }
 
 impl TempObject {
-    fn new(input: &Path) -> Self {
+    fn new(input: &Path) -> Result<Self, String> {
         let id = NEXT_TEMP_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
         let stem = input.file_stem().and_then(OsStr::to_str).unwrap_or("input");
-        let path = env::temp_dir().join(format!("rcc-{}-{id}-{stem}.o", std::process::id()));
-        let _ = fs::remove_file(&path);
-        Self { path }
+        let dir = env::temp_dir().join(format!("rcc-{}-{id}-{stem}.tmp", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let path = dir.join(format!("{stem}.o"));
+        Ok(Self { dir, path })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        ArtifactPlan::PrivateTemp(self.path.clone()).write(bytes)
+    }
 }
 
 impl Drop for TempObject {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_dir_all(&self.dir);
     }
-}
-
-fn stage_output_path(base: &Path, kind: EmitKind) -> PathBuf {
-    PathBuf::from(format!("{}.{}", base.display(), stage_extension(kind)))
 }
 
 fn stage_extension(kind: EmitKind) -> &'static str {
@@ -428,6 +530,28 @@ fn stage_extension(kind: EmitKind) -> &'static str {
         EmitKind::LlvmIr => "ll",
         EmitKind::Asm => "s",
         EmitKind::Obj => "o",
+    }
+}
+
+fn saved_temp_extension(kind: EmitKind) -> &'static str {
+    match kind {
+        EmitKind::Pp => "i",
+        kind => stage_extension(kind),
+    }
+}
+
+fn same_file_or_same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => absolutize(a) == absolutize(b),
+    }
+}
+
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
     }
 }
 

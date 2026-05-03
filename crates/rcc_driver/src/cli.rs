@@ -18,6 +18,16 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
+    /// Preserve intermediate artifacts in the current directory or a chosen directory.
+    #[arg(
+        long = "save-temps",
+        value_name = "DIR",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        require_equals = true
+    )]
+    pub save_temps: Option<PathBuf>,
+
     /// Compile to object file and stop before linking (`-c`).
     #[arg(short = 'c', conflicts_with_all = ["emit_assembly", "preprocess_only", "emit"])]
     pub compile_only: bool,
