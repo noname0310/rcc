@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-05: End-to-end runner
 
 **Phase:** 10-driver    **Depends on:** 10-02    **Milestone:** M3
