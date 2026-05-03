@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-00.2: Backend-required output contract
 
 **Phase:** 10-driver    **Depends on:** 09-26, 10-00.1    **Milestone:** M3    **Size:** Small

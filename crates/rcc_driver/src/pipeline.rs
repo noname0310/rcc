@@ -34,6 +34,9 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         let src = sm.file(file).src.clone();
         let out = rcc_lexer::pretty::format_tokens(&src, &sm, file);
         print!("{out}");
+        if !has_later_emit_than_tokens(&session.opts.emit) {
+            return Ok(());
+        }
     }
 
     // 2. Preprocess.
@@ -66,6 +69,9 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     };
     if session.opts.emit.contains(&EmitKind::Ast) {
         eprintln!("-- emit=ast: {} decls", ast.decls.len());
+        if !has_later_emit_than_ast(&session.opts.emit) {
+            return Ok(());
+        }
     }
 
     // 4. Lower to HIR.
@@ -81,20 +87,23 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     if session.handler.has_errors() {
         return Ok(());
     }
+    if session.opts.emit.contains(&EmitKind::Hir) && !has_later_emit_than_hir(&session.opts.emit) {
+        return Ok(());
+    }
 
     // 6. Build CFG.
     let bodies = build_bodies(session, &tcx, &hir);
     if session.opts.emit.contains(&EmitKind::Mir) {
         emit_mir(&tcx, &bodies);
+        if !backend_required(&session.opts.emit) {
+            return Ok(());
+        }
     }
 
     // 7. Codegen.
     match codegen(session, &tcx, &hir, &bodies) {
         Ok(_art) => Ok(()),
-        Err(CodegenError::BackendDisabled) => {
-            // Skeleton build; not an error, just a notice for now.
-            Ok(())
-        }
+        Err(CodegenError::BackendDisabled) => Err(CodegenError::BackendDisabled.to_string()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -173,4 +182,38 @@ fn has_later_emit_than_pp(emit: &[EmitKind]) -> bool {
                 | EmitKind::Obj
         )
     })
+}
+
+fn has_later_emit_than_tokens(emit: &[EmitKind]) -> bool {
+    emit.iter().any(|k| {
+        matches!(
+            k,
+            EmitKind::Pp
+                | EmitKind::Ast
+                | EmitKind::Hir
+                | EmitKind::Mir
+                | EmitKind::LlvmIr
+                | EmitKind::Asm
+                | EmitKind::Obj
+        )
+    })
+}
+
+fn has_later_emit_than_ast(emit: &[EmitKind]) -> bool {
+    emit.iter().any(|k| {
+        matches!(
+            k,
+            EmitKind::Hir | EmitKind::Mir | EmitKind::LlvmIr | EmitKind::Asm | EmitKind::Obj
+        )
+    })
+}
+
+fn has_later_emit_than_hir(emit: &[EmitKind]) -> bool {
+    emit.iter()
+        .any(|k| matches!(k, EmitKind::Mir | EmitKind::LlvmIr | EmitKind::Asm | EmitKind::Obj))
+}
+
+fn backend_required(emit: &[EmitKind]) -> bool {
+    emit.is_empty()
+        || emit.iter().any(|k| matches!(k, EmitKind::LlvmIr | EmitKind::Asm | EmitKind::Obj))
 }
