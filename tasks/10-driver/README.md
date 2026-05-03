@@ -9,6 +9,8 @@ single driver.
 
 | # | File | Summary |
 |---|------|---------|
+| 00.1 | [`00-01-pre-driver-state-hygiene.md`](00-01-pre-driver-state-hygiene.md) | Backfill missing done banners before driver work. |
+| 00.2 | [`00-02-backend-required-output-contract.md`](00-02-backend-required-output-contract.md) | Make backend-required no-LLVM invocations fail. |
 | 01 | [`01-emit-stages-dump.md`](01-emit-stages-dump.md) | Wire every `EmitKind`. |
 | 02 | [`02-link-invocation.md`](02-link-invocation.md) | Call `cc` / `ld` for final link. |
 | 03 | [`03-ui-test-harness.md`](03-ui-test-harness.md) | `tests/ui/**/*.c` runner. |

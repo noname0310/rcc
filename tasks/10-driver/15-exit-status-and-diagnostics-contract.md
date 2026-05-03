@@ -1,6 +1,6 @@
 # 10-15: Exit status and diagnostics contract
 
-**Phase:** 10-driver    **Depends on:** 10-01, 10-02, 10-03    **Milestone:** M4    **Size:** Small
+**Phase:** 10-driver    **Depends on:** 10-00.2, 10-01, 10-02, 10-03    **Milestone:** M4    **Size:** Small
 
 ## Goal
 
@@ -32,6 +32,8 @@ to trust exit codes.
 
 - `rcc bad.c` returns compilation failure, not success.
 - `rcc --unknown` returns usage failure.
+- Backend-disabled, missing linker, and failed subprocess cases return
+  infrastructure failure, not success.
 - `rcc hello.c -o out` does not invoke the linker if type checking emitted an
   error.
 - Test harnesses can distinguish compiler bugs from expected invalid-source
