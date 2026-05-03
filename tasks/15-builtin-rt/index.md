@@ -1,6 +1,6 @@
 # 15-builtin-rt: index
 
-Compiler-provided runtime: target abstraction, freestanding headers, builtin functions, system header discovery.
+Compiler-owned support surface: target abstraction, freestanding headers, builtin lowering, system header discovery. Hosted libc/glibc/MSVCRT bodies are not implemented by rcc.
 
 ## Upstream deps
 

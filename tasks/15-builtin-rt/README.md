@@ -1,9 +1,18 @@
 # 15-builtin-rt
 
-**Goal of the phase.** Provide the compiler runtime that real C
-programs need: a target abstraction layer, freestanding standard
-headers (`stddef.h`, `stdarg.h`, `stdint.h`, etc.), builtin
-function implementations, and system header search path discovery.
+**Goal of the phase.** Provide the compiler-owned support surface that
+real C programs need: a target abstraction layer, freestanding standard
+headers (`stddef.h`, `stdarg.h`, `stdint.h`, etc.), compiler builtin
+lowering, and system header search path discovery.
+
+## Non-goals
+
+- Do not implement hosted libc/glibc/MSVCRT function bodies such as
+  `printf`, `malloc`, `fopen`, or `memcpy`.
+- Do not vendor or reimplement glibc headers wholesale.
+- Hosted library symbols are provided by the target platform's libc/CRT
+  at link time. rcc only needs declarations, builtin hooks, sysroot
+  discovery, and linker-driver wiring.
 
 ## Current seed
 
@@ -12,6 +21,7 @@ ordinary `#include` dispatch became live and parser/conformance smoke
 tests must not hide standard-header failures by bulk-xfail. The seed is
 parse-oriented: phase-15 tasks still own target-correct definitions,
 builtin semantics, hosted system-header search, and codegen validation.
+It is not a libc implementation.
 
 ## Tasks
 
@@ -33,3 +43,5 @@ builtin semantics, hosted system-header search, and codegen validation.
 - A variadic function using `va_start`/`va_arg` compiles and runs.
 - `__builtin_offsetof(struct S, field)` evaluates at compile time.
 - On Linux, `#include <stdio.h>` resolves via system header search.
+- A `printf` hello-world links against the host libc/CRT; rcc does not
+  provide the `printf` implementation.
