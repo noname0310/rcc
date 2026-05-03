@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-13: Variable-length array lowering
 
 > **Status:** done. Block-scope VLA declarations now preserve and

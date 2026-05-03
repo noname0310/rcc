@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-00.1: Pre-driver task-state hygiene
 
 **Phase:** 10-driver    **Depends on:** 09-26    **Milestone:** M3    **Size:** Small
@@ -36,6 +38,12 @@ banner.
 - `tasks/index.md` still marks 01 through 09 as `[x]`, and 10-driver remains
   the first pending implementation phase.
 - Worktree diff contains only task metadata / optional checker code.
+
+## Completion note
+
+This task is metadata hygiene only. It does not reopen or modify completed
+implementation acceptance; it only normalizes missing or non-standard done
+banners so future agents can verify state mechanically.
 
 ## References
 

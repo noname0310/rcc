@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-12: StorageLive / StorageDead
 
 > **Status:** done. Block-scoped locals are bracketed by

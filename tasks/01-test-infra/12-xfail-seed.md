@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 01-12: Seed empty `xfail.toml` per suite
 
 **Phase:** 01-test-infra    **Depends on:** 01-08, 01-09    **Milestone:** M0.5

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 04-09: `#x` stringize operator
 
 **Phase:** 04-preprocess    **Depends on:** 04-08    **Milestone:** M5

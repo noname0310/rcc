@@ -1,4 +1,4 @@
-> ✅ done — 2026-04-29
+> ✓ done — 2026-05-04
 
 # 08-06: `if / else` lowering
 

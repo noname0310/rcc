@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 04-20: GNU preprocessor extensions
 
 **Phase:** 04-preprocess    **Depends on:** 04-18    **Milestone:** M5+

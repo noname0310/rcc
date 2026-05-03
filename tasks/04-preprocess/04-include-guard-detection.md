@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 04-04: Include-guard detection
 
 **Phase:** 04-preprocess    **Depends on:** 04-03    **Milestone:** M5

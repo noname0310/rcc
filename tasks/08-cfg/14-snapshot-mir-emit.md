@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-14: `--emit=mir` pretty printer
 
 > **Status:** done. CFG bodies now have a stable MIR-style text dump

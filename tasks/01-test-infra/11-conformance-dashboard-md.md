@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 01-11: Render `docs/conformance.md` dashboard
 
 **Phase:** 01-test-infra    **Depends on:** 01-10    **Milestone:** M0.5

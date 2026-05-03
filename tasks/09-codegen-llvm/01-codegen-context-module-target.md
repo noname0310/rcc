@@ -1,4 +1,4 @@
-> ??done ??2026-05-01
+> ✓ done — 2026-05-04
 
 # 09-01: Codegen context, module, and target baseline
 

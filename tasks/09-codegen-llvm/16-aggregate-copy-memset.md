@@ -1,4 +1,4 @@
-> ??done ??2026-05-03
+> ✓ done — 2026-05-04
 
 # 09-16: Aggregate copy and memset intrinsics
 

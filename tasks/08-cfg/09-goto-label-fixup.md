@@ -1,4 +1,4 @@
-> ✅ done — 2026-04-30
+> ✓ done — 2026-05-04
 
 # 08-09: `goto` and label fixup
 

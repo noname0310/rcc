@@ -1,4 +1,4 @@
-> ??done ??2026-05-01
+> ✓ done — 2026-05-04
 
 # 09-04: LayoutCx arrays, FAM, and VLA sentinel
 
