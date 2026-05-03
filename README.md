@@ -59,8 +59,17 @@ on `PATH`) and build with the feature flag:
 
 ```bash
 # Linux / macOS: see https://apt.llvm.org/ or `brew install llvm@18`
-export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
+export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18
 cargo build --features rcc_codegen_llvm/llvm
+```
+
+On Windows with the official `clang+llvm-18.1.8-x86_64-pc-windows-msvc`
+archive, use the project-supported LLVM-C import library path:
+
+```powershell
+$env:LLVM_SYS_181_PREFIX='D:\Tools\clang+llvm-18.1.8-x86_64-pc-windows-msvc'
+$env:Path="$env:LLVM_SYS_181_PREFIX\bin;$env:Path"
+cargo test -p rcc_codegen_llvm --features llvm-windows-llvm-c --test llvm_ir_snapshots -- --test-threads=1
 ```
 
 ## Running the compiler

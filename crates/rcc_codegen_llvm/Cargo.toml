@@ -13,7 +13,8 @@ description = "LLVM IR code generator (via inkwell) for the rcc C compiler"
 # Enable with `--features llvm` (or at the workspace level) once LLVM 18 is
 # on PATH and llvm-config is reachable.
 default = []
-llvm = ["dep:inkwell"]
+llvm = ["dep:inkwell", "inkwell/llvm18-1", "inkwell/target-x86"]
+llvm-windows-llvm-c = ["llvm", "inkwell/llvm18-1-no-llvm-linking"]
 
 [dependencies]
 rcc_span            = { workspace = true }
@@ -26,6 +27,7 @@ inkwell            = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta          = { workspace = true }
+tempfile       = { workspace = true }
 rcc_preprocess = { workspace = true }
 rcc_parse      = { workspace = true }
 rcc_hir_lower  = { workspace = true }

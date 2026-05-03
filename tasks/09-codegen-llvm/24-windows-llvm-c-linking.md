@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 09-24: Windows LLVM-C linking feature
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-23    **Milestone:** M4    **Size:** Medium

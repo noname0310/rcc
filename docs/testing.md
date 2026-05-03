@@ -78,7 +78,9 @@ CI budgets:
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace` (no-LLVM path, fast)
-4. `cargo test --workspace --features rcc_codegen_llvm/llvm` (LLVM path)
+4. `cargo test --workspace --features rcc_codegen_llvm/llvm` (Linux LLVM path)
+   or, on Windows with the official LLVM 18 archive,
+   `cargo test -p rcc_codegen_llvm --features llvm-windows-llvm-c --test llvm_ir_snapshots -- --test-threads=1`.
 5. `cargo llvm-cov --workspace` — coverage uploaded; threshold enforced.
 6. 30-second `cargo fuzz run lex` smoke.
 7. `cargo xtask fetch-testsuites` + conformance run against

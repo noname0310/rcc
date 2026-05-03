@@ -566,6 +566,7 @@ dependencies = [
  "rcc_session",
  "rcc_span",
  "rcc_typeck",
+ "tempfile",
 ]
 
 [[package]]
