@@ -1,6 +1,6 @@
-# 09-25: DWARF debug info
+# 09-26: DWARF debug info
 
-**Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-12, 09-23    **Milestone:** M6    **Size:** Large
+**Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-12, 09-25    **Milestone:** M6    **Size:** Large
 
 ## Goal
 

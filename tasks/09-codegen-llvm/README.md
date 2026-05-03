@@ -32,8 +32,9 @@ active for developers without an LLVM install.
 | 21 | [`21-bitfield-access-codegen.md`](21-bitfield-access-codegen.md) | Bitfield read/write shift-mask sequences. |
 | 22 | [`22-mem2reg-and-module-verifier.md`](22-mem2reg-and-module-verifier.md) | LLVM module verifier and mem2reg proof fixtures. |
 | 23 | [`23-llvm-ir-snapshots.md`](23-llvm-ir-snapshots.md) | Stable `--emit=llvm-ir` snapshots. |
-| 24 | [`24-filecheck-tests.md`](24-filecheck-tests.md) | LLVM-style `// CHECK:` tests. |
-| 25 | [`25-debug-info-dwarf.md`](25-debug-info-dwarf.md) | DWARF debug metadata via DIBuilder. |
+| 24 | [`24-windows-llvm-c-linking.md`](24-windows-llvm-c-linking.md) | Link the official Windows LLVM archive through `LLVM-C.lib`. |
+| 25 | [`25-filecheck-tests.md`](25-filecheck-tests.md) | LLVM-style `// CHECK:` tests. |
+| 26 | [`26-debug-info-dwarf.md`](26-debug-info-dwarf.md) | DWARF debug metadata via DIBuilder. |
 
 ## Exit criteria
 

@@ -34,6 +34,7 @@ lowered to `BasicBlock` + `Terminator` sequences. Non-SSA —
 | 22 | [`22-source-pipeline-edge-fixtures.md`](22-source-pipeline-edge-fixtures.md) | Add full source fixtures for edge cases that unit tests missed. |
 | 23 | [`23-type-aware-cfg-verifier.md`](23-type-aware-cfg-verifier.md) | Reject type-incompatible CFG before LLVM. |
 | 24 | [`24-pre-codegen-contract-fixtures.md`](24-pre-codegen-contract-fixtures.md) | Lock the final source-to-CFG codegen contract. |
+| 25 | [`25-global-object-lvalue-contract.md`](25-global-object-lvalue-contract.md) | Separate global object loads, addresses, and function designators. |
 
 ## Exit criteria
 
@@ -47,4 +48,6 @@ lowered to `BasicBlock` + `Terminator` sequences. Non-SSA —
   contracts before 09-codegen consumes them.
 - Assignment, return, call, and projection types are verifier-checked
   before 09-codegen consumes them.
+- Global object value reads, address-of uses, and function designators have
+  distinct CFG shapes before 09-codegen consumes them.
 - `--emit=mir hello.c` matches the checked-in snapshot.

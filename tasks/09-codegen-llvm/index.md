@@ -31,8 +31,9 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [21-bitfield-access-codegen](21-bitfield-access-codegen.md)
 - [x] [22-mem2reg-and-module-verifier](22-mem2reg-and-module-verifier.md)
 - [x] [23-llvm-ir-snapshots](23-llvm-ir-snapshots.md)
-- [ ] [24-filecheck-tests](24-filecheck-tests.md)
-- [ ] [25-debug-info-dwarf](25-debug-info-dwarf.md)
+- [ ] [24-windows-llvm-c-linking](24-windows-llvm-c-linking.md)
+- [ ] [25-filecheck-tests](25-filecheck-tests.md)
+- [ ] [26-debug-info-dwarf](26-debug-info-dwarf.md)
 
 ## Downstream
 
