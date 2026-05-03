@@ -19,11 +19,77 @@ pub use cli::Cli;
 
 static NEXT_MULTI_OBJECT_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Stable process exit codes returned by the driver.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ExitCode {
+    /// Successful compilation.
+    Success = 0,
+    /// Source-level compilation diagnostics were emitted.
+    CompilationFailure = 1,
+    /// Command-line usage failed before compilation could start.
+    Usage = 64,
+    /// I/O, backend, linker, or subprocess infrastructure failed.
+    InfrastructureFailure = 70,
+}
+
+impl ExitCode {
+    /// Numeric process status code.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Result classification returned by driver orchestration before process exit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DriverStatus {
+    /// Stable exit code category.
+    pub exit_code: ExitCode,
+}
+
+impl DriverStatus {
+    /// Successful status.
+    pub const SUCCESS: Self = Self { exit_code: ExitCode::Success };
+
+    /// Numeric process status code.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self.exit_code.code()
+    }
+
+    fn from_compile_result(result: Result<(), String>, has_errors: bool) -> Self {
+        match result {
+            Ok(()) if has_errors => Self { exit_code: ExitCode::CompilationFailure },
+            Ok(()) => Self::SUCCESS,
+            Err(msg) => Self { exit_code: classify_driver_error(&msg) },
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        match (self.exit_code, other.exit_code) {
+            (ExitCode::InfrastructureFailure, _) | (_, ExitCode::InfrastructureFailure) => {
+                Self { exit_code: ExitCode::InfrastructureFailure }
+            }
+            (ExitCode::Usage, _) | (_, ExitCode::Usage) => Self { exit_code: ExitCode::Usage },
+            (ExitCode::CompilationFailure, _) | (_, ExitCode::CompilationFailure) => {
+                Self { exit_code: ExitCode::CompilationFailure }
+            }
+            _ => Self::SUCCESS,
+        }
+    }
+}
+
 /// Run the driver with a pre-parsed CLI. Returns a UNIX-style exit code.
 pub fn run(cli: Cli) -> i32 {
+    run_status(cli).code()
+}
+
+/// Run the driver with a pre-parsed CLI and return the classified status.
+pub fn run_status(cli: Cli) -> DriverStatus {
     if let Err(msg) = validate_driver_cli(&cli) {
         eprintln!("rcc: {msg}");
-        return 1;
+        return DriverStatus { exit_code: classify_driver_error(&msg) };
     }
     emit_ignored_feature_flag_notes(&cli);
     let opts = options_from_cli(&cli);
@@ -31,18 +97,21 @@ pub fn run(cli: Cli) -> i32 {
         return run_many(&cli, &opts);
     }
     let mut session = Session::new(opts);
-    match pipeline::compile(&mut session, first_input(&cli)) {
-        Ok(()) => {
-            if session.handler.has_errors() {
-                1
-            } else {
-                0
-            }
-        }
-        Err(msg) => {
-            eprintln!("rcc: {msg}");
-            1
-        }
+    let result = pipeline::compile(&mut session, first_input(&cli));
+    if let Err(msg) = &result {
+        eprintln!("rcc: {msg}");
+    }
+    DriverStatus::from_compile_result(result, session.handler.has_errors())
+}
+
+fn classify_driver_error(message: &str) -> ExitCode {
+    if message.starts_with("unsupported standard")
+        || message.starts_with("cannot specify -o")
+        || message.starts_with("refusing to overwrite input file")
+    {
+        ExitCode::Usage
+    } else {
+        ExitCode::InfrastructureFailure
     }
 }
 
@@ -77,10 +146,10 @@ fn is_known_ignored_feature_flag(flag: &str) -> bool {
     )
 }
 
-fn run_many(cli: &Cli, base_opts: &Options) -> i32 {
+fn run_many(cli: &Cli, base_opts: &Options) -> DriverStatus {
     if (cli.compile_only || cli.emit_assembly) && cli.output.is_some() {
         eprintln!("rcc: cannot specify -o with multiple input files when using -c or -S");
-        return 1;
+        return DriverStatus { exit_code: ExitCode::Usage };
     }
     if cli.preprocess_only || !cli.emit.is_empty() || cli.emit_assembly {
         return compile_many_without_link(cli, base_opts);
@@ -91,83 +160,78 @@ fn run_many(cli: &Cli, base_opts: &Options) -> i32 {
     compile_many_and_link(cli, base_opts)
 }
 
-fn compile_many_without_link(cli: &Cli, base_opts: &Options) -> i32 {
-    let mut failed = false;
+fn compile_many_without_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
+    let mut status = DriverStatus::SUCCESS;
     for input in &cli.input {
         let mut opts = base_opts.clone();
         opts.output = None;
         let mut session = Session::new(opts);
-        match pipeline::compile(&mut session, input) {
-            Ok(()) if !session.handler.has_errors() => {}
-            Ok(()) => failed = true,
-            Err(msg) => {
-                eprintln!("rcc: {}: {msg}", input.display());
-                failed = true;
-            }
+        let result = pipeline::compile(&mut session, input);
+        if let Err(msg) = &result {
+            eprintln!("rcc: {}: {msg}", input.display());
         }
+        status =
+            status.merge(DriverStatus::from_compile_result(result, session.handler.has_errors()));
     }
-    i32::from(failed)
+    status
 }
 
-fn compile_many_to_default_objects(cli: &Cli, base_opts: &Options) -> i32 {
-    let mut failed = false;
+fn compile_many_to_default_objects(cli: &Cli, base_opts: &Options) -> DriverStatus {
+    let mut status = DriverStatus::SUCCESS;
     for input in &cli.input {
         let output = default_output_path(input, "o");
-        if !compile_one_to_object(input, &output, base_opts) {
-            failed = true;
-        }
+        status = status.merge(compile_one_to_object(input, &output, base_opts));
     }
-    i32::from(failed)
+    status
 }
 
-fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> i32 {
+fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
     let mut temps = TempObjects::default();
-    let mut failed = false;
+    let mut status = DriverStatus::SUCCESS;
     for input in &cli.input {
         let output = match temps.alloc(input) {
             Ok(output) => output,
             Err(msg) => {
                 eprintln!("rcc: {msg}");
-                failed = true;
+                status = status.merge(DriverStatus { exit_code: ExitCode::InfrastructureFailure });
                 continue;
             }
         };
-        if compile_one_to_object(input, &output, base_opts) {
+        let compile_status = compile_one_to_object(input, &output, base_opts);
+        if compile_status.exit_code == ExitCode::Success {
             temps.keep(output);
         } else {
             let _ = fs::remove_file(&output);
-            failed = true;
+            status = status.merge(compile_status);
         }
     }
-    if failed {
-        return 1;
+    if status.exit_code != ExitCode::Success {
+        return status;
     }
     let output = cli.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
     if cli.input.iter().any(|input| same_file_or_same_path(&output, input)) {
         eprintln!("rcc: refusing to overwrite input file {}", output.display());
-        return 1;
+        return DriverStatus { exit_code: ExitCode::Usage };
     }
     match pipeline::link_objects_with_options(temps.paths(), &output, &base_opts.link) {
-        Ok(()) => 0,
+        Ok(()) => DriverStatus::SUCCESS,
         Err(msg) => {
             eprintln!("rcc: {msg}");
-            1
+            DriverStatus { exit_code: ExitCode::InfrastructureFailure }
         }
     }
 }
 
-fn compile_one_to_object(input: &Path, output: &Path, base_opts: &Options) -> bool {
+fn compile_one_to_object(input: &Path, output: &Path, base_opts: &Options) -> DriverStatus {
     let mut opts = base_opts.clone();
     opts.emit = vec![EmitKind::Obj];
     opts.output = Some(output.to_path_buf());
     let mut session = Session::new(opts);
-    match pipeline::compile(&mut session, input) {
-        Ok(()) => !session.handler.has_errors(),
-        Err(msg) => {
-            eprintln!("rcc: {}: {msg}", input.display());
-            false
-        }
+    let result = pipeline::compile(&mut session, input);
+    if let Err(msg) = &result {
+        eprintln!("rcc: {}: {msg}", input.display());
     }
+    DriverStatus::from_compile_result(result, session.handler.has_errors())
 }
 
 /// Convert parsed CLI flags into a `rcc_session::Options`.

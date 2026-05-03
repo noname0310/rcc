@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rcc_driver::{options_from_cli, run, Cli};
+use rcc_driver::{options_from_cli, run, Cli, ExitCode};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -66,7 +66,7 @@ fn ansi_alias_is_parsed_but_rejected_before_compilation() {
     let cli = parse(&["rcc", "-ansi", "does-not-need-to-exist.c"]);
 
     assert!(cli.ansi);
-    assert_eq!(run(cli), 1);
+    assert_eq!(run(cli), ExitCode::Usage.code());
 }
 
 #[test]

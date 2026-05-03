@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rcc_driver::{options_from_cli, run, Cli};
+use rcc_driver::{options_from_cli, run, Cli, ExitCode};
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_session::{Options, Session};
 
@@ -69,7 +69,7 @@ fn output_path_must_not_clobber_input_file() {
     let input = dir.file("hello.c", "int main(void) { return 0; }\n");
     let cli = parse(&["rcc", "-E", "-o", input.to_str().unwrap(), input.to_str().unwrap()]);
 
-    assert_eq!(run(cli), 1);
+    assert_eq!(run(cli), ExitCode::Usage.code());
     let source = fs::read_to_string(&input).expect("read input after rejected run");
     assert!(source.contains("return 0"), "{source}");
 }
@@ -146,7 +146,7 @@ fn failed_link_removes_private_temp_directory_when_save_temps_is_off() {
     let before = matching_temp_entries(stem);
     let cli = parse(&["rcc", "-l__rcc_missing_output_policy__", input.to_str().unwrap()]);
 
-    assert_eq!(run(cli), 1);
+    assert_eq!(run(cli), ExitCode::InfrastructureFailure.code());
 
     let after = matching_temp_entries(stem);
     assert_eq!(after, before, "private temp dirs leaked: before={before:?} after={after:?}");
@@ -192,7 +192,7 @@ fn save_temps_object_survives_failed_link_when_enabled() {
         input.to_str().unwrap(),
     ]);
 
-    assert_eq!(run(cli), 1);
+    assert_eq!(run(cli), ExitCode::InfrastructureFailure.code());
     assert!(temps.join("hello.o").exists());
 }
 

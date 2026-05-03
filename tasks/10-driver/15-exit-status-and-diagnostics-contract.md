@@ -1,5 +1,7 @@
 # 10-15: Exit status and diagnostics contract
 
+> ✓ done — 2026-05-04 — implemented in commit
+
 **Phase:** 10-driver    **Depends on:** 10-00.2, 10-01, 10-02, 10-03    **Milestone:** M4    **Size:** Small
 
 ## Goal

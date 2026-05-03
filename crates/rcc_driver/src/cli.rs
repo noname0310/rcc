@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use clap::{ArgAction, Parser};
 use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
 
+use crate::ExitCode;
+
 /// The `rcc` command-line interface.
 #[derive(Debug, Parser, Clone)]
 #[command(name = "rcc", about = "rcc: a Rust-based C99 compiler")]
@@ -116,7 +118,10 @@ pub struct Cli {
 impl Cli {
     /// Parse CLI args, accepting GCC-style single-dash long linker flags.
     pub fn parse() -> Self {
-        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit())
+        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|err| {
+            let _ = err.print();
+            std::process::exit(ExitCode::Usage.code());
+        })
     }
 
     /// Parse from an explicit iterator, normalising GCC driver spellings first.
