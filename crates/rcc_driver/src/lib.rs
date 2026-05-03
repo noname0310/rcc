@@ -21,6 +21,11 @@ static NEXT_MULTI_OBJECT_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Run the driver with a pre-parsed CLI. Returns a UNIX-style exit code.
 pub fn run(cli: Cli) -> i32 {
+    if let Err(msg) = validate_driver_cli(&cli) {
+        eprintln!("rcc: {msg}");
+        return 1;
+    }
+    emit_ignored_feature_flag_notes(&cli);
     let opts = options_from_cli(&cli);
     if cli.input.len() > 1 {
         return run_many(&cli, &opts);
@@ -39,6 +44,37 @@ pub fn run(cli: Cli) -> i32 {
             1
         }
     }
+}
+
+fn validate_driver_cli(cli: &Cli) -> Result<(), String> {
+    if cli.ansi {
+        return Err("unsupported standard '-ansi'; only -std=c99 is supported".to_owned());
+    }
+    Ok(())
+}
+
+fn emit_ignored_feature_flag_notes(cli: &Cli) {
+    for flag in &cli.feature_flags {
+        let spelling = format!("-f{flag}");
+        if is_known_ignored_feature_flag(flag) {
+            eprintln!("rcc: note: ignoring compatibility flag {spelling}");
+        } else {
+            eprintln!("rcc: warning: ignoring unknown compatibility flag {spelling}");
+        }
+    }
+}
+
+fn is_known_ignored_feature_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "PIC"
+            | "pic"
+            | "no-strict-aliasing"
+            | "wrapv"
+            | "stack-protector"
+            | "no-common"
+            | "visibility=hidden"
+    )
 }
 
 fn run_many(cli: &Cli, base_opts: &Options) -> i32 {

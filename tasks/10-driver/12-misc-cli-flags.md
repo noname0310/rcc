@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-12: Miscellaneous compatibility flags
 
 **Phase:** 10-driver    **Depends on:** —    **Milestone:** M6

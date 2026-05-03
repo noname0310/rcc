@@ -21,7 +21,7 @@
 - [x] [09-warning-control](09-warning-control.md)
 - [x] [10-linker-flags](10-linker-flags.md)
 - [x] [11-multi-file](11-multi-file.md)
-- [ ] [12-misc-cli-flags](12-misc-cli-flags.md)
+- [x] [12-misc-cli-flags](12-misc-cli-flags.md)
 - [ ] [13-debug-info-object-smoke](13-debug-info-object-smoke.md)
 - [ ] [14-output-and-temp-artifact-policy](14-output-and-temp-artifact-policy.md)
 - [ ] [15-exit-status-and-diagnostics-contract](15-exit-status-and-diagnostics-contract.md)

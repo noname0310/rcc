@@ -46,9 +46,21 @@ pub struct Cli {
     #[arg(long = "target", value_parser = parse_target)]
     pub target: Option<TargetInfo>,
 
+    /// C language standard (`-std=c99` only for now).
+    #[arg(long = "std", value_name = "STANDARD", value_parser = parse_standard)]
+    pub standard: Option<String>,
+
+    /// GCC compatibility alias for C89 mode. Parsed, but currently unsupported.
+    #[arg(long = "ansi", action = ArgAction::SetTrue)]
+    pub ansi: bool,
+
     /// Optimisation level.
     #[arg(short = 'O', long = "opt-level", value_enum, default_value_t = OptLevel::None)]
     pub opt_level: OptLevel,
+
+    /// GCC-style `-f<flag>` compatibility options.
+    #[arg(short = 'f', value_name = "FLAG", action = ArgAction::Append)]
+    pub feature_flags: Vec<String>,
 
     /// Suppress all warnings (`-w`).
     #[arg(short = 'w', action = ArgAction::SetTrue)]
@@ -111,7 +123,13 @@ where
     args.into_iter()
         .map(|arg| {
             let arg = arg.into();
-            match arg.to_string_lossy().as_ref() {
+            let text = arg.to_string_lossy();
+            if let Some(standard) = text.strip_prefix("-std=") {
+                return OsString::from(format!("--std={standard}"));
+            }
+            match text.as_ref() {
+                "-std" => OsString::from("--std"),
+                "-ansi" => OsString::from("--ansi"),
                 "-shared" => OsString::from("--shared"),
                 "-static" => OsString::from("--static"),
                 "-pie" => OsString::from("--pie"),
@@ -133,4 +151,11 @@ fn parse_define(raw: &str) -> Result<(String, Option<String>), String> {
 fn parse_target(raw: &str) -> Result<TargetInfo, String> {
     let triple = TargetTriple::new(raw);
     TargetInfo::from_triple(&triple).map_err(|err| err.to_string())
+}
+
+fn parse_standard(raw: &str) -> Result<String, String> {
+    match raw {
+        "c99" => Ok(raw.to_owned()),
+        other => Err(format!("unsupported standard '{other}'; only c99 is supported")),
+    }
 }
