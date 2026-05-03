@@ -1,0 +1,24 @@
+---
+source: crates/rcc_driver/tests/support/mod.rs
+---
+1:1-1:4  Ident  int
+1:5-1:9  Ident  main
+1:9-1:10  Punct.LParen  (
+1:10-1:14  Ident  void
+1:14-1:15  Punct.RParen  )
+1:16-1:17  Punct.LBrace  {
+1:17-2:1  Newline  \n
+2:5-2:8  Ident  int
+2:9-2:10  Ident  x
+2:11-2:12  Punct.Eq  =
+2:13-2:15  PpNumber.Integer  40
+2:15-2:16  Punct.Semi  ;
+2:16-3:1  Newline  \n
+3:5-3:11  Ident  return
+3:12-3:13  Ident  x
+3:14-3:15  Punct.Plus  +
+3:16-3:17  PpNumber.Integer  2
+3:17-3:18  Punct.Semi  ;
+3:18-4:1  Newline  \n
+4:1-4:2  Punct.RBrace  }
+4:2-5:1  Newline  \n

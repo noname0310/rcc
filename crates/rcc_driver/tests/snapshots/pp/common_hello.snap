@@ -1,0 +1,7 @@
+---
+source: crates/rcc_driver/tests/support/mod.rs
+---
+int main ( void ) {
+int x = 40 ;
+return x + 2 ;
+}

@@ -1,0 +1,320 @@
+---
+source: crates/rcc_driver/tests/support/mod.rs
+---
+TranslationUnit {
+    decls: [
+        Function(
+            FunctionDef {
+                id: NodeId(
+                    7,
+                ),
+                span: Span {
+                    file: FileId(
+                        0,
+                    ),
+                    lo: BytePos(
+                        0,
+                    ),
+                    hi: BytePos(
+                        52,
+                    ),
+                },
+                specs: DeclSpecs {
+                    span: Span {
+                        file: FileId(
+                            0,
+                        ),
+                        lo: BytePos(
+                            0,
+                        ),
+                        hi: BytePos(
+                            3,
+                        ),
+                    },
+                    storage: None,
+                    type_specs: [
+                        Int,
+                    ],
+                    quals: TypeQuals {
+                        const_: false,
+                        volatile: false,
+                        restrict: false,
+                    },
+                    func_specs: FuncSpecs {
+                        inline: false,
+                    },
+                    attrs: [],
+                },
+                declarator: Declarator {
+                    name: Some(
+                        (
+                            Symbol(
+                                9,
+                            ),
+                            Span {
+                                file: FileId(
+                                    0,
+                                ),
+                                lo: BytePos(
+                                    4,
+                                ),
+                                hi: BytePos(
+                                    8,
+                                ),
+                            },
+                        ),
+                    ),
+                    derived: [
+                        Function(
+                            FunctionDeclarator {
+                                params: [],
+                                is_void: true,
+                                variadic: false,
+                                kr_names: [],
+                            },
+                        ),
+                    ],
+                    span: Span {
+                        file: FileId(
+                            0,
+                        ),
+                        lo: BytePos(
+                            4,
+                        ),
+                        hi: BytePos(
+                            14,
+                        ),
+                    },
+                    attrs: [],
+                },
+                kr_decls: [],
+                body: Block {
+                    id: NodeId(
+                        6,
+                    ),
+                    items: [
+                        Decl(
+                            Decl {
+                                id: NodeId(
+                                    1,
+                                ),
+                                span: Span {
+                                    file: FileId(
+                                        0,
+                                    ),
+                                    lo: BytePos(
+                                        21,
+                                    ),
+                                    hi: BytePos(
+                                        32,
+                                    ),
+                                },
+                                specs: DeclSpecs {
+                                    span: Span {
+                                        file: FileId(
+                                            0,
+                                        ),
+                                        lo: BytePos(
+                                            21,
+                                        ),
+                                        hi: BytePos(
+                                            24,
+                                        ),
+                                    },
+                                    storage: None,
+                                    type_specs: [
+                                        Int,
+                                    ],
+                                    quals: TypeQuals {
+                                        const_: false,
+                                        volatile: false,
+                                        restrict: false,
+                                    },
+                                    func_specs: FuncSpecs {
+                                        inline: false,
+                                    },
+                                    attrs: [],
+                                },
+                                inits: [
+                                    InitDeclarator {
+                                        declarator: Declarator {
+                                            name: Some(
+                                                (
+                                                    Symbol(
+                                                        11,
+                                                    ),
+                                                    Span {
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                        lo: BytePos(
+                                                            25,
+                                                        ),
+                                                        hi: BytePos(
+                                                            26,
+                                                        ),
+                                                    },
+                                                ),
+                                            ),
+                                            derived: [],
+                                            span: Span {
+                                                file: FileId(
+                                                    0,
+                                                ),
+                                                lo: BytePos(
+                                                    25,
+                                                ),
+                                                hi: BytePos(
+                                                    26,
+                                                ),
+                                            },
+                                            attrs: [],
+                                        },
+                                        init: Some(
+                                            Expr(
+                                                Expr {
+                                                    id: NodeId(
+                                                        0,
+                                                    ),
+                                                    kind: IntLit(
+                                                        IntLiteral {
+                                                            text: Symbol(
+                                                                13,
+                                                            ),
+                                                            value: 40,
+                                                            suffix: None,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                        lo: BytePos(
+                                                            29,
+                                                        ),
+                                                        hi: BytePos(
+                                                            31,
+                                                        ),
+                                                    },
+                                                },
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            },
+                        ),
+                        Stmt(
+                            Stmt {
+                                id: NodeId(
+                                    5,
+                                ),
+                                kind: Return(
+                                    Some(
+                                        Expr {
+                                            id: NodeId(
+                                                4,
+                                            ),
+                                            kind: Binary {
+                                                op: Add,
+                                                lhs: Expr {
+                                                    id: NodeId(
+                                                        2,
+                                                    ),
+                                                    kind: Ident(
+                                                        Symbol(
+                                                            11,
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                        lo: BytePos(
+                                                            44,
+                                                        ),
+                                                        hi: BytePos(
+                                                            45,
+                                                        ),
+                                                    },
+                                                },
+                                                rhs: Expr {
+                                                    id: NodeId(
+                                                        3,
+                                                    ),
+                                                    kind: IntLit(
+                                                        IntLiteral {
+                                                            text: Symbol(
+                                                                14,
+                                                            ),
+                                                            value: 2,
+                                                            suffix: None,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                        lo: BytePos(
+                                                            48,
+                                                        ),
+                                                        hi: BytePos(
+                                                            49,
+                                                        ),
+                                                    },
+                                                },
+                                            },
+                                            span: Span {
+                                                file: FileId(
+                                                    0,
+                                                ),
+                                                lo: BytePos(
+                                                    44,
+                                                ),
+                                                hi: BytePos(
+                                                    49,
+                                                ),
+                                            },
+                                        },
+                                    ),
+                                ),
+                                span: Span {
+                                    file: FileId(
+                                        0,
+                                    ),
+                                    lo: BytePos(
+                                        37,
+                                    ),
+                                    hi: BytePos(
+                                        50,
+                                    ),
+                                },
+                            },
+                        ),
+                    ],
+                    span: Span {
+                        file: FileId(
+                            0,
+                        ),
+                        lo: BytePos(
+                            15,
+                        ),
+                        hi: BytePos(
+                            52,
+                        ),
+                    },
+                },
+            },
+        ),
+    ],
+    span: Span {
+        file: FileId(
+            0,
+        ),
+        lo: BytePos(
+            0,
+        ),
+        hi: BytePos(
+            52,
+        ),
+    },
+}

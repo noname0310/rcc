@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-04: `insta` snapshot harness
 
 **Phase:** 10-driver    **Depends on:** 10-01    **Milestone:** M3

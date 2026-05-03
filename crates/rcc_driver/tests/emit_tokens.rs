@@ -12,26 +12,14 @@ use std::sync::Arc;
 use rcc_lexer::pretty::format_tokens;
 use rcc_span::SourceMap;
 
+#[macro_use]
+mod support;
+
 /// Tokenise `src` and return the pretty-printed pp-token stream.
 fn render(name: &str, src: &str) -> String {
     let mut sm = SourceMap::new();
     let id = sm.add_file(PathBuf::from(name), Arc::from(src));
     format_tokens(src, &sm, id)
-}
-
-/// Snapshot helper: route all `assert_snapshot!` calls in this file to
-/// `tests/snapshots/tokens/` with un-prefixed names so the checked-in
-/// fixtures match the task deliverable path.
-macro_rules! snap {
-    ($name:literal, $body:expr) => {
-        insta::with_settings!({
-            snapshot_path => "snapshots/tokens",
-            prepend_module_to_snapshot => false,
-            omit_expression => true,
-        }, {
-            insta::assert_snapshot!($name, $body);
-        });
-    };
 }
 
 #[test]
@@ -42,7 +30,7 @@ fn hello_world() {
                printf(\"Hello, world!\\n\");\n    \
                return 0;\n\
                }\n";
-    snap!("hello", render("hello.c", src));
+    assert_emit_snapshot!("tokens", "hello", render("hello.c", src));
 }
 
 #[test]
@@ -50,14 +38,14 @@ fn pp_numbers() {
     // Covers Integer vs Float classification, hex/binary exponents,
     // and the sign-absorption rule after `e`/`E`/`p`/`P`.
     let src = "0 42 0x1f 0755 3.14 .5 1e10 1E-3 0x1.0p0 0X1p+1 1.5f\n";
-    snap!("pp_numbers", render("pp_numbers.c", src));
+    assert_emit_snapshot!("tokens", "pp_numbers", render("pp_numbers.c", src));
 }
 
 #[test]
 fn strings_and_chars() {
     // All five C99/C11 encoding prefixes for both `'...'` and `"..."`.
     let src = "'a' L'b' u'c' U'd' u8'e'\n\"a\" L\"b\" u\"c\" U\"d\" u8\"e\"\n";
-    snap!("strings_and_chars", render("literals.c", src));
+    assert_emit_snapshot!("tokens", "strings_and_chars", render("literals.c", src));
 }
 
 #[test]
@@ -68,7 +56,7 @@ fn punctuators() {
                a<b>c<=d>=e==f!=g && h||i?j:k;\n\
                x=1; y+=2; z<<=3; w>>=4; a&=b^=c|=d;\n\
                #define F(...) __VA_ARGS__\n";
-    snap!("punctuators", render("punct.c", src));
+    assert_emit_snapshot!("tokens", "punctuators", render("punct.c", src));
 }
 
 #[test]
@@ -78,7 +66,7 @@ fn comments_and_whitespace() {
     let src = "int a; // trailing line comment\n\
                /* leading block */ int b;\n\
                int /* mid */ c;\n";
-    snap!("comments_and_ws", render("comments.c", src));
+    assert_emit_snapshot!("tokens", "comments_and_ws", render("comments.c", src));
 }
 
 #[test]
@@ -88,5 +76,5 @@ fn multiline_and_unicode_ident() {
     let src = "int\n\
                \tfoo_bar\n\
                = 42;\n";
-    snap!("multiline", render("multiline.c", src));
+    assert_emit_snapshot!("tokens", "multiline", render("multiline.c", src));
 }

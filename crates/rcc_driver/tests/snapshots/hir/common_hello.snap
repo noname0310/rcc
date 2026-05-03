@@ -1,0 +1,295 @@
+---
+source: crates/rcc_driver/tests/support/mod.rs
+---
+HirCrate {
+    defs: IndexVec {
+        raw: [
+            Def {
+                id: DefId(
+                    0,
+                ),
+                name: Symbol(
+                    9,
+                ),
+                span: Span {
+                    file: FileId(
+                        0,
+                    ),
+                    lo: BytePos(
+                        0,
+                    ),
+                    hi: BytePos(
+                        52,
+                    ),
+                },
+                kind: Function {
+                    ty: TyId(
+                        20,
+                    ),
+                    has_body: true,
+                    is_static: false,
+                    is_inline: false,
+                    is_extern_inline: false,
+                    variadic: false,
+                },
+            },
+        ],
+        _marker: PhantomData<fn(rcc_hir::DefId) -> rcc_hir::DefId>,
+    },
+    bodies: {
+        DefId(
+            0,
+        ): Body {
+            locals: IndexVec {
+                raw: [
+                    LocalDecl {
+                        name: Some(
+                            Symbol(
+                                11,
+                            ),
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        quals: ObjectQuals {
+                            is_const: false,
+                            is_volatile: false,
+                            is_restrict: false,
+                        },
+                        vla_len: None,
+                        is_param: false,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                21,
+                            ),
+                            hi: BytePos(
+                                32,
+                            ),
+                        },
+                    },
+                ],
+                _marker: PhantomData<fn(rcc_hir::Local) -> rcc_hir::Local>,
+            },
+            root: Some(
+                HirStmtId(
+                    2,
+                ),
+            ),
+            stmts: IndexVec {
+                raw: [
+                    HirStmt {
+                        id: HirStmtId(
+                            0,
+                        ),
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                21,
+                            ),
+                            hi: BytePos(
+                                32,
+                            ),
+                        },
+                        kind: LocalDecl {
+                            local: Local(
+                                0,
+                            ),
+                            init: Some(
+                                HirExprId(
+                                    0,
+                                ),
+                            ),
+                        },
+                    },
+                    HirStmt {
+                        id: HirStmtId(
+                            1,
+                        ),
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                37,
+                            ),
+                            hi: BytePos(
+                                50,
+                            ),
+                        },
+                        kind: Return(
+                            Some(
+                                HirExprId(
+                                    3,
+                                ),
+                            ),
+                        ),
+                    },
+                    HirStmt {
+                        id: HirStmtId(
+                            2,
+                        ),
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                15,
+                            ),
+                            hi: BytePos(
+                                52,
+                            ),
+                        },
+                        kind: Block(
+                            [
+                                HirStmtId(
+                                    0,
+                                ),
+                                HirStmtId(
+                                    1,
+                                ),
+                            ],
+                        ),
+                    },
+                ],
+                _marker: PhantomData<fn(rcc_hir::HirStmtId) -> rcc_hir::HirStmtId>,
+            },
+            exprs: IndexVec {
+                raw: [
+                    HirExpr {
+                        id: HirExprId(
+                            0,
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        value_cat: RValue,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                29,
+                            ),
+                            hi: BytePos(
+                                31,
+                            ),
+                        },
+                        kind: IntConst(
+                            40,
+                        ),
+                    },
+                    HirExpr {
+                        id: HirExprId(
+                            1,
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        value_cat: LValue,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                44,
+                            ),
+                            hi: BytePos(
+                                45,
+                            ),
+                        },
+                        kind: LocalRef(
+                            Local(
+                                0,
+                            ),
+                        ),
+                    },
+                    HirExpr {
+                        id: HirExprId(
+                            2,
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        value_cat: RValue,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                48,
+                            ),
+                            hi: BytePos(
+                                49,
+                            ),
+                        },
+                        kind: IntConst(
+                            2,
+                        ),
+                    },
+                    HirExpr {
+                        id: HirExprId(
+                            3,
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        value_cat: RValue,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                44,
+                            ),
+                            hi: BytePos(
+                                49,
+                            ),
+                        },
+                        kind: Binary {
+                            op: Add,
+                            lhs: HirExprId(
+                                4,
+                            ),
+                            rhs: HirExprId(
+                                2,
+                            ),
+                        },
+                    },
+                    HirExpr {
+                        id: HirExprId(
+                            4,
+                        ),
+                        ty: TyId(
+                            6,
+                        ),
+                        value_cat: RValue,
+                        span: Span {
+                            file: FileId(
+                                0,
+                            ),
+                            lo: BytePos(
+                                44,
+                            ),
+                            hi: BytePos(
+                                45,
+                            ),
+                        },
+                        kind: Convert {
+                            operand: HirExprId(
+                                1,
+                            ),
+                            kind: LvalueToRvalue,
+                        },
+                    },
+                ],
+                _marker: PhantomData<fn(rcc_hir::HirExprId) -> rcc_hir::HirExprId>,
+            },
+        },
+    },
+    global_init_bodies: {},
+}

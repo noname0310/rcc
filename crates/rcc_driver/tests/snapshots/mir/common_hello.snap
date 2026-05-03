@@ -1,0 +1,18 @@
+---
+source: crates/rcc_driver/tests/support/mod.rs
+---
+fn def#0() -> int {
+  locals:
+    _0: int;
+    _1: int name#11;
+    _2: int;
+
+  bb0:
+    StorageLive(_1);
+    _1 = 40;
+    _2 = Add(copy _1, 2);
+    _0 = copy _2;
+    StorageDead(_1);
+    return;
+
+}
