@@ -1,9 +1,10 @@
 //! Clap-based command-line interface.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser};
+use clap::{error::ErrorKind, ArgAction, Parser};
 use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
 
 use crate::ExitCode;
@@ -134,7 +135,194 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString>,
     {
+        let args = expand_response_args(args).map_err(|err| {
+            clap::Error::raw(ErrorKind::ValueValidation, format!("response file error: {err}\n"))
+        })?;
         <Self as Parser>::try_parse_from(normalize_driver_args(args))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResponseFileError {
+    path: PathBuf,
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+impl ResponseFileError {
+    fn new(path: PathBuf, line: usize, column: usize, message: impl Into<String>) -> Self {
+        Self { path, line, column, message: message.into() }
+    }
+}
+
+impl std::fmt::Display for ResponseFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}: {}", self.path.display(), self.line, self.column, self.message)
+    }
+}
+
+fn expand_response_args<I, T>(args: I) -> Result<Vec<OsString>, ResponseFileError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    let mut out = Vec::new();
+    let mut args = args.into_iter();
+    if let Some(program) = args.next() {
+        out.push(program.into());
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut stack = Vec::new();
+    for arg in args {
+        expand_response_arg(arg.into(), &cwd, &mut stack, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn expand_response_arg(
+    arg: OsString,
+    base_dir: &Path,
+    stack: &mut Vec<PathBuf>,
+    out: &mut Vec<OsString>,
+) -> Result<(), ResponseFileError> {
+    let Some(text) = arg.to_str() else {
+        out.push(arg);
+        return Ok(());
+    };
+    let Some(path) = text.strip_prefix('@').filter(|path| !path.is_empty()) else {
+        out.push(arg);
+        return Ok(());
+    };
+    expand_response_file(base_dir.join(path), stack, out)
+}
+
+fn expand_response_file(
+    path: PathBuf,
+    stack: &mut Vec<PathBuf>,
+    out: &mut Vec<OsString>,
+) -> Result<(), ResponseFileError> {
+    let canonical = fs::canonicalize(&path)
+        .map_err(|err| ResponseFileError::new(path.clone(), 1, 1, format!("cannot read: {err}")))?;
+    if let Some(first) = stack.iter().position(|open| open == &canonical) {
+        let cycle = stack[first..]
+            .iter()
+            .chain(std::iter::once(&canonical))
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return Err(ResponseFileError::new(path, 1, 1, format!("response file cycle: {cycle}")));
+    }
+    let text = fs::read_to_string(&canonical).map_err(|err| {
+        ResponseFileError::new(canonical.clone(), 1, 1, format!("cannot decode UTF-8: {err}"))
+    })?;
+    stack.push(canonical.clone());
+    let base_dir = canonical.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let args = parse_response_file_args(&canonical, &text)?;
+    for arg in args {
+        expand_response_arg(OsString::from(arg), &base_dir, stack, out)?;
+    }
+    stack.pop();
+    Ok(())
+}
+
+fn parse_response_file_args(path: &Path, text: &str) -> Result<Vec<String>, ResponseFileError> {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut line = 1usize;
+    let mut col = 1usize;
+    let mut token_start: Option<(usize, usize)> = None;
+    let mut quote: Option<(char, usize, usize)> = None;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        let here = (line, col);
+        advance_line_col(ch, &mut line, &mut col);
+
+        if let Some((q, _, _)) = quote {
+            if ch == q {
+                quote = None;
+                continue;
+            }
+            if ch == '\\' && q == '"' {
+                let Some(next) = chars.peek().copied() else {
+                    cur.push('\\');
+                    continue;
+                };
+                if matches!(next, '"' | '\\' | '\'' | '#' | ' ' | '\t' | '\r' | '\n') {
+                    chars.next();
+                    advance_line_col(next, &mut line, &mut col);
+                    cur.push(next);
+                } else {
+                    cur.push('\\');
+                }
+                continue;
+            }
+            cur.push(ch);
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                token_start.get_or_insert(here);
+                quote = Some((ch, here.0, here.1));
+            }
+            '#' if cur.is_empty() && token_start.is_none() => {
+                while let Some(next) = chars.peek().copied() {
+                    if next == '\n' {
+                        break;
+                    }
+                    chars.next();
+                    advance_line_col(next, &mut line, &mut col);
+                }
+            }
+            ch if ch.is_whitespace() => {
+                if token_start.is_some() {
+                    args.push(std::mem::take(&mut cur));
+                    token_start = None;
+                }
+            }
+            '\\' => {
+                token_start.get_or_insert(here);
+                let Some(next) = chars.peek().copied() else {
+                    cur.push('\\');
+                    continue;
+                };
+                if matches!(next, '"' | '\'' | '\\' | '#' | ' ' | '\t' | '\r' | '\n') {
+                    chars.next();
+                    advance_line_col(next, &mut line, &mut col);
+                    cur.push(next);
+                } else {
+                    cur.push('\\');
+                }
+            }
+            _ => {
+                token_start.get_or_insert(here);
+                cur.push(ch);
+            }
+        }
+    }
+
+    if let Some((q, q_line, q_col)) = quote {
+        return Err(ResponseFileError::new(
+            path.to_path_buf(),
+            q_line,
+            q_col,
+            format!("unterminated {q} quote"),
+        ));
+    }
+    if token_start.is_some() {
+        args.push(cur);
+    }
+    Ok(args)
+}
+
+fn advance_line_col(ch: char, line: &mut usize, col: &mut usize) {
+    if ch == '\n' {
+        *line += 1;
+        *col = 1;
+    } else {
+        *col += 1;
     }
 }
 

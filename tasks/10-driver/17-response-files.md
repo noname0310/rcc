@@ -1,5 +1,7 @@
 # 10-17: Response files
 
+> ✓ done — 2026-05-04 — implemented in commit
+
 **Phase:** 10-driver    **Depends on:** 10-12, 10-16    **Milestone:** M5    **Size:** Medium
 
 ## Goal
