@@ -17,6 +17,7 @@ use rcc_hir::{Def, DefId, DefKind, FloatKind, HirCrate, Layout, LayoutError, Ty,
 #[cfg(feature = "llvm")]
 use rcc_hir::{GlobalInit, GlobalInitDesignator, GlobalInitEntry, GlobalInitValue};
 use rcc_session::Session;
+use rcc_target::TargetInfo;
 
 pub mod layout;
 
@@ -282,7 +283,11 @@ struct SysvParamClassifier<'tcx> {
 
 impl<'tcx> SysvParamClassifier<'tcx> {
     fn new(tcx: &'tcx TyCtxt, defs: &'tcx IndexVec<DefId, Def>) -> Self {
-        Self { tcx, defs, layout: LayoutCx::with_defs(tcx, defs) }
+        Self {
+            tcx,
+            defs,
+            layout: LayoutCx::with_defs_for_target(tcx, defs, TargetInfo::baseline()),
+        }
     }
 
     fn classify_param(&self, ty: TyId) -> Result<AbiParam, CodegenError> {
@@ -847,6 +852,7 @@ pub mod backend {
         context: &'ctx Context,
         module: Module<'ctx>,
         builder: Builder<'ctx>,
+        target_info: TargetInfo,
         target_triple: String,
         data_layout: String,
         session: &'a mut Session,
@@ -870,8 +876,9 @@ pub mod backend {
             let module_name = module_name(session);
             let module = context.create_module(&module_name);
             let builder = context.create_builder();
-            let target_triple = target_triple(session);
-            let data_layout = BASELINE_DATA_LAYOUT.to_owned();
+            let target_info = target_info(session);
+            let target_triple = target_info.triple.0.clone();
+            let data_layout = target_info.llvm_data_layout.to_owned();
 
             module.set_triple(&TargetTriple::create(&target_triple));
             let target_data = TargetData::create(&data_layout);
@@ -883,6 +890,7 @@ pub mod backend {
                 context,
                 module,
                 builder,
+                target_info,
                 target_triple,
                 data_layout,
                 session,
@@ -938,6 +946,10 @@ pub mod backend {
         /// Return the LLVM data layout attached to this module.
         pub fn data_layout(&self) -> &str {
             &self.data_layout
+        }
+
+        fn layout_cx(&self) -> LayoutCx<'a> {
+            LayoutCx::with_defs_for_target(self.tcx, &self.hir.defs, self.target_info.clone())
         }
 
         /// Verify the current LLVM module and convert verifier text into `CodegenError`.
@@ -1153,9 +1165,8 @@ pub mod backend {
                     param_index = param_index.saturating_add(1);
                     var
                 } else {
-                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
-                        .layout_of(decl.ty)
-                        .unwrap_or(Layout { size: 0, align: 1 });
+                    let layout =
+                        self.layout_cx().layout_of(decl.ty).unwrap_or(Layout { size: 0, align: 1 });
                     debug.builder.create_auto_variable(
                         subprogram.as_debug_info_scope(),
                         name,
@@ -1243,7 +1254,8 @@ pub mod backend {
                         FloatKind::F64 => "_Complex double",
                         FloatKind::F80 => "_Complex long double",
                     };
-                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                    let layout = self
+                        .layout_cx()
                         .layout_of(ty)
                         .map_err(|e| type_lowering_error(ty, e.to_string()))?;
                     debug
@@ -1261,7 +1273,8 @@ pub mod backend {
                 }
                 Ty::Array { elem, len, is_vla } => {
                     let elem_ty = self.debug_type(elem.ty)?;
-                    let elem_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                    let elem_layout = self
+                        .layout_cx()
                         .layout_of(elem.ty)
                         .map_err(|e| type_lowering_error(ty, e.to_string()))?;
                     let count = if *is_vla { 0 } else { len.unwrap_or(0) };
@@ -1333,7 +1346,8 @@ pub mod backend {
             let DefKind::Record { kind, .. } = &def_data.kind else {
                 return Err(type_lowering_error(ty, "record definition id does not name a record"));
             };
-            let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+            let layout = self
+                .layout_cx()
                 .layout_of(ty)
                 .map_err(|e| type_lowering_error(ty, e.to_string()))?;
             let tag = match kind {
@@ -1387,7 +1401,7 @@ pub mod backend {
 
         /// Build a type-lowering helper sharing this module's context and HIR.
         pub fn type_cx(&self) -> TypeCx<'a, 'ctx> {
-            TypeCx::new(self.context, self.tcx, self.hir)
+            TypeCx::for_target(self.context, self.tcx, self.hir, self.target_info.clone())
         }
 
         /// Declare every HIR function and file-scope object in this LLVM module.
@@ -2017,7 +2031,7 @@ pub mod backend {
                     ));
                 }
                 _ => {
-                    LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                    self.layout_cx()
                         .layout_of(ty)
                         .map_err(|err| type_error(ty, err.to_string()))?
                         .size
@@ -3511,7 +3525,8 @@ pub mod backend {
                     ptr_ty
                 )));
             }
-            let elem_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+            let elem_layout = self
+                .layout_cx()
                 .layout_of(pointee.ty)
                 .map_err(|err| type_lowering_error(pointee.ty, err.to_string()))?;
             if elem_layout.size == 0 {
@@ -3822,9 +3837,7 @@ pub mod backend {
         }
 
         fn memory_layout(&self, ty: TyId) -> Result<Layout, CodegenError> {
-            LayoutCx::with_defs(self.tcx, &self.hir.defs)
-                .layout_of(ty)
-                .map_err(|err| type_error(ty, err.to_string()))
+            self.layout_cx().layout_of(ty).map_err(|err| type_error(ty, err.to_string()))
         }
 
         /// Materialise a CFG [`Const`] as an LLVM value.
@@ -3926,7 +3939,8 @@ pub mod backend {
             let field = fields.get(index as usize).ok_or_else(|| {
                 CodegenError::Internal(format!("record {:?} has no field at index {}", def, index))
             })?;
-            let record_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+            let record_layout = self
+                .layout_cx()
                 .record_layout_of(ty)
                 .map_err(|err| type_error(ty, err.to_string()))?;
             let layout = record_layout.fields.get(index as usize).copied().ok_or_else(|| {
@@ -4640,13 +4654,28 @@ pub mod backend {
         context: &'ctx Context,
         tcx: &'a TyCtxt,
         hir: &'a HirCrate,
+        target_info: TargetInfo,
         cache: FxHashMap<TyId, AnyTypeEnum<'ctx>>,
     }
 
     impl<'a, 'ctx> TypeCx<'a, 'ctx> {
         /// Build a fresh type-lowering context.
         pub fn new(context: &'ctx Context, tcx: &'a TyCtxt, hir: &'a HirCrate) -> Self {
-            Self { context, tcx, hir, cache: FxHashMap::default() }
+            Self::for_target(context, tcx, hir, TargetInfo::baseline())
+        }
+
+        /// Build a fresh type-lowering context for an explicit target.
+        pub fn for_target(
+            context: &'ctx Context,
+            tcx: &'a TyCtxt,
+            hir: &'a HirCrate,
+            target_info: TargetInfo,
+        ) -> Self {
+            Self { context, tcx, hir, target_info, cache: FxHashMap::default() }
+        }
+
+        fn layout_cx(&self) -> LayoutCx<'a> {
+            LayoutCx::with_defs_for_target(self.tcx, &self.hir.defs, self.target_info.clone())
         }
 
         /// Lower any HIR type representable as an LLVM type.
@@ -4839,7 +4868,8 @@ pub mod backend {
                     .map(|field_ty| self.basic_type_of(field_ty))
                     .collect::<Result<Vec<_>, _>>()?,
                 RecordKind::Union => {
-                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                    let layout = self
+                        .layout_cx()
                         .layout_of(ty)
                         .map_err(|err| type_error(ty, err.to_string()))?;
                     vec![self.context.i8_type().array_type(array_len(layout.size, ty)?).into()]
@@ -4913,6 +4943,7 @@ pub mod backend {
         context: &'ctx Context,
         tcx: &'a TyCtxt,
         hir: &'a HirCrate,
+        target_info: TargetInfo,
         type_cx: TypeCx<'a, 'ctx>,
         globals: FxHashMap<DefId, GlobalValue<'ctx>>,
         functions: FxHashMap<DefId, FunctionValue<'ctx>>,
@@ -4926,11 +4957,16 @@ pub mod backend {
                 context: cx.context(),
                 tcx: cx.tcx(),
                 hir: cx.hir(),
+                target_info: cx.target_info.clone(),
                 type_cx: cx.type_cx(),
                 globals: cx.global_decls().clone(),
                 functions: cx.function_decls().clone(),
                 string_literals: FxHashMap::default(),
             }
+        }
+
+        fn layout_cx(&self) -> LayoutCx<'a> {
+            LayoutCx::with_defs_for_target(self.tcx, &self.hir.defs, self.target_info.clone())
         }
 
         /// Lower every `GlobalInit` attached to file-scope objects into LLVM
@@ -5077,7 +5113,8 @@ pub mod backend {
                         .iter()
                         .find(|e| matches!(e.path.first(), Some(GlobalInitDesignator::Field(_))));
 
-                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                    let layout = self
+                        .layout_cx()
                         .layout_of(ty)
                         .map_err(|err| type_error(ty, err.to_string()))?;
                     let size = u32::try_from(layout.size)
@@ -5222,7 +5259,7 @@ pub mod backend {
                 return Ok(self.collect_scalar_bytes(value, size));
             }
 
-            let layout_cx = LayoutCx::with_defs(self.tcx, &self.hir.defs);
+            let layout_cx = self.layout_cx();
             match self.tcx.get(ty) {
                 Ty::Array { elem, len: Some(len), is_vla: false } => {
                     let elem_ty = elem.ty;
@@ -5486,13 +5523,13 @@ pub mod backend {
         }
     }
 
-    fn target_triple(session: &Session) -> String {
+    fn target_info(session: &Session) -> TargetInfo {
         session
             .opts
             .target
             .as_ref()
-            .map(|target| target.0.clone())
-            .unwrap_or_else(|| BASELINE_TARGET_TRIPLE.to_owned())
+            .and_then(|target| TargetInfo::from_triple(target).ok())
+            .unwrap_or_else(TargetInfo::baseline)
     }
 
     fn module_name(session: &Session) -> String {

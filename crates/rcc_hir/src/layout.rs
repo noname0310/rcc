@@ -4,6 +4,7 @@
 //! because CFG lowering needs `sizeof` answers before LLVM codegen runs.
 
 use rcc_data_structures::IndexVec;
+use rcc_target::{FloatLayoutKind, IntRankLayout, TargetInfo, TypeLayout};
 
 use crate::{Def, DefId, DefKind, FloatKind, IntRank, Layout, RecordKind, Ty, TyCtxt, TyId};
 
@@ -100,14 +101,15 @@ impl std::fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
-/// Layout context for the compiler's current baseline target.
+/// Layout context for one compilation target.
 ///
-/// The scalar ABI is LP64 / SysV x86-64 compatible for now. Aggregate
-/// layout is independent of LLVM and can therefore be shared by CFG
-/// lowering, constant evaluation, and the LLVM backend.
+/// Scalar layouts are read from [`TargetInfo`]. Aggregate layout is independent
+/// of LLVM and can therefore be shared by CFG lowering, constant evaluation,
+/// and the LLVM backend.
 pub struct LayoutCx<'tcx> {
     /// Backing type context.
     pub tcx: &'tcx TyCtxt,
+    target: TargetInfo,
     defs: Option<&'tcx IndexVec<DefId, Def>>,
 }
 
@@ -118,13 +120,37 @@ impl<'tcx> LayoutCx<'tcx> {
     /// layouts that do not contain records.
     #[must_use]
     pub fn new(tcx: &'tcx TyCtxt) -> Self {
-        Self { tcx, defs: None }
+        Self::for_target(tcx, TargetInfo::baseline())
+    }
+
+    /// Build a layout context for an explicit target without access to
+    /// top-level definitions.
+    #[must_use]
+    pub fn for_target(tcx: &'tcx TyCtxt, target: TargetInfo) -> Self {
+        Self { tcx, target, defs: None }
     }
 
     /// Build a layout context that can resolve record and enum definitions.
     #[must_use]
     pub fn with_defs(tcx: &'tcx TyCtxt, defs: &'tcx IndexVec<DefId, Def>) -> Self {
-        Self { tcx, defs: Some(defs) }
+        Self::with_defs_for_target(tcx, defs, TargetInfo::baseline())
+    }
+
+    /// Build a layout context that can resolve record and enum definitions for
+    /// an explicit target.
+    #[must_use]
+    pub fn with_defs_for_target(
+        tcx: &'tcx TyCtxt,
+        defs: &'tcx IndexVec<DefId, Def>,
+        target: TargetInfo,
+    ) -> Self {
+        Self { tcx, target, defs: Some(defs) }
+    }
+
+    /// Target facts used by this layout context.
+    #[must_use]
+    pub fn target(&self) -> &TargetInfo {
+        &self.target
     }
 
     /// Compute the layout of `ty`.
@@ -152,16 +178,16 @@ impl<'tcx> LayoutCx<'tcx> {
     fn layout_of_inner(&self, ty: TyId, record_stack: &mut Vec<DefId>) -> LayoutResult<Layout> {
         match self.tcx.get(ty) {
             Ty::Void => Err(LayoutError::Unsized { ty, reason: "void is not an object type" }),
-            Ty::Int { rank, .. } => Ok(int_layout(*rank)),
-            Ty::Float(kind) => Ok(float_layout(*kind)),
+            Ty::Int { rank, .. } => Ok(type_layout(self.target.int_layout(int_rank_layout(*rank)))),
+            Ty::Float(kind) => Ok(type_layout(self.target.float_layout(float_layout_kind(*kind)))),
             Ty::Complex(kind) => {
-                let base = float_layout(*kind);
+                let base = type_layout(self.target.float_layout(float_layout_kind(*kind)));
                 Ok(Layout {
                     size: base.size.checked_mul(2).ok_or(LayoutError::SizeOverflow { ty })?,
                     align: base.align,
                 })
             }
-            Ty::Ptr(_) => Ok(Layout { size: 8, align: 8 }),
+            Ty::Ptr(_) => Ok(type_layout(self.target.layouts.pointer)),
             Ty::Func { .. } => {
                 Err(LayoutError::Unsized { ty, reason: "function types have no object size" })
             }
@@ -180,7 +206,7 @@ impl<'tcx> LayoutCx<'tcx> {
             }
             Ty::Record(def) => self.record_layout_details(ty, *def, record_stack).map(|r| r.layout),
             Ty::Enum(def) => self.enum_layout(*def),
-            Ty::BuiltinVaList => Ok(Layout { size: 24, align: 8 }),
+            Ty::BuiltinVaList => Ok(type_layout(self.target.layouts.builtin_va_list)),
             Ty::Error => Err(LayoutError::Unsized { ty, reason: "error type has no layout" }),
         }
     }
@@ -403,34 +429,40 @@ impl<'tcx> LayoutCx<'tcx> {
 
     fn enum_layout(&self, def: DefId) -> LayoutResult<Layout> {
         let Some(defs) = self.defs else {
-            return Ok(int_layout(IntRank::Int));
+            return Ok(type_layout(self.target.int_layout(IntRankLayout::Int)));
         };
         let Some(def_data) = defs.get(def) else {
-            return Ok(int_layout(IntRank::Int));
+            return Ok(type_layout(self.target.int_layout(IntRankLayout::Int)));
         };
         match &def_data.kind {
             DefKind::Enum { repr, .. } | DefKind::Enumerator { ty: repr, .. } => {
                 self.layout_of_inner(*repr, &mut Vec::new())
             }
-            _ => Ok(int_layout(IntRank::Int)),
+            _ => Ok(type_layout(self.target.int_layout(IntRankLayout::Int))),
         }
     }
 }
 
-fn int_layout(rank: IntRank) -> Layout {
+fn type_layout(layout: TypeLayout) -> Layout {
+    Layout { size: layout.size, align: layout.align }
+}
+
+fn int_rank_layout(rank: IntRank) -> IntRankLayout {
     match rank {
-        IntRank::Bool | IntRank::Char => Layout { size: 1, align: 1 },
-        IntRank::Short => Layout { size: 2, align: 2 },
-        IntRank::Int => Layout { size: 4, align: 4 },
-        IntRank::Long | IntRank::LongLong => Layout { size: 8, align: 8 },
+        IntRank::Bool => IntRankLayout::Bool,
+        IntRank::Char => IntRankLayout::Char,
+        IntRank::Short => IntRankLayout::Short,
+        IntRank::Int => IntRankLayout::Int,
+        IntRank::Long => IntRankLayout::Long,
+        IntRank::LongLong => IntRankLayout::LongLong,
     }
 }
 
-fn float_layout(kind: FloatKind) -> Layout {
+fn float_layout_kind(kind: FloatKind) -> FloatLayoutKind {
     match kind {
-        FloatKind::F32 => Layout { size: 4, align: 4 },
-        FloatKind::F64 => Layout { size: 8, align: 8 },
-        FloatKind::F80 => Layout { size: 16, align: 16 },
+        FloatKind::F32 => FloatLayoutKind::Float,
+        FloatKind::F64 => FloatLayoutKind::Double,
+        FloatKind::F80 => FloatLayoutKind::LongDouble,
     }
 }
 
@@ -505,6 +537,19 @@ mod tests {
         assert_eq!(layouts.layout_of(ptr).unwrap(), Layout { size: 8, align: 8 });
         assert_eq!(layouts.layout_of(arr).unwrap(), Layout { size: 12, align: 4 });
         assert_eq!(layouts.layout_of(nested).unwrap(), Layout { size: 24, align: 4 });
+    }
+
+    #[test]
+    fn target_info_drives_scalar_layout() {
+        let tcx = TyCtxt::new();
+        let windows =
+            TargetInfo::from_triple(&rcc_target::TargetTriple::new("x86_64-pc-windows-msvc"))
+                .unwrap();
+        let layouts = LayoutCx::for_target(&tcx, windows);
+
+        assert_eq!(layouts.layout_of(tcx.long).unwrap(), Layout { size: 4, align: 4 });
+        assert_eq!(layouts.layout_of(tcx.long_long).unwrap(), Layout { size: 8, align: 8 });
+        assert_eq!(layouts.layout_of(tcx.long_double).unwrap(), Layout { size: 8, align: 8 });
     }
 
     #[test]

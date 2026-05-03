@@ -15,4 +15,5 @@ clap = ["dep:clap"]
 [dependencies]
 rcc_span    = { workspace = true }
 rcc_errors  = { workspace = true }
+rcc_target  = { workspace = true }
 clap       = { workspace = true, optional = true }

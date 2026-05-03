@@ -8,7 +8,7 @@ Compiler-provided runtime: target abstraction, freestanding headers, builtin fun
 
 ## Tasks (pick in order)
 
-- [ ] [01-target-info](01-target-info.md)
+- [x] [01-target-info](01-target-info.md)
 - [ ] [02-stddef-header](02-stddef-header.md)
 - [ ] [03-stdarg-header](03-stdarg-header.md)
 - [ ] [04-remaining-freestanding](04-remaining-freestanding.md)

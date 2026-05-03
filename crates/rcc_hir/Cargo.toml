@@ -11,3 +11,4 @@ description = "High-level IR: name-resolved tree + C99 type system"
 [dependencies]
 rcc_span            = { workspace = true }
 rcc_data_structures = { workspace = true }
+rcc_target          = { workspace = true }

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 15-01: `TargetInfo` struct
 
 **Phase:** 15-builtin-rt    **Depends on:** —    **Milestone:** M5

@@ -565,6 +565,7 @@ dependencies = [
  "rcc_preprocess",
  "rcc_session",
  "rcc_span",
+ "rcc_target",
  "rcc_typeck",
  "tempfile",
 ]
@@ -627,6 +628,7 @@ version = "0.0.1"
 dependencies = [
  "rcc_data_structures",
  "rcc_span",
+ "rcc_target",
 ]
 
 [[package]]
@@ -689,6 +691,7 @@ dependencies = [
  "clap",
  "rcc_errors",
  "rcc_span",
+ "rcc_target",
 ]
 
 [[package]]
@@ -697,6 +700,10 @@ version = "0.0.1"
 dependencies = [
  "rustc-hash",
 ]
+
+[[package]]
+name = "rcc_target"
+version = "0.0.1"
 
 [[package]]
 name = "rcc_typeck"

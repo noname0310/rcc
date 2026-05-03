@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use rcc_errors::{CaptureEmitter, Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
+pub use rcc_target::TargetTriple;
 
 /// Stages at which the driver can dump intermediate state.
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -35,10 +36,6 @@ pub enum EmitKind {
     /// Object file.
     Obj,
 }
-
-/// Target triple (parsed lazily by `rcc_codegen_llvm`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TargetTriple(pub String);
 
 /// LLVM-style optimisation level, mapped 1:1 to `OptimizationLevel`.
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]

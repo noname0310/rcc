@@ -6,6 +6,7 @@ exclude = ["fuzz"]
 members = [
     "crates/rcc_span",
     "crates/rcc_errors",
+    "crates/rcc_target",
     "crates/rcc_session",
     "crates/rcc_data_structures",
     "crates/rcc_lexer",
@@ -35,6 +36,7 @@ publish = false
 # Internal crates
 rcc_span             = { path = "crates/rcc_span" }
 rcc_errors           = { path = "crates/rcc_errors" }
+rcc_target           = { path = "crates/rcc_target" }
 rcc_session          = { path = "crates/rcc_session" }
 rcc_data_structures  = { path = "crates/rcc_data_structures" }
 rcc_lexer            = { path = "crates/rcc_lexer" }
