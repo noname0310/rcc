@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 09-25: FileCheck-style tests
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-24    **Milestone:** M4
