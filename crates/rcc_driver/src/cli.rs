@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
 
 /// The `rcc` command-line interface.
@@ -47,6 +47,14 @@ pub struct Cli {
     /// Optimisation level.
     #[arg(short = 'O', long = "opt-level", value_enum, default_value_t = OptLevel::None)]
     pub opt_level: OptLevel,
+
+    /// Suppress all warnings (`-w`).
+    #[arg(short = 'w', action = ArgAction::SetTrue)]
+    pub suppress_warnings: bool,
+
+    /// Warning control flag (`-Wall`, `-Werror`, `-Wno-name`, ...).
+    #[arg(short = 'W', value_name = "warning", action = ArgAction::Append)]
+    pub warning_flags: Vec<String>,
 
     /// Include GPL-licensed test suites during `fetch-testsuites` / conformance runs.
     #[arg(long)]

@@ -13,10 +13,12 @@ mod builder;
 pub mod codes;
 mod emitter;
 mod handler;
+mod warning;
 
 pub use builder::DiagnosticBuilder;
 pub use emitter::{include_chain_notes, CaptureEmitter, Emitter, StderrEmitter};
 pub use handler::Handler;
+pub use warning::WarningConfig;
 
 /// Severity level of a `Diagnostic`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

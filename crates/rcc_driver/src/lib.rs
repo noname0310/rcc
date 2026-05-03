@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rcc_session::{EmitKind, Options, Session, TargetInfo};
+use rcc_session::{EmitKind, Options, Session, TargetInfo, WarningConfig};
 
 pub mod cli;
 pub mod pipeline;
@@ -44,6 +44,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         emit,
         output,
         opt_level: cli.opt_level,
+        warning_config: warning_config_from_cli(cli),
         debug_info: false,
         include_gpl_tests: cli.include_gpl_tests,
         gnu_va_args_elision: false,
@@ -54,6 +55,37 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_range_designators: false,
         gnu_attributes: false,
         gnu_inline_asm: false,
+    }
+}
+
+fn warning_config_from_cli(cli: &Cli) -> WarningConfig {
+    let mut config = WarningConfig::default();
+    if cli.suppress_warnings {
+        config.suppress_all();
+    }
+    for flag in &cli.warning_flags {
+        apply_warning_flag(&mut config, flag);
+    }
+    config
+}
+
+fn apply_warning_flag(config: &mut WarningConfig, raw: &str) {
+    match raw {
+        "all" => config.enable_wall(),
+        "extra" => config.enable_extra(),
+        "pedantic" => config.enable_pedantic(),
+        "error" => config.set_warnings_as_errors(true),
+        "no-error" => config.set_warnings_as_errors(false),
+        name if name.starts_with("error=") => {
+            config.promote_warning(name.trim_start_matches("error="));
+        }
+        name if name.starts_with("no-error=") => {
+            config.demote_warning(name.trim_start_matches("no-error="));
+        }
+        name if name.starts_with("no-") => {
+            config.disable_warning(name.trim_start_matches("no-"));
+        }
+        name => config.enable_warning(name),
     }
 }
 

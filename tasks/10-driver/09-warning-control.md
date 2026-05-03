@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-09: Warning control flags
 
 **Phase:** 10-driver    **Depends on:** 10-03    **Milestone:** M6

@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+pub use rcc_errors::WarningConfig;
 use rcc_errors::{CaptureEmitter, Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
 pub use rcc_target::{Arch, DataModel, Environment, Os, TargetError, TargetInfo, TargetTriple};
@@ -66,6 +67,8 @@ pub struct Options {
     pub output: Option<PathBuf>,
     /// Optimisation level.
     pub opt_level: OptLevel,
+    /// Warning filtering and promotion policy.
+    pub warning_config: WarningConfig,
     /// Emit LLVM debug metadata when the LLVM backend is enabled.
     ///
     /// CLI `-g` wiring is owned by the driver phase; backend tests can set this
@@ -146,6 +149,7 @@ impl Default for Options {
             emit: Vec::new(),
             output: None,
             opt_level: OptLevel::None,
+            warning_config: WarningConfig::default(),
             debug_info: false,
             include_gpl_tests: false,
             gnu_va_args_elision: false,
@@ -176,19 +180,17 @@ impl Session {
     /// Build a session that prints diagnostics to stderr.
     pub fn new(opts: Options) -> Self {
         let sm = Arc::new(RwLock::new(SourceMap::new()));
-        Self {
-            opts,
-            source_map: sm.clone(),
-            interner: Interner::new(),
-            handler: Handler::with_emitter(Box::new(StderrEmitter::new(sm))),
-        }
+        let mut handler = Handler::with_emitter(Box::new(StderrEmitter::new(sm.clone())));
+        handler.set_warning_config(opts.warning_config.clone());
+        Self { opts, source_map: sm.clone(), interner: Interner::new(), handler }
     }
 
     /// Build a session with a user-supplied `Handler`. Used by tests.
-    pub fn with_handler(opts: Options, handler: Handler) -> Self {
+    pub fn with_handler(opts: Options, mut handler: Handler) -> Self {
+        handler.set_warning_config(opts.warning_config.clone());
         Self {
-            opts,
             source_map: Arc::new(RwLock::new(SourceMap::new())),
+            opts,
             interner: Interner::new(),
             handler,
         }
