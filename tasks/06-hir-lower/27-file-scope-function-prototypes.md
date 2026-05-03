@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 06-27: File-scope function prototypes
 
 **Phase:** 06-hir-lower    **Depends on:** 06-26    **Milestone:** M4    **Size:** Medium

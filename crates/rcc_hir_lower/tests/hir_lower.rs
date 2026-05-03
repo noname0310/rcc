@@ -1471,17 +1471,65 @@ fn snippet_extern_then_definition_globals_are_both_typed() {
 }
 
 #[test]
-fn snippet_function_declaration_global_has_function_type() {
+fn snippet_function_declaration_is_function_prototype() {
     let (hir, tcx) = lower_snippet("int f(int);");
-    let DefKind::Global { ty, .. } = hir.defs[DefId(0)].kind else {
-        panic!("expected file-scope function declaration as ordinary global def");
+    let DefKind::Function { ty, has_body, is_static, is_inline, is_extern_inline, .. } =
+        hir.defs[DefId(0)].kind
+    else {
+        panic!("expected file-scope function declaration as function prototype def");
     };
+    assert!(!has_body);
+    assert!(!is_static);
+    assert!(!is_inline);
+    assert!(!is_extern_inline);
     match tcx.get(ty) {
         Ty::Func { ret, params, variadic: false, proto: true } => {
             assert_eq!(*ret, tcx.int);
             assert_eq!(params.as_slice(), &[tcx.int]);
         }
         other => panic!("expected function type, got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_function_prototype_storage_flags_are_preserved() {
+    let (hir, _tcx) = lower_snippet("static int s(int); extern int e(int);");
+    let DefKind::Function { has_body, is_static, is_inline, is_extern_inline, .. } =
+        hir.defs[DefId(0)].kind
+    else {
+        panic!("expected static prototype function def");
+    };
+    assert!(!has_body);
+    assert!(is_static);
+    assert!(!is_inline);
+    assert!(!is_extern_inline);
+
+    let DefKind::Function { has_body, is_static, is_inline, is_extern_inline, .. } =
+        hir.defs[DefId(1)].kind
+    else {
+        panic!("expected extern prototype function def");
+    };
+    assert!(!has_body);
+    assert!(!is_static);
+    assert!(!is_inline);
+    assert!(!is_extern_inline);
+}
+
+#[test]
+fn snippet_function_pointer_object_remains_global() {
+    let (hir, tcx) = lower_snippet("int (*fp)(int);");
+    let DefKind::Global { ty, .. } = hir.defs[DefId(0)].kind else {
+        panic!("function pointer object should remain a global object");
+    };
+    match tcx.get(ty) {
+        Ty::Ptr(pointee) => match tcx.get(pointee.ty) {
+            Ty::Func { ret, params, variadic: false, proto: true } => {
+                assert_eq!(*ret, tcx.int);
+                assert_eq!(params.as_slice(), &[tcx.int]);
+            }
+            other => panic!("expected pointer to function, got pointer to {other:?}"),
+        },
+        other => panic!("expected pointer-to-function object type, got {other:?}"),
     }
 }
 
@@ -2490,6 +2538,18 @@ fn assert_no_def_or_local_error_types(hir: &HirCrate, tcx: &TyCtxt) {
     }
 }
 
+fn assert_no_global_direct_function_types(hir: &HirCrate, tcx: &TyCtxt) {
+    for def in hir.defs.iter() {
+        if let DefKind::Global { ty, .. } = def.kind {
+            assert!(
+                !matches!(tcx.get(ty), Ty::Func { .. }),
+                "global object {:?} carries a direct function type",
+                def.id
+            );
+        }
+    }
+}
+
 fn assert_no_body_expr_error_types_after_typeck(hir: &HirCrate, tcx: &TyCtxt) {
     for body in hir.bodies.values() {
         for expr in body.exprs.iter() {
@@ -2634,6 +2694,59 @@ fn regression_gate_typedef_record_enum_globals_keep_resolved_types() {
         global_tys.iter().any(|ty| matches!(tcx.get(*ty), Ty::Enum(_))),
         "enum E eg should be enum-typed"
     );
+}
+
+#[test]
+fn regression_gate_function_prototype_call_uses_function_def() {
+    let (hir, tcx, cap, sess) =
+        lower_and_typeck_snippet("int callee(int); int f(void) { return callee(7); }");
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean prototype call should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    assert_no_def_or_local_error_types(&hir, &tcx);
+    assert_no_body_expr_error_types_after_typeck(&hir, &tcx);
+    assert_no_global_direct_function_types(&hir, &tcx);
+
+    let callee = def_named(&hir, &sess, "callee");
+    let DefKind::Function { ty, has_body, is_static, .. } = callee.kind else {
+        panic!("callee should be a function prototype def");
+    };
+    assert!(!has_body);
+    assert!(!is_static);
+    match tcx.get(ty) {
+        Ty::Func { ret, params, variadic: false, proto: true } => {
+            assert_eq!(*ret, tcx.int);
+            assert_eq!(params.as_slice(), &[tcx.int]);
+        }
+        other => panic!("expected callee function type, got {other:?}"),
+    }
+
+    let f = def_named(&hir, &sess, "f");
+    let DefKind::Function { has_body, .. } = f.kind else {
+        panic!("f should be a function definition");
+    };
+    assert!(has_body);
+}
+
+#[test]
+fn regression_gate_function_prototype_and_definition_share_def_id() {
+    let (hir, tcx) = lower_snippet("int f(void); int f(void) { return 0; }");
+    let defs: Vec<_> = hir
+        .defs
+        .iter_enumerated()
+        .filter(|(_, def)| matches!(def.kind, DefKind::Function { .. }))
+        .collect();
+    assert_eq!(defs.len(), 1, "prototype and definition should merge to one function def");
+    let (def_id, def) = defs[0];
+    let DefKind::Function { ty, has_body, .. } = def.kind else {
+        unreachable!();
+    };
+    assert!(has_body);
+    assert!(hir.bodies.contains_key(&def_id), "function body should use the merged DefId");
+    assert!(matches!(tcx.get(ty), Ty::Func { .. }));
+    assert_no_global_direct_function_types(&hir, &tcx);
 }
 
 #[test]

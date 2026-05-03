@@ -34,7 +34,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [24-gnu-range-designator-lowering](24-gnu-range-designator-lowering.md)
 - [x] [25-member-access-name-preservation](25-member-access-name-preservation.md)
 - [x] [26-object-qualifier-preservation](26-object-qualifier-preservation.md)
-- [ ] [27-file-scope-function-prototypes](27-file-scope-function-prototypes.md)
+- [x] [27-file-scope-function-prototypes](27-file-scope-function-prototypes.md)
 
 ## Downstream
 

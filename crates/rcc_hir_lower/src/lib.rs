@@ -3942,35 +3942,46 @@ fn assign_def_ids(
             ExternalDecl::Function(func_def) => {
                 // Function definition — extract name from declarator.
                 if let Some((name, _span)) = func_def.declarator.name {
-                    // C99 §6.7.4 inline classification.
-                    //
-                    // Three meaningful combinations of `inline` with a
-                    // storage-class:
-                    //   * `inline`           → inline definition only; the
-                    //     translation unit does not provide an external
-                    //     definition (`is_inline=true, is_extern_inline=false`).
-                    //   * `extern inline`    → both inline and an external
-                    //     definition (`is_inline=true, is_extern_inline=true`).
-                    //   * `static inline`    → internal linkage definition,
-                    //     always emitted (`is_inline=true, is_static=true`).
-                    let is_inline = func_def.specs.func_specs.inline;
-                    let is_static = func_def.specs.storage == Some(StorageClass::Static);
-                    let is_extern_inline =
-                        is_inline && func_def.specs.storage == Some(StorageClass::Extern);
-                    let id = crate_.defs.push(Def {
-                        id: DefId(0), // patched below
-                        name,
-                        span: func_def.span,
-                        kind: DefKind::Function {
-                            ty: tcx.error,
-                            has_body: true,
+                    let flags = function_decl_flags(&func_def.specs);
+                    let id = if let Some(existing) = resolver
+                        .ordinary
+                        .get(&name)
+                        .copied()
+                        .filter(|id| matches!(crate_.defs[*id].kind, DefKind::Function { .. }))
+                    {
+                        if let DefKind::Function {
+                            has_body,
                             is_static,
                             is_inline,
                             is_extern_inline,
-                            variadic: false,
-                        },
-                    });
-                    crate_.defs[id].id = id;
+                            ..
+                        } = &mut crate_.defs[existing].kind
+                        {
+                            *has_body = true;
+                            *is_static = flags.is_static;
+                            *is_inline = flags.is_inline;
+                            *is_extern_inline = flags.is_extern_inline;
+                        }
+                        crate_.defs[existing].span = func_def.span;
+                        existing
+                    } else {
+                        let id = crate_.defs.push(Def {
+                            id: DefId(0), // patched below
+                            name,
+                            span: func_def.span,
+                            kind: DefKind::Function {
+                                ty: tcx.error,
+                                has_body: true,
+                                is_static: flags.is_static,
+                                is_inline: flags.is_inline,
+                                is_extern_inline: flags.is_extern_inline,
+                                variadic: false,
+                            },
+                        });
+                        crate_.defs[id].id = id;
+                        resolver.ordinary.insert(name, id);
+                        id
+                    };
                     resolver.ordinary.insert(name, id);
                 }
             }
@@ -4027,6 +4038,33 @@ fn assign_def_ids(
                             if !duplicate_in_decl {
                                 resolver.ordinary.insert(name, id);
                             }
+                        } else if is_file_scope_function_declarator(&init_decl.declarator) {
+                            let flags = function_decl_flags(&decl.specs);
+                            let id = if let Some(existing) =
+                                resolver.ordinary.get(&name).copied().filter(|id| {
+                                    matches!(crate_.defs[*id].kind, DefKind::Function { .. })
+                                }) {
+                                existing
+                            } else {
+                                let id = crate_.defs.push(Def {
+                                    id: DefId(0),
+                                    name,
+                                    span: decl.span,
+                                    kind: DefKind::Function {
+                                        ty: tcx.error,
+                                        has_body: false,
+                                        is_static: flags.is_static,
+                                        is_inline: flags.is_inline,
+                                        is_extern_inline: flags.is_extern_inline,
+                                        variadic: false,
+                                    },
+                                });
+                                crate_.defs[id].id = id;
+                                id
+                            };
+                            if !duplicate_in_decl {
+                                resolver.ordinary.insert(name, id);
+                            }
                         } else {
                             // Global variable (or extern declaration).
                             let linkage = match decl.specs.storage {
@@ -4058,6 +4096,24 @@ fn assign_def_ids(
             }
         }
     }
+}
+
+#[derive(Copy, Clone)]
+struct FunctionDeclFlags {
+    is_static: bool,
+    is_inline: bool,
+    is_extern_inline: bool,
+}
+
+fn function_decl_flags(specs: &rcc_ast::DeclSpecs) -> FunctionDeclFlags {
+    let is_inline = specs.func_specs.inline;
+    let is_static = specs.storage == Some(StorageClass::Static);
+    let is_extern_inline = is_inline && specs.storage == Some(StorageClass::Extern);
+    FunctionDeclFlags { is_static, is_inline, is_extern_inline }
+}
+
+fn is_file_scope_function_declarator(declarator: &Declarator) -> bool {
+    matches!(declarator.derived.last(), Some(DerivedDeclarator::Function(_)))
 }
 
 fn finalize_file_scope_tag_definitions(
@@ -4116,10 +4172,21 @@ fn finalize_file_scope_def_types(
             let Some((name, _span)) = init_decl.declarator.name else {
                 continue;
             };
-            let ordinal = seen_file_scope_ordinary_def(&mut seen_ordinary_defs, name, is_typedef);
-            let Some(def_id) = find_file_scope_ordinary_def(crate_, name, is_typedef, ordinal)
-            else {
-                continue;
+            let is_function_decl =
+                !is_typedef && is_file_scope_function_declarator(&init_decl.declarator);
+            let def_id = if is_function_decl {
+                let Some(def_id) = find_file_scope_function_def(crate_, name) else {
+                    continue;
+                };
+                def_id
+            } else {
+                let ordinal =
+                    seen_file_scope_ordinary_def(&mut seen_ordinary_defs, name, is_typedef);
+                let Some(def_id) = find_file_scope_ordinary_def(crate_, name, is_typedef, ordinal)
+                else {
+                    continue;
+                };
+                def_id
             };
 
             let mut ty = lower_type_from_parts(
@@ -4156,6 +4223,26 @@ fn finalize_file_scope_def_types(
 
             match &mut crate_.defs[def_id].kind {
                 DefKind::Typedef(slot) => *slot = ty,
+                DefKind::Function {
+                    ty: slot,
+                    has_body,
+                    is_static,
+                    is_inline,
+                    is_extern_inline,
+                    variadic,
+                } => {
+                    *slot = ty;
+                    *variadic = match tcx.get(ty) {
+                        Ty::Func { variadic, .. } => *variadic,
+                        _ => false,
+                    };
+                    if !*has_body {
+                        let flags = function_decl_flags(&decl.specs);
+                        *is_static = flags.is_static;
+                        *is_inline = flags.is_inline;
+                        *is_extern_inline = flags.is_extern_inline;
+                    }
+                }
                 DefKind::Global { ty: slot, quals, init, .. } => {
                     *slot = ty;
                     *quals = declaration_object_quals(&decl.specs, &init_decl.declarator);
@@ -4195,6 +4282,12 @@ fn find_file_scope_ordinary_def(
         seen += 1;
     }
     None
+}
+
+fn find_file_scope_function_def(crate_: &HirCrate, name: Symbol) -> Option<DefId> {
+    crate_.defs.iter_enumerated().find_map(|(id, def)| {
+        (def.name == name && matches!(def.kind, DefKind::Function { .. })).then_some(id)
+    })
 }
 
 fn matches_file_scope_ordinary_kind(kind: &DefKind, is_typedef: bool) -> bool {
