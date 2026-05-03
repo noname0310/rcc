@@ -25,7 +25,7 @@
 - [x] [13-debug-info-object-smoke](13-debug-info-object-smoke.md)
 - [x] [14-output-and-temp-artifact-policy](14-output-and-temp-artifact-policy.md)
 - [x] [15-exit-status-and-diagnostics-contract](15-exit-status-and-diagnostics-contract.md)
-- [ ] [16-tool-discovery-and-verbose-trace](16-tool-discovery-and-verbose-trace.md)
+- [x] [16-tool-discovery-and-verbose-trace](16-tool-discovery-and-verbose-trace.md)
 - [ ] [17-response-files](17-response-files.md)
 - [ ] [18-dependency-file-emission](18-dependency-file-emission.md)
 

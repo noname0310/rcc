@@ -2,11 +2,10 @@
 //! lower -> typeck -> cfg-build -> cfg-transform -> codegen.
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rcc_cfg::{build_bodies, pretty::dump_body};
@@ -17,6 +16,9 @@ use rcc_lexer::{PpToken, PpTokenKind};
 use rcc_preprocess::preprocess;
 use rcc_session::{EmitKind, LinkOptions, Session};
 use rcc_typeck::{check, verify_typed_hir};
+
+pub use crate::toolchain::CommandSpec as LinkCommand;
+use crate::toolchain::{CommandSpec, Toolchain};
 
 /// Compile a single file end-to-end. Errors are written to the session's
 /// diagnostic handler; this function only returns `Err` for unrecoverable
@@ -296,10 +298,11 @@ impl OutputPlan {
     }
 }
 
-/// Link one native object file into an executable using the host C compiler.
+/// Link one native object file into an executable using clang + LLVM lld.
 ///
-/// This deliberately goes through `cc` instead of invoking `ld` directly so
-/// libc and CRT startup objects stay the host toolchain's responsibility.
+/// This deliberately goes through a clang-compatible linker driver with
+/// `-fuse-ld=lld` instead of invoking `ld.lld` directly, so libc and CRT
+/// startup objects stay the platform driver's responsibility.
 pub fn link(obj: &Path, output: &Path) -> Result<(), String> {
     link_with_options(obj, output, &LinkOptions::default())
 }
@@ -315,17 +318,20 @@ pub fn link_objects_with_options(
     output: &Path,
     options: &LinkOptions,
 ) -> Result<(), String> {
-    let linker = find_host_cc()?;
-    link_objects_with_linker_and_options(&linker, objects, output, options)
+    let linker_driver = match &options.linker_driver {
+        Some(path) => path.clone(),
+        None => Toolchain::discover().map_err(|err| err.to_string())?.linker_driver,
+    };
+    link_objects_with_linker_and_options(&linker_driver, objects, output, options)
 }
 
-/// Link with an explicit linker path. Public for driver tests and later tool
-/// discovery work; ordinary users should call [`link`].
+/// Link with an explicit linker-driver path. Public for driver tests and later
+/// tool discovery work; ordinary users should call [`link`].
 pub fn link_with_linker(linker: &Path, obj: &Path, output: &Path) -> Result<(), String> {
     link_with_linker_and_options(linker, obj, output, &LinkOptions::default())
 }
 
-/// Link with an explicit linker path and explicit forwarding options.
+/// Link with an explicit linker-driver path and explicit forwarding options.
 pub fn link_with_linker_and_options(
     linker: &Path,
     obj: &Path,
@@ -335,16 +341,19 @@ pub fn link_with_linker_and_options(
     link_objects_with_linker_and_options(linker, &[obj.to_path_buf()], output, options)
 }
 
-/// Link several objects with an explicit linker path and explicit options.
+/// Link several objects with an explicit linker-driver path and explicit options.
 pub fn link_objects_with_linker_and_options(
     linker: &Path,
     objects: &[PathBuf],
     output: &Path,
     options: &LinkOptions,
 ) -> Result<(), String> {
-    let command = LinkCommand::with_objects(linker.to_path_buf(), objects, output, options);
-    let result = Command::new(&command.program)
-        .args(&command.args)
+    let command = CommandSpec::with_objects(linker.to_path_buf(), objects, output, options);
+    if options.verbose {
+        eprintln!("link command: {}", command.render());
+    }
+    let result = command
+        .to_command()
         .output()
         .map_err(|e| format!("failed to run linker `{}`: {e}", command.render()))?;
 
@@ -359,124 +368,6 @@ pub fn link_objects_with_linker_and_options(
         command.render(),
         stderr.trim_end()
     ))
-}
-
-/// A host linker command before it is spawned.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LinkCommand {
-    program: PathBuf,
-    args: Vec<OsString>,
-}
-
-impl LinkCommand {
-    /// Build `cc <obj> -o <output>`.
-    #[must_use]
-    pub fn new(program: PathBuf, obj: &Path, output: &Path) -> Self {
-        Self::with_options(program, obj, output, &LinkOptions::default())
-    }
-
-    /// Build a host-cc link command with forwarded linker options.
-    #[must_use]
-    pub fn with_options(
-        program: PathBuf,
-        obj: &Path,
-        output: &Path,
-        options: &LinkOptions,
-    ) -> Self {
-        Self::with_objects(program, &[obj.to_path_buf()], output, options)
-    }
-
-    /// Build a host-cc link command for several object files.
-    #[must_use]
-    pub fn with_objects(
-        program: PathBuf,
-        objects: &[PathBuf],
-        output: &Path,
-        options: &LinkOptions,
-    ) -> Self {
-        let mut args = objects.iter().map(|obj| obj.as_os_str().to_owned()).collect::<Vec<_>>();
-        args.push(OsString::from("-o"));
-        args.push(output.as_os_str().to_owned());
-        if options.shared {
-            args.push(OsString::from("-shared"));
-        }
-        if options.static_link {
-            args.push(OsString::from("-static"));
-        }
-        match options.pie {
-            Some(true) => args.push(OsString::from("-pie")),
-            Some(false) => args.push(OsString::from("-no-pie")),
-            None => {}
-        }
-        for path in &options.library_paths {
-            let mut arg = OsString::from("-L");
-            arg.push(path);
-            args.push(arg);
-        }
-        for lib in &options.libraries {
-            args.push(OsString::from(format!("-l{lib}")));
-        }
-        for arg in &options.linker_args {
-            args.push(OsString::from(arg));
-        }
-        Self { program, args }
-    }
-
-    /// Render the command line for diagnostics.
-    #[must_use]
-    pub fn render(&self) -> String {
-        std::iter::once(quote_arg(self.program.as_os_str()))
-            .chain(self.args.iter().map(|arg| quote_arg(arg.as_os_str())))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-fn find_host_cc() -> Result<PathBuf, String> {
-    find_program_on_path("cc").ok_or_else(|| "host linker `cc` was not found on PATH".to_string())
-}
-
-fn find_program_on_path(program: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        for name in executable_names(program) {
-            let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn executable_names(program: &str) -> Vec<OsString> {
-    #[cfg(windows)]
-    {
-        let has_ext = Path::new(program).extension().is_some();
-        if has_ext {
-            return vec![OsString::from(program)];
-        }
-        let pathext =
-            env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
-        let mut names = vec![OsString::from(program)];
-        for ext in pathext.to_string_lossy().split(';').filter(|ext| !ext.is_empty()) {
-            names.push(OsString::from(format!("{program}{ext}")));
-        }
-        names
-    }
-    #[cfg(not(windows))]
-    {
-        vec![OsString::from(program)]
-    }
-}
-
-fn quote_arg(arg: &OsStr) -> String {
-    let raw = arg.to_string_lossy();
-    if raw.is_empty() || raw.chars().any(char::is_whitespace) {
-        format!("\"{}\"", raw.replace('"', "\\\""))
-    } else {
-        raw.into_owned()
-    }
 }
 
 fn default_executable_path() -> PathBuf {

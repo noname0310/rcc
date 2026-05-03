@@ -14,6 +14,7 @@ use rcc_session::{EmitKind, LinkOptions, Options, Session, TargetInfo, WarningCo
 
 pub mod cli;
 pub mod pipeline;
+pub mod toolchain;
 
 pub use cli::Cli;
 
@@ -93,6 +94,9 @@ pub fn run_status(cli: Cli) -> DriverStatus {
     }
     emit_ignored_feature_flag_notes(&cli);
     let opts = options_from_cli(&cli);
+    if cli.verbose {
+        emit_verbose_trace(&cli, &opts);
+    }
     if cli.input.len() > 1 {
         return run_many(&cli, &opts);
     }
@@ -129,6 +133,52 @@ fn emit_ignored_feature_flag_notes(cli: &Cli) {
             eprintln!("rcc: note: ignoring compatibility flag {spelling}");
         } else {
             eprintln!("rcc: warning: ignoring unknown compatibility flag {spelling}");
+        }
+    }
+}
+
+fn emit_verbose_trace(cli: &Cli, opts: &Options) {
+    eprintln!("rcc version {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("target: {}", opts.target.triple);
+    if opts.include_paths.is_empty() {
+        eprintln!("include paths: <none>");
+    } else {
+        eprintln!("include paths:");
+        for path in &opts.include_paths {
+            eprintln!("  {}", path.display());
+        }
+    }
+    eprintln!("selected tools:");
+    let finder = toolchain::ToolFinder::from_env();
+    match &opts.link.linker_driver {
+        Some(path) => eprintln!("  linker driver: {} (from command line/options)", path.display()),
+        None => match finder.find_linker_driver() {
+            Ok(path) => eprintln!("  linker driver: {}", path.display()),
+            Err(err) => eprintln!("  linker driver: <not found: {err}>"),
+        },
+    }
+    match finder.find_lld() {
+        Ok(path) => eprintln!("  lld: {}", path.display()),
+        Err(err) => eprintln!("  lld: <not found: {err}>"),
+    }
+    if let Some(prefix) = finder.find_llvm_prefix() {
+        eprintln!("  llvm prefix: {}", prefix.display());
+    } else {
+        eprintln!("  llvm prefix: <none>");
+    }
+    if !cli.libraries.is_empty()
+        || !cli.library_paths.is_empty()
+        || !opts.link.linker_args.is_empty()
+    {
+        eprintln!("link inputs:");
+        for path in &cli.library_paths {
+            eprintln!("  -L{}", path.display());
+        }
+        for lib in &cli.libraries {
+            eprintln!("  -l{lib}");
+        }
+        for flag in &opts.link.linker_args {
+            eprintln!("  {flag}");
         }
     }
 }
@@ -296,11 +346,16 @@ fn apply_warning_flag(config: &mut WarningConfig, raw: &str) {
 
 fn link_options_from_cli(cli: &Cli) -> LinkOptions {
     let mut link = LinkOptions {
+        linker_driver: std::env::var_os("RCC_LINKER_DRIVER")
+            .or_else(|| std::env::var_os("RCC_CLANG"))
+            .or_else(|| std::env::var_os("CLANG"))
+            .map(PathBuf::from),
         libraries: cli.libraries.clone(),
         library_paths: cli.library_paths.clone(),
         shared: cli.shared,
         static_link: cli.static_link,
         pie: cli.pie.then_some(true).or_else(|| cli.no_pie.then_some(false)),
+        verbose: cli.verbose,
         ..LinkOptions::default()
     };
     link.linker_args.extend(

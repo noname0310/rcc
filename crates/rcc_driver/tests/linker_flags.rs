@@ -124,7 +124,7 @@ fn pie_and_no_pie_are_mutually_exclusive() {
 }
 
 #[test]
-fn link_command_forwards_options_to_host_cc() {
+fn link_command_forwards_options_to_clang_lld_driver() {
     let options = LinkOptions {
         libraries: vec!["m".to_owned(), "pthread".to_owned()],
         library_paths: vec![PathBuf::from("/native/lib")],
@@ -132,16 +132,18 @@ fn link_command_forwards_options_to_host_cc() {
         shared: true,
         static_link: true,
         pie: Some(true),
+        ..LinkOptions::default()
     };
 
     let command = pipeline::LinkCommand::with_options(
-        PathBuf::from("cc"),
+        PathBuf::from("clang"),
         Path::new("input.o"),
         Path::new("out"),
         &options,
     );
     let rendered = command.render();
 
+    assert!(rendered.starts_with("clang -fuse-ld=lld"), "{rendered}");
     assert!(rendered.contains("input.o"), "{rendered}");
     assert!(rendered.contains("-o out"), "{rendered}");
     assert!(rendered.contains("-shared"), "{rendered}");

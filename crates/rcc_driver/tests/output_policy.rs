@@ -198,7 +198,7 @@ fn save_temps_object_survives_failed_link_when_enabled() {
 
 #[cfg(not(windows))]
 #[test]
-fn saved_temp_object_can_be_linked_by_host_cc() {
+fn saved_temp_object_can_be_linked_by_clang_lld_driver() {
     if !llvm_backend_enabled_for_this_build() {
         return;
     }

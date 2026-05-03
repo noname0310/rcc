@@ -74,6 +74,10 @@ pub struct Cli {
     #[arg(short = 'g', action = ArgAction::SetTrue)]
     pub debug_info: bool,
 
+    /// Print selected tools and subprocess command lines.
+    #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue)]
+    pub verbose: bool,
+
     /// GCC-style `-f<flag>` compatibility options.
     #[arg(short = 'f', value_name = "FLAG", action = ArgAction::Append)]
     pub feature_flags: Vec<String>,

@@ -72,7 +72,7 @@ pub struct Options {
     pub opt_level: OptLevel,
     /// Warning filtering and promotion policy.
     pub warning_config: WarningConfig,
-    /// Host-cc linker options for final executable/shared-library emission.
+    /// LLVM linker-driver options for final executable/shared-library emission.
     pub link: LinkOptions,
     /// Emit LLVM debug metadata when the LLVM backend is enabled.
     ///
@@ -171,14 +171,18 @@ impl Default for Options {
     }
 }
 
-/// Options forwarded to the host C compiler when it is used as linker.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Options forwarded to the LLVM linker driver.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkOptions {
+    /// Explicit clang-compatible linker driver path. `None` discovers `clang`.
+    pub linker_driver: Option<PathBuf>,
+    /// Force the linker driver to use LLVM lld (`-fuse-ld=lld`).
+    pub use_lld: bool,
     /// Library names passed as `-l<name>`.
     pub libraries: Vec<String>,
     /// Library search paths passed as `-L<path>`.
     pub library_paths: Vec<PathBuf>,
-    /// Raw `-Wl,...` arguments passed through to the host C compiler.
+    /// Raw `-Wl,...` arguments passed through to the clang-compatible driver.
     pub linker_args: Vec<String>,
     /// Produce a shared library (`-shared`).
     pub shared: bool,
@@ -186,6 +190,24 @@ pub struct LinkOptions {
     pub static_link: bool,
     /// PIE control: `Some(true)` => `-pie`, `Some(false)` => `-no-pie`.
     pub pie: Option<bool>,
+    /// Print selected tools and subprocess command lines to stderr.
+    pub verbose: bool,
+}
+
+impl Default for LinkOptions {
+    fn default() -> Self {
+        Self {
+            linker_driver: None,
+            use_lld: true,
+            libraries: Vec::new(),
+            library_paths: Vec::new(),
+            linker_args: Vec::new(),
+            shared: false,
+            static_link: false,
+            pie: None,
+            verbose: false,
+        }
+    }
 }
 
 /// Compilation-wide state. Usually passed `&mut` down the pipeline.
