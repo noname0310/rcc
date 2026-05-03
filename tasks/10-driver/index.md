@@ -15,7 +15,7 @@
 - [x] [03-ui-test-harness](03-ui-test-harness.md)
 - [x] [04-insta-snapshot-harness](04-insta-snapshot-harness.md)
 - [x] [05-e2e-runner](05-e2e-runner.md)
-- [ ] [06-differential-cc](06-differential-cc.md)
+- [x] [06-differential-cc](06-differential-cc.md)
 - [ ] [07-standard-stop-flags](07-standard-stop-flags.md)
 - [ ] [08-target-cli-wiring](08-target-cli-wiring.md)
 - [ ] [09-warning-control](09-warning-control.md)

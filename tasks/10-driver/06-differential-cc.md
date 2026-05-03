@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-06: Differential vs host `cc`
 
 **Phase:** 10-driver    **Depends on:** 10-05    **Milestone:** M3
