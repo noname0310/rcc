@@ -721,6 +721,10 @@ pub mod backend {
     use inkwell::context::Context;
     use inkwell::module::Linkage as LlvmLinkage;
     use inkwell::module::Module;
+    #[cfg(test)]
+    use inkwell::passes::PassBuilderOptions;
+    #[cfg(test)]
+    use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
     use inkwell::targets::{TargetData, TargetTriple};
     use inkwell::types::{
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
@@ -729,6 +733,8 @@ pub mod backend {
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
         FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
+    #[cfg(test)]
+    use inkwell::OptimizationLevel;
     use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
     use rcc_cfg::UnOp;
     use rcc_cfg::{
@@ -873,6 +879,40 @@ pub mod backend {
             self.module.verify().map_err(|err| {
                 CodegenError::Internal(format!("LLVM module verifier failed: {}", err.to_string()))
             })
+        }
+
+        /// Run just LLVM's mem2reg pass for backend tests that assert the
+        /// alloca-based CFG emission is promotable. Production optimization
+        /// pipelines are owned by later driver/quality tasks.
+        #[cfg(test)]
+        pub fn run_mem2reg_for_tests(&self) -> Result<(), CodegenError> {
+            Target::initialize_x86(&InitializationConfig::default());
+            let triple = TargetTriple::create(self.target_triple());
+            let target = Target::from_triple(&triple).map_err(|err| {
+                CodegenError::Internal(format!(
+                    "failed to resolve target for mem2reg test: {}",
+                    err.to_string()
+                ))
+            })?;
+            let machine = target
+                .create_target_machine(
+                    &triple,
+                    "generic",
+                    "",
+                    OptimizationLevel::None,
+                    RelocMode::Default,
+                    CodeModel::Default,
+                )
+                .ok_or_else(|| {
+                    CodegenError::Internal(
+                        "failed to create target machine for mem2reg test".to_owned(),
+                    )
+                })?;
+            let options = PassBuilderOptions::create();
+            self.module.run_passes("mem2reg", &machine, options).map_err(|err| {
+                CodegenError::Internal(format!("LLVM mem2reg pass failed: {}", err.to_string()))
+            })?;
+            self.verify_module()
         }
 
         /// Render the current LLVM module as textual LLVM IR.
@@ -6466,6 +6506,42 @@ mod tests {
         codegen_fixture_ir(&mut session, tcx, name, ret_ty, body).unwrap()
     }
 
+    #[cfg(feature = "llvm")]
+    fn assert_codegen_fixture_mem2reg(
+        tcx: &mut TyCtxt,
+        name: &str,
+        ret_ty: TyId,
+        mut body: Body,
+    ) -> String {
+        let (mut session, _cap) = Session::for_test();
+        let fn_ty = func_ty(tcx, ret_ty, Vec::new(), false);
+        let fn_name = session.interner.intern(name);
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        body.def = Some(def);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        let context = inkwell::context::Context::create();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        cx.codegen_all_bodies().unwrap();
+        cx.verify_module().unwrap();
+        cx.run_mem2reg_for_tests().unwrap();
+        cx.ir_text()
+    }
+
+    #[cfg(feature = "llvm")]
+    fn matching_line_count(ir: &str, needle: &str) -> usize {
+        ir.lines().filter(|line| line.contains(needle)).count()
+    }
+
     /// A simple `return 42;` body emits a valid LLVM return from the CFG return slot.
     #[cfg(feature = "llvm")]
     #[test]
@@ -8647,6 +8723,98 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("address of a bit-field"), "unexpected error: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-22: mem2reg and module verifier gate
+    // -----------------------------------------------------------------------
+
+    /// A simple scalar local should be promoted away by mem2reg after the
+    /// non-SSA CFG has been emitted as allocas plus loads/stores.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn mem2reg_promotes_clean_scalar_locals() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(540)), ret_ty, true));
+        locals.push(cfg_local_decl(Some(Symbol(541)), ret_ty, false));
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(2)),
+                        rvalue: Rvalue::BinaryOp(
+                            BinOp::Add,
+                            local_copy(Local(1)),
+                            int_const(ret_ty, 1),
+                        ),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::Use(local_copy(Local(2))),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = assert_codegen_fixture_mem2reg(&mut tcx, "__mem2reg_clean", ret_ty, body);
+
+        assert_eq!(matching_line_count(&ir, "alloca i32"), 0, "IR:\n{ir}");
+    }
+
+    /// Taking a local's address prevents mem2reg from removing that local's
+    /// storage, even though other scalar temporaries can still be promoted.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn mem2reg_keeps_address_taken_alloca() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(int_ty)));
+        let ret_ty = int_ptr;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(542)), int_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(543)), int_ptr, false));
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(1)),
+                        rvalue: Rvalue::Use(int_const(int_ty, 7)),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(2)),
+                        rvalue: Rvalue::AddressOf(local_place(Local(1))),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::Use(local_copy(Local(2))),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = assert_codegen_fixture_mem2reg(&mut tcx, "__mem2reg_address_taken", ret_ty, body);
+
+        assert_eq!(matching_line_count(&ir, "alloca i32"), 1, "IR:\n{ir}");
+        assert!(ir.contains("%local542.addr = alloca i32"), "IR:\n{ir}");
     }
 
     /// emit_operand_value on ConstKind::Global returns a pointer.

@@ -29,7 +29,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [19-varargs-va-intrinsics](19-varargs-va-intrinsics.md)
 - [x] [20-volatile-access](20-volatile-access.md)
 - [x] [21-bitfield-access-codegen](21-bitfield-access-codegen.md)
-- [ ] [22-mem2reg-and-module-verifier](22-mem2reg-and-module-verifier.md)
+- [x] [22-mem2reg-and-module-verifier](22-mem2reg-and-module-verifier.md)
 - [ ] [23-llvm-ir-snapshots](23-llvm-ir-snapshots.md)
 - [ ] [24-filecheck-tests](24-filecheck-tests.md)
 - [ ] [25-debug-info-dwarf](25-debug-info-dwarf.md)

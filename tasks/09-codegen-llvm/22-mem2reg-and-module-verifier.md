@@ -1,5 +1,7 @@
 # 09-22: mem2reg and module verifier gate
 
+> ✓ done — 2026-05-03
+
 **Phase:** 09-codegen-llvm    **Depends on:** 09-10, 09-12, 09-14, 09-15, 09-16    **Milestone:** M3
 
 ## Goal
