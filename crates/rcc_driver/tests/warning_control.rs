@@ -48,7 +48,7 @@ fn compile_warning_fixture(args: &[&str]) -> (Session, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
     let mut session = Session::with_handler(options_from_cli(&cli), handler);
-    pipeline::compile(&mut session, &cli.input).expect("compile warning fixture");
+    pipeline::compile(&mut session, &cli.input[0]).expect("compile warning fixture");
     (session, cap)
 }
 

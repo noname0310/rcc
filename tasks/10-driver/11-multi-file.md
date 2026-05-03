@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-11: Multi-file compilation
 
 **Phase:** 10-driver    **Depends on:** 10-02    **Milestone:** M5

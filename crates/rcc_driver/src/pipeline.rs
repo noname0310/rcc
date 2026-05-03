@@ -203,8 +203,17 @@ pub fn link(obj: &Path, output: &Path) -> Result<(), String> {
 
 /// Link one native object file into an executable/shared object with options.
 pub fn link_with_options(obj: &Path, output: &Path, options: &LinkOptions) -> Result<(), String> {
+    link_objects_with_options(&[obj.to_path_buf()], output, options)
+}
+
+/// Link several native object files into one output with options.
+pub fn link_objects_with_options(
+    objects: &[PathBuf],
+    output: &Path,
+    options: &LinkOptions,
+) -> Result<(), String> {
     let linker = find_host_cc()?;
-    link_with_linker_and_options(&linker, obj, output, options)
+    link_objects_with_linker_and_options(&linker, objects, output, options)
 }
 
 /// Link with an explicit linker path. Public for driver tests and later tool
@@ -220,7 +229,17 @@ pub fn link_with_linker_and_options(
     output: &Path,
     options: &LinkOptions,
 ) -> Result<(), String> {
-    let command = LinkCommand::with_options(linker.to_path_buf(), obj, output, options);
+    link_objects_with_linker_and_options(linker, &[obj.to_path_buf()], output, options)
+}
+
+/// Link several objects with an explicit linker path and explicit options.
+pub fn link_objects_with_linker_and_options(
+    linker: &Path,
+    objects: &[PathBuf],
+    output: &Path,
+    options: &LinkOptions,
+) -> Result<(), String> {
+    let command = LinkCommand::with_objects(linker.to_path_buf(), objects, output, options);
     let result = Command::new(&command.program)
         .args(&command.args)
         .output()
@@ -261,8 +280,20 @@ impl LinkCommand {
         output: &Path,
         options: &LinkOptions,
     ) -> Self {
-        let mut args =
-            vec![obj.as_os_str().to_owned(), OsString::from("-o"), output.as_os_str().to_owned()];
+        Self::with_objects(program, &[obj.to_path_buf()], output, options)
+    }
+
+    /// Build a host-cc link command for several object files.
+    #[must_use]
+    pub fn with_objects(
+        program: PathBuf,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+    ) -> Self {
+        let mut args = objects.iter().map(|obj| obj.as_os_str().to_owned()).collect::<Vec<_>>();
+        args.push(OsString::from("-o"));
+        args.push(output.as_os_str().to_owned());
         if options.shared {
             args.push(OsString::from("-shared"));
         }

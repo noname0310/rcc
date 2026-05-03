@@ -59,7 +59,7 @@ fn compile_cli(cli: &Cli) -> Result<(), String> {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap));
     let mut session = Session::with_handler(options_from_cli(cli), handler);
-    pipeline::compile(&mut session, &cli.input)
+    pipeline::compile(&mut session, &cli.input[0])
 }
 
 #[test]

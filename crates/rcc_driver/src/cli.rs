@@ -10,8 +10,9 @@ use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
 #[derive(Debug, Parser, Clone)]
 #[command(name = "rcc", about = "rcc: a Rust-based C99 compiler")]
 pub struct Cli {
-    /// Input `.c` file.
-    pub input: PathBuf,
+    /// Input `.c` file(s).
+    #[arg(required = true)]
+    pub input: Vec<PathBuf>,
 
     /// Output path (`-o`).
     #[arg(short = 'o', long)]
