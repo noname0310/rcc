@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-03: UI test harness
 
 **Phase:** 10-driver    **Depends on:** 02-01    **Milestone:** M2
