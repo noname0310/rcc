@@ -736,7 +736,8 @@ pub mod backend {
         Statement, StatementKind, TerminatorKind,
     };
     use rcc_hir::{
-        DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, Qual, RecordKind, Ty,
+        DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, ObjectQuals, Qual, RecordKind,
+        Ty,
     };
 
     /// First supported backend target: Linux x86-64 SysV.
@@ -1531,6 +1532,131 @@ pub mod backend {
         // 09-09: Place address, operand load, and store helpers
         // ---------------------------------------------------------------
 
+        fn place_is_volatile(&self, place: &Place, body: &Body) -> Result<bool, CodegenError> {
+            let decl = body.locals.get(place.base).ok_or_else(|| {
+                CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+            })?;
+            let mut current_ty = decl.ty;
+            let mut current_volatile = decl.quals.is_volatile;
+            for proj in &place.projection {
+                match proj {
+                    Projection::Deref => {
+                        let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
+                            return Err(invalid_place_projection("dereference", current_ty));
+                        };
+                        current_volatile = pointee.is_volatile;
+                        current_ty = pointee.ty;
+                    }
+                    Projection::Field(idx) => {
+                        let (_, field_ty, quals) = self.record_field_info(current_ty, *idx)?;
+                        current_volatile |= quals.is_volatile;
+                        current_ty = field_ty;
+                    }
+                    Projection::Index(_) => match self.tcx.get(current_ty) {
+                        Ty::Array { elem, .. } => {
+                            current_volatile |= elem.is_volatile;
+                            current_ty = elem.ty;
+                        }
+                        Ty::Ptr(pointee) => {
+                            current_volatile = pointee.is_volatile;
+                            current_ty = pointee.ty;
+                        }
+                        _ => return Err(invalid_place_projection("index", current_ty)),
+                    },
+                }
+            }
+            Ok(current_volatile)
+        }
+
+        /// `ObjectQuals` on the object path (local and struct fields) for the
+        /// first `prefix_len` projections — used for volatile *pointer* loads
+        /// (`int *volatile p`), not for `volatile int *p` pointee quals.
+        ///
+        /// For arrays of pointers, `int *volatile a[N]` stores each element as
+        /// `Qual { ty: Ptr(..), is_volatile: true }`; indexing must treat that
+        /// element slot like a volatile pointer object (`volatile int *` keeps
+        /// volatility inside [`Ty::Ptr`] only — excluded here via `elem.ty`).
+        fn place_prefix_object_volatile(
+            &self,
+            place: &Place,
+            body: &Body,
+            prefix_len: usize,
+        ) -> Result<bool, CodegenError> {
+            let decl = body.locals.get(place.base).ok_or_else(|| {
+                CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+            })?;
+            let mut vol = decl.quals.is_volatile;
+            let mut current_ty = decl.ty;
+            for proj in place.projection.iter().take(prefix_len) {
+                match proj {
+                    Projection::Field(idx) => {
+                        let (_, field_ty, quals) = self.record_field_info(current_ty, *idx)?;
+                        vol |= quals.is_volatile;
+                        current_ty = field_ty;
+                    }
+                    Projection::Index(_) => {
+                        current_ty = match self.tcx.get(current_ty) {
+                            Ty::Array { elem, .. } => {
+                                vol |= Self::array_elem_volatile_pointer_slot(self.tcx, elem);
+                                elem.ty
+                            }
+                            Ty::Ptr(pointee) => {
+                                vol = pointee.is_volatile;
+                                pointee.ty
+                            }
+                            _ => return Err(invalid_place_projection("index", current_ty)),
+                        };
+                    }
+                    Projection::Deref => {
+                        let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
+                            return Err(invalid_place_projection("dereference", current_ty));
+                        };
+                        vol = pointee.is_volatile;
+                        current_ty = pointee.ty;
+                    }
+                }
+            }
+            Ok(vol)
+        }
+
+        /// `true` when an array element stores a pointer value in a volatile-qualified slot
+        /// (`int *volatile a[]`), but not when only the pointee is volatile (`volatile int *a[]`).
+        fn array_elem_volatile_pointer_slot(tcx: &TyCtxt, elem: &Qual) -> bool {
+            matches!(tcx.get(elem.ty), Ty::Ptr(_)) && elem.is_volatile
+        }
+
+        fn emit_memory_load(
+            &self,
+            llvm_ty: BasicTypeEnum<'ctx>,
+            addr: PointerValue<'ctx>,
+            name: &str,
+            volatile: bool,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let v = self.builder.build_load(llvm_ty, addr, name).map_err(builder_error)?;
+            if volatile {
+                let Some(inst) = v.as_instruction_value() else {
+                    return Err(CodegenError::Internal(
+                        "load result is not an instruction".to_owned(),
+                    ));
+                };
+                inst.set_volatile(true).map_err(|e| CodegenError::Internal(e.to_string()))?;
+            }
+            Ok(v)
+        }
+
+        fn emit_memory_store(
+            &self,
+            addr: PointerValue<'ctx>,
+            value: BasicValueEnum<'ctx>,
+            volatile: bool,
+        ) -> Result<(), CodegenError> {
+            let inst = self.builder.build_store(addr, value).map_err(builder_error)?;
+            if volatile {
+                inst.set_volatile(true).map_err(|e| CodegenError::Internal(e.to_string()))?;
+            }
+            Ok(())
+        }
+
         /// Compute the LLVM pointer for a CFG [`Place`].
         ///
         /// Walks the projection chain and emits `getelementptr` / pointer
@@ -1556,18 +1682,21 @@ pub mod backend {
                 })?
                 .ty;
 
-            for proj in &place.projection {
+            for (i, proj) in place.projection.iter().enumerate() {
+                let prefix_object_vol = self.place_prefix_object_volatile(place, body, i)?;
                 match proj {
                     Projection::Deref => {
                         let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
                             return Err(invalid_place_projection("dereference", current_ty));
                         };
                         let ptr_ty = self.context.ptr_type(AddressSpace::default());
-                        ptr = self
-                            .builder
-                            .build_load(ptr_ty, ptr, "deref_load")
-                            .map_err(builder_error)?
-                            .into_pointer_value();
+                        let v = self.emit_memory_load(
+                            ptr_ty.as_basic_type_enum(),
+                            ptr,
+                            "deref_load",
+                            prefix_object_vol,
+                        )?;
+                        ptr = v.into_pointer_value();
                         current_ty = pointee.ty;
                     }
                     Projection::Field(idx) => {
@@ -1607,9 +1736,12 @@ pub mod backend {
                             Ty::Ptr(pointee) => {
                                 let ptr_ty = self.context.ptr_type(AddressSpace::default());
                                 let base = self
-                                    .builder
-                                    .build_load(ptr_ty, ptr, "index_base_load")
-                                    .map_err(builder_error)?
+                                    .emit_memory_load(
+                                        ptr_ty.as_basic_type_enum(),
+                                        ptr,
+                                        "index_base_load",
+                                        prefix_object_vol,
+                                    )?
                                     .into_pointer_value();
                                 let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
                                 ptr = self.build_gep(elem_ty, base, &[index_val], "index_gep")?;
@@ -1639,7 +1771,8 @@ pub mod backend {
                     let addr = self.emit_place_addr(place, locals, body)?;
                     let ty = self.place_ty(place, body)?;
                     let llvm_ty = self.type_cx().basic_type_of(ty)?;
-                    self.builder.build_load(llvm_ty, addr, "load").map_err(builder_error)
+                    let volatile = self.place_is_volatile(place, body)?;
+                    self.emit_memory_load(llvm_ty, addr, "load", volatile)
                 }
                 Operand::Const(c) => self.emit_const(c),
             }
@@ -2772,16 +2905,70 @@ pub mod backend {
             match rvalue {
                 Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) => {
                     let src_ty = self.place_ty(src, body)?;
-                    let src = self.emit_place_addr(src, locals, body)?;
-                    self.emit_memcpy(dest, dest_ty, src, src_ty)?;
+                    let src_addr = self.emit_place_addr(src, locals, body)?;
+                    let dest_volatile = self.place_is_volatile(place, body)?;
+                    let src_volatile = self.place_is_volatile(src, body)?;
+                    if dest_volatile || src_volatile {
+                        let dest_layout = self.memory_layout(dest_ty)?;
+                        let src_layout = self.memory_layout(src_ty)?;
+                        if dest_layout.size != src_layout.size {
+                            return Err(CodegenError::Internal(format!(
+                                "aggregate copy size mismatch: dest {} bytes, source {} bytes",
+                                dest_layout.size, src_layout.size
+                            )));
+                        }
+                        self.emit_volatile_byte_range_copy(dest, src_addr, dest_layout.size)?;
+                    } else {
+                        self.emit_memcpy(dest, dest_ty, src_addr, src_ty)?;
+                    }
                     Ok(true)
                 }
                 Rvalue::Use(Operand::Const(c)) if matches!(c.kind, ConstKind::ZeroInit) => {
-                    self.emit_memset_zero(dest, dest_ty)?;
+                    if self.place_is_volatile(place, body)? {
+                        self.emit_volatile_memset_zero(dest, dest_ty)?;
+                    } else {
+                        self.emit_memset_zero(dest, dest_ty)?;
+                    }
                     Ok(true)
                 }
                 _ => Ok(false),
             }
+        }
+
+        /// Byte-wise volatile load/store copy (LLVM `memcpy` intrinsic has no volatile flag in inkwell 0.6).
+        fn emit_volatile_byte_range_copy(
+            &self,
+            dest: PointerValue<'ctx>,
+            src: PointerValue<'ctx>,
+            size: u64,
+        ) -> Result<(), CodegenError> {
+            let i8_ty = self.context.i8_type();
+            let i64_ty = self.context.i64_type();
+            for off in 0..size {
+                let off_val = i64_ty.const_int(off, false);
+                let sp = self.build_gep(i8_ty, src, &[off_val], "vbc.src")?;
+                let dp = self.build_gep(i8_ty, dest, &[off_val], "vbc.dst")?;
+                let b = self.emit_memory_load(i8_ty.as_basic_type_enum(), sp, "vbc.l", true)?;
+                self.emit_memory_store(dp, b, true)?;
+            }
+            Ok(())
+        }
+
+        fn emit_volatile_memset_zero(
+            &self,
+            dest: PointerValue<'ctx>,
+            dest_ty: TyId,
+        ) -> Result<(), CodegenError> {
+            let layout = self.memory_layout(dest_ty)?;
+            let i8_ty = self.context.i8_type();
+            let i64_ty = self.context.i64_type();
+            let zero = i8_ty.const_zero().as_basic_value_enum();
+            for off in 0..layout.size {
+                let off_val = i64_ty.const_int(off, false);
+                let dp = self.build_gep(i8_ty, dest, &[off_val], "vmz")?;
+                self.emit_memory_store(dp, zero, true)?;
+            }
+            Ok(())
         }
 
         fn emit_memcpy(
@@ -2791,6 +2978,7 @@ pub mod backend {
             src: PointerValue<'ctx>,
             src_ty: TyId,
         ) -> Result<(), CodegenError> {
+            // Non-volatile aggregate copies only; volatile paths use `emit_volatile_byte_range_copy`.
             let dest_layout = self.memory_layout(dest_ty)?;
             let src_layout = self.memory_layout(src_ty)?;
             if dest_layout.size != src_layout.size {
@@ -2835,7 +3023,8 @@ pub mod backend {
             body: &Body,
         ) -> Result<(), CodegenError> {
             let addr = self.emit_place_addr(place, locals, body)?;
-            self.builder.build_store(addr, value).map(|_| ()).map_err(builder_error)
+            let volatile = self.place_is_volatile(place, body)?;
+            self.emit_memory_store(addr, value, volatile)
         }
 
         /// Resolve the HIR type of a place from the body's local declarations.
@@ -2966,11 +3155,11 @@ pub mod backend {
             }
         }
 
-        fn record_field_ty(
+        fn record_field_info(
             &self,
             ty: TyId,
             index: u32,
-        ) -> Result<(RecordKind, TyId), CodegenError> {
+        ) -> Result<(RecordKind, TyId, ObjectQuals), CodegenError> {
             let Ty::Record(def) = self.tcx.get(ty) else {
                 return Err(invalid_place_projection("field", ty));
             };
@@ -2986,7 +3175,16 @@ pub mod backend {
             let field = fields.get(index as usize).ok_or_else(|| {
                 CodegenError::Internal(format!("record {:?} has no field at index {}", def, index))
             })?;
-            Ok((*kind, field.ty))
+            Ok((*kind, field.ty, field.quals))
+        }
+
+        fn record_field_ty(
+            &self,
+            ty: TyId,
+            index: u32,
+        ) -> Result<(RecordKind, TyId), CodegenError> {
+            let (kind, field_ty, _) = self.record_field_info(ty, index)?;
+            Ok((kind, field_ty))
         }
 
         #[allow(unsafe_code)]
@@ -7616,6 +7814,357 @@ mod tests {
         }
         finish_void_test_function(&cx);
         cx.verify_module().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-20: Volatile load / store
+    // -----------------------------------------------------------------------
+
+    /// Memory access to a `volatile` object uses `load volatile` in LLVM IR.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_object_load_emits_load_volatile() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: Some(Symbol(1)),
+            ty: tcx.int,
+            quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: Vec::new(),
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_obj_load", ret_ty, body);
+        assert!(ir.contains("load volatile"), "expected load volatile in:\n{ir}");
+    }
+
+    /// Storing to a `volatile` object uses `store volatile` in LLVM IR.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_object_store_emits_store_volatile() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.int,
+            quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(cfg_local_decl(None, tcx.int, true));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(1), projection: Vec::new() },
+                    rvalue: Rvalue::Use(Operand::Copy(local_place(Local(2)))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_obj_store", ret_ty, body);
+        assert!(ir.contains("store volatile"), "expected store volatile in:\n{ir}");
+    }
+
+    /// Non-volatile loads are plain `load`, not `load volatile`.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn non_volatile_object_load_is_not_load_volatile() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(cfg_local_decl(Some(Symbol(1)), tcx.int, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: Vec::new(),
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__non_volatile_load", ret_ty, body);
+        assert!(!ir.contains("load volatile"), "unexpected load volatile in:\n{ir}");
+    }
+
+    /// Dereference of `volatile T *` issues a volatile load of the `T` value.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_pointee_deref_load_is_volatile() {
+        let mut tcx = TyCtxt::new();
+        let v_int_ptr = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.int,
+            is_const: false,
+            is_volatile: true,
+            is_restrict: false,
+        }));
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: None,
+            ty: v_int_ptr,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Deref],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_deref", ret_ty, body);
+        assert!(ir.contains("load volatile"), "expected load volatile in:\n{ir}");
+    }
+
+    /// A read of a `volatile` object in a value position is not dropped: IR shows `load volatile`.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_load_preserved_for_discarded_rvalue() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(LocalDecl {
+            name: None,
+            ty: tcx.int,
+            quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(cfg_local_decl(None, tcx.int, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(2), projection: Vec::new() },
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: Vec::new(),
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_discard", ret_ty, body);
+        assert!(ir.contains("load volatile"), "expected load volatile in:\n{ir}");
+    }
+
+    /// `int * volatile p`: loading `p` uses `load volatile` for the pointer value.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_pointer_object_inner_load_is_load_volatile_ptr() {
+        let mut tcx = TyCtxt::new();
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: None,
+            ty: int_ptr,
+            quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Deref],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir =
+            assert_codegen_fixture_verifies(&mut tcx, "__volatile_ptr_obj_deref", ret_ty, body);
+        assert!(
+            ir.contains("load volatile ptr") || ir.contains("load volatile i64"),
+            "expected volatile pointer load:\n{ir}"
+        );
+        assert!(
+            !ir.contains("load volatile i32"),
+            "pointee load should not inherit pointer-slot volatility:\n{ir}"
+        );
+    }
+
+    /// `volatile int *p`: loading `p` is non-volatile; only the `int` load is volatile.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_pointee_pointer_slot_load_is_plain_ptr() {
+        let mut tcx = TyCtxt::new();
+        let v_int_ptr = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.int,
+            is_const: false,
+            is_volatile: true,
+            is_restrict: false,
+        }));
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: None,
+            ty: v_int_ptr,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Deref],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(
+            &mut tcx,
+            "__volatile_pointee_deref_split",
+            ret_ty,
+            body,
+        );
+        assert!(ir.contains("load volatile"), "expected final load volatile:\n{ir}");
+        assert!(
+            !ir.contains("load volatile ptr") && !ir.contains("load volatile i64"),
+            "pointer slot load should not be marked volatile:\n{ir}"
+        );
+    }
+
+    /// `int * volatile a[1]; *a[0]` — element qualifier makes the pointer-slot load volatile.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_pointer_array_element_load_is_volatile_ptr() {
+        let mut tcx = TyCtxt::new();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let elem = Qual { ty: ptr_ty, is_const: false, is_volatile: true, is_restrict: false };
+        let arr_ty = tcx.intern(Ty::Array { elem, len: Some(1), is_vla: false });
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(LocalDecl {
+            name: None,
+            ty: ret_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        locals.push(LocalDecl {
+            name: None,
+            ty: arr_ty,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+        let idx_op = int_const(tcx.int, 0);
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Index(idx_op), Projection::Deref],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_ptr_arr_elt", ret_ty, body);
+        assert!(
+            ir.contains("load volatile ptr") || ir.contains("load volatile i64"),
+            "expected volatile pointer load from array element:\n{ir}"
+        );
+        assert!(
+            !ir.contains("load volatile i32"),
+            "pointee load should not inherit array element pointer-slot volatility:\n{ir}"
+        );
     }
 
     /// emit_operand_value on ConstKind::Global returns a pointer.
