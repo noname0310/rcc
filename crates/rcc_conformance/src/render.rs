@@ -20,12 +20,8 @@ pub fn render_dashboard(report: &Report) -> String {
 
     for suite in &report.suites {
         let c = suite.counts();
-        let discovered = c.pass + c.fail + c.xfail + c.skip;
-        let pct = if discovered == 0 {
-            0.0
-        } else {
-            ((c.pass + c.xfail) as f64 / discovered as f64) * 100.0
-        };
+        let discovered = c.discovered();
+        let pct = suite.pass_rate() * 100.0;
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {:.1} |\n",
             suite.name, discovered, c.pass, c.xfail, c.fail, c.skip, pct,

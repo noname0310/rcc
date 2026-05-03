@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,7 @@ pub enum Outcome {
         reason: String,
     },
     /// Expected failure: listed in `xfail.toml`; counts as pass.
+    #[serde(rename = "xfail")]
     XFail {
         /// `xfail.toml` entry reason.
         reason: String,
@@ -95,6 +96,22 @@ impl SuiteReport {
         }
         c
     }
+
+    /// Pass rate as a ratio in the range `0.0..=1.0`.
+    ///
+    /// Expected failures count as passing for milestone KPI gates, while
+    /// skips remain part of the denominator so missing adapter coverage is
+    /// visible in the reported percentage.
+    #[must_use]
+    pub fn pass_rate(&self) -> f64 {
+        let c = self.counts();
+        let discovered = c.discovered();
+        if discovered == 0 {
+            0.0
+        } else {
+            f64::from(c.pass + c.xfail) / f64::from(discovered)
+        }
+    }
 }
 
 /// Outcome roll-up.
@@ -108,6 +125,14 @@ pub struct Counts {
     pub xfail: u32,
     /// Skipped tests.
     pub skip: u32,
+}
+
+impl Counts {
+    /// Total discovered cases represented by this count set.
+    #[must_use]
+    pub fn discovered(self) -> u32 {
+        self.pass + self.fail + self.xfail + self.skip
+    }
 }
 
 /// Top-level report containing every suite.
@@ -132,6 +157,18 @@ pub fn run_suites(rrcc_path: &Path, suites: &[Suite]) -> Report {
     let mut report = Report::default();
     for suite in suites {
         let mut sr = SuiteReport { name: suite.name.clone(), ..Default::default() };
+        let xfails = match xfail::load(&suite.root.join("xfail.toml")) {
+            Ok(file) => file.xfail,
+            Err(e) => {
+                sr.cases.insert("<xfail>".into(), Outcome::Fail { reason: e.to_string() });
+                report.suites.push(sr);
+                continue;
+            }
+        };
+        let mut xfail_map = BTreeMap::new();
+        for entry in xfails {
+            xfail_map.insert(entry.id, entry.reason);
+        }
         let cases = match suite.adapter.discover(&suite.root) {
             Ok(c) => c,
             Err(e) => {
@@ -140,14 +177,101 @@ pub fn run_suites(rrcc_path: &Path, suites: &[Suite]) -> Report {
                 continue;
             }
         };
+        let discovered_ids: BTreeSet<_> = cases.iter().map(|case| case.id.as_str()).collect();
+        for (id, reason) in &xfail_map {
+            if !discovered_ids.contains(id.as_str()) {
+                sr.cases.insert(
+                    id.clone(),
+                    Outcome::Skip {
+                        reason: format!("xfail entry did not match discovered case: {reason}"),
+                    },
+                );
+            }
+        }
         for case in cases {
             let outcome = suite
                 .adapter
                 .run(rrcc_path, &case)
                 .unwrap_or_else(|e| Outcome::Fail { reason: e.to_string() });
+            let outcome = match xfail_map.get(&case.id) {
+                Some(reason) if !matches!(outcome, Outcome::Pass) => {
+                    Outcome::XFail { reason: reason.clone() }
+                }
+                _ => outcome,
+            };
             sr.cases.insert(case.id, outcome);
         }
         report.suites.push(sr);
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedAdapter {
+        outcome: Outcome,
+    }
+
+    impl Adapter for FixedAdapter {
+        fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+            Ok(vec![
+                TestCase { id: "suite::pass".into(), path: root.join("pass.c") },
+                TestCase { id: "suite::known-fail".into(), path: root.join("known-fail.c") },
+            ])
+        }
+
+        fn run(&self, _rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+            if case.id.ends_with("pass") {
+                Ok(Outcome::Pass)
+            } else {
+                Ok(self.outcome.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn run_suites_applies_xfail_entries_to_non_passing_outcomes() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("xfail.toml"),
+            "[[xfail]]\nid = \"suite::known-fail\"\nreason = \"future task\"\n",
+        )
+        .unwrap();
+
+        let suite = Suite {
+            name: "suite".into(),
+            root: tmp.path().to_path_buf(),
+            adapter: Box::new(FixedAdapter { outcome: Outcome::Fail { reason: "boom".into() } }),
+        };
+
+        let report = run_suites(Path::new("rcc"), &[suite]);
+        let suite = &report.suites[0];
+        assert_eq!(suite.counts().pass, 1);
+        assert_eq!(suite.counts().xfail, 1);
+        assert_eq!(suite.pass_rate(), 1.0);
+    }
+
+    #[test]
+    fn run_suites_leaves_xpass_as_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("xfail.toml"),
+            "[[xfail]]\nid = \"suite::known-fail\"\nreason = \"stale xfail\"\n",
+        )
+        .unwrap();
+
+        let suite = Suite {
+            name: "suite".into(),
+            root: tmp.path().to_path_buf(),
+            adapter: Box::new(FixedAdapter { outcome: Outcome::Pass }),
+        };
+
+        let report = run_suites(Path::new("rcc"), &[suite]);
+        let suite = &report.suites[0];
+        assert_eq!(suite.counts().pass, 2);
+        assert_eq!(suite.counts().xfail, 0);
+        assert_eq!(suite.pass_rate(), 1.0);
+    }
 }

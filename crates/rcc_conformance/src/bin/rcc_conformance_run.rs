@@ -98,11 +98,30 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&cli.output, &json)
         .with_context(|| format!("writing report to {}", cli.output.display()))?;
 
-    let total: u32 = report.suites.iter().map(|s| s.cases.len() as u32).sum();
-    let pass: u32 = report.suites.iter().map(|s| s.counts().pass).sum();
-    let fail: u32 = report.suites.iter().map(|s| s.counts().fail).sum();
-    let xfail: u32 = report.suites.iter().map(|s| s.counts().xfail).sum();
-    let skip: u32 = report.suites.iter().map(|s| s.counts().skip).sum();
+    let mut total = 0;
+    let mut pass = 0;
+    let mut fail = 0;
+    let mut xfail = 0;
+    let mut skip = 0;
+
+    for suite in &report.suites {
+        let c = suite.counts();
+        total += c.discovered();
+        pass += c.pass;
+        fail += c.fail;
+        xfail += c.xfail;
+        skip += c.skip;
+        eprintln!(
+            "suite {}: {} cases: {} pass, {} fail, {} xfail, {} skip; pass_rate={:.3}",
+            suite.name,
+            c.discovered(),
+            c.pass,
+            c.fail,
+            c.xfail,
+            c.skip,
+            suite.pass_rate(),
+        );
+    }
 
     eprintln!(
         "wrote {} ({total} cases: {pass} pass, {fail} fail, {xfail} xfail, {skip} skip)",

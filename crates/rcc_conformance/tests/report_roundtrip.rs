@@ -10,6 +10,8 @@ fn report_roundtrip_json() {
     let report = sample_report();
 
     let json = report.to_json_pretty();
+    assert!(json.contains(r#""status": "xfail""#));
+    assert!(!json.contains(r#""status": "x_fail""#));
     let parsed: Report = serde_json::from_str(&json).expect("Report JSON should deserialise back");
 
     assert_eq!(report.suites.len(), parsed.suites.len());
