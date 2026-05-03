@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 09-23: LLVM IR snapshots
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-22    **Milestone:** M3
