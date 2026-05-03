@@ -471,6 +471,32 @@ pub enum HirExprKind {
         /// Value.
         rhs: HirExprId,
     },
+    /// `__builtin_va_arg(ap, type)` — extract one variadic argument.
+    BuiltinVaArg {
+        /// va_list expression.
+        ap: HirExprId,
+        /// Type of the value to extract.
+        ty: TyId,
+    },
+    /// `__builtin_va_start(ap, last_param)`.
+    BuiltinVaStart {
+        /// va_list expression.
+        ap: HirExprId,
+        /// Last named parameter.
+        last_param: HirExprId,
+    },
+    /// `__builtin_va_end(ap)`.
+    BuiltinVaEnd {
+        /// va_list expression.
+        ap: HirExprId,
+    },
+    /// `__builtin_va_copy(dst, src)`.
+    BuiltinVaCopy {
+        /// Destination va_list.
+        dst: HirExprId,
+        /// Source va_list.
+        src: HirExprId,
+    },
 }
 
 /// Kinds of implicit conversion inserted during type checking.

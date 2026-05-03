@@ -271,7 +271,11 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::AddressOf(_)
             | HirExprKind::Deref(_)
             | HirExprKind::Comma { .. }
-            | HirExprKind::Assign { .. } => None,
+            | HirExprKind::Assign { .. }
+            | HirExprKind::BuiltinVaArg { .. }
+            | HirExprKind::BuiltinVaStart { .. }
+            | HirExprKind::BuiltinVaEnd { .. }
+            | HirExprKind::BuiltinVaCopy { .. } => None,
         }
     }
 
@@ -588,7 +592,11 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::AddressOf(_)
             | HirExprKind::Deref(_)
             | HirExprKind::Comma { .. }
-            | HirExprKind::Assign { .. } => None,
+            | HirExprKind::Assign { .. }
+            | HirExprKind::BuiltinVaArg { .. }
+            | HirExprKind::BuiltinVaStart { .. }
+            | HirExprKind::BuiltinVaEnd { .. }
+            | HirExprKind::BuiltinVaCopy { .. } => None,
         }
     }
 

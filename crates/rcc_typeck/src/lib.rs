@@ -677,6 +677,36 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::Comma { lhs: lhs2, rhs: rhs2 };
             expr_id
         }
+        HirExprKind::BuiltinVaArg { ap, ty } => {
+            let ap2 = visit_expr(ap, body, tcx, session, def_info);
+            body.exprs[expr_id].ty = ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinVaArg { ap: ap2, ty };
+            expr_id
+        }
+        HirExprKind::BuiltinVaStart { ap, last_param } => {
+            let ap2 = visit_expr(ap, body, tcx, session, def_info);
+            let last2 = visit_expr(last_param, body, tcx, session, def_info);
+            body.exprs[expr_id].ty = tcx.void;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinVaStart { ap: ap2, last_param: last2 };
+            expr_id
+        }
+        HirExprKind::BuiltinVaEnd { ap } => {
+            let ap2 = visit_expr(ap, body, tcx, session, def_info);
+            body.exprs[expr_id].ty = tcx.void;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinVaEnd { ap: ap2 };
+            expr_id
+        }
+        HirExprKind::BuiltinVaCopy { dst, src } => {
+            let dst2 = visit_expr(dst, body, tcx, session, def_info);
+            let src2 = visit_expr(src, body, tcx, session, def_info);
+            body.exprs[expr_id].ty = tcx.void;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinVaCopy { dst: dst2, src: src2 };
+            expr_id
+        }
     }
 }
 
@@ -1859,7 +1889,11 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Cond { .. }
         | HirExprKind::Comma { .. }
         | HirExprKind::Assign { .. }
-        | HirExprKind::Convert { .. } => ValueCat::RValue,
+        | HirExprKind::Convert { .. }
+        | HirExprKind::BuiltinVaArg { .. }
+        | HirExprKind::BuiltinVaStart { .. }
+        | HirExprKind::BuiltinVaEnd { .. }
+        | HirExprKind::BuiltinVaCopy { .. } => ValueCat::RValue,
 
         // Identifier-style designators are lvalues. String literals are
         // arrays of `char` (with static storage duration) and §6.4.5p6

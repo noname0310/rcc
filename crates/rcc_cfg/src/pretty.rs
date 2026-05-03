@@ -77,6 +77,20 @@ fn fmt_term(term: &TerminatorKind) -> String {
             format!("call {}({args}) -> {dest}, {target};", fmt_operand(callee))
         }
         TerminatorKind::Unreachable => "unreachable;".to_string(),
+        TerminatorKind::BuiltinVaStart { ap, last_param, target } => {
+            format!(
+                "va_start({}, {}) -> {};",
+                fmt_operand(ap),
+                fmt_operand(last_param),
+                fmt_bb(*target)
+            )
+        }
+        TerminatorKind::BuiltinVaEnd { ap, target } => {
+            format!("va_end({}) -> {};", fmt_operand(ap), fmt_bb(*target))
+        }
+        TerminatorKind::BuiltinVaCopy { dst, src, target } => {
+            format!("va_copy({}, {}) -> {};", fmt_operand(dst), fmt_operand(src), fmt_bb(*target))
+        }
     }
 }
 
@@ -98,6 +112,9 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         }
         Rvalue::AddressOf(place) => format!("&{}", fmt_place(place)),
         Rvalue::Len(place) => format!("Len({})", fmt_place(place)),
+        Rvalue::BuiltinVaArg { ap, ty } => {
+            format!("va_arg({}, {})", fmt_operand(ap), fmt_ty(tcx, *ty))
+        }
     }
 }
 
@@ -161,6 +178,7 @@ fn fmt_ty(tcx: &TyCtxt, ty: TyId) -> String {
         }
         Ty::Record(def) => format!("record#{}", def.0),
         Ty::Enum(def) => format!("enum#{}", def.0),
+        Ty::BuiltinVaList => "__builtin_va_list".to_string(),
         Ty::Error => "<error>".to_string(),
     }
 }

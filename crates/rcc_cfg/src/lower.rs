@@ -315,6 +315,55 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
         }
+        HirExprKind::BuiltinVaArg { ap, .. } => {
+            let ap_op = lower_as_rvalue(builder, cx, *ap);
+            let dest_local = builder.alloc_temp(ty, span);
+            let dest = Place { base: dest_local, projection: Vec::new() };
+            builder.push(Statement {
+                kind: StatementKind::Assign {
+                    place: dest.clone(),
+                    rvalue: Rvalue::BuiltinVaArg { ap: ap_op, ty },
+                },
+                span,
+            });
+            Operand::Copy(dest)
+        }
+        HirExprKind::BuiltinVaStart { ap, last_param } => {
+            let ap_op = lower_as_rvalue(builder, cx, *ap);
+            let last_op = lower_as_rvalue(builder, cx, *last_param);
+            let successor = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::BuiltinVaStart {
+                    ap: ap_op,
+                    last_param: last_op,
+                    target: successor,
+                },
+                span,
+            });
+            builder.switch_to(successor);
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
+        HirExprKind::BuiltinVaEnd { ap } => {
+            let ap_op = lower_as_rvalue(builder, cx, *ap);
+            let successor = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::BuiltinVaEnd { ap: ap_op, target: successor },
+                span,
+            });
+            builder.switch_to(successor);
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
+        HirExprKind::BuiltinVaCopy { dst, src } => {
+            let dst_op = lower_as_rvalue(builder, cx, *dst);
+            let src_op = lower_as_rvalue(builder, cx, *src);
+            let successor = builder.new_block();
+            builder.terminate(Terminator {
+                kind: TerminatorKind::BuiltinVaCopy { dst: dst_op, src: src_op, target: successor },
+                span,
+            });
+            builder.switch_to(successor);
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
     }
 }
 
@@ -1619,6 +1668,7 @@ fn classify(id: TyId, tcx: &TyCtxt) -> TyClass {
         Ty::Array { .. } => TyClass::Ptr,
         Ty::Func { .. } => TyClass::Ptr,
         Ty::Void | Ty::Record(_) | Ty::Enum(_) | Ty::Error => TyClass::Other,
+        Ty::BuiltinVaList => TyClass::Other,
     }
 }
 

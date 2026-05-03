@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-03
+
 # 09-19: Variadic function support
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-06, 09-07, 09-08, 09-13    **Milestone:** M6
@@ -27,3 +29,9 @@ LLVM `va_start`, `va_end`, `va_copy`, and `va_arg` lowering.
 
 - SysV x86-64 ABI 3.5.7
 - LLVM LangRef: `va_arg`
+
+## Notes (agent)
+
+- Runtime host-cc differential fixture is deferred until object emission is wired
+  through the driver; current coverage verifies the LLVM va intrinsic/codegen path
+  and workspace gates.

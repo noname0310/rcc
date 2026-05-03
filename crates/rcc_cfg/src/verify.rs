@@ -232,6 +232,11 @@ fn verify_blocks(
                     });
                 }
             }
+            TerminatorKind::BuiltinVaStart { target, .. }
+            | TerminatorKind::BuiltinVaEnd { target, .. }
+            | TerminatorKind::BuiltinVaCopy { target, .. } => {
+                verify_block_target(body, *target, at, errors);
+            }
         }
     }
 }
@@ -281,6 +286,10 @@ fn verify_rvalue_typed(
         Rvalue::Len(place) => {
             let _ = verify_place_typed(body, tcx, hir, place, at, errors);
             Some(InferredTy::Known(tcx.ulong))
+        }
+        Rvalue::BuiltinVaArg { ap, ty } => {
+            let _ = verify_operand_typed(body, tcx, hir, ap, at, errors);
+            Some(InferredTy::Known(*ty))
         }
     }
 }
@@ -546,6 +555,9 @@ fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
         TerminatorKind::Call { target: None, .. }
         | TerminatorKind::Return
         | TerminatorKind::Unreachable => Vec::new(),
+        TerminatorKind::BuiltinVaStart { target, .. }
+        | TerminatorKind::BuiltinVaEnd { target, .. }
+        | TerminatorKind::BuiltinVaCopy { target, .. } => vec![*target],
     }
 }
 

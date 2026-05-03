@@ -893,6 +893,9 @@ fn successors(kind: &TerminatorKind) -> Vec<BasicBlockId> {
         TerminatorKind::Call { target: None, .. }
         | TerminatorKind::Return
         | TerminatorKind::Unreachable => Vec::new(),
+        TerminatorKind::BuiltinVaStart { target, .. }
+        | TerminatorKind::BuiltinVaEnd { target, .. }
+        | TerminatorKind::BuiltinVaCopy { target, .. } => vec![*target],
     }
 }
 

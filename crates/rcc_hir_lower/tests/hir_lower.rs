@@ -2452,8 +2452,13 @@ fn assert_ty_has_no_error(tcx: &TyCtxt, ty: TyId, context: &str) {
                 assert_ty_has_no_error(tcx, *param, context);
             }
         }
-        Ty::Void | Ty::Int { .. } | Ty::Float(_) | Ty::Complex(_) | Ty::Record(_) | Ty::Enum(_) => {
-        }
+        Ty::Void
+        | Ty::Int { .. }
+        | Ty::Float(_)
+        | Ty::Complex(_)
+        | Ty::Record(_)
+        | Ty::Enum(_)
+        | Ty::BuiltinVaList => {}
     }
 }
 

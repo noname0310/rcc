@@ -180,6 +180,7 @@ impl<'tcx> LayoutCx<'tcx> {
             }
             Ty::Record(def) => self.record_layout_details(ty, *def, record_stack).map(|r| r.layout),
             Ty::Enum(def) => self.enum_layout(*def),
+            Ty::BuiltinVaList => Ok(Layout { size: 24, align: 8 }),
             Ty::Error => Err(LayoutError::Unsized { ty, reason: "error type has no layout" }),
         }
     }

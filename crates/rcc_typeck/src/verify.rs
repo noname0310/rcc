@@ -217,6 +217,7 @@ fn ty_contains_error(tcx: &TyCtxt, ty: TyId) -> bool {
                 || params.iter().any(|param| ty_contains_error(tcx, *param))
         }
         Ty::Error => true,
+        Ty::BuiltinVaList => false,
         Ty::Void | Ty::Int { .. } | Ty::Float(_) | Ty::Complex(_) | Ty::Record(_) | Ty::Enum(_) => {
             false
         }

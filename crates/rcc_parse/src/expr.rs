@@ -286,7 +286,7 @@ fn parse_gnu_statement_expr(p: &mut Parser<'_>, lparen_span: Span) -> Option<Exp
 
 fn is_builtin_type_arg_call(p: &Parser<'_>, sym: Symbol) -> bool {
     let name = p.session.interner.get(sym);
-    matches!(name, "__builtin_offsetof" | "__builtin_types_compatible_p")
+    matches!(name, "__builtin_offsetof" | "__builtin_types_compatible_p" | "__builtin_va_arg")
         && matches!(
             p.tokens.get(p.cursor + 1).map(|t| &t.kind),
             Some(TokenKind::Punct(Punct::LParen))
@@ -312,6 +312,7 @@ fn parse_builtin_type_arg_expr(p: &mut Parser<'_>, sym: Symbol, name_span: Span)
     let (kind, end_span) = match name.as_str() {
         "__builtin_offsetof" => parse_builtin_offsetof_body(p, lparen_span),
         "__builtin_types_compatible_p" => parse_builtin_types_compatible_body(p, lparen_span),
+        "__builtin_va_arg" => parse_builtin_va_arg_body(p, lparen_span),
         _ => unreachable!("is_builtin_type_arg_call filters builtin names"),
     };
 
@@ -333,6 +334,26 @@ fn parse_builtin_types_compatible_body(p: &mut Parser<'_>, lparen_span: Span) ->
     let rhs = parse_type_name(p);
     let end_span = expect_builtin_rparen(p, lparen_span, "__builtin_types_compatible_p");
     (ExprKind::BuiltinTypesCompatible { lhs: Box::new(lhs), rhs: Box::new(rhs) }, end_span)
+}
+
+fn parse_builtin_va_arg_body(p: &mut Parser<'_>, lparen_span: Span) -> (ExprKind, Span) {
+    let Some(ap) = parse_assignment_expression(p) else {
+        p.session
+            .handler
+            .struct_err(p.cur_span(), "expected expression for `__builtin_va_arg` first argument")
+            .label(lparen_span, "in call to `__builtin_va_arg`")
+            .emit();
+        let id = p.fresh_id();
+        let span = p.cur_span();
+        let dummy_ap = Expr { id, kind: ExprKind::Ident(p.session.interner.intern("")), span };
+        let ty = parse_type_name(p);
+        let end_span = expect_builtin_rparen(p, lparen_span, "__builtin_va_arg");
+        return (ExprKind::BuiltinVaArg { ap: Box::new(dummy_ap), ty: Box::new(ty) }, end_span);
+    };
+    let _ = expect_builtin_comma(p, lparen_span, "__builtin_va_arg");
+    let ty = parse_type_name(p);
+    let end_span = expect_builtin_rparen(p, lparen_span, "__builtin_va_arg");
+    (ExprKind::BuiltinVaArg { ap: Box::new(ap), ty: Box::new(ty) }, end_span)
 }
 
 fn expect_builtin_comma(p: &mut Parser<'_>, lparen_span: Span, builtin: &str) -> Option<Span> {

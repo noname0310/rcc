@@ -163,12 +163,20 @@ pub fn parse_decl_specs(p: &mut Parser<'_>) -> Option<DeclSpecs> {
                     && !state.unsigned_flag
                     && !state.complex_flag
                     && !state.imaginary_flag
-                    && p.scopes.is_typedef(*sym)
                 {
-                    let sym = *sym;
-                    specs.type_specs.push(TypeSpec::TypedefName(sym));
-                    state.base = Some(BaseKind::Typedef);
-                    p.bump();
+                    let name = p.session.interner.get(*sym);
+                    if name == "__builtin_va_list" {
+                        specs.type_specs.push(TypeSpec::BuiltinVaList);
+                        state.base = Some(BaseKind::Typedef);
+                        p.bump();
+                    } else if p.scopes.is_typedef(*sym) {
+                        let sym = *sym;
+                        specs.type_specs.push(TypeSpec::TypedefName(sym));
+                        state.base = Some(BaseKind::Typedef);
+                        p.bump();
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }

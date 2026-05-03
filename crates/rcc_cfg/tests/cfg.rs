@@ -651,6 +651,15 @@ fn terminator_contains_field_projection(term: &TerminatorKind, expected: u32) ->
                     .as_ref()
                     .is_some_and(|place| place_contains_field_projection(place, expected))
         }
+        TerminatorKind::BuiltinVaStart { ap, last_param, .. } => {
+            operand_contains_field_projection(ap, expected)
+                || operand_contains_field_projection(last_param, expected)
+        }
+        TerminatorKind::BuiltinVaEnd { ap, .. } => operand_contains_field_projection(ap, expected),
+        TerminatorKind::BuiltinVaCopy { dst, src, .. } => {
+            operand_contains_field_projection(dst, expected)
+                || operand_contains_field_projection(src, expected)
+        }
         TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => false,
     }
 }
@@ -668,6 +677,7 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
             operand_contains_field_projection(lhs, expected)
                 || operand_contains_field_projection(rhs, expected)
         }
+        Rvalue::BuiltinVaArg { ap, .. } => operand_contains_field_projection(ap, expected),
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             place_contains_field_projection(place, expected)
         }
@@ -700,6 +710,7 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
+        Rvalue::BuiltinVaArg { ap, .. } => operand_contains_int_const(ap, expected),
         Rvalue::AddressOf(_) | Rvalue::Len(_) => false,
     }
 }
@@ -864,6 +875,20 @@ fn assert_terminator_valid(
                 assert_block_valid(name, def, body, *target);
             }
         }
+        TerminatorKind::BuiltinVaStart { ap, last_param, target } => {
+            assert_operand_valid(name, def, body, ap);
+            assert_operand_valid(name, def, body, last_param);
+            assert_block_valid(name, def, body, *target);
+        }
+        TerminatorKind::BuiltinVaEnd { ap, target } => {
+            assert_operand_valid(name, def, body, ap);
+            assert_block_valid(name, def, body, *target);
+        }
+        TerminatorKind::BuiltinVaCopy { dst, src, target } => {
+            assert_operand_valid(name, def, body, dst);
+            assert_operand_valid(name, def, body, src);
+            assert_block_valid(name, def, body, *target);
+        }
         TerminatorKind::Return | TerminatorKind::Unreachable => {}
     }
 }
@@ -882,6 +907,9 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         Rvalue::BinaryOp(_, lhs, rhs) => {
             assert_operand_valid(name, def, body, lhs);
             assert_operand_valid(name, def, body, rhs);
+        }
+        Rvalue::BuiltinVaArg { ap, .. } => {
+            assert_operand_valid(name, def, body, ap);
         }
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             assert_place_valid(name, def, body, place);
@@ -934,5 +962,8 @@ fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
         TerminatorKind::Call { target: None, .. }
         | TerminatorKind::Return
         | TerminatorKind::Unreachable => Vec::new(),
+        TerminatorKind::BuiltinVaStart { target, .. }
+        | TerminatorKind::BuiltinVaEnd { target, .. }
+        | TerminatorKind::BuiltinVaCopy { target, .. } => vec![*target],
     }
 }

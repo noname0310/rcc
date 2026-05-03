@@ -287,7 +287,9 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             Ty::Func { .. } => Err(type_lowering_error(ty, "function parameters must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_param(ty)),
-            Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => self.aggregate_param(ty),
+            Ty::BuiltinVaList | Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => {
+                self.aggregate_param(ty)
+            }
         }
     }
 
@@ -313,7 +315,9 @@ impl<'tcx> SysvParamClassifier<'tcx> {
                 classes: vec![AbiClass::ComplexX87],
                 zeroext: false,
             }),
-            Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => self.aggregate_return(ty),
+            Ty::BuiltinVaList | Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => {
+                self.aggregate_return(ty)
+            }
         }
     }
 
@@ -434,6 +438,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             }
             Ty::Array { elem, .. } => self.classify_array(ty, elem.ty, offset, chunks),
             Ty::Record(_) => self.classify_record(ty, offset, chunks),
+            Ty::BuiltinVaList => self.classify_record(ty, offset, chunks),
             Ty::Void | Ty::Func { .. } | Ty::Error => {
                 Err(type_lowering_error(ty, "type cannot appear inside an ABI aggregate"))
             }
@@ -1685,7 +1690,28 @@ pub mod backend {
                     let len_llvm_ty = self.type_cx().basic_type_of(self.tcx.ulong)?;
                     self.builder.build_load(len_llvm_ty, len_ptr, "len").map_err(builder_error)
                 }
+                Rvalue::BuiltinVaArg { ap, ty } => self.emit_va_arg(ap, *ty, locals, body),
             }
+        }
+
+        fn emit_va_arg(
+            &self,
+            ap: &Operand,
+            ty: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let ap_place = match ap {
+                Operand::Copy(place) | Operand::Move(place) => place,
+                Operand::Const(_) => {
+                    return Err(CodegenError::Internal(
+                        "va_arg operand must be an addressable place".to_owned(),
+                    ));
+                }
+            };
+            let ap_ptr = self.emit_place_addr(ap_place, locals, body)?;
+            let llvm_ty = self.type_cx().basic_type_of(ty)?;
+            self.builder.build_va_arg(ap_ptr, llvm_ty, "va_arg").map_err(builder_error)
         }
 
         fn emit_complex_from_real(
@@ -3083,6 +3109,18 @@ pub mod backend {
                 TerminatorKind::Unreachable => {
                     self.cx.builder.build_unreachable().map(|_| ()).map_err(builder_error)
                 }
+                TerminatorKind::BuiltinVaStart { ap, last_param, target } => {
+                    self.emit_va_start(ap, last_param)?;
+                    self.emit_goto(*target)
+                }
+                TerminatorKind::BuiltinVaEnd { ap, target } => {
+                    self.emit_va_end(ap)?;
+                    self.emit_goto(*target)
+                }
+                TerminatorKind::BuiltinVaCopy { dst, src, target } => {
+                    self.emit_va_copy(dst, src)?;
+                    self.emit_goto(*target)
+                }
             }
         }
 
@@ -3142,7 +3180,15 @@ pub mod backend {
         ) -> Result<(), CodegenError> {
             let fn_ty = self.callee_fn_ty(callee)?;
             let abi = sysv_fn_abi(self.cx.tcx, &self.cx.hir.defs, fn_ty)?;
-            if args.len() != abi.params.len() {
+            if abi.variadic {
+                if args.len() < abi.params.len() {
+                    return Err(CodegenError::Internal(format!(
+                        "variadic call has {} args but ABI requires at least {} fixed params",
+                        args.len(),
+                        abi.params.len()
+                    )));
+                }
+            } else if args.len() != abi.params.len() {
                 return Err(CodegenError::Internal(format!(
                     "call argument count {} does not match ABI parameter count {}",
                     args.len(),
@@ -3162,6 +3208,11 @@ pub mod backend {
 
             for (arg, param_abi) in args.iter().zip(abi.params.iter()) {
                 self.push_call_arg(arg, param_abi, &mut llvm_args)?;
+            }
+
+            for arg in args.iter().skip(abi.params.len()) {
+                let value = self.cx.emit_operand_value(arg, &self.locals, self.body)?;
+                llvm_args.push(value.into());
             }
 
             let fn_type = self.cx.type_cx().fn_type_of(fn_ty)?;
@@ -3368,6 +3419,78 @@ pub mod backend {
             }
         }
 
+        // ---------------------------------------------------------------
+        // Variadic builtin helpers (09-19)
+        // ---------------------------------------------------------------
+
+        fn va_list_ptr(&self, operand: &Operand) -> Result<PointerValue<'ctx>, CodegenError> {
+            self.cx.emit_place_addr(
+                match operand {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Const(_) => {
+                        return Err(CodegenError::Internal(
+                            "va_list operand must be an addressable place".to_owned(),
+                        ));
+                    }
+                },
+                &self.locals,
+                self.body,
+            )
+        }
+
+        fn va_start_intrinsic(&self) -> FunctionValue<'ctx> {
+            let name = "llvm.va_start.p0";
+            self.cx.module.get_function(name).unwrap_or_else(|| {
+                let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+                let fn_ty = self.cx.context.void_type().fn_type(&[ptr_ty.into()], false);
+                self.cx.module.add_function(name, fn_ty, None)
+            })
+        }
+
+        fn va_end_intrinsic(&self) -> FunctionValue<'ctx> {
+            let name = "llvm.va_end.p0";
+            self.cx.module.get_function(name).unwrap_or_else(|| {
+                let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+                let fn_ty = self.cx.context.void_type().fn_type(&[ptr_ty.into()], false);
+                self.cx.module.add_function(name, fn_ty, None)
+            })
+        }
+
+        fn va_copy_intrinsic(&self) -> FunctionValue<'ctx> {
+            let name = "llvm.va_copy.p0";
+            self.cx.module.get_function(name).unwrap_or_else(|| {
+                let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+                let fn_ty =
+                    self.cx.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+                self.cx.module.add_function(name, fn_ty, None)
+            })
+        }
+
+        fn emit_va_start(&self, ap: &Operand, _last_param: &Operand) -> Result<(), CodegenError> {
+            let ap_ptr = self.va_list_ptr(ap)?;
+            let intrinsic = self.va_start_intrinsic();
+            self.cx.builder.build_call(intrinsic, &[ap_ptr.into()], "").map_err(builder_error)?;
+            Ok(())
+        }
+
+        fn emit_va_end(&self, ap: &Operand) -> Result<(), CodegenError> {
+            let ap_ptr = self.va_list_ptr(ap)?;
+            let intrinsic = self.va_end_intrinsic();
+            self.cx.builder.build_call(intrinsic, &[ap_ptr.into()], "").map_err(builder_error)?;
+            Ok(())
+        }
+
+        fn emit_va_copy(&self, dst: &Operand, src: &Operand) -> Result<(), CodegenError> {
+            let dst_ptr = self.va_list_ptr(dst)?;
+            let src_ptr = self.va_list_ptr(src)?;
+            let intrinsic = self.va_copy_intrinsic();
+            self.cx
+                .builder
+                .build_call(intrinsic, &[dst_ptr.into(), src_ptr.into()], "")
+                .map_err(builder_error)?;
+            Ok(())
+        }
+
         fn emit_return(&self) -> Result<(), CodegenError> {
             let ret_ty = self.body.ret_ty.ok_or_else(|| {
                 CodegenError::Internal("CFG body is missing its return type".to_owned())
@@ -3560,6 +3683,16 @@ pub mod backend {
                 Ty::Func { .. } => self.fn_type_of(ty)?.into(),
                 Ty::Record(def) => self.record_type(ty, *def)?.into(),
                 Ty::Enum(def) => basic_type_as_any(self.enum_type(ty, *def)?),
+                Ty::BuiltinVaList => {
+                    let i32_ty = self.context.i32_type();
+                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    self.context
+                        .struct_type(
+                            &[i32_ty.into(), i32_ty.into(), ptr_ty.into(), ptr_ty.into()],
+                            false,
+                        )
+                        .into()
+                }
                 Ty::Error => return self.type_error(ty, "error type cannot be lowered"),
             };
 
@@ -4394,6 +4527,7 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
         Ty::Func { variadic, .. } => format!("func(variadic={})", variadic),
         Ty::Record(d) => format!("record#{}", d.0),
         Ty::Enum(d) => format!("enum#{}", d.0),
+        Ty::BuiltinVaList => "builtin_va_list".into(),
         Ty::Error => "<error>".into(),
     }
 }
@@ -8093,5 +8227,135 @@ mod tests {
         let ir = cx.ir_text();
         assert!(ir.contains(r#"@p1 = internal global ptr @"\22shared\22""#), "IR:\n{ir}");
         assert!(ir.contains(r#"@p2 = internal global ptr @"\22shared\22""#), "IR:\n{ir}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-19: Variadic function and va builtin tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn variadic_va_builtins_fixture_verifies() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let va_list_ty = tcx.builtin_va_list;
+
+        let fn_ty = func_ty(&mut tcx, int_ty, vec![int_ty], true);
+        let fn_name = session.interner.intern("__test_va_sum");
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, variadic: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false)); // 0: ret
+        locals.push(cfg_local_decl(None, int_ty, true)); // 1: last param
+        locals.push(cfg_local_decl(None, va_list_ty, false)); // 2: ap
+        locals.push(cfg_local_decl(None, int_ty, false)); // 3: tmp
+
+        let ap_place = local_place(Local(2));
+        let last_place = local_place(Local(1));
+        let tmp_place = local_place(Local(3));
+
+        let block0 = cfg_block(
+            Vec::new(),
+            TerminatorKind::BuiltinVaStart {
+                ap: Operand::Copy(ap_place.clone()),
+                last_param: Operand::Copy(last_place),
+                target: BasicBlockId(1),
+            },
+        );
+        let block1 = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: tmp_place.clone(),
+                    rvalue: Rvalue::BuiltinVaArg {
+                        ap: Operand::Copy(ap_place.clone()),
+                        ty: int_ty,
+                    },
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Goto(BasicBlockId(2)),
+        );
+        let block2 = cfg_block(
+            Vec::new(),
+            TerminatorKind::BuiltinVaEnd { ap: Operand::Copy(ap_place), target: BasicBlockId(3) },
+        );
+        let block3 = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(tmp_place)),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+
+        let mut cfg_blocks = IndexVec::new();
+        cfg_blocks.push(block0);
+        cfg_blocks.push(block1);
+        cfg_blocks.push(block2);
+        cfg_blocks.push(block3);
+
+        let body = Body { def: Some(def), locals, blocks: cfg_blocks, ret_ty: Some(int_ty) };
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        let ir = codegen(&mut session, &tcx, &hir, &bodies).unwrap().ir_text;
+
+        assert!(ir.contains("va_start"), "IR missing va_start:\n{ir}");
+        assert!(ir.contains("va_arg"), "IR missing va_arg:\n{ir}");
+        assert!(ir.contains("va_end"), "IR missing va_end:\n{ir}");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn variadic_is_vararg_in_ir() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+
+        let fn_ty = func_ty(&mut tcx, int_ty, vec![int_ty], true);
+        let fn_name = session.interner.intern("__test_variadic_decl");
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, variadic: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false));
+        locals.push(cfg_local_decl(None, int_ty, true));
+
+        let body = Body {
+            def: Some(def),
+            locals,
+            blocks: {
+                let mut b = IndexVec::new();
+                b.push(cfg_block(vec![assign_ret(int_ty, 0)], TerminatorKind::Return));
+                b
+            },
+            ret_ty: Some(int_ty),
+        };
+
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        let ir = codegen(&mut session, &tcx, &hir, &bodies).unwrap().ir_text;
+
+        assert!(
+            ir.contains("define i32 @__test_variadic_decl(i32 %0, ...)"),
+            "IR missing variadic signature:\n{ir}"
+        );
     }
 }

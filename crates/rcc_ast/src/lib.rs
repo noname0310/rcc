@@ -158,6 +158,8 @@ pub enum TypeSpec {
     Record(RecordSpec),
     /// Enum specifier.
     Enum(EnumSpec),
+    /// `__builtin_va_list`
+    BuiltinVaList,
 }
 
 /// `struct`/`union` specifier.
@@ -649,6 +651,8 @@ pub enum ExprKind {
         /// Right type argument.
         rhs: Box<TypeName>,
     },
+    /// `__builtin_va_arg(va_list, type-name)`.
+    BuiltinVaArg { ap: Box<Expr>, ty: Box<TypeName> },
     /// GNU C statement expression `({ block-item* })`.
     StmtExpr(Box<Block>),
     /// `a.b`

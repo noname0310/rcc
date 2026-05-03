@@ -53,6 +53,8 @@ pub enum Ty {
     Record(DefId),
     /// Reference to an enum by `DefId`.
     Enum(DefId),
+    /// Compiler-provided `__builtin_va_list` (SysV x86-64 baseline).
+    BuiltinVaList,
     /// Error sentinel used during type checking to keep lowering lossy but alive.
     Error,
 }
@@ -160,6 +162,8 @@ pub struct TyCtxt {
     pub complex_long_double: TyId,
     /// Error sentinel.
     pub error: TyId,
+    /// `__builtin_va_list`
+    pub builtin_va_list: TyId,
 }
 
 impl TyCtxt {
@@ -188,6 +192,7 @@ impl TyCtxt {
             complex_double: TyId(0),
             complex_long_double: TyId(0),
             error: TyId(0),
+            builtin_va_list: TyId(0),
         };
         this.void = this.intern(Ty::Void);
         this.bool_ = this.intern(Ty::Int { signed: false, rank: IntRank::Bool });
@@ -209,6 +214,7 @@ impl TyCtxt {
         this.complex_double = this.intern(Ty::Complex(FloatKind::F64));
         this.complex_long_double = this.intern(Ty::Complex(FloatKind::F80));
         this.error = this.intern(Ty::Error);
+        this.builtin_va_list = this.intern(Ty::BuiltinVaList);
         this
     }
 

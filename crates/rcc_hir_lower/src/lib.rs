@@ -2169,6 +2169,111 @@ pub fn lower_expr(
             HirExprKind::Comma { lhs: l, rhs: r }
         }
         rcc_ast::ExprKind::Call { callee, args } => {
+            // Intercept __builtin_va_start/end/copy calls before callee
+            // resolution, since these are not declared functions.
+            if let rcc_ast::ExprKind::Ident(sym) = &callee.kind {
+                let name = session.interner.get(*sym);
+                match name {
+                    "__builtin_va_start" => {
+                        if args.len() != 2 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_va_start` requires exactly 2 arguments",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let ap_id =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let last_id =
+                            lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.void,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinVaStart { ap: ap_id, last_param: last_id },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_va_end" => {
+                        if args.len() != 1 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_va_end` requires exactly 1 argument",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let ap_id =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.void,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinVaEnd { ap: ap_id },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_va_copy" => {
+                        if args.len() != 2 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_va_copy` requires exactly 2 arguments",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let dst_id =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let src_id =
+                            lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.void,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinVaCopy { dst: dst_id, src: src_id },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    _ => {}
+                }
+            }
             let callee_id = lower_expr(callee, body, scope, crate_, tcx, resolver, session);
             let arg_ids: Vec<HirExprId> = args
                 .iter()
@@ -2176,15 +2281,14 @@ pub fn lower_expr(
                 .collect();
             HirExprKind::Call { callee: callee_id, args: arg_ids }
         }
+        rcc_ast::ExprKind::BuiltinVaArg { ap, ty } => {
+            let ap_id = lower_expr(ap, body, scope, crate_, tcx, resolver, session);
+            let ty_id = lower_type_name(ty, DeclScope::Block, tcx, resolver, crate_, session);
+            HirExprKind::BuiltinVaArg { ap: ap_id, ty: ty_id }
+        }
         rcc_ast::ExprKind::BuiltinOffsetof { .. }
         | rcc_ast::ExprKind::BuiltinTypesCompatible { .. }
-        | rcc_ast::ExprKind::StmtExpr(_) => {
-            // Phase 15 owns builtin lowering once layout/type-compatibility
-            // services are available; GNU statement-expression value/lifetime
-            // semantics are a phase 14/CFG follow-up. Keep HIR lowering
-            // exhaustive for now without pretending these are ordinary calls.
-            HirExprKind::IntConst(0)
-        }
+        | rcc_ast::ExprKind::StmtExpr(_) => HirExprKind::IntConst(0),
         rcc_ast::ExprKind::Member { base, field } => {
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
             // Field-index resolution happens in typeck; keep the source
@@ -3346,6 +3450,9 @@ fn lower_builtin_specs_to_base_ty(
             }
             TypeSpec::Imaginary => {
                 saw_unsupported = true;
+            }
+            TypeSpec::BuiltinVaList => {
+                return tcx.builtin_va_list;
             }
             TypeSpec::TypedefName(_) | TypeSpec::Record(_) | TypeSpec::Enum(_) => {
                 saw_unsupported = true;

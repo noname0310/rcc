@@ -131,6 +131,31 @@ pub enum TerminatorKind {
     },
     /// Unreachable (missing `return`, `__builtin_unreachable`).
     Unreachable,
+    /// `__builtin_va_start(ap, last_param)`.
+    BuiltinVaStart {
+        /// va_list operand.
+        ap: Operand,
+        /// Last named parameter.
+        last_param: Operand,
+        /// Control transfers here after the intrinsic call.
+        target: BasicBlockId,
+    },
+    /// `__builtin_va_end(ap)`.
+    BuiltinVaEnd {
+        /// va_list operand.
+        ap: Operand,
+        /// Control transfers here after the intrinsic call.
+        target: BasicBlockId,
+    },
+    /// `__builtin_va_copy(dst, src)`.
+    BuiltinVaCopy {
+        /// Destination va_list.
+        dst: Operand,
+        /// Source va_list.
+        src: Operand,
+        /// Control transfers here after the intrinsic call.
+        target: BasicBlockId,
+    },
 }
 
 /// A memory location addressable by the IR.
@@ -229,6 +254,13 @@ pub enum Rvalue {
     AddressOf(Place),
     /// Array/struct length (used for VLA).
     Len(Place),
+    /// `__builtin_va_arg(ap, type)` — extract one variadic argument.
+    BuiltinVaArg {
+        /// va_list operand.
+        ap: Operand,
+        /// Type of the value to extract.
+        ty: TyId,
+    },
 }
 
 /// Cast kinds recognised by the backend.
