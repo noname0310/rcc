@@ -2,7 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clap::Parser;
 use rcc_driver::{options_from_cli, pipeline, Cli};
 use rcc_errors::{codes, CaptureEmitter, Handler};
 use rcc_session::Session;

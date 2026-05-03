@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rcc_session::{EmitKind, Options, Session, TargetInfo, WarningConfig};
+use rcc_session::{EmitKind, LinkOptions, Options, Session, TargetInfo, WarningConfig};
 
 pub mod cli;
 pub mod pipeline;
@@ -45,6 +45,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         output,
         opt_level: cli.opt_level,
         warning_config: warning_config_from_cli(cli),
+        link: link_options_from_cli(cli),
         debug_info: false,
         include_gpl_tests: cli.include_gpl_tests,
         gnu_va_args_elision: false,
@@ -70,6 +71,9 @@ fn warning_config_from_cli(cli: &Cli) -> WarningConfig {
 }
 
 fn apply_warning_flag(config: &mut WarningConfig, raw: &str) {
+    if raw.starts_with("l,") {
+        return;
+    }
     match raw {
         "all" => config.enable_wall(),
         "extra" => config.enable_extra(),
@@ -87,6 +91,23 @@ fn apply_warning_flag(config: &mut WarningConfig, raw: &str) {
         }
         name => config.enable_warning(name),
     }
+}
+
+fn link_options_from_cli(cli: &Cli) -> LinkOptions {
+    let mut link = LinkOptions {
+        libraries: cli.libraries.clone(),
+        library_paths: cli.library_paths.clone(),
+        shared: cli.shared,
+        static_link: cli.static_link,
+        pie: cli.pie.then_some(true).or_else(|| cli.no_pie.then_some(false)),
+        ..LinkOptions::default()
+    };
+    link.linker_args.extend(
+        cli.warning_flags
+            .iter()
+            .filter_map(|flag| flag.strip_prefix("l,").map(|rest| format!("-Wl,{rest}"))),
+    );
+    link
 }
 
 fn emit_and_output_from_cli(cli: &Cli) -> (Vec<EmitKind>, Option<PathBuf>) {

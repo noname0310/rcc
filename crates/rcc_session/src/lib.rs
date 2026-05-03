@@ -69,6 +69,8 @@ pub struct Options {
     pub opt_level: OptLevel,
     /// Warning filtering and promotion policy.
     pub warning_config: WarningConfig,
+    /// Host-cc linker options for final executable/shared-library emission.
+    pub link: LinkOptions,
     /// Emit LLVM debug metadata when the LLVM backend is enabled.
     ///
     /// CLI `-g` wiring is owned by the driver phase; backend tests can set this
@@ -150,6 +152,7 @@ impl Default for Options {
             output: None,
             opt_level: OptLevel::None,
             warning_config: WarningConfig::default(),
+            link: LinkOptions::default(),
             debug_info: false,
             include_gpl_tests: false,
             gnu_va_args_elision: false,
@@ -162,6 +165,23 @@ impl Default for Options {
             gnu_inline_asm: false,
         }
     }
+}
+
+/// Options forwarded to the host C compiler when it is used as linker.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkOptions {
+    /// Library names passed as `-l<name>`.
+    pub libraries: Vec<String>,
+    /// Library search paths passed as `-L<path>`.
+    pub library_paths: Vec<PathBuf>,
+    /// Raw `-Wl,...` arguments passed through to the host C compiler.
+    pub linker_args: Vec<String>,
+    /// Produce a shared library (`-shared`).
+    pub shared: bool,
+    /// Request static linking (`-static`).
+    pub static_link: bool,
+    /// PIE control: `Some(true)` => `-pie`, `Some(false)` => `-no-pie`.
+    pub pie: Option<bool>,
 }
 
 /// Compilation-wide state. Usually passed `&mut` down the pipeline.

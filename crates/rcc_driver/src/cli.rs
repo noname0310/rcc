@@ -1,5 +1,6 @@
 //! Clap-based command-line interface.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
@@ -56,9 +57,68 @@ pub struct Cli {
     #[arg(short = 'W', value_name = "warning", action = ArgAction::Append)]
     pub warning_flags: Vec<String>,
 
+    /// Link against library (`-l<lib>`). May repeat.
+    #[arg(short = 'l', value_name = "LIB", action = ArgAction::Append)]
+    pub libraries: Vec<String>,
+
+    /// Add a library search path (`-L<path>`). May repeat.
+    #[arg(short = 'L', value_name = "DIR", action = ArgAction::Append)]
+    pub library_paths: Vec<PathBuf>,
+
+    /// Produce a shared library.
+    #[arg(long)]
+    pub shared: bool,
+
+    /// Request static linking.
+    #[arg(long = "static")]
+    pub static_link: bool,
+
+    /// Request a position-independent executable.
+    #[arg(long)]
+    pub pie: bool,
+
+    /// Disable position-independent executable linking.
+    #[arg(long = "no-pie", conflicts_with = "pie")]
+    pub no_pie: bool,
+
     /// Include GPL-licensed test suites during `fetch-testsuites` / conformance runs.
     #[arg(long)]
     pub include_gpl_tests: bool,
+}
+
+impl Cli {
+    /// Parse CLI args, accepting GCC-style single-dash long linker flags.
+    pub fn parse() -> Self {
+        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit())
+    }
+
+    /// Parse from an explicit iterator, normalising GCC driver spellings first.
+    pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        <Self as Parser>::try_parse_from(normalize_driver_args(args))
+    }
+}
+
+fn normalize_driver_args<I, T>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    args.into_iter()
+        .map(|arg| {
+            let arg = arg.into();
+            match arg.to_string_lossy().as_ref() {
+                "-shared" => OsString::from("--shared"),
+                "-static" => OsString::from("--static"),
+                "-pie" => OsString::from("--pie"),
+                "-no-pie" => OsString::from("--no-pie"),
+                _ => arg,
+            }
+        })
+        .collect()
 }
 
 fn parse_define(raw: &str) -> Result<(String, Option<String>), String> {

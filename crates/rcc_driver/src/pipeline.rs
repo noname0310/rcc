@@ -15,7 +15,7 @@ use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
 use rcc_lexer::{PpToken, PpTokenKind};
 use rcc_preprocess::preprocess;
-use rcc_session::{EmitKind, Session};
+use rcc_session::{EmitKind, LinkOptions, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
 /// Compile a single file end-to-end. Errors are written to the session's
@@ -133,7 +133,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
                 let obj = TempObject::new(input);
                 fs::write(obj.path(), object)
                     .map_err(|e| format!("cannot write {}: {e}", obj.path().display()))?;
-                return link(obj.path(), &exe);
+                return link_with_options(obj.path(), &exe, &session.opts.link);
             }
             if session.opts.emit.contains(&EmitKind::Obj) {
                 let object = art
@@ -198,14 +198,29 @@ fn flush_stage_outputs(
 /// This deliberately goes through `cc` instead of invoking `ld` directly so
 /// libc and CRT startup objects stay the host toolchain's responsibility.
 pub fn link(obj: &Path, output: &Path) -> Result<(), String> {
+    link_with_options(obj, output, &LinkOptions::default())
+}
+
+/// Link one native object file into an executable/shared object with options.
+pub fn link_with_options(obj: &Path, output: &Path, options: &LinkOptions) -> Result<(), String> {
     let linker = find_host_cc()?;
-    link_with_linker(&linker, obj, output)
+    link_with_linker_and_options(&linker, obj, output, options)
 }
 
 /// Link with an explicit linker path. Public for driver tests and later tool
 /// discovery work; ordinary users should call [`link`].
 pub fn link_with_linker(linker: &Path, obj: &Path, output: &Path) -> Result<(), String> {
-    let command = LinkCommand::new(linker.to_path_buf(), obj, output);
+    link_with_linker_and_options(linker, obj, output, &LinkOptions::default())
+}
+
+/// Link with an explicit linker path and explicit forwarding options.
+pub fn link_with_linker_and_options(
+    linker: &Path,
+    obj: &Path,
+    output: &Path,
+    options: &LinkOptions,
+) -> Result<(), String> {
+    let command = LinkCommand::with_options(linker.to_path_buf(), obj, output, options);
     let result = Command::new(&command.program)
         .args(&command.args)
         .output()
@@ -235,14 +250,42 @@ impl LinkCommand {
     /// Build `cc <obj> -o <output>`.
     #[must_use]
     pub fn new(program: PathBuf, obj: &Path, output: &Path) -> Self {
-        Self {
-            program,
-            args: vec![
-                obj.as_os_str().to_owned(),
-                OsString::from("-o"),
-                output.as_os_str().to_owned(),
-            ],
+        Self::with_options(program, obj, output, &LinkOptions::default())
+    }
+
+    /// Build a host-cc link command with forwarded linker options.
+    #[must_use]
+    pub fn with_options(
+        program: PathBuf,
+        obj: &Path,
+        output: &Path,
+        options: &LinkOptions,
+    ) -> Self {
+        let mut args =
+            vec![obj.as_os_str().to_owned(), OsString::from("-o"), output.as_os_str().to_owned()];
+        if options.shared {
+            args.push(OsString::from("-shared"));
         }
+        if options.static_link {
+            args.push(OsString::from("-static"));
+        }
+        match options.pie {
+            Some(true) => args.push(OsString::from("-pie")),
+            Some(false) => args.push(OsString::from("-no-pie")),
+            None => {}
+        }
+        for path in &options.library_paths {
+            let mut arg = OsString::from("-L");
+            arg.push(path);
+            args.push(arg);
+        }
+        for lib in &options.libraries {
+            args.push(OsString::from(format!("-l{lib}")));
+        }
+        for arg in &options.linker_args {
+            args.push(OsString::from(arg));
+        }
+        Self { program, args }
     }
 
     /// Render the command line for diagnostics.

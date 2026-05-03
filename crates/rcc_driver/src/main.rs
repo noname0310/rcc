@@ -1,4 +1,3 @@
-use clap::Parser;
 use rcc_driver::Cli;
 
 fn main() {
