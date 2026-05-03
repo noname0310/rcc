@@ -43,6 +43,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         emit: cli.emit.clone(),
         output: cli.output.clone(),
         opt_level: cli.opt_level,
+        debug_info: false,
         include_gpl_tests: cli.include_gpl_tests,
         gnu_va_args_elision: false,
         gnu_permissive_redefinition: false,

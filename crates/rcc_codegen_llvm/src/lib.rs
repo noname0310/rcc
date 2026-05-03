@@ -715,10 +715,17 @@ pub mod backend {
 
     use super::*;
 
+    use std::cell::RefCell;
+
     use inkwell::attributes::{Attribute, AttributeLoc};
     use inkwell::basic_block::BasicBlock as LlvmBasicBlock;
     use inkwell::builder::Builder;
     use inkwell::context::Context;
+    use inkwell::debug_info::{
+        AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DIScope, DISubprogram, DIType,
+        DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
+    };
+    use inkwell::module::FlagBehavior;
     use inkwell::module::Linkage as LlvmLinkage;
     use inkwell::module::Module;
     #[cfg(test)]
@@ -745,6 +752,7 @@ pub mod backend {
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, ObjectQuals, Qual, RecordKind,
         Ty,
     };
+    use rcc_span::{FileId, Span};
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -780,6 +788,58 @@ pub mod backend {
         volatile: bool,
     }
 
+    struct DebugInfoCx<'ctx> {
+        builder: DebugInfoBuilder<'ctx>,
+        compile_unit: DICompileUnit<'ctx>,
+        subprograms: RefCell<FxHashMap<DefId, DISubprogram<'ctx>>>,
+        types: RefCell<FxHashMap<TyId, DIType<'ctx>>>,
+    }
+
+    impl<'ctx> DebugInfoCx<'ctx> {
+        fn new(context: &'ctx Context, module: &Module<'ctx>, session: &Session) -> Self {
+            let debug_metadata_version = context.i32_type().const_int(3, false);
+            module.add_basic_value_flag(
+                "Debug Info Version",
+                FlagBehavior::Warning,
+                debug_metadata_version,
+            );
+
+            let (filename, directory) = debug_compile_unit_path(session);
+            let (builder, compile_unit) = module.create_debug_info_builder(
+                true,
+                DWARFSourceLanguage::C,
+                &filename,
+                &directory,
+                "rcc",
+                false,
+                "",
+                0,
+                "",
+                DWARFEmissionKind::Full,
+                0,
+                false,
+                false,
+                "",
+                "",
+            );
+
+            Self {
+                builder,
+                compile_unit,
+                subprograms: RefCell::new(FxHashMap::default()),
+                types: RefCell::new(FxHashMap::default()),
+            }
+        }
+
+        fn file(&self) -> DIFile<'ctx> {
+            self.compile_unit.get_file()
+        }
+
+        fn scope(&self) -> DIScope<'ctx> {
+            self.compile_unit.as_debug_info_scope()
+        }
+    }
+
     /// Shared state for one LLVM module emission.
     pub struct CodegenCx<'a, 'ctx> {
         context: &'ctx Context,
@@ -793,6 +853,7 @@ pub mod backend {
         bodies: &'a FxHashMap<DefId, Body>,
         functions: FxHashMap<DefId, FunctionValue<'ctx>>,
         globals: FxHashMap<DefId, GlobalValue<'ctx>>,
+        debug: Option<DebugInfoCx<'ctx>>,
     }
 
     impl<'a, 'ctx> CodegenCx<'a, 'ctx> {
@@ -813,6 +874,8 @@ pub mod backend {
             module.set_triple(&TargetTriple::create(&target_triple));
             let target_data = TargetData::create(&data_layout);
             module.set_data_layout(&target_data.get_data_layout());
+            let debug =
+                session.opts.debug_info.then(|| DebugInfoCx::new(context, &module, session));
 
             Self {
                 context,
@@ -826,6 +889,7 @@ pub mod backend {
                 bodies,
                 functions: FxHashMap::default(),
                 globals: FxHashMap::default(),
+                debug,
             }
         }
 
@@ -918,6 +982,353 @@ pub mod backend {
         /// Render the current LLVM module as textual LLVM IR.
         pub fn ir_text(&self) -> String {
             self.module.print_to_string().to_string()
+        }
+
+        fn finalize_debug_info(&self) {
+            if let Some(debug) = &self.debug {
+                debug.builder.finalize();
+            }
+        }
+
+        fn debug_subprogram(
+            &self,
+            def: DefId,
+            function: FunctionValue<'ctx>,
+        ) -> Result<Option<DISubprogram<'ctx>>, CodegenError> {
+            let Some(debug) = &self.debug else {
+                return Ok(None);
+            };
+            if let Some(subprogram) = debug.subprograms.borrow().get(&def).copied() {
+                return Ok(Some(subprogram));
+            }
+
+            let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                CodegenError::Internal(format!("function definition {def:?} is missing"))
+            })?;
+            let DefKind::Function { ty, has_body, .. } = &def_data.kind else {
+                return Err(CodegenError::Internal(format!(
+                    "definition {def:?} is not a function"
+                )));
+            };
+            let Ty::Func { ret, params, .. } = self.tcx.get(*ty) else {
+                return Err(type_lowering_error(
+                    *ty,
+                    "function definition does not name a function type",
+                ));
+            };
+
+            let return_ty = if *ret == self.tcx.void { None } else { Some(self.debug_type(*ret)?) };
+            let mut param_tys = Vec::with_capacity(params.len());
+            for param in params {
+                param_tys.push(self.debug_type(*param)?);
+            }
+            let subroutine_ty = debug.builder.create_subroutine_type(
+                debug.file(),
+                return_ty,
+                &param_tys,
+                DIFlags::PUBLIC,
+            );
+            let loc = self.debug_line_col(def_data.span);
+            let name = self.def_name(def_data);
+            let subprogram = debug.builder.create_function(
+                debug.scope(),
+                &name,
+                None,
+                debug.file(),
+                loc.line,
+                subroutine_ty,
+                true,
+                *has_body,
+                loc.line,
+                DIFlags::PUBLIC,
+                false,
+            );
+            function.set_subprogram(subprogram);
+            debug.subprograms.borrow_mut().insert(def, subprogram);
+            Ok(Some(subprogram))
+        }
+
+        fn emit_debug_declarations(
+            &self,
+            function: FunctionValue<'ctx>,
+            body: &Body,
+            locals: &LocalMap<'ctx>,
+        ) -> Result<(), CodegenError> {
+            let Some(debug) = &self.debug else {
+                return Ok(());
+            };
+            let Some(def) = body.def else {
+                return Ok(());
+            };
+            let Some(subprogram) = self.debug_subprogram(def, function)? else {
+                return Ok(());
+            };
+            let Some(entry) = function.get_first_basic_block() else {
+                return Ok(());
+            };
+
+            let mut param_index = 1u32;
+            for (local, decl) in body.locals.iter_enumerated() {
+                let Some(name) = decl.name else {
+                    continue;
+                };
+                if matches!(self.tcx.get(decl.ty), Ty::Array { is_vla: true, .. }) {
+                    continue;
+                }
+                let Some(&storage) = locals.get(local) else {
+                    continue;
+                };
+                if storage.is_null() {
+                    continue;
+                }
+
+                let loc = self.debug_line_col(decl.span);
+                let name = self.session.interner.get(name);
+                let ty = self.debug_type(decl.ty)?;
+                let var = if decl.is_param {
+                    let var = debug.builder.create_parameter_variable(
+                        subprogram.as_debug_info_scope(),
+                        name,
+                        param_index,
+                        debug.file(),
+                        loc.line,
+                        ty,
+                        true,
+                        DIFlags::PUBLIC,
+                    );
+                    param_index = param_index.saturating_add(1);
+                    var
+                } else {
+                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(decl.ty)
+                        .unwrap_or(Layout { size: 0, align: 1 });
+                    debug.builder.create_auto_variable(
+                        subprogram.as_debug_info_scope(),
+                        name,
+                        debug.file(),
+                        loc.line,
+                        ty,
+                        true,
+                        DIFlags::PUBLIC,
+                        layout.align.saturating_mul(8),
+                    )
+                };
+
+                let debug_loc = debug.builder.create_debug_location(
+                    self.context,
+                    loc.line,
+                    loc.col,
+                    subprogram.as_debug_info_scope(),
+                    None,
+                );
+                debug.builder.insert_declare_at_end(storage, Some(var), None, debug_loc, entry);
+            }
+
+            self.clear_debug_location();
+            Ok(())
+        }
+
+        fn set_debug_location(&self, def: Option<DefId>, span: Span) {
+            let Some(debug) = &self.debug else {
+                return;
+            };
+            let scope = def
+                .and_then(|def| debug.subprograms.borrow().get(&def).copied())
+                .map(|subprogram| subprogram.as_debug_info_scope())
+                .unwrap_or_else(|| debug.scope());
+            let loc = self.debug_line_col(span);
+            let debug_loc =
+                debug.builder.create_debug_location(self.context, loc.line, loc.col, scope, None);
+            self.builder.set_current_debug_location(debug_loc);
+        }
+
+        fn clear_debug_location(&self) {
+            if self.debug.is_some() {
+                self.builder.unset_current_debug_location();
+            }
+        }
+
+        fn debug_type(&self, ty: TyId) -> Result<DIType<'ctx>, CodegenError> {
+            let debug = self
+                .debug
+                .as_ref()
+                .ok_or_else(|| CodegenError::Internal("debug info is disabled".to_owned()))?;
+            if let Some(ty) = debug.types.borrow().get(&ty).copied() {
+                return Ok(ty);
+            }
+
+            let di_ty = match self.tcx.get(ty) {
+                Ty::Void => debug
+                    .builder
+                    .create_basic_type("void", 0, 0x00, DIFlags::PUBLIC)
+                    .map_err(|e| type_lowering_error(ty, e))?
+                    .as_type(),
+                Ty::Int { signed, rank } => {
+                    let (name, bits, encoding) = debug_int_type(*signed, *rank);
+                    debug
+                        .builder
+                        .create_basic_type(name, bits, encoding, DIFlags::PUBLIC)
+                        .map_err(|e| type_lowering_error(ty, e))?
+                        .as_type()
+                }
+                Ty::Float(kind) => {
+                    let (name, bits) = match kind {
+                        FloatKind::F32 => ("float", 32),
+                        FloatKind::F64 => ("double", 64),
+                        FloatKind::F80 => ("long double", 128),
+                    };
+                    debug
+                        .builder
+                        .create_basic_type(name, bits, 0x04, DIFlags::PUBLIC)
+                        .map_err(|e| type_lowering_error(ty, e))?
+                        .as_type()
+                }
+                Ty::Complex(kind) => {
+                    let name = match kind {
+                        FloatKind::F32 => "_Complex float",
+                        FloatKind::F64 => "_Complex double",
+                        FloatKind::F80 => "_Complex long double",
+                    };
+                    let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(ty)
+                        .map_err(|e| type_lowering_error(ty, e.to_string()))?;
+                    debug
+                        .builder
+                        .create_basic_type(name, layout.size * 8, 0x04, DIFlags::PUBLIC)
+                        .map_err(|e| type_lowering_error(ty, e))?
+                        .as_type()
+                }
+                Ty::Ptr(pointee) => {
+                    let pointee = self.debug_type(pointee.ty)?;
+                    debug
+                        .builder
+                        .create_pointer_type("", pointee, 64, 64, AddressSpace::default())
+                        .as_type()
+                }
+                Ty::Array { elem, len, is_vla } => {
+                    let elem_ty = self.debug_type(elem.ty)?;
+                    let elem_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                        .layout_of(elem.ty)
+                        .map_err(|e| type_lowering_error(ty, e.to_string()))?;
+                    let count = if *is_vla { 0 } else { len.unwrap_or(0) };
+                    let size = elem_layout.size.saturating_mul(count).saturating_mul(8);
+                    let range_end = i64::try_from(count).unwrap_or(i64::MAX);
+                    debug
+                        .builder
+                        .create_array_type(
+                            elem_ty,
+                            size,
+                            elem_layout.align.saturating_mul(8),
+                            &[0..range_end],
+                        )
+                        .as_type()
+                }
+                Ty::Record(def) => self.debug_record_type(ty, *def)?,
+                Ty::Enum(def) => {
+                    let name = self
+                        .hir
+                        .defs
+                        .get(*def)
+                        .map(|def| self.session.interner.get(def.name).to_owned())
+                        .unwrap_or_else(|| "enum".to_owned());
+                    debug
+                        .builder
+                        .create_basic_type(&format!("enum {name}"), 32, 0x05, DIFlags::PUBLIC)
+                        .map_err(|e| type_lowering_error(ty, e))?
+                        .as_type()
+                }
+                Ty::Func { .. } => debug
+                    .builder
+                    .create_pointer_type(
+                        "function pointer",
+                        self.debug_type(self.tcx.void)?,
+                        64,
+                        64,
+                        AddressSpace::default(),
+                    )
+                    .as_type(),
+                Ty::BuiltinVaList => debug
+                    .builder
+                    .create_pointer_type(
+                        "__builtin_va_list",
+                        self.debug_type(self.tcx.char_)?,
+                        64,
+                        64,
+                        AddressSpace::default(),
+                    )
+                    .as_type(),
+                Ty::Error => {
+                    return Err(type_lowering_error(ty, "error type has no debug metadata"));
+                }
+            };
+
+            debug.types.borrow_mut().insert(ty, di_ty);
+            Ok(di_ty)
+        }
+
+        fn debug_record_type(&self, ty: TyId, def: DefId) -> Result<DIType<'ctx>, CodegenError> {
+            let debug = self
+                .debug
+                .as_ref()
+                .ok_or_else(|| CodegenError::Internal("debug info is disabled".to_owned()))?;
+            let def_data = self
+                .hir
+                .defs
+                .get(def)
+                .ok_or_else(|| type_lowering_error(ty, "record definition is missing"))?;
+            let DefKind::Record { kind, .. } = &def_data.kind else {
+                return Err(type_lowering_error(ty, "record definition id does not name a record"));
+            };
+            let layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                .layout_of(ty)
+                .map_err(|e| type_lowering_error(ty, e.to_string()))?;
+            let tag = match kind {
+                RecordKind::Struct => "struct",
+                RecordKind::Union => "union",
+            };
+            let name = self.session.interner.get(def_data.name);
+            let loc = self.debug_line_col(def_data.span);
+            let di_ty = match kind {
+                RecordKind::Struct => debug.builder.create_struct_type(
+                    debug.scope(),
+                    name,
+                    debug.file(),
+                    loc.line,
+                    layout.size.saturating_mul(8),
+                    layout.align.saturating_mul(8),
+                    DIFlags::PUBLIC,
+                    None,
+                    &[],
+                    0,
+                    None,
+                    &format!("rcc.{tag}.{name}"),
+                ),
+                RecordKind::Union => debug.builder.create_union_type(
+                    debug.scope(),
+                    name,
+                    debug.file(),
+                    loc.line,
+                    layout.size.saturating_mul(8),
+                    layout.align.saturating_mul(8),
+                    DIFlags::PUBLIC,
+                    &[],
+                    0,
+                    &format!("rcc.{tag}.{name}"),
+                ),
+            };
+            Ok(di_ty.as_type())
+        }
+
+        fn debug_line_col(&self, span: Span) -> rcc_span::LineCol {
+            if span.file == FileId::DUMMY {
+                return rcc_span::LineCol { line: 0, col: 0 };
+            }
+            self.session
+                .source_map
+                .read()
+                .ok()
+                .map(|source_map| source_map.lookup_line_col(span.file, span.lo))
+                .unwrap_or(rcc_span::LineCol { line: 0, col: 0 })
         }
 
         /// Build a type-lowering helper sharing this module's context and HIR.
@@ -3529,7 +3940,11 @@ pub mod backend {
                 .get(BasicBlockId(0))
                 .ok_or_else(|| CodegenError::Internal("CFG body has no entry block".to_owned()))?;
             cx.builder.position_at_end(entry);
+            if let Some(def) = body.def {
+                cx.debug_subprogram(def, function)?;
+            }
             let locals = cx.materialize_locals(function, body)?;
+            cx.emit_debug_declarations(function, body, &locals)?;
             let mut vla_stacks = VlaStackMap::with_capacity(body.locals.len());
             for _ in body.locals.iter() {
                 vla_stacks.push(None);
@@ -3549,7 +3964,7 @@ pub mod backend {
                     self.ensure_no_terminator(bb, llvm_block)?;
                 }
 
-                self.emit_terminator(bb, &block.terminator.kind)?;
+                self.emit_terminator(bb, &block.terminator)?;
                 if llvm_block.get_terminator().is_none() {
                     return Err(CodegenError::Internal(format!(
                         "CFG block {bb:?} did not emit an LLVM terminator"
@@ -3561,6 +3976,7 @@ pub mod backend {
         }
 
         fn emit_statement(&mut self, statement: &Statement) -> Result<(), CodegenError> {
+            self.cx.set_debug_location(self.body.def, statement.span);
             match &statement.kind {
                 StatementKind::Assign { place, rvalue } => {
                     if self.cx.try_emit_aggregate_assign(place, rvalue, &self.locals, self.body)? {
@@ -3585,12 +4001,13 @@ pub mod backend {
         fn emit_terminator(
             &self,
             bb: BasicBlockId,
-            terminator: &TerminatorKind,
+            terminator: &rcc_cfg::Terminator,
         ) -> Result<(), CodegenError> {
+            self.cx.set_debug_location(self.body.def, terminator.span);
             let llvm_block = self.llvm_block(bb)?;
             self.ensure_no_terminator(bb, llvm_block)?;
 
-            match terminator {
+            match &terminator.kind {
                 TerminatorKind::Goto(target) => self.emit_goto(*target),
                 TerminatorKind::SwitchInt { discr, targets } => {
                     self.emit_switch_int(discr, targets.as_slice())
@@ -4995,6 +5412,7 @@ pub mod backend {
         cx.declare_all()?;
         GlobalCx::new(&cx).materialize_all_globals()?;
         cx.codegen_all_bodies()?;
+        cx.finalize_debug_info();
         cx.verify_module()?;
         Ok(CodegenArtifact { ir_text: cx.ir_text() })
     }
@@ -5018,6 +5436,45 @@ pub mod backend {
             })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| FALLBACK_MODULE_NAME.to_owned())
+    }
+
+    fn debug_compile_unit_path(session: &Session) -> (String, String) {
+        let Some(path) = session
+            .source_map
+            .read()
+            .ok()
+            .and_then(|source_map| source_map.files().next().map(|file| file.name.clone()))
+        else {
+            return ("<unknown>".to_owned(), ".".to_owned());
+        };
+
+        let filename = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| path.display().to_string());
+        let directory = path
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .filter(|dir| !dir.is_empty())
+            .unwrap_or_else(|| ".".to_owned());
+        (filename, directory)
+    }
+
+    fn debug_int_type(signed: bool, rank: IntRank) -> (&'static str, u64, u32) {
+        match (signed, rank) {
+            (_, IntRank::Bool) => ("_Bool", 8, 0x02),
+            (true, IntRank::Char) => ("char", 8, 0x05),
+            (false, IntRank::Char) => ("unsigned char", 8, 0x07),
+            (true, IntRank::Short) => ("short", 16, 0x05),
+            (false, IntRank::Short) => ("unsigned short", 16, 0x07),
+            (true, IntRank::Int) => ("int", 32, 0x05),
+            (false, IntRank::Int) => ("unsigned int", 32, 0x07),
+            (true, IntRank::Long) => ("long", 64, 0x05),
+            (false, IntRank::Long) => ("unsigned long", 64, 0x07),
+            (true, IntRank::LongLong) => ("long long", 64, 0x05),
+            (false, IntRank::LongLong) => ("unsigned long long", 64, 0x07),
+        }
     }
 }
 

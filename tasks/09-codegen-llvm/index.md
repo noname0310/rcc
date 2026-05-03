@@ -33,7 +33,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [23-llvm-ir-snapshots](23-llvm-ir-snapshots.md)
 - [x] [24-windows-llvm-c-linking](24-windows-llvm-c-linking.md)
 - [x] [25-filecheck-tests](25-filecheck-tests.md)
-- [ ] [26-debug-ir-metadata](26-debug-ir-metadata.md)
+- [x] [26-debug-ir-metadata](26-debug-ir-metadata.md)
 
 ## Downstream
 

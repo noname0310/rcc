@@ -20,8 +20,12 @@ enum Directive {
 }
 
 fn assert_checked(name: &str, checked_source: &str) {
+    assert_checked_with_options(name, checked_source, Options::default());
+}
+
+fn assert_checked_with_options(name: &str, checked_source: &str, opts: Options) {
     let (source, directives) = parse_checked_source(checked_source);
-    let ir = render(name, &source);
+    let ir = render_with_options(name, &source, opts);
     filecheck(&ir, &directives).unwrap_or_else(|message| panic!("{message}\n\nIR:\n{ir}"));
 }
 
@@ -92,10 +96,10 @@ fn excerpt(ir: &str, cursor: usize) -> String {
     format!("IR excerpt at byte {cursor}:\n{}", &ir[start..end])
 }
 
-fn render(name: &str, src: &str) -> String {
+fn render_with_options(name: &str, src: &str, opts: Options) -> String {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut session = Session::with_handler(Options::default(), handler);
+    let mut session = Session::with_handler(opts, handler);
     let file = session
         .source_map
         .write()
@@ -242,6 +246,48 @@ fn bitfield_write_masks_neighbor_bits() {
         int f(struct S *p) {
             p->b = 17;
             return p->b;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn debug_info_enabled_emits_compile_unit_subprogram_and_local_metadata() {
+    let opts = Options { debug_info: true, ..Options::default() };
+    assert_checked_with_options(
+        "debug_info_enabled",
+        r#"
+        // CHECK: call void @llvm.dbg.declare
+        // CHECK: !llvm.dbg.cu = !{!
+        // CHECK: !DICompileUnit(language: DW_LANG_C
+        // CHECK: !DIFile(filename:
+        // CHECK: !DISubprogram(name: "f"
+        // CHECK: !DILocalVariable(name: "param"
+        // CHECK: !DILocalVariable(name: "pair"
+        // CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "Pair"
+        // CHECK: !DILocalVariable(name: "local"
+        struct Pair { int a; int b; };
+        int f(int param) {
+            struct Pair pair;
+            int local = param;
+            pair.a = local;
+            return pair.a;
+        }
+        "#,
+        opts,
+    );
+}
+
+#[test]
+fn debug_info_disabled_keeps_ir_free_of_debug_metadata() {
+    assert_checked(
+        "debug_info_disabled",
+        r#"
+        // CHECK-NOT: !llvm.dbg.cu
+        // CHECK-NOT: llvm.dbg.declare
+        int f(int param) {
+            int local = param;
+            return local;
         }
         "#,
     );

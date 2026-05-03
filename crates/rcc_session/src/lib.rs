@@ -69,6 +69,12 @@ pub struct Options {
     pub output: Option<PathBuf>,
     /// Optimisation level.
     pub opt_level: OptLevel,
+    /// Emit LLVM debug metadata when the LLVM backend is enabled.
+    ///
+    /// CLI `-g` wiring is owned by the driver phase; backend tests can set this
+    /// directly to exercise the debug-info path without depending on object
+    /// emission or linker support.
+    pub debug_info: bool,
     /// Enable `--include-gpl` test suites.
     pub include_gpl_tests: bool,
     /// Enable the GNU `, ## __VA_ARGS__` comma-elision extension.
@@ -143,6 +149,7 @@ impl Default for Options {
             emit: Vec::new(),
             output: None,
             opt_level: OptLevel::None,
+            debug_info: false,
             include_gpl_tests: false,
             gnu_va_args_elision: false,
             gnu_permissive_redefinition: false,

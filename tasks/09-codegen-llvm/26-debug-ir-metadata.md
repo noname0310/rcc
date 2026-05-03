@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 09-26: Debug IR metadata
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-05, 09-12, 09-25    **Milestone:** M6    **Size:** Large
