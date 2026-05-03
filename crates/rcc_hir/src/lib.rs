@@ -14,6 +14,7 @@ use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_span::{Span, Symbol};
 
 pub mod layout;
+pub mod pretty;
 pub mod ty;
 
 pub use layout::{ArrayLayout, LayoutCx, LayoutError, LayoutResult};

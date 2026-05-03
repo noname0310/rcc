@@ -11,6 +11,7 @@
 
 use rcc_span::{Span, Symbol};
 
+pub mod pretty;
 pub mod visit;
 
 rcc_data_structures::new_index! {

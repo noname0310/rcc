@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-01: `--emit=` stage dumps
 
 **Phase:** 10-driver    **Depends on:** 03-13, 05-28, 08-14, 09-15, 10-00.2    **Milestone:** M3

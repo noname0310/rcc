@@ -10,7 +10,7 @@
 
 - [x] [00-01-pre-driver-state-hygiene](00-01-pre-driver-state-hygiene.md)
 - [x] [00-02-backend-required-output-contract](00-02-backend-required-output-contract.md)
-- [ ] [01-emit-stages-dump](01-emit-stages-dump.md)
+- [x] [01-emit-stages-dump](01-emit-stages-dump.md)
 - [ ] [02-link-invocation](02-link-invocation.md)
 - [ ] [03-ui-test-harness](03-ui-test-harness.md)
 - [ ] [04-insta-snapshot-harness](04-insta-snapshot-harness.md)

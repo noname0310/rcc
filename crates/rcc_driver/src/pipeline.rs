@@ -1,7 +1,8 @@
 //! Orchestration of the compiler pipeline: source -> preprocess -> parse ->
 //! lower -> typeck -> cfg-build -> cfg-transform -> codegen.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use rcc_cfg::{build_bodies, pretty::dump_body};
 use rcc_codegen_llvm::{codegen, CodegenError};
@@ -16,6 +17,8 @@ use rcc_typeck::{check, verify_typed_hir};
 /// diagnostic handler; this function only returns `Err` for unrecoverable
 /// I/O or backend failures.
 pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
+    let mut stage_outputs = Vec::new();
+
     // 1. Load.
     let file = session
         .source_map
@@ -33,16 +36,19 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         let sm = session.source_map.read().unwrap();
         let src = sm.file(file).src.clone();
         let out = rcc_lexer::pretty::format_tokens(&src, &sm, file);
-        print!("{out}");
+        stage_outputs.push(StageOutput { kind: EmitKind::Tokens, text: out });
         if !has_later_emit_than_tokens(&session.opts.emit) {
-            return Ok(());
+            return flush_stage_outputs(session, input, &stage_outputs);
         }
     }
 
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
     if session.opts.emit.contains(&EmitKind::Pp) {
-        emit_preprocessed(session, &pp_tokens);
+        stage_outputs.push(StageOutput {
+            kind: EmitKind::Pp,
+            text: format_preprocessed(session, &pp_tokens),
+        });
         // When `--emit=pp` is requested and no later stage is asked
         // for, the driver stops here: it would be surprising for
         // `rcc --emit=pp foo.c` to then try to parse / typecheck /
@@ -58,7 +64,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         // on this short-circuit so a conformance adapter can run
         // preprocess-only checks.
         if !has_later_emit_than_pp(&session.opts.emit) {
-            return Ok(());
+            return flush_stage_outputs(session, input, &stage_outputs);
         }
     }
 
@@ -68,9 +74,12 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         None => return Ok(()), // Errors already reported.
     };
     if session.opts.emit.contains(&EmitKind::Ast) {
-        eprintln!("-- emit=ast: {} decls", ast.decls.len());
+        stage_outputs.push(StageOutput {
+            kind: EmitKind::Ast,
+            text: rcc_ast::pretty::dump_translation_unit(&ast),
+        });
         if !has_later_emit_than_ast(&session.opts.emit) {
-            return Ok(());
+            return flush_stage_outputs(session, input, &stage_outputs);
         }
     }
 
@@ -87,42 +96,112 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     if session.handler.has_errors() {
         return Ok(());
     }
-    if session.opts.emit.contains(&EmitKind::Hir) && !has_later_emit_than_hir(&session.opts.emit) {
-        return Ok(());
+    if session.opts.emit.contains(&EmitKind::Hir) {
+        stage_outputs
+            .push(StageOutput { kind: EmitKind::Hir, text: rcc_hir::pretty::dump_crate(&hir) });
+        if !has_later_emit_than_hir(&session.opts.emit) {
+            return flush_stage_outputs(session, input, &stage_outputs);
+        }
     }
 
     // 6. Build CFG.
     let bodies = build_bodies(session, &tcx, &hir);
     if session.opts.emit.contains(&EmitKind::Mir) {
-        emit_mir(&tcx, &bodies);
+        stage_outputs.push(StageOutput { kind: EmitKind::Mir, text: format_mir(&tcx, &bodies) });
         if !backend_required(&session.opts.emit) {
-            return Ok(());
+            return flush_stage_outputs(session, input, &stage_outputs);
         }
     }
 
     // 7. Codegen.
     match codegen(session, &tcx, &hir, &bodies) {
-        Ok(_art) => Ok(()),
+        Ok(art) => {
+            if session.opts.emit.contains(&EmitKind::LlvmIr) {
+                stage_outputs.push(StageOutput { kind: EmitKind::LlvmIr, text: art.ir_text });
+            }
+            if session.opts.emit.contains(&EmitKind::Asm) {
+                return Err("--emit=asm is not implemented yet".to_string());
+            }
+            if session.opts.emit.contains(&EmitKind::Obj) {
+                return Err("--emit=obj is not implemented yet".to_string());
+            }
+            flush_stage_outputs(session, input, &stage_outputs)
+        }
         Err(CodegenError::BackendDisabled) => Err(CodegenError::BackendDisabled.to_string()),
         Err(e) => Err(e.to_string()),
     }
 }
 
-fn emit_mir(tcx: &TyCtxt, bodies: &rcc_data_structures::FxHashMap<rcc_hir::DefId, rcc_cfg::Body>) {
+struct StageOutput {
+    kind: EmitKind,
+    text: String,
+}
+
+fn flush_stage_outputs(
+    session: &Session,
+    input: &Path,
+    outputs: &[StageOutput],
+) -> Result<(), String> {
+    if outputs.is_empty() {
+        return Ok(());
+    }
+
+    if outputs.len() == 1 && session.opts.emit.len() == 1 {
+        if let Some(path) = &session.opts.output {
+            fs::write(path, &outputs[0].text)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        } else {
+            print!("{}", outputs[0].text);
+        }
+        return Ok(());
+    }
+
+    let base = session.opts.output.as_deref().unwrap_or(input);
+    for output in outputs {
+        let path = stage_output_path(base, output.kind);
+        fs::write(&path, &output.text)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn stage_output_path(base: &Path, kind: EmitKind) -> PathBuf {
+    PathBuf::from(format!("{}.{}", base.display(), stage_extension(kind)))
+}
+
+fn stage_extension(kind: EmitKind) -> &'static str {
+    match kind {
+        EmitKind::Tokens => "tokens",
+        EmitKind::Pp => "pp",
+        EmitKind::Ast => "ast",
+        EmitKind::Hir => "hir",
+        EmitKind::Mir => "mir",
+        EmitKind::LlvmIr => "ll",
+        EmitKind::Asm => "s",
+        EmitKind::Obj => "o",
+    }
+}
+
+fn format_mir(
+    tcx: &TyCtxt,
+    bodies: &rcc_data_structures::FxHashMap<rcc_hir::DefId, rcc_cfg::Body>,
+) -> String {
+    let mut out = String::new();
     let mut ids: Vec<_> = bodies.keys().copied().collect();
     ids.sort_by_key(|id| id.0);
     for (idx, id) in ids.iter().enumerate() {
         if idx > 0 {
-            println!();
+            out.push('\n');
         }
         if let Some(body) = bodies.get(id) {
-            print!("{}", dump_body(body, tcx));
+            out.push_str(&dump_body(body, tcx));
         }
     }
+    out
 }
 
 /// Write a human-readable rendering of the preprocessed pp-token
-/// stream to stdout, one token per space, newlines inserted between
+/// stream, one token per space, newlines inserted between
 /// tokens whose spans cross a source-line boundary. This is not an
 /// exact `cc -E` reproduction — different hosts disagree on spacing
 /// anyway — but it is enough for eyeballing and for the conformance
@@ -134,7 +213,7 @@ fn emit_mir(tcx: &TyCtxt, bodies: &rcc_data_structures::FxHashMap<rcc_hir::DefId
 /// files are silently skipped rather than panicking, because the
 /// token stream is already the preprocessor's best effort and
 /// printing is a best-effort downstream concern.
-fn emit_preprocessed(session: &Session, tokens: &[PpToken]) {
+fn format_preprocessed(session: &Session, tokens: &[PpToken]) -> String {
     let sm = session.source_map.read().unwrap();
     let mut prev_line: Option<u32> = None;
     let mut prev_file: Option<rcc_span::FileId> = None;
@@ -163,7 +242,7 @@ fn emit_preprocessed(session: &Session, tokens: &[PpToken]) {
     if !buf.is_empty() {
         buf.push('\n');
     }
-    print!("{buf}");
+    buf
 }
 
 /// Whether `emit` contains any stage that runs after preprocessing.
