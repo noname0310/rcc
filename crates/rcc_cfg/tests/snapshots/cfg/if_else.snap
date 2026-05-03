@@ -1,11 +1,12 @@
 ---
 source: crates/rcc_cfg/tests/cfg.rs
+assertion_line: 350
 ---
 fn def#0() -> int {
   locals:
     _0: int;
-    _1: int param name#10;
-    _2: int name#11;
+    _1: int param name#19;
+    _2: int name#20;
 
   bb0:
     StorageLive(_2);

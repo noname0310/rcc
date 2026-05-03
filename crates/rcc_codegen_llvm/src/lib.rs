@@ -5524,12 +5524,7 @@ pub mod backend {
     }
 
     fn target_info(session: &Session) -> TargetInfo {
-        session
-            .opts
-            .target
-            .as_ref()
-            .and_then(|target| TargetInfo::from_triple(target).ok())
-            .unwrap_or_else(TargetInfo::baseline)
+        session.opts.target.clone()
     }
 
     fn module_name(session: &Session) -> String {

@@ -1,11 +1,12 @@
 ---
-source: crates/rcc_driver/tests/emit_mir.rs
+source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 fn def#0() -> int {
   locals:
     _0: int;
-    _1: int param name#10;
-    _2: int name#11;
+    _1: int param name#19;
+    _2: int name#20;
     _3: int;
     _4: int;
 

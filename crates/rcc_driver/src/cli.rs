@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use rcc_session::{EmitKind, OptLevel};
+use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
 
 /// The `rcc` command-line interface.
 #[derive(Debug, Parser, Clone)]
@@ -40,6 +40,10 @@ pub struct Cli {
     #[arg(long = "emit", value_enum)]
     pub emit: Vec<EmitKind>,
 
+    /// Target triple (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, ...).
+    #[arg(long = "target", value_parser = parse_target)]
+    pub target: Option<TargetInfo>,
+
     /// Optimisation level.
     #[arg(short = 'O', long = "opt-level", value_enum, default_value_t = OptLevel::None)]
     pub opt_level: OptLevel,
@@ -55,4 +59,9 @@ fn parse_define(raw: &str) -> Result<(String, Option<String>), String> {
     } else {
         Ok((raw.to_owned(), None))
     }
+}
+
+fn parse_target(raw: &str) -> Result<TargetInfo, String> {
+    let triple = TargetTriple::new(raw);
+    TargetInfo::from_triple(&triple).map_err(|err| err.to_string())
 }

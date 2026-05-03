@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use rcc_errors::{CaptureEmitter, Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
-pub use rcc_target::TargetTriple;
+pub use rcc_target::{Arch, DataModel, Environment, Os, TargetError, TargetInfo, TargetTriple};
 
 /// Stages at which the driver can dump intermediate state.
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -58,8 +58,8 @@ pub struct Options {
     pub include_paths: Vec<PathBuf>,
     /// Command-line `-D` macro definitions: `(name, value)`.
     pub cli_defines: Vec<(String, Option<String>)>,
-    /// Target triple. `None` = host.
-    pub target: Option<TargetTriple>,
+    /// Target-specific C layout and backend metadata.
+    pub target: TargetInfo,
     /// What to emit (may be multiple).
     pub emit: Vec<EmitKind>,
     /// Output path. `None` = stdout / default.
@@ -142,7 +142,7 @@ impl Default for Options {
         Self {
             include_paths: Vec::new(),
             cli_defines: Vec::new(),
-            target: None,
+            target: TargetInfo::baseline(),
             emit: Vec::new(),
             output: None,
             opt_level: OptLevel::None,

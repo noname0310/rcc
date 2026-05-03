@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-08: `--target=<triple>` CLI wiring
 
 **Phase:** 10-driver    **Depends on:** 15-01    **Milestone:** M5

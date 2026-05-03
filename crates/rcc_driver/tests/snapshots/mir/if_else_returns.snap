@@ -1,10 +1,11 @@
 ---
-source: crates/rcc_driver/tests/emit_mir.rs
+source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 fn def#0() -> int {
   locals:
     _0: int;
-    _1: int param name#10;
+    _1: int param name#19;
 
   bb0:
     switchInt(copy _1) -> [0: bb2, otherwise: bb1];

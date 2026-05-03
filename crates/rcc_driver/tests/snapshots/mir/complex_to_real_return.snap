@@ -1,10 +1,11 @@
 ---
-source: crates/rcc_driver/tests/emit_mir.rs
+source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 fn def#0() -> double {
   locals:
     _0: double;
-    _1: _Complex double param name#11;
+    _1: _Complex double param name#20;
     _2: double;
 
   bb0:

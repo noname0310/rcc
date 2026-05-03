@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rcc_data_structures::FxHashMap;
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_session::Session;
+use rcc_session::{Arch, DataModel, Os, Session};
 use rcc_span::{BytePos, FileId, Span, Symbol};
 
 pub mod cond_stack;
@@ -281,8 +281,59 @@ impl<'a> Preprocessor<'a> {
         let (date, time) = current_date_time();
         self.install_static_predefined("__DATE__", &format!("\"{date}\""));
         self.install_static_predefined("__TIME__", &format!("\"{time}\""));
+        self.install_target_predefined();
         self.install_builtin_predefined("__FILE__", BuiltinMacro::File);
         self.install_builtin_predefined("__LINE__", BuiltinMacro::Line);
+    }
+
+    fn install_target_predefined(&mut self) {
+        let target = self.session.opts.target.clone();
+
+        self.install_static_predefined(
+            "__SIZEOF_POINTER__",
+            &target.layouts.pointer.size.to_string(),
+        );
+        self.install_static_predefined("__SIZEOF_INT__", &target.layouts.int.size.to_string());
+        self.install_static_predefined("__SIZEOF_LONG__", &target.layouts.long.size.to_string());
+        self.install_static_predefined(
+            "__SIZEOF_LONG_LONG__",
+            &target.layouts.long_long.size.to_string(),
+        );
+
+        if target.data_model == DataModel::Lp64 {
+            self.install_static_predefined("__LP64__", "1");
+            self.install_static_predefined("_LP64", "1");
+        }
+
+        match target.arch {
+            Arch::X86_64 => {
+                self.install_static_predefined("__x86_64__", "1");
+                self.install_static_predefined("__amd64__", "1");
+            }
+            Arch::Aarch64 => {
+                self.install_static_predefined("__aarch64__", "1");
+            }
+            Arch::I386 => {
+                self.install_static_predefined("__i386__", "1");
+            }
+        }
+
+        match target.os {
+            Os::Linux => {
+                self.install_static_predefined("__linux__", "1");
+            }
+            Os::Darwin => {
+                self.install_static_predefined("__APPLE__", "1");
+                self.install_static_predefined("__MACH__", "1");
+            }
+            Os::Windows => {
+                self.install_static_predefined("_WIN32", "1");
+                if target.pointer_width == 64 {
+                    self.install_static_predefined("_WIN64", "1");
+                }
+            }
+            Os::None => {}
+        }
     }
 
     fn install_static_predefined(&mut self, name: &str, body_src: &str) {
@@ -1275,6 +1326,13 @@ mod run_tests {
             "__STDC_VERSION__",
             "__DATE__",
             "__TIME__",
+            "__SIZEOF_POINTER__",
+            "__SIZEOF_INT__",
+            "__SIZEOF_LONG__",
+            "__SIZEOF_LONG_LONG__",
+            "__LP64__",
+            "__x86_64__",
+            "__linux__",
             "__FILE__",
             "__LINE__",
         ]
@@ -1289,12 +1347,37 @@ mod run_tests {
             "__STDC_VERSION__",
             "__DATE__",
             "__TIME__",
+            "__SIZEOF_POINTER__",
+            "__SIZEOF_INT__",
+            "__SIZEOF_LONG__",
+            "__SIZEOF_LONG_LONG__",
+            "__LP64__",
+            "__x86_64__",
+            "__linux__",
             "__FILE__",
             "__LINE__",
         ]) {
             let def = pp.macros.get(*sym).unwrap_or_else(|| panic!("{label} must be defined"));
             assert!(def.is_predefined, "{label} must carry is_predefined=true");
         }
+    }
+
+    #[test]
+    fn target_predefined_macros_follow_session_target() {
+        let opts = rcc_session::Options {
+            target: rcc_session::TargetInfo::from_triple(&rcc_session::TargetTriple::new(
+                "x86_64-pc-windows-msvc",
+            ))
+            .unwrap(),
+            ..rcc_session::Options::default()
+        };
+        let (mut sess, id, cap) =
+            seed_with_opts(opts, "_WIN32\n_WIN64\n__SIZEOF_POINTER__\n__SIZEOF_LONG__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "1184");
+        assert!(cap.diagnostics().is_empty());
     }
 
     // ── Conditional-compilation state machine (task 04-14) ──────────

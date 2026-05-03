@@ -1,5 +1,6 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 TranslationUnit {
     decls: [
@@ -49,7 +50,7 @@ TranslationUnit {
                     name: Some(
                         (
                             Symbol(
-                                9,
+                                18,
                             ),
                             Span {
                                 file: FileId(
@@ -141,7 +142,7 @@ TranslationUnit {
                                             name: Some(
                                                 (
                                                     Symbol(
-                                                        11,
+                                                        20,
                                                     ),
                                                     Span {
                                                         file: FileId(
@@ -179,7 +180,7 @@ TranslationUnit {
                                                     kind: IntLit(
                                                         IntLiteral {
                                                             text: Symbol(
-                                                                13,
+                                                                22,
                                                             ),
                                                             value: 40,
                                                             suffix: None,
@@ -222,7 +223,7 @@ TranslationUnit {
                                                     ),
                                                     kind: Ident(
                                                         Symbol(
-                                                            11,
+                                                            20,
                                                         ),
                                                     ),
                                                     span: Span {
@@ -244,7 +245,7 @@ TranslationUnit {
                                                     kind: IntLit(
                                                         IntLiteral {
                                                             text: Symbol(
-                                                                14,
+                                                                23,
                                                             ),
                                                             value: 2,
                                                             suffix: None,

@@ -4,9 +4,9 @@ source: crates/rcc_cfg/tests/cfg.rs
 fn def#0() -> _Complex double {
   locals:
     _0: _Complex double;
-    _1: int param name#12;
-    _2: double param name#13;
-    _3: _Complex double param name#14;
+    _1: int param name#21;
+    _2: double param name#22;
+    _3: _Complex double param name#23;
     _4: _Complex double;
     _5: _Complex double;
 
