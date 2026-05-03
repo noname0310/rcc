@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-25: Global object lvalue contract
 
 **Phase:** 08-cfg    **Depends on:** 08-24, 06-27    **Milestone:** M4    **Size:** Medium

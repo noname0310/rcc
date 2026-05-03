@@ -681,6 +681,7 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             place_contains_field_projection(place, expected)
         }
+        Rvalue::LoadGlobal { .. } => false,
     }
 }
 
@@ -711,7 +712,7 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
         Rvalue::BuiltinVaArg { ap, .. } => operand_contains_int_const(ap, expected),
-        Rvalue::AddressOf(_) | Rvalue::Len(_) => false,
+        Rvalue::AddressOf(_) | Rvalue::Len(_) | Rvalue::LoadGlobal { .. } => false,
     }
 }
 
@@ -914,6 +915,7 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             assert_place_valid(name, def, body, place);
         }
+        Rvalue::LoadGlobal { .. } => {}
     }
 }
 

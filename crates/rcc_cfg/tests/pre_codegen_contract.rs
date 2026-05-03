@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rcc_cfg::{
-    build_bodies, verify::verify_body_with_hir, Body, Operand, Projection, Rvalue, StatementKind,
+    build_bodies,
+    verify::{verify_body_with_hir, CfgErrorKind},
+    Body, ConstKind, Operand, Projection, Rvalue, StatementKind,
 };
 use rcc_errors::{CaptureEmitter, Diagnostic, Handler};
-use rcc_hir::{DefId, DefKind, GlobalInitValue, HirCrate, ObjectQuals, TyCtxt};
+use rcc_hir::{DefId, DefKind, GlobalInitValue, HirCrate, Local, ObjectQuals, Ty, TyCtxt};
 use rcc_hir_lower::lower;
 use rcc_session::{Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
@@ -135,6 +137,137 @@ fn folded_global_initializer_is_ready_for_codegen() {
 }
 
 #[test]
+fn global_object_read_lowers_to_explicit_load() {
+    let lowered =
+        lower_checked("global-object-read", "static int x = 5; int f(void) { return x; }");
+    let body = only_body(&lowered);
+    let x = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::LoadGlobal { def, ty },
+                    ..
+                } if *def == x && *ty == lowered.tcx.int
+            )
+        }),
+        "return x should load the object value from global x"
+    );
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).all(|stmt| {
+            !matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                } if place.base.0 == 0 && matches!(c.kind, ConstKind::Global(def) if def == x)
+            )
+        }),
+        "return x must not store the address constant global#x into the return slot"
+    );
+}
+
+#[test]
+fn global_object_address_stays_address_value() {
+    let lowered = lower_checked("global-address", "static int x; int *f(void) { return &x; }");
+    let body = only_body(&lowered);
+    let x = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                } if place.base.0 == 0 && matches!(c.kind, ConstKind::Global(def) if def == x)
+            )
+        }),
+        "return &x should pass the global address constant through to the pointer return slot"
+    );
+}
+
+#[test]
+fn deref_of_global_address_loads_object_value() {
+    let lowered =
+        lower_checked("global-deref-address", "static int x = 3; int f(void) { return *&x; }");
+    let body = only_body(&lowered);
+    let x = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                    ..
+                } if matches!(c.kind, ConstKind::Global(def) if def == x)
+            )
+        }),
+        "*&x should materialize the global address"
+    );
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Copy(src) | Operand::Move(src)),
+                } if place.base.0 == 0
+                    && src.projection.iter().any(|p| matches!(p, Projection::Deref))
+            )
+        }),
+        "return *&x should copy from a dereferenced address place into the return slot"
+    );
+}
+
+#[test]
+fn function_designator_return_is_not_global_object_load() {
+    let lowered = lower_checked(
+        "function-designator-return",
+        "int f(void) { return 1; } int (*g(void))(void) { return f; }",
+    );
+    let g_body = lowered
+        .bodies
+        .iter()
+        .find(|(_, body)| body.ret_ty.is_some_and(|ret| matches!(lowered.tcx.get(ret), Ty::Ptr(_))))
+        .map(|(_, body)| body)
+        .expect("expected function returning a function pointer");
+    assert!(
+        g_body.blocks.iter().flat_map(|block| &block.statements).all(|stmt| {
+            !matches!(&stmt.kind, StatementKind::Assign { rvalue: Rvalue::LoadGlobal { .. }, .. })
+        }),
+        "returning function designator f must not become a global object load"
+    );
+}
+
+#[test]
+fn verifier_rejects_global_address_stored_as_scalar() {
+    let lowered =
+        lower_checked("global-address-old-shape", "static int x = 5; int f(void) { return x; }");
+    let mut body = only_body(&lowered).clone();
+    let x = find_global(&lowered.hir);
+    body.blocks[rcc_cfg::BasicBlockId(0)].statements.insert(
+        0,
+        rcc_cfg::Statement {
+            kind: StatementKind::Assign {
+                place: rcc_cfg::Place { base: Local(0), projection: Vec::new() },
+                rvalue: Rvalue::Use(Operand::Const(rcc_cfg::Const {
+                    kind: ConstKind::Global(x),
+                    ty: lowered.tcx.int,
+                })),
+            },
+            span: rcc_span::DUMMY_SP,
+        },
+    );
+    let errors = verify_body_with_hir(&body, &lowered.tcx, &lowered.hir).unwrap_err();
+    assert!(errors.iter().any(|err| matches!(
+        err.kind,
+        CfgErrorKind::InvalidGlobalAddressType { def, ty }
+            if def == x && ty == lowered.tcx.int
+    )));
+}
+
+#[test]
 fn volatile_local_metadata_survives_to_cfg() {
     let lowered = lower_checked(
         "volatile-metadata",
@@ -187,6 +320,13 @@ fn const_assignment_stops_before_cfg() {
 fn only_body(lowered: &Lowered) -> &Body {
     assert_eq!(lowered.bodies.len(), 1);
     &lowered.bodies[0].1
+}
+
+fn find_global(hir: &HirCrate) -> DefId {
+    hir.defs
+        .iter_enumerated()
+        .find_map(|(def, data)| matches!(data.kind, DefKind::Global { .. }).then_some(def))
+        .expect("missing global")
 }
 
 fn volatile_quals() -> ObjectQuals {

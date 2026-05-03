@@ -111,6 +111,7 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
             format!("RealFromComplex({}, {})", fmt_operand(complex), fmt_ty(tcx, *to))
         }
         Rvalue::AddressOf(place) => format!("&{}", fmt_place(place)),
+        Rvalue::LoadGlobal { def, .. } => format!("load global#{}", def.0),
         Rvalue::Len(place) => format!("Len({})", fmt_place(place)),
         Rvalue::BuiltinVaArg { ap, ty } => {
             format!("va_arg({}, {})", fmt_operand(ap), fmt_ty(tcx, *ty))

@@ -2046,6 +2046,7 @@ pub mod backend {
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
+                Rvalue::LoadGlobal { def, ty } => self.emit_global_object_load(*def, *ty),
                 Rvalue::Len(place) => {
                     let base = place.base;
                     let decl = body.locals.get(base).ok_or_else(|| {
@@ -3398,6 +3399,36 @@ pub mod backend {
                     let ty = self.type_cx().basic_type_of(c.ty)?;
                     Ok(ty.const_zero())
                 }
+            }
+        }
+
+        fn emit_global_object_load(
+            &self,
+            def: DefId,
+            ty: TyId,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let gv = self.globals.get(&def).ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "global-object load references undeclared object {:?}",
+                    def
+                ))
+            })?;
+            let llvm_ty = self.type_cx().basic_type_of(ty)?;
+            self.emit_memory_load(
+                llvm_ty,
+                gv.as_pointer_value(),
+                "global.load",
+                self.global_is_volatile(def),
+            )
+        }
+
+        fn global_is_volatile(&self, def: DefId) -> bool {
+            let Some(def_data) = self.hir.defs.get(def) else {
+                return false;
+            };
+            match &def_data.kind {
+                DefKind::Global { quals, .. } => quals.is_volatile,
+                _ => false,
             }
         }
 

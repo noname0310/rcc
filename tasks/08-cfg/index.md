@@ -32,7 +32,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [22-source-pipeline-edge-fixtures](22-source-pipeline-edge-fixtures.md)
 - [x] [23-type-aware-cfg-verifier](23-type-aware-cfg-verifier.md)
 - [x] [24-pre-codegen-contract-fixtures](24-pre-codegen-contract-fixtures.md)
-- [ ] [25-global-object-lvalue-contract](25-global-object-lvalue-contract.md)
+- [x] [25-global-object-lvalue-contract](25-global-object-lvalue-contract.md)
 
 ## Downstream
 

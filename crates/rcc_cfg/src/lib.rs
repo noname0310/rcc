@@ -252,6 +252,16 @@ pub enum Rvalue {
     },
     /// Take the address of a place.
     AddressOf(Place),
+    /// Load the current value of a file-scope global object.
+    ///
+    /// Backend contract: `def` must name a [`rcc_hir::DefKind::Global`] object,
+    /// not a function designator. `ConstKind::Global` remains the address form.
+    LoadGlobal {
+        /// Global object definition to load from.
+        def: DefId,
+        /// Object type loaded from the global storage.
+        ty: TyId,
+    },
     /// Array/struct length (used for VLA).
     Len(Place),
     /// `__builtin_va_arg(ap, type)` — extract one variadic argument.

@@ -199,6 +199,21 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             }
         },
         HirExprKind::Convert { operand, kind } => {
+            if *kind == ConvertKind::LvalueToRvalue {
+                if let Some(def) = direct_global_ref(cx, *operand) {
+                    let operand_ty = cx.body.exprs[*operand].ty;
+                    if !matches!(cx.tcx.get(operand_ty), Ty::Array { .. } | Ty::Func { .. }) {
+                        let temp = builder.alloc_temp(ty, span);
+                        push_assign(builder, span, temp, Rvalue::LoadGlobal { def, ty });
+                        return Operand::Copy(Place { base: temp, projection: Vec::new() });
+                    }
+                }
+            }
+            if matches!(kind, ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr) {
+                if let Some(def) = direct_global_ref(cx, *operand) {
+                    return Operand::Const(Const { kind: ConstKind::Global(def), ty });
+                }
+            }
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
             if matches!(kind, ConvertKind::RealToComplex | ConvertKind::ComplexToReal) {
@@ -237,6 +252,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
         HirExprKind::SizeofType(ty) => lower_sizeof_type(cx, expr_id, *ty),
         HirExprKind::AddressOf(operand) => {
+            if let Some(def) = direct_global_ref(cx, *operand) {
+                return Operand::Const(Const { kind: ConstKind::Global(def), ty });
+            }
             let place = lower_as_place(builder, cx, *operand);
             let temp = builder.alloc_temp(ty, span);
             push_assign(builder, span, temp, Rvalue::AddressOf(place));
@@ -1563,6 +1581,13 @@ fn operand_to_place(
             push_assign(builder, span, temp, Rvalue::Use(Operand::Const(c)));
             Place { base: temp, projection: Vec::new() }
         }
+    }
+}
+
+fn direct_global_ref(cx: &LowerCx<'_>, expr_id: HirExprId) -> Option<DefId> {
+    match cx.body.exprs[expr_id].kind {
+        HirExprKind::DefRef(def) | HirExprKind::StringRef(def) => Some(def),
+        _ => None,
     }
 }
 

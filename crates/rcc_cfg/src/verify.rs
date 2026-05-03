@@ -6,10 +6,11 @@
 
 use std::fmt;
 
-use rcc_hir::{DefKind, HirCrate, Ty, TyCtxt, TyId};
+use rcc_hir::{DefId, DefKind, HirCrate, Ty, TyCtxt, TyId};
 
 use crate::{
-    BasicBlockId, Body, Local, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
+    BasicBlockId, Body, ConstKind, Local, Operand, Place, Projection, Rvalue, StatementKind,
+    TerminatorKind,
 };
 
 /// One CFG verifier error.
@@ -61,6 +62,10 @@ pub enum CfgErrorKind {
     InvalidProjection { base_ty: TyId, projection: ProjectionKind },
     /// A call callee did not have a function or pointer-to-function type.
     InvalidCalleeType { callee_ty: TyId },
+    /// A `ConstKind::Global` address used a non-address, non-function type.
+    InvalidGlobalAddressType { def: DefId, ty: TyId },
+    /// A global-object load referenced a non-object definition or mismatched type.
+    InvalidGlobalObjectLoad { def: DefId, ty: TyId },
 }
 
 /// Verifier projection category.
@@ -283,6 +288,10 @@ fn verify_rvalue_typed(
             let pointee = verify_place_typed(body, tcx, hir, place, at.clone(), errors)?;
             Some(InferredTy::AddressOf { pointee })
         }
+        Rvalue::LoadGlobal { def, ty } => {
+            verify_global_object_load(tcx, hir, *def, *ty, at, errors);
+            Some(InferredTy::Known(*ty))
+        }
         Rvalue::Len(place) => {
             let _ = verify_place_typed(body, tcx, hir, place, at, errors);
             Some(InferredTy::Known(tcx.ulong))
@@ -306,7 +315,49 @@ fn verify_operand_typed(
         Operand::Copy(place) | Operand::Move(place) => {
             verify_place_typed(body, tcx, hir, place, at, errors)
         }
-        Operand::Const(c) => Some(c.ty),
+        Operand::Const(c) => {
+            if let ConstKind::Global(def) = c.kind {
+                verify_global_address_type(tcx, def, c.ty, at, errors);
+            }
+            Some(c.ty)
+        }
+    }
+}
+
+fn verify_global_address_type(
+    tcx: &TyCtxt,
+    def: DefId,
+    ty: TyId,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) {
+    if matches!(tcx.get(ty), Ty::Ptr(_) | Ty::Func { .. }) {
+        return;
+    }
+    errors.push(CfgError { at, kind: CfgErrorKind::InvalidGlobalAddressType { def, ty } });
+}
+
+fn verify_global_object_load(
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    def: DefId,
+    ty: TyId,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) {
+    let Some(hir) = hir else {
+        return;
+    };
+    let Some(def_data) = hir.defs.get(def) else {
+        errors.push(CfgError { at, kind: CfgErrorKind::InvalidGlobalObjectLoad { def, ty } });
+        return;
+    };
+    let DefKind::Global { ty: global_ty, .. } = &def_data.kind else {
+        errors.push(CfgError { at, kind: CfgErrorKind::InvalidGlobalObjectLoad { def, ty } });
+        return;
+    };
+    if *global_ty != ty || matches!(tcx.get(ty), Ty::Func { .. }) {
+        errors.push(CfgError { at, kind: CfgErrorKind::InvalidGlobalObjectLoad { def, ty } });
     }
 }
 
