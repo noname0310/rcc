@@ -20,10 +20,18 @@ single driver.
 | 09 | [`09-warning-control.md`](09-warning-control.md) | `-Wall`, `-Werror`, `-Wno-*` flags. |
 | 10 | [`10-linker-flags.md`](10-linker-flags.md) | `-l`, `-L`, `-Wl,`, `-shared`, `-static`. |
 | 11 | [`11-multi-file.md`](11-multi-file.md) | Multiple `.c` input files. |
-| 12 | [`12-misc-cli-flags.md`](12-misc-cli-flags.md) | `-v`, `-std=c99`, `-f` flag handling. |
+| 12 | [`12-misc-cli-flags.md`](12-misc-cli-flags.md) | `-std=c99`, `-ansi`, and common ignored `-f` flags. |
+| 13 | [`13-debug-info-object-smoke.md`](13-debug-info-object-smoke.md) | `-g` driver wiring plus object-level DWARF smoke tests. |
+| 14 | [`14-output-and-temp-artifact-policy.md`](14-output-and-temp-artifact-policy.md) | Default outputs, temp dirs, and `--save-temps`. |
+| 15 | [`15-exit-status-and-diagnostics-contract.md`](15-exit-status-and-diagnostics-contract.md) | Stable driver exit-code contract. |
+| 16 | [`16-tool-discovery-and-verbose-trace.md`](16-tool-discovery-and-verbose-trace.md) | Host tool lookup, dry-run command specs, and `-v`. |
+| 17 | [`17-response-files.md`](17-response-files.md) | `@file` response-file expansion. |
+| 18 | [`18-dependency-file-emission.md`](18-dependency-file-emission.md) | Make-compatible `-M*` dependency files. |
 
 ## Exit criteria
 
 - `rcc foo.c -o foo` produces a runnable binary.
 - `cargo test -p rcc_driver`: UI, snapshot, and E2E tests green on
   the M3+ fixture set.
+- Build-system integration flags (`-c`, `-S`, `-E`, `-MMD`, response
+  files, linker flags, and `-v`) have deterministic behavior and tests.

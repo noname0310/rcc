@@ -1,24 +1,39 @@
 # 10-02: Link invocation
 
-**Phase:** 10-driver    **Depends on:** 09-06    **Milestone:** M3
+**Phase:** 10-driver    **Depends on:** 09-23    **Milestone:** M3
 
 ## Goal
-Drive the final link. Emit an object file via LLVM (`llc` or inkwell's
-built-in emit) then call `cc` as the linker so libc / crt startup is
-handled correctly.
+Drive final executable production. Emit an object file from the LLVM backend
+(`TargetMachine::write_to_memory_buffer` or an equivalent object writer), then
+call the host C compiler as the linker so libc / crt startup is handled
+correctly.
 
 ## Scope
-- In: locate `cc` from `PATH`; build a `Command` passing our `.o`
-  plus `-o <output>`; error on non-zero exit.
-- Out: custom linker scripts (out of scope).
+- In:
+  - Extend `CodegenArtifact` or add a driver-side backend API that can produce
+    object bytes for one translation unit.
+  - Write object bytes to the artifact/temp policy used by the driver.
+  - Locate host `cc` from `PATH` as a first pass.
+  - Build a command passing our `.o` plus `-o <output>`.
+  - Surface non-zero linker status with stderr and the command line.
+- Out:
+  - Custom linker scripts.
+  - User-controlled linker selection and extra linker flags (`10-10`,
+    `10-16`).
+  - Multi-file linking (`10-11`).
 
 ## Deliverables
-- `pipeline::link(obj: &Path, output: &Path) -> Result<(), String>`.
+- Object emission API used by the driver.
+- `pipeline::link(obj: &Path, output: &Path) -> Result<(), String>` or a
+  `CommandSpec`-based equivalent if `10-16` has already landed.
 - Fixture: compile `int main(){return 42;}` → run → exit 42.
 
 ## Acceptance
 - On Linux / macOS / Windows, `rcc hello.c -o hello` and `./hello`
   works.
+- A linker failure includes the linker command and stderr in the diagnostic.
+- The no-LLVM build still reports backend-disabled rather than trying to link
+  an empty/nonexistent object.
 
 ## References
 - rustc `link.rs` for design inspiration (much simpler here).

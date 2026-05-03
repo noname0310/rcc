@@ -34,7 +34,7 @@ active for developers without an LLVM install.
 | 23 | [`23-llvm-ir-snapshots.md`](23-llvm-ir-snapshots.md) | Stable `--emit=llvm-ir` snapshots. |
 | 24 | [`24-windows-llvm-c-linking.md`](24-windows-llvm-c-linking.md) | Link the official Windows LLVM archive through `LLVM-C.lib`. |
 | 25 | [`25-filecheck-tests.md`](25-filecheck-tests.md) | LLVM-style `// CHECK:` tests. |
-| 26 | [`26-debug-info-dwarf.md`](26-debug-info-dwarf.md) | DWARF debug metadata via DIBuilder. |
+| 26 | [`26-debug-ir-metadata.md`](26-debug-ir-metadata.md) | LLVM debug metadata via DIBuilder; object DWARF smoke moves to driver. |
 
 ## Exit criteria
 

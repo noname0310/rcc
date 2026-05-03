@@ -20,6 +20,12 @@
 - [ ] [10-linker-flags](10-linker-flags.md)
 - [ ] [11-multi-file](11-multi-file.md)
 - [ ] [12-misc-cli-flags](12-misc-cli-flags.md)
+- [ ] [13-debug-info-object-smoke](13-debug-info-object-smoke.md)
+- [ ] [14-output-and-temp-artifact-policy](14-output-and-temp-artifact-policy.md)
+- [ ] [15-exit-status-and-diagnostics-contract](15-exit-status-and-diagnostics-contract.md)
+- [ ] [16-tool-discovery-and-verbose-trace](16-tool-discovery-and-verbose-trace.md)
+- [ ] [17-response-files](17-response-files.md)
+- [ ] [18-dependency-file-emission](18-dependency-file-emission.md)
 
 ## Downstream
 

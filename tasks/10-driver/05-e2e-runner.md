@@ -15,7 +15,7 @@ link, execute, capture stdout + exit code, compare against expected.
 - Harness + ≥ 10 fixtures (arithmetic, control flow, strings, I/O).
 
 ## Acceptance
-- `cargo test -p rcc_driver --test e2e --features cc_codegen_llvm/llvm`:
+- `cargo test -p rcc_driver --test e2e --features rcc_codegen_llvm/llvm`:
   green (requires LLVM).
 
 ## References
