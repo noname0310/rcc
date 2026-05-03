@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented in commit
+
 # 10-13: Debug info object smoke
 
 **Phase:** 10-driver    **Depends on:** 09-26, 10-02, 10-07    **Milestone:** M6    **Size:** Medium

@@ -58,6 +58,10 @@ pub struct Cli {
     #[arg(short = 'O', long = "opt-level", value_enum, default_value_t = OptLevel::None)]
     pub opt_level: OptLevel,
 
+    /// Emit debug information in backend outputs (`-g`).
+    #[arg(short = 'g', action = ArgAction::SetTrue)]
+    pub debug_info: bool,
+
     /// GCC-style `-f<flag>` compatibility options.
     #[arg(short = 'f', value_name = "FLAG", action = ArgAction::Append)]
     pub feature_flags: Vec<String>,

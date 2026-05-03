@@ -171,7 +171,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         opt_level: cli.opt_level,
         warning_config: warning_config_from_cli(cli),
         link: link_options_from_cli(cli),
-        debug_info: false,
+        debug_info: cli.debug_info,
         include_gpl_tests: cli.include_gpl_tests,
         gnu_va_args_elision: false,
         gnu_permissive_redefinition: false,
