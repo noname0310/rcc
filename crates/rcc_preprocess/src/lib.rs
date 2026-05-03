@@ -147,7 +147,7 @@ impl<'a> Preprocessor<'a> {
                 if line.len() == 1 {
                     continue;
                 }
-                self.dispatch_directive(&line, &src, &mut cond);
+                out.extend(self.dispatch_directive(&line, &src, &mut cond));
                 continue;
             }
             if !cond.is_active() {
@@ -393,7 +393,7 @@ impl<'a> Preprocessor<'a> {
         line: &[PpToken],
         src: &str,
         cond: &mut cond_stack::CondStack,
-    ) {
+    ) -> Vec<PpToken> {
         // Peek the directive name so we can identify conditional
         // control directives without running the full parser (and
         // therefore without emitting unrelated diagnostics while in
@@ -402,14 +402,14 @@ impl<'a> Preprocessor<'a> {
 
         if let Some(kind) = name_kind {
             self.dispatch_conditional(line, src, cond, kind);
-            return;
+            return Vec::new();
         }
 
         // Non-conditional directive: if we're inside an inactive
         // region, drop the line with no parsing, no diagnostics, no
         // side effects. C99 §6.10p5 calls this "skipping groups".
         if !cond.is_active() {
-            return;
+            return Vec::new();
         }
 
         match directive::parse_directive_ext(
@@ -448,6 +448,9 @@ impl<'a> Preprocessor<'a> {
                     self.session.handler.emit(&diag);
                 }
             }
+            Ok(directive::Directive::Include { span, is_system, header }) => {
+                return self.process_include(&header, is_system, span, line[0].span.file);
+            }
             Ok(directive::Directive::Line { span, line, file }) => {
                 self.apply_line_directive(span, line, file);
             }
@@ -463,6 +466,7 @@ impl<'a> Preprocessor<'a> {
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
         }
+        Vec::new()
     }
 
     /// Handle a parsed `#error` directive: emit E0020 with the

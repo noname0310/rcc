@@ -27,7 +27,7 @@
 - [x] [15-exit-status-and-diagnostics-contract](15-exit-status-and-diagnostics-contract.md)
 - [x] [16-tool-discovery-and-verbose-trace](16-tool-discovery-and-verbose-trace.md)
 - [x] [17-response-files](17-response-files.md)
-- [ ] [18-dependency-file-emission](18-dependency-file-emission.md)
+- [x] [18-dependency-file-emission](18-dependency-file-emission.md)
 
 ## Downstream
 

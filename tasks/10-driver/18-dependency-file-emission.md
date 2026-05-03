@@ -1,5 +1,7 @@
 # 10-18: Dependency file emission
 
+> ✓ done — 2026-05-04 — implemented in commit
+
 **Phase:** 10-driver    **Depends on:** 04-03, 10-07, 10-14    **Milestone:** M5    **Size:** Medium
 
 ## Goal

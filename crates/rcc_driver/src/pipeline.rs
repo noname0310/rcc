@@ -17,6 +17,7 @@ use rcc_preprocess::preprocess;
 use rcc_session::{EmitKind, LinkOptions, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
+use crate::deps;
 pub use crate::toolchain::CommandSpec as LinkCommand;
 use crate::toolchain::{CommandSpec, Toolchain};
 
@@ -52,6 +53,16 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
 
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
+    if session.opts.dependencies.mode.is_some() {
+        let default_target = output_plan.dependency_target_path();
+        deps::emit_dependency_file(session, input, &default_target)?;
+        if matches!(
+            session.opts.dependencies.mode,
+            Some(rcc_session::DependencyMode::PreprocessOnly)
+        ) {
+            return Ok(());
+        }
+    }
     let pp_output = if session.opts.emit.contains(&EmitKind::Pp) || output_plan.saves_temps() {
         Some(format_preprocessed(session, &pp_tokens))
     } else {
@@ -243,6 +254,10 @@ impl OutputPlan {
         let output = self.output.clone().unwrap_or_else(default_executable_path);
         self.ensure_output_does_not_clobber_input(&output)?;
         Ok(output)
+    }
+
+    fn dependency_target_path(&self) -> PathBuf {
+        deps::default_dependency_target(&self.input, self.output.as_deref())
     }
 
     fn write_stage_outputs(&self, outputs: &[StageOutput]) -> Result<(), String> {

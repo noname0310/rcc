@@ -68,6 +68,8 @@ pub struct Options {
     /// Preserve intermediate artifacts. `None` removes private temporaries;
     /// `Some(dir)` writes saved temporaries under `dir`.
     pub save_temps: Option<PathBuf>,
+    /// Make-compatible dependency-file emission options.
+    pub dependencies: DependencyOptions,
     /// Optimisation level.
     pub opt_level: OptLevel,
     /// Warning filtering and promotion policy.
@@ -154,6 +156,7 @@ impl Default for Options {
             emit: Vec::new(),
             output: None,
             save_temps: None,
+            dependencies: DependencyOptions::default(),
             opt_level: OptLevel::None,
             warning_config: WarningConfig::default(),
             link: LinkOptions::default(),
@@ -169,6 +172,52 @@ impl Default for Options {
             gnu_inline_asm: false,
         }
     }
+}
+
+/// Make-compatible dependency generation mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DependencyMode {
+    /// Emit dependencies and stop after preprocessing (`-M` / `-MM`).
+    PreprocessOnly,
+    /// Emit dependencies as a side effect of normal compilation (`-MD` / `-MMD`).
+    SideEffect,
+}
+
+/// A makefile dependency target supplied by the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyTarget {
+    /// Raw target spelling from `-MT` / `-MQ`.
+    pub text: String,
+    /// Whether the spelling came from `-MQ` and must be make-escaped.
+    pub quote: bool,
+}
+
+/// Options for make-compatible dependency generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyOptions {
+    /// Active dependency generation mode. `None` means disabled.
+    pub mode: Option<DependencyMode>,
+    /// Include headers reached through `<...>` search. False for `-MM` / `-MMD`.
+    pub include_system_headers: bool,
+    /// Explicit dependency output path from `-MF`.
+    pub output: Option<PathBuf>,
+    /// Explicit make targets from `-MT` / `-MQ`.
+    pub targets: Vec<DependencyTarget>,
+}
+
+impl Default for DependencyOptions {
+    fn default() -> Self {
+        Self { mode: None, include_system_headers: true, output: None, targets: Vec::new() }
+    }
+}
+
+/// One source-file prerequisite discovered during preprocessing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceDependency {
+    /// Header path that was resolved and loaded.
+    pub path: PathBuf,
+    /// True when the include used the `<...>` system-header form.
+    pub system: bool,
 }
 
 /// Options forwarded to the LLVM linker driver.
@@ -220,6 +269,8 @@ pub struct Session {
     pub interner: Interner,
     /// Diagnostic sink.
     pub handler: Handler,
+    /// Headers resolved by preprocessing, in encounter order.
+    pub source_dependencies: Arc<RwLock<Vec<SourceDependency>>>,
 }
 
 impl Session {
@@ -228,7 +279,13 @@ impl Session {
         let sm = Arc::new(RwLock::new(SourceMap::new()));
         let mut handler = Handler::with_emitter(Box::new(StderrEmitter::new(sm.clone())));
         handler.set_warning_config(opts.warning_config.clone());
-        Self { opts, source_map: sm.clone(), interner: Interner::new(), handler }
+        Self {
+            opts,
+            source_map: sm.clone(),
+            interner: Interner::new(),
+            handler,
+            source_dependencies: Arc::new(RwLock::new(Vec::new())),
+        }
     }
 
     /// Build a session with a user-supplied `Handler`. Used by tests.
@@ -239,6 +296,7 @@ impl Session {
             opts,
             interner: Interner::new(),
             handler,
+            source_dependencies: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -250,8 +308,23 @@ impl Session {
         let sm = Arc::new(RwLock::new(SourceMap::new()));
         let cap = CaptureEmitter::new();
         let handler = Handler::with_emitter(Box::new(cap.clone()));
-        let sess =
-            Self { opts: Options::default(), source_map: sm, interner: Interner::new(), handler };
+        let sess = Self {
+            opts: Options::default(),
+            source_map: sm,
+            interner: Interner::new(),
+            handler,
+            source_dependencies: Arc::new(RwLock::new(Vec::new())),
+        };
         (sess, cap)
+    }
+
+    /// Record a source dependency resolved by the preprocessor.
+    pub fn record_source_dependency(&self, path: PathBuf, system: bool) {
+        self.source_dependencies.write().unwrap().push(SourceDependency { path, system });
+    }
+
+    /// Return source dependencies in encounter order.
+    pub fn source_dependencies(&self) -> Vec<SourceDependency> {
+        self.source_dependencies.read().unwrap().clone()
     }
 }

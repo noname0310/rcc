@@ -14,29 +14,13 @@ id     = "c-testsuite::00050"
 reason = "14-lang-extensions: anonymous union member inside struct is outside C99 parser scope"
 
 [[xfail]]
-id     = "c-testsuite::00104"
-reason = "15-builtin-rt: freestanding <stdint.h> header is not available in parse-only mode"
-
-[[xfail]]
 id     = "c-testsuite::00152"
 reason = "04-preprocess: macro-expanded #line directive is not fully implemented"
 
 [[xfail]]
-id     = "c-testsuite::00189"
-reason = "15-builtin-rt: freestanding <stdio.h> header is not available in parse-only mode"
-
-[[xfail]]
-id     = "c-testsuite::00204"
-reason = "15-builtin-rt: freestanding <stdarg.h>/<stdint.h> headers are not available in parse-only mode"
-
-[[xfail]]
 id     = "c-testsuite::00216"
-reason = "14-lang-extensions/15-builtin-rt: empty aggregate extension, anonymous aggregate members, and freestanding <stdio.h>"
+reason = "14-lang-extensions: empty aggregate extension and anonymous aggregate members are outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00219"
-reason = "15-builtin-rt: freestanding <stdio.h> header is not available in parse-only mode"
-
-[[xfail]]
-id     = "c-testsuite::00220"
-reason = "15-builtin-rt: freestanding <stdio.h>/<wchar.h> headers are not available in parse-only mode"
+reason = "C11 _Generic is outside the C99 parser scope"

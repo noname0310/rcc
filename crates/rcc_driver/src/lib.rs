@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rcc_session::{EmitKind, LinkOptions, Options, Session, TargetInfo, WarningConfig};
 
 pub mod cli;
+mod deps;
 pub mod pipeline;
 pub mod toolchain;
 
@@ -201,7 +202,11 @@ fn run_many(cli: &Cli, base_opts: &Options) -> DriverStatus {
         eprintln!("rcc: cannot specify -o with multiple input files when using -c or -S");
         return DriverStatus { exit_code: ExitCode::Usage };
     }
-    if cli.preprocess_only || !cli.emit.is_empty() || cli.emit_assembly {
+    if matches!(base_opts.dependencies.mode, Some(rcc_session::DependencyMode::PreprocessOnly))
+        || cli.preprocess_only
+        || !cli.emit.is_empty()
+        || cli.emit_assembly
+    {
         return compile_many_without_link(cli, base_opts);
     }
     if cli.compile_only {
@@ -294,6 +299,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         emit,
         output,
         save_temps: cli.save_temps.clone(),
+        dependencies: dependency_options_from_cli(cli),
         opt_level: cli.opt_level,
         warning_config: warning_config_from_cli(cli),
         link: link_options_from_cli(cli),
@@ -307,6 +313,33 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_range_designators: false,
         gnu_attributes: false,
         gnu_inline_asm: false,
+    }
+}
+
+fn dependency_options_from_cli(cli: &Cli) -> rcc_session::DependencyOptions {
+    use rcc_session::{DependencyMode, DependencyOptions, DependencyTarget};
+
+    let mode = if cli.dep_only || cli.user_dep_only {
+        Some(DependencyMode::PreprocessOnly)
+    } else if cli.dep_side_effect || cli.user_dep_side_effect {
+        Some(DependencyMode::SideEffect)
+    } else {
+        None
+    };
+    DependencyOptions {
+        mode,
+        include_system_headers: !(cli.user_dep_only || cli.user_dep_side_effect),
+        output: cli.dependency_file.clone(),
+        targets: cli
+            .dependency_targets
+            .iter()
+            .map(|text| DependencyTarget { text: text.clone(), quote: false })
+            .chain(
+                cli.quoted_dependency_targets
+                    .iter()
+                    .map(|text| DependencyTarget { text: text.clone(), quote: true }),
+            )
+            .collect(),
     }
 }
 

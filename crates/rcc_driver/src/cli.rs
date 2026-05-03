@@ -51,6 +51,34 @@ pub struct Cli {
     #[arg(short = 'D', long = "define", value_parser = parse_define)]
     pub defines: Vec<(String, Option<String>)>,
 
+    /// Emit make dependencies to stdout and stop after preprocessing (`-M`).
+    #[arg(short = 'M', action = ArgAction::SetTrue)]
+    pub dep_only: bool,
+
+    /// Emit user-header make dependencies to stdout and stop after preprocessing (`-MM`).
+    #[arg(long = "user-dependencies", hide = true, action = ArgAction::SetTrue)]
+    pub user_dep_only: bool,
+
+    /// Emit make dependencies as a side effect of normal compilation (`-MD`).
+    #[arg(long = "emit-dependencies", hide = true, action = ArgAction::SetTrue)]
+    pub dep_side_effect: bool,
+
+    /// Emit user-header make dependencies as a side effect of normal compilation (`-MMD`).
+    #[arg(long = "emit-user-dependencies", hide = true, action = ArgAction::SetTrue)]
+    pub user_dep_side_effect: bool,
+
+    /// Dependency output file (`-MF`).
+    #[arg(long = "dependency-file", value_name = "FILE")]
+    pub dependency_file: Option<PathBuf>,
+
+    /// Add an explicit dependency target (`-MT`).
+    #[arg(long = "dependency-target", value_name = "TARGET", action = ArgAction::Append)]
+    pub dependency_targets: Vec<String>,
+
+    /// Add an explicit make-quoted dependency target (`-MQ`).
+    #[arg(long = "quoted-dependency-target", value_name = "TARGET", action = ArgAction::Append)]
+    pub quoted_dependency_targets: Vec<String>,
+
     /// Intermediate stage(s) to emit.
     #[arg(long = "emit", value_enum)]
     pub emit: Vec<EmitKind>,
@@ -338,9 +366,24 @@ where
             if let Some(standard) = text.strip_prefix("-std=") {
                 return OsString::from(format!("--std={standard}"));
             }
+            if let Some(path) = text.strip_prefix("-MF").filter(|rest| !rest.is_empty()) {
+                return OsString::from(format!("--dependency-file={path}"));
+            }
+            if let Some(target) = text.strip_prefix("-MT").filter(|rest| !rest.is_empty()) {
+                return OsString::from(format!("--dependency-target={target}"));
+            }
+            if let Some(target) = text.strip_prefix("-MQ").filter(|rest| !rest.is_empty()) {
+                return OsString::from(format!("--quoted-dependency-target={target}"));
+            }
             match text.as_ref() {
                 "-std" => OsString::from("--std"),
                 "-ansi" => OsString::from("--ansi"),
+                "-MM" => OsString::from("--user-dependencies"),
+                "-MD" => OsString::from("--emit-dependencies"),
+                "-MMD" => OsString::from("--emit-user-dependencies"),
+                "-MF" => OsString::from("--dependency-file"),
+                "-MT" => OsString::from("--dependency-target"),
+                "-MQ" => OsString::from("--quoted-dependency-target"),
                 "-shared" => OsString::from("--shared"),
                 "-static" => OsString::from("--static"),
                 "-pie" => OsString::from("--pie"),

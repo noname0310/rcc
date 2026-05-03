@@ -5,8 +5,8 @@
 //!
 //! | Form            | Directories searched, in order                      |
 //! |-----------------|-----------------------------------------------------|
-//! | `#include "h"`  | the current translation unit's directory, then `-I` |
-//! | `#include <h>`  | only the `-I` list                                  |
+//! | `#include "h"`  | the current translation unit's directory, `-I`, then rcc's builtin include root |
+//! | `#include <h>`  | `-I`, then rcc's builtin include root              |
 //!
 //! The first existing file on that path wins; no file-system readdir is
 //! performed. A header whose string resolves to an absolute path bypasses
@@ -64,6 +64,20 @@ pub fn resolve_header(
     }
 
     None
+}
+
+/// Compiler-provided C header root.
+///
+/// This is deliberately part of the preprocessor, not the parser smoke tests:
+/// once ordinary `#include` dispatch is active, standard headers must resolve
+/// through the same path production users will exercise.
+pub fn builtin_include_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("lib")
+        .join("rcc")
+        .join("include")
 }
 
 /// Return `true` if `tokens` (a header's full pp-token stream, as
@@ -153,12 +167,17 @@ impl Preprocessor<'_> {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let include_paths = self.session.opts.include_paths.clone();
+        let mut include_paths = self.session.opts.include_paths.clone();
+        let builtin = builtin_include_dir();
+        if builtin.is_dir() {
+            include_paths.push(builtin);
+        }
 
         let Some(resolved) = resolve_header(name, is_system, &current_dir, &include_paths) else {
             self.session.handler.emit(&cannot_find_header(directive_span, name, is_system));
             return Vec::new();
         };
+        self.session.record_source_dependency(resolved.clone(), is_system);
 
         // Dedupe on the resolved path: if this header was already
         // loaded during a prior `#include`, reuse its existing
@@ -444,13 +463,17 @@ mod tests {
 
     #[test]
     fn acceptance_missing_system_header_emits_e0021() {
-        // `<stddef.h>` with no matching include path must fail with
+        // A non-existent `<...>` header with no matching include path must fail with
         // E0021, and the label must point at the `#include` span.
         let tmp = TempDir::new().unwrap();
         let (mut sess, main_id, cap) = seed_session(tmp.path(), Vec::new());
-        let span = Span::new(main_id, BytePos(0), BytePos(18)); // `#include <stddef.h>`
-        let tokens =
-            Preprocessor::new(&mut sess).process_include("<stddef.h>", true, span, main_id);
+        let span = Span::new(main_id, BytePos(0), BytePos(31)); // `#include <rcc-missing-test.h>`
+        let tokens = Preprocessor::new(&mut sess).process_include(
+            "<rcc-missing-test.h>",
+            true,
+            span,
+            main_id,
+        );
 
         assert!(tokens.is_empty(), "failed include must contribute no tokens");
         let diags = cap.diagnostics();
@@ -458,7 +481,7 @@ mod tests {
         let d = &diags[0];
         assert_eq!(d.code, Some(E0021), "E0021 required for missing header");
         assert!(
-            d.message.contains("stddef.h"),
+            d.message.contains("rcc-missing-test.h"),
             "diagnostic message should name the missing header, got {:?}",
             d.message
         );
@@ -478,6 +501,22 @@ mod tests {
 
         assert!(!tokens.is_empty());
         assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn process_include_finds_compiler_builtin_system_headers() {
+        let src_dir = TempDir::new().unwrap();
+        let (mut sess, main_id, cap) = seed_session(src_dir.path(), Vec::new());
+        let span = dummy_span(main_id);
+        let tokens = Preprocessor::new(&mut sess).process_include("<stdio.h>", true, span, main_id);
+
+        assert!(!tokens.is_empty(), "builtin stdio.h must contribute tokens");
+        assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
+        let deps = sess.source_dependencies();
+        assert!(
+            deps.iter().any(|dep| dep.path.ends_with(Path::new("stdio.h")) && dep.system),
+            "stdio.h must be recorded as a system dependency: {deps:?}"
+        );
     }
 
     #[test]

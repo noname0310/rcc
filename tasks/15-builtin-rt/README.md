@@ -5,6 +5,14 @@ programs need: a target abstraction layer, freestanding standard
 headers (`stddef.h`, `stdarg.h`, `stdint.h`, etc.), builtin
 function implementations, and system header search path discovery.
 
+## Current seed
+
+Task 10-18 introduced a minimal `lib/rcc/include/` seed because
+ordinary `#include` dispatch became live and parser/conformance smoke
+tests must not hide standard-header failures by bulk-xfail. The seed is
+parse-oriented: phase-15 tasks still own target-correct definitions,
+builtin semantics, hosted system-header search, and codegen validation.
+
 ## Tasks
 
 | # | File | Summary |
