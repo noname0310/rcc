@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-03
+
 # 09-21: Bitfield access codegen
 
 **Phase:** 09-codegen-llvm    **Depends on:** 09-03, 09-09, 09-20    **Milestone:** M4

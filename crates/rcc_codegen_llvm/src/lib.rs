@@ -755,6 +755,25 @@ pub mod backend {
     /// Saved stack tokens for VLA locals, restored on `StorageDead`.
     pub type VlaStackMap<'ctx> = IndexVec<Local, Option<PointerValue<'ctx>>>;
 
+    #[derive(Copy, Clone, Debug)]
+    struct RecordFieldAccess {
+        kind: RecordKind,
+        ty: TyId,
+        quals: ObjectQuals,
+        layout: rcc_hir::layout::FieldLayout,
+    }
+
+    #[derive(Copy, Clone, Debug)]
+    struct BitfieldAccess<'ctx> {
+        storage_addr: PointerValue<'ctx>,
+        storage_ty: inkwell::types::IntType<'ctx>,
+        field_ty: TyId,
+        bit_offset: u32,
+        bit_width: u32,
+        storage_bits: u32,
+        volatile: bool,
+    }
+
     /// Shared state for one LLVM module emission.
     pub struct CodegenCx<'a, 'ctx> {
         context: &'ctx Context,
@@ -1657,6 +1676,186 @@ pub mod backend {
             Ok(())
         }
 
+        fn build_byte_gep(
+            &self,
+            ptr: PointerValue<'ctx>,
+            offset: u64,
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            let i8_ty = self.context.i8_type();
+            let offset = self.context.i64_type().const_int(offset, false);
+            self.build_gep(i8_ty, ptr, &[offset], name)
+        }
+
+        fn emit_bitfield_access(
+            &self,
+            place: &Place,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<Option<BitfieldAccess<'ctx>>, CodegenError> {
+            let Some((Projection::Field(field_idx), prefix)) = place.projection.split_last() else {
+                return Ok(None);
+            };
+            let prefix_place = Place { base: place.base, projection: prefix.to_vec() };
+            let owner_ty = self.place_ty(&prefix_place, body)?;
+            let field = self.record_field_access(owner_ty, *field_idx)?;
+            let Some(bit_width) = field.layout.bit_width else {
+                return Ok(None);
+            };
+            if bit_width == 0 {
+                return Err(CodegenError::Internal(
+                    "zero-width bit-field cannot be accessed as a value".to_owned(),
+                ));
+            }
+            let bit_offset = field.layout.bit_offset.ok_or_else(|| {
+                CodegenError::Internal("bit-field layout is missing bit offset".to_owned())
+            })?;
+            let storage_bits = storage_bits_for_bitfield(field.layout.storage_size)?;
+            if bit_offset.checked_add(bit_width).is_none_or(|end| end > storage_bits) {
+                return Err(CodegenError::Internal(format!(
+                    "bit-field range offset {} width {} exceeds {}-bit storage unit",
+                    bit_offset, bit_width, storage_bits
+                )));
+            }
+
+            let owner_addr = self.emit_place_addr(&prefix_place, locals, body)?;
+            let storage_addr =
+                self.build_byte_gep(owner_addr, field.layout.offset, "bf.storage")?;
+            let storage_ty = self.context.custom_width_int_type(storage_bits);
+            let volatile = self.place_is_volatile(place, body)?;
+            Ok(Some(BitfieldAccess {
+                storage_addr,
+                storage_ty,
+                field_ty: field.ty,
+                bit_offset,
+                bit_width,
+                storage_bits,
+                volatile,
+            }))
+        }
+
+        fn try_emit_bitfield_load(
+            &self,
+            place: &Place,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<Option<BasicValueEnum<'ctx>>, CodegenError> {
+            let Some(access) = self.emit_bitfield_access(place, locals, body)? else {
+                return Ok(None);
+            };
+            let storage = self
+                .emit_memory_load(
+                    access.storage_ty.as_basic_type_enum(),
+                    access.storage_addr,
+                    "bf.load",
+                    access.volatile,
+                )?
+                .into_int_value();
+            let shifted = if access.bit_offset == 0 {
+                storage
+            } else {
+                let amount = access.storage_ty.const_int(u64::from(access.bit_offset), false);
+                self.builder
+                    .build_right_shift(storage, amount, false, "bf.lshr")
+                    .map_err(builder_error)?
+            };
+            let mask = access.storage_ty.const_int(bit_mask(access.bit_width)?, false);
+            let masked = if access.bit_width == access.storage_bits {
+                shifted
+            } else {
+                self.builder.build_and(shifted, mask, "bf.mask").map_err(builder_error)?
+            };
+            let narrow_ty = self.context.custom_width_int_type(access.bit_width);
+            let narrow = if access.bit_width == access.storage_bits {
+                masked
+            } else {
+                self.builder
+                    .build_int_truncate(masked, narrow_ty, "bf.trunc")
+                    .map_err(builder_error)?
+            };
+            let BasicTypeEnum::IntType(field_ty) = self.type_cx().basic_type_of(access.field_ty)?
+            else {
+                return Err(type_lowering_error(access.field_ty, "bit-field type is not integer"));
+            };
+            let signed = self.is_signed_integer_ty(access.field_ty)?;
+            let value = self.cast_int_value(narrow, field_ty, signed, "bf.ext")?;
+            Ok(Some(value.as_basic_value_enum()))
+        }
+
+        fn try_emit_bitfield_store(
+            &self,
+            place: &Place,
+            value: BasicValueEnum<'ctx>,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<bool, CodegenError> {
+            let Some(access) = self.emit_bitfield_access(place, locals, body)? else {
+                return Ok(false);
+            };
+            let BasicValueEnum::IntValue(value) = value else {
+                return Err(CodegenError::Internal(format!(
+                    "bit-field store expected integer value, got {:?}",
+                    value.get_type()
+                )));
+            };
+            let value = self.cast_int_value(value, access.storage_ty, false, "bf.store.cast")?;
+            let width_mask = bit_mask(access.bit_width)?;
+            let value_mask = access.storage_ty.const_int(width_mask, false);
+            let value =
+                self.builder.build_and(value, value_mask, "bf.value").map_err(builder_error)?;
+            let shifted_value = if access.bit_offset == 0 {
+                value
+            } else {
+                let amount = access.storage_ty.const_int(u64::from(access.bit_offset), false);
+                self.builder.build_left_shift(value, amount, "bf.shl").map_err(builder_error)?
+            };
+            let storage = self
+                .emit_memory_load(
+                    access.storage_ty.as_basic_type_enum(),
+                    access.storage_addr,
+                    "bf.old",
+                    access.volatile,
+                )?
+                .into_int_value();
+            let field_mask = width_mask.checked_shl(access.bit_offset).ok_or_else(|| {
+                CodegenError::Internal("bit-field mask shift overflowed".to_owned())
+            })?;
+            let storage_mask = bit_mask(access.storage_bits)?;
+            let clear_mask = access.storage_ty.const_int(storage_mask & !field_mask, false);
+            let kept =
+                self.builder.build_and(storage, clear_mask, "bf.keep").map_err(builder_error)?;
+            let merged =
+                self.builder.build_or(kept, shifted_value, "bf.merge").map_err(builder_error)?;
+            self.emit_memory_store(
+                access.storage_addr,
+                merged.as_basic_value_enum(),
+                access.volatile,
+            )?;
+            Ok(true)
+        }
+
+        fn cast_int_value(
+            &self,
+            value: IntValue<'ctx>,
+            to_ty: inkwell::types::IntType<'ctx>,
+            signed: bool,
+            name: &str,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            let from_width = value.get_type().get_bit_width();
+            let to_width = to_ty.get_bit_width();
+            if from_width == to_width {
+                return Ok(value);
+            }
+            if from_width > to_width {
+                return self.builder.build_int_truncate(value, to_ty, name).map_err(builder_error);
+            }
+            if signed {
+                self.builder.build_int_s_extend(value, to_ty, name).map_err(builder_error)
+            } else {
+                self.builder.build_int_z_extend(value, to_ty, name).map_err(builder_error)
+            }
+        }
+
         /// Compute the LLVM pointer for a CFG [`Place`].
         ///
         /// Walks the projection chain and emits `getelementptr` / pointer
@@ -1700,15 +1899,16 @@ pub mod backend {
                         current_ty = pointee.ty;
                     }
                     Projection::Field(idx) => {
-                        let (record_kind, field_ty) = self.record_field_ty(current_ty, *idx)?;
-                        if record_kind == RecordKind::Struct {
-                            let record_ty = self.type_cx().basic_type_of(current_ty)?;
-                            ptr = self
-                                .builder
-                                .build_struct_gep(record_ty, ptr, *idx, "field_gep")
-                                .map_err(builder_error)?;
+                        let field = self.record_field_access(current_ty, *idx)?;
+                        if field.layout.bit_width.is_some() {
+                            return Err(CodegenError::Internal(
+                                "cannot take the address of a bit-field".to_owned(),
+                            ));
                         }
-                        current_ty = field_ty;
+                        if field.kind == RecordKind::Struct && field.layout.offset != 0 {
+                            ptr = self.build_byte_gep(ptr, field.layout.offset, "field_gep")?;
+                        }
+                        current_ty = field.ty;
                     }
                     Projection::Index(index_op) => {
                         let index_val = match self.emit_operand_value(index_op, locals, body)? {
@@ -1768,6 +1968,9 @@ pub mod backend {
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             match operand {
                 Operand::Copy(place) | Operand::Move(place) => {
+                    if let Some(value) = self.try_emit_bitfield_load(place, locals, body)? {
+                        return Ok(value);
+                    }
                     let addr = self.emit_place_addr(place, locals, body)?;
                     let ty = self.place_ty(place, body)?;
                     let llvm_ty = self.type_cx().basic_type_of(ty)?;
@@ -3022,6 +3225,9 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<(), CodegenError> {
+            if self.try_emit_bitfield_store(place, value, locals, body)? {
+                return Ok(());
+            }
             let addr = self.emit_place_addr(place, locals, body)?;
             let volatile = self.place_is_volatile(place, body)?;
             self.emit_memory_store(addr, value, volatile)
@@ -3160,6 +3366,15 @@ pub mod backend {
             ty: TyId,
             index: u32,
         ) -> Result<(RecordKind, TyId, ObjectQuals), CodegenError> {
+            let field = self.record_field_access(ty, index)?;
+            Ok((field.kind, field.ty, field.quals))
+        }
+
+        fn record_field_access(
+            &self,
+            ty: TyId,
+            index: u32,
+        ) -> Result<RecordFieldAccess, CodegenError> {
             let Ty::Record(def) = self.tcx.get(ty) else {
                 return Err(invalid_place_projection("field", ty));
             };
@@ -3175,7 +3390,16 @@ pub mod backend {
             let field = fields.get(index as usize).ok_or_else(|| {
                 CodegenError::Internal(format!("record {:?} has no field at index {}", def, index))
             })?;
-            Ok((*kind, field.ty, field.quals))
+            let record_layout = LayoutCx::with_defs(self.tcx, &self.hir.defs)
+                .record_layout_of(ty)
+                .map_err(|err| type_error(ty, err.to_string()))?;
+            let layout = record_layout.fields.get(index as usize).copied().ok_or_else(|| {
+                CodegenError::Internal(format!(
+                    "record {:?} layout has no field at index {}",
+                    def, index
+                ))
+            })?;
+            Ok(RecordFieldAccess { kind: *kind, ty: field.ty, quals: field.quals, layout })
         }
 
         fn record_field_ty(
@@ -3828,6 +4052,34 @@ pub mod backend {
 
     fn invalid_place_projection(projection: &str, ty: TyId) -> CodegenError {
         CodegenError::Internal(format!("invalid {projection} projection for place type {ty:?}"))
+    }
+
+    fn storage_bits_for_bitfield(storage_size: u64) -> Result<u32, CodegenError> {
+        let bits = storage_size.checked_mul(8).ok_or_else(|| {
+            CodegenError::Internal("bit-field storage size overflowed".to_owned())
+        })?;
+        let bits = u32::try_from(bits).map_err(|_| {
+            CodegenError::Internal("bit-field storage unit exceeds u32 bits".to_owned())
+        })?;
+        if bits == 0 || bits > 64 {
+            return Err(CodegenError::Internal(format!(
+                "unsupported {bits}-bit bit-field storage unit"
+            )));
+        }
+        Ok(bits)
+    }
+
+    fn bit_mask(bits: u32) -> Result<u64, CodegenError> {
+        if bits == 0 || bits > 64 {
+            return Err(CodegenError::Internal(format!(
+                "unsupported {bits}-bit bit-field mask width"
+            )));
+        }
+        if bits == 64 {
+            Ok(u64::MAX)
+        } else {
+            Ok((1_u64 << bits) - 1)
+        }
     }
 
     fn builder_error(error: impl std::fmt::Display) -> CodegenError {
@@ -6903,6 +7155,43 @@ mod tests {
         codegen(session, tcx, &hir, &bodies).unwrap().ir_text
     }
 
+    #[cfg(feature = "llvm")]
+    fn codegen_fixture_ir_with_defs(
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+        defs: IndexVec<DefId, Def>,
+        name: &str,
+        ret_ty: TyId,
+        body: Body,
+    ) -> String {
+        codegen_fixture_result_with_defs(session, tcx, defs, name, ret_ty, body).unwrap()
+    }
+
+    #[cfg(feature = "llvm")]
+    fn codegen_fixture_result_with_defs(
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+        defs: IndexVec<DefId, Def>,
+        name: &str,
+        ret_ty: TyId,
+        mut body: Body,
+    ) -> Result<String, CodegenError> {
+        let fn_name = session.interner.intern(name);
+        let mut defs = defs;
+        let fn_ty = func_ty(tcx, ret_ty, Vec::new(), false);
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        body.def = Some(def);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+        codegen(session, tcx, &hir, &bodies).map(|artifact| artifact.ir_text)
+    }
+
     /// Struct assignment lowers to an LLVM memcpy intrinsic instead of an
     /// aggregate load/store pair.
     #[cfg(feature = "llvm")]
@@ -8165,6 +8454,199 @@ mod tests {
             !ir.contains("load volatile i32"),
             "pointee load should not inherit array element pointer-slot volatility:\n{ir}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 09-21: Bitfield access codegen
+    // -----------------------------------------------------------------------
+
+    /// Reading a signed bitfield extracts the declared-width integer and
+    /// sign-extends it to the field's declared integer type.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn bitfield_signed_read_sign_extends_to_declared_type() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![bitfield(tcx.int, 3), bitfield(tcx.uint, 5)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let ret_ty = tcx.int;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(520)), rec_ty, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Field(0)],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = codegen_fixture_ir_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__bitfield_signed_read",
+            ret_ty,
+            body,
+        );
+
+        assert!(ir.contains("sext i3"), "signed 3-bit read should sign-extend:\n{ir}");
+    }
+
+    /// Writing one packed bitfield performs a read-modify-write on the
+    /// containing storage unit so neighboring bitfields are preserved.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn bitfield_write_masks_without_clobbering_neighbors() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![bitfield(tcx.uint, 3), bitfield(tcx.uint, 5)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let ret_ty = tcx.void;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(521)), rec_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(522)), tcx.uint, true));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(1), projection: vec![Projection::Field(1)] },
+                    rvalue: Rvalue::Use(Operand::Copy(local_place(Local(2)))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = codegen_fixture_ir_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__bitfield_masked_write",
+            ret_ty,
+            body,
+        );
+
+        assert!(ir.contains("load i32"), "bitfield write should read storage first:\n{ir}");
+        assert!(ir.contains("and i32"), "bitfield write should mask storage/value:\n{ir}");
+        assert!(ir.contains("shl i32"), "bitfield write should shift into place:\n{ir}");
+        assert!(ir.contains("or i32"), "bitfield write should merge with neighbors:\n{ir}");
+        assert!(ir.contains("store i32"), "bitfield write should store storage unit:\n{ir}");
+    }
+
+    /// Volatile bitfield reads and writes apply volatility to the containing
+    /// storage-unit memory operation.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn volatile_bitfield_accesses_use_volatile_storage_ops() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let mut vf = bitfield(tcx.uint, 3);
+        vf.quals = ObjectQuals { is_volatile: true, ..ObjectQuals::none() };
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![vf]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let ret_ty = tcx.void;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(523)), rec_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(524)), tcx.uint, true));
+        locals.push(cfg_local_decl(Some(Symbol(525)), tcx.uint, false));
+        let field_place = Place { base: Local(1), projection: vec![Projection::Field(0)] };
+        let block = cfg_block(
+            vec![
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(3)),
+                        rvalue: Rvalue::Use(Operand::Copy(field_place.clone())),
+                    },
+                    span: DUMMY_SP,
+                },
+                Statement {
+                    kind: StatementKind::Assign {
+                        place: field_place,
+                        rvalue: Rvalue::Use(Operand::Copy(local_place(Local(2)))),
+                    },
+                    span: DUMMY_SP,
+                },
+            ],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = codegen_fixture_ir_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__volatile_bitfield",
+            ret_ty,
+            body,
+        );
+
+        assert!(ir.contains("load volatile i32"), "volatile bitfield load expected:\n{ir}");
+        assert!(ir.contains("store volatile i32"), "volatile bitfield store expected:\n{ir}");
+    }
+
+    /// C99 forbids taking the address of a bitfield; codegen rejects an
+    /// address-producing rvalue before emitting an invalid pointer.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn bitfield_address_of_is_rejected() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![bitfield(tcx.uint, 3)]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.uint)));
+        let ret_ty = tcx.void;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(526)), rec_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(527)), ptr_ty, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: local_place(Local(2)),
+                    rvalue: Rvalue::AddressOf(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Field(0)],
+                    }),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let err = codegen_fixture_result_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__bitfield_addrof",
+            ret_ty,
+            body,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("address of a bit-field"), "unexpected error: {err}");
     }
 
     /// emit_operand_value on ConstKind::Global returns a pointer.

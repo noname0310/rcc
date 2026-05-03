@@ -28,7 +28,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [18-complex-rvalue-emission](18-complex-rvalue-emission.md)
 - [x] [19-varargs-va-intrinsics](19-varargs-va-intrinsics.md)
 - [x] [20-volatile-access](20-volatile-access.md)
-- [ ] [21-bitfield-access-codegen](21-bitfield-access-codegen.md)
+- [x] [21-bitfield-access-codegen](21-bitfield-access-codegen.md)
 - [ ] [22-mem2reg-and-module-verifier](22-mem2reg-and-module-verifier.md)
 - [ ] [23-llvm-ir-snapshots](23-llvm-ir-snapshots.md)
 - [ ] [24-filecheck-tests](24-filecheck-tests.md)
