@@ -1,8 +1,13 @@
 //! Orchestration of the compiler pipeline: source -> preprocess -> parse ->
 //! lower -> typeck -> cfg-build -> cfg-transform -> codegen.
 
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rcc_cfg::{build_bodies, pretty::dump_body};
 use rcc_codegen_llvm::{codegen, CodegenError};
@@ -36,7 +41,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         let sm = session.source_map.read().unwrap();
         let src = sm.file(file).src.clone();
         let out = rcc_lexer::pretty::format_tokens(&src, &sm, file);
-        stage_outputs.push(StageOutput { kind: EmitKind::Tokens, text: out });
+        stage_outputs.push(StageOutput::text(EmitKind::Tokens, out));
         if !has_later_emit_than_tokens(&session.opts.emit) {
             return flush_stage_outputs(session, input, &stage_outputs);
         }
@@ -45,10 +50,8 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     // 2. Preprocess.
     let pp_tokens = preprocess(session, file);
     if session.opts.emit.contains(&EmitKind::Pp) {
-        stage_outputs.push(StageOutput {
-            kind: EmitKind::Pp,
-            text: format_preprocessed(session, &pp_tokens),
-        });
+        stage_outputs
+            .push(StageOutput::text(EmitKind::Pp, format_preprocessed(session, &pp_tokens)));
         // When `--emit=pp` is requested and no later stage is asked
         // for, the driver stops here: it would be surprising for
         // `rcc --emit=pp foo.c` to then try to parse / typecheck /
@@ -74,10 +77,8 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         None => return Ok(()), // Errors already reported.
     };
     if session.opts.emit.contains(&EmitKind::Ast) {
-        stage_outputs.push(StageOutput {
-            kind: EmitKind::Ast,
-            text: rcc_ast::pretty::dump_translation_unit(&ast),
-        });
+        stage_outputs
+            .push(StageOutput::text(EmitKind::Ast, rcc_ast::pretty::dump_translation_unit(&ast)));
         if !has_later_emit_than_ast(&session.opts.emit) {
             return flush_stage_outputs(session, input, &stage_outputs);
         }
@@ -97,8 +98,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         return Ok(());
     }
     if session.opts.emit.contains(&EmitKind::Hir) {
-        stage_outputs
-            .push(StageOutput { kind: EmitKind::Hir, text: rcc_hir::pretty::dump_crate(&hir) });
+        stage_outputs.push(StageOutput::text(EmitKind::Hir, rcc_hir::pretty::dump_crate(&hir)));
         if !has_later_emit_than_hir(&session.opts.emit) {
             return flush_stage_outputs(session, input, &stage_outputs);
         }
@@ -107,7 +107,7 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     // 6. Build CFG.
     let bodies = build_bodies(session, &tcx, &hir);
     if session.opts.emit.contains(&EmitKind::Mir) {
-        stage_outputs.push(StageOutput { kind: EmitKind::Mir, text: format_mir(&tcx, &bodies) });
+        stage_outputs.push(StageOutput::text(EmitKind::Mir, format_mir(&tcx, &bodies)));
         if !backend_required(&session.opts.emit) {
             return flush_stage_outputs(session, input, &stage_outputs);
         }
@@ -117,13 +117,29 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
     match codegen(session, &tcx, &hir, &bodies) {
         Ok(art) => {
             if session.opts.emit.contains(&EmitKind::LlvmIr) {
-                stage_outputs.push(StageOutput { kind: EmitKind::LlvmIr, text: art.ir_text });
+                stage_outputs.push(StageOutput::text(EmitKind::LlvmIr, art.ir_text));
             }
             if session.opts.emit.contains(&EmitKind::Asm) {
-                return Err("--emit=asm is not implemented yet".to_string());
+                let assembly = art
+                    .assembly_text
+                    .ok_or_else(|| "LLVM backend did not return assembly output".to_string())?;
+                stage_outputs.push(StageOutput::text(EmitKind::Asm, assembly));
+            }
+            if session.opts.emit.is_empty() {
+                let object = art
+                    .object_bytes
+                    .ok_or_else(|| "LLVM backend did not return object output".to_string())?;
+                let exe = output_executable_path(session, input);
+                let obj = TempObject::new(input);
+                fs::write(obj.path(), object)
+                    .map_err(|e| format!("cannot write {}: {e}", obj.path().display()))?;
+                return link(obj.path(), &exe);
             }
             if session.opts.emit.contains(&EmitKind::Obj) {
-                return Err("--emit=obj is not implemented yet".to_string());
+                let object = art
+                    .object_bytes
+                    .ok_or_else(|| "LLVM backend did not return object output".to_string())?;
+                stage_outputs.push(StageOutput::bytes(EmitKind::Obj, object));
             }
             flush_stage_outputs(session, input, &stage_outputs)
         }
@@ -134,7 +150,17 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
 
 struct StageOutput {
     kind: EmitKind,
-    text: String,
+    bytes: Vec<u8>,
+}
+
+impl StageOutput {
+    fn text(kind: EmitKind, text: String) -> Self {
+        Self { kind, bytes: text.into_bytes() }
+    }
+
+    fn bytes(kind: EmitKind, bytes: Vec<u8>) -> Self {
+        Self { kind, bytes }
+    }
 }
 
 fn flush_stage_outputs(
@@ -148,10 +174,12 @@ fn flush_stage_outputs(
 
     if outputs.len() == 1 && session.opts.emit.len() == 1 {
         if let Some(path) = &session.opts.output {
-            fs::write(path, &outputs[0].text)
+            fs::write(path, &outputs[0].bytes)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         } else {
-            print!("{}", outputs[0].text);
+            io::stdout()
+                .write_all(&outputs[0].bytes)
+                .map_err(|e| format!("cannot write stdout: {e}"))?;
         }
         return Ok(());
     }
@@ -159,10 +187,157 @@ fn flush_stage_outputs(
     let base = session.opts.output.as_deref().unwrap_or(input);
     for output in outputs {
         let path = stage_output_path(base, output.kind);
-        fs::write(&path, &output.text)
+        fs::write(&path, &output.bytes)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// Link one native object file into an executable using the host C compiler.
+///
+/// This deliberately goes through `cc` instead of invoking `ld` directly so
+/// libc and CRT startup objects stay the host toolchain's responsibility.
+pub fn link(obj: &Path, output: &Path) -> Result<(), String> {
+    let linker = find_host_cc()?;
+    link_with_linker(&linker, obj, output)
+}
+
+/// Link with an explicit linker path. Public for driver tests and later tool
+/// discovery work; ordinary users should call [`link`].
+pub fn link_with_linker(linker: &Path, obj: &Path, output: &Path) -> Result<(), String> {
+    let command = LinkCommand::new(linker.to_path_buf(), obj, output);
+    let result = Command::new(&command.program)
+        .args(&command.args)
+        .output()
+        .map_err(|e| format!("failed to run linker `{}`: {e}", command.render()))?;
+
+    if result.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    Err(format!(
+        "linker failed with status {}\ncommand: {}\nstderr:\n{}",
+        result.status,
+        command.render(),
+        stderr.trim_end()
+    ))
+}
+
+/// A host linker command before it is spawned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+
+impl LinkCommand {
+    /// Build `cc <obj> -o <output>`.
+    #[must_use]
+    pub fn new(program: PathBuf, obj: &Path, output: &Path) -> Self {
+        Self {
+            program,
+            args: vec![
+                obj.as_os_str().to_owned(),
+                OsString::from("-o"),
+                output.as_os_str().to_owned(),
+            ],
+        }
+    }
+
+    /// Render the command line for diagnostics.
+    #[must_use]
+    pub fn render(&self) -> String {
+        std::iter::once(quote_arg(self.program.as_os_str()))
+            .chain(self.args.iter().map(|arg| quote_arg(arg.as_os_str())))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn find_host_cc() -> Result<PathBuf, String> {
+    find_program_on_path("cc").ok_or_else(|| "host linker `cc` was not found on PATH".to_string())
+}
+
+fn find_program_on_path(program: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        for name in executable_names(program) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn executable_names(program: &str) -> Vec<OsString> {
+    #[cfg(windows)]
+    {
+        let has_ext = Path::new(program).extension().is_some();
+        if has_ext {
+            return vec![OsString::from(program)];
+        }
+        let pathext =
+            env::var_os("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+        let mut names = vec![OsString::from(program)];
+        for ext in pathext.to_string_lossy().split(';').filter(|ext| !ext.is_empty()) {
+            names.push(OsString::from(format!("{program}{ext}")));
+        }
+        names
+    }
+    #[cfg(not(windows))]
+    {
+        vec![OsString::from(program)]
+    }
+}
+
+fn quote_arg(arg: &OsStr) -> String {
+    let raw = arg.to_string_lossy();
+    if raw.is_empty() || raw.chars().any(char::is_whitespace) {
+        format!("\"{}\"", raw.replace('"', "\\\""))
+    } else {
+        raw.into_owned()
+    }
+}
+
+fn output_executable_path(session: &Session, _input: &Path) -> PathBuf {
+    session.opts.output.clone().unwrap_or_else(default_executable_path)
+}
+
+fn default_executable_path() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("a.exe")
+    } else {
+        PathBuf::from("a.out")
+    }
+}
+
+static NEXT_TEMP_OBJECT_ID: AtomicUsize = AtomicUsize::new(0);
+
+struct TempObject {
+    path: PathBuf,
+}
+
+impl TempObject {
+    fn new(input: &Path) -> Self {
+        let id = NEXT_TEMP_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+        let stem = input.file_stem().and_then(OsStr::to_str).unwrap_or("input");
+        let path = env::temp_dir().join(format!("rcc-{}-{id}-{stem}.o", std::process::id()));
+        let _ = fs::remove_file(&path);
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempObject {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn stage_output_path(base: &Path, kind: EmitKind) -> PathBuf {

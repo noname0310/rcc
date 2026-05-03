@@ -61,6 +61,10 @@ impl std::error::Error for CodegenError {}
 pub struct CodegenArtifact {
     /// Textual LLVM IR module (pretty-printed).
     pub ir_text: String,
+    /// Target assembly, present when `EmitKind::Asm` was requested.
+    pub assembly_text: Option<String>,
+    /// Native object bytes, present for final linking or `EmitKind::Obj`.
+    pub object_bytes: Option<Vec<u8>>,
 }
 
 /// Final SysV x86-64 ABI class assigned to a parameter/return eightbyte.
@@ -730,9 +734,8 @@ pub mod backend {
     use inkwell::module::Module;
     #[cfg(test)]
     use inkwell::passes::PassBuilderOptions;
-    #[cfg(test)]
-    use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
-    use inkwell::targets::{TargetData, TargetTriple};
+    use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target};
+    use inkwell::targets::{TargetData, TargetMachine, TargetTriple};
     use inkwell::types::{
         AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
@@ -740,7 +743,6 @@ pub mod backend {
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
         FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
-    #[cfg(test)]
     use inkwell::OptimizationLevel;
     use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
     use rcc_cfg::UnOp;
@@ -982,6 +984,58 @@ pub mod backend {
         /// Render the current LLVM module as textual LLVM IR.
         pub fn ir_text(&self) -> String {
             self.module.print_to_string().to_string()
+        }
+
+        /// Emit the current module as target assembly text.
+        pub fn assembly_text(&self) -> Result<String, CodegenError> {
+            let bytes = self.emit_to_memory_buffer(FileType::Assembly)?;
+            String::from_utf8(bytes).map_err(|err| {
+                CodegenError::Internal(format!("LLVM assembly output was not UTF-8: {err}"))
+            })
+        }
+
+        /// Emit the current module as native object bytes.
+        pub fn object_bytes(&self) -> Result<Vec<u8>, CodegenError> {
+            self.emit_to_memory_buffer(FileType::Object)
+        }
+
+        fn emit_to_memory_buffer(&self, file_type: FileType) -> Result<Vec<u8>, CodegenError> {
+            let machine = self.target_machine()?;
+            let buffer =
+                machine.write_to_memory_buffer(&self.module, file_type).map_err(|err| {
+                    CodegenError::Internal(format!(
+                        "LLVM target emission failed: {}",
+                        err.to_string()
+                    ))
+                })?;
+            Ok(buffer.as_slice().to_vec())
+        }
+
+        fn target_machine(&self) -> Result<TargetMachine, CodegenError> {
+            Target::initialize_x86(&InitializationConfig::default());
+            let triple = TargetTriple::create(self.target_triple());
+            let target = Target::from_triple(&triple).map_err(|err| {
+                CodegenError::Internal(format!(
+                    "failed to resolve target '{}': {}",
+                    self.target_triple(),
+                    err.to_string()
+                ))
+            })?;
+            target
+                .create_target_machine(
+                    &triple,
+                    "generic",
+                    "",
+                    llvm_opt_level(self.session.opts.opt_level),
+                    RelocMode::PIC,
+                    CodeModel::Default,
+                )
+                .ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "failed to create target machine for '{}'",
+                        self.target_triple()
+                    ))
+                })
         }
 
         fn finalize_debug_info(&self) {
@@ -5407,6 +5461,9 @@ pub mod backend {
         hir: &HirCrate,
         bodies: &FxHashMap<DefId, Body>,
     ) -> Result<CodegenArtifact, CodegenError> {
+        let needs_object =
+            session.opts.emit.is_empty() || session.opts.emit.contains(&rcc_session::EmitKind::Obj);
+        let needs_assembly = session.opts.emit.contains(&rcc_session::EmitKind::Asm);
         let context = Context::create();
         let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
         cx.declare_all()?;
@@ -5414,7 +5471,19 @@ pub mod backend {
         cx.codegen_all_bodies()?;
         cx.finalize_debug_info();
         cx.verify_module()?;
-        Ok(CodegenArtifact { ir_text: cx.ir_text() })
+        let ir_text = cx.ir_text();
+        let assembly_text = needs_assembly.then(|| cx.assembly_text()).transpose()?;
+        let object_bytes = needs_object.then(|| cx.object_bytes()).transpose()?;
+        Ok(CodegenArtifact { ir_text, assembly_text, object_bytes })
+    }
+
+    fn llvm_opt_level(level: rcc_session::OptLevel) -> OptimizationLevel {
+        match level {
+            rcc_session::OptLevel::None => OptimizationLevel::None,
+            rcc_session::OptLevel::Less => OptimizationLevel::Less,
+            rcc_session::OptLevel::Default => OptimizationLevel::Default,
+            rcc_session::OptLevel::Aggressive => OptimizationLevel::Aggressive,
+        }
     }
 
     fn target_triple(session: &Session) -> String {

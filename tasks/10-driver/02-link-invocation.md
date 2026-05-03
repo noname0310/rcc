@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 10-02: Link invocation
 
 **Phase:** 10-driver    **Depends on:** 09-23    **Milestone:** M3
@@ -37,3 +39,10 @@ correctly.
 
 ## References
 - rustc `link.rs` for design inspiration (much simpler here).
+
+## Completion notes
+- Windows-native linking is covered by command construction and error-path
+  tests in this task. A runnable Windows ABI/COFF E2E is deferred to the target
+  abstraction work in `10-08`.
+- Runnable E2E was verified under WSL with LLVM 18 and host `cc`, matching the
+  backend's current Linux SysV target.

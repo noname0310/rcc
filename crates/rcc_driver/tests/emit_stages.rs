@@ -75,6 +75,10 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+fn read_bytes(path: &Path) -> Vec<u8> {
+    fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
 fn llvm_backend_enabled_for_this_build() -> bool {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap));
@@ -209,4 +213,22 @@ fn multi_emit_hir_mir_llvm_ir_when_backend_enabled() {
     assert!(mir.contains("fn def#"), "mir:\n{mir}");
     let ir = read(&output.stage("ll"));
     assert!(ir.contains("define i32 @main"), "ir:\n{ir}");
+}
+
+#[test]
+fn asm_and_obj_emit_when_backend_enabled() {
+    if !llvm_backend_enabled_for_this_build() {
+        return;
+    }
+
+    let input = TempCFile::new("hello", "int main(void) { return 0; }\n");
+    let output = TempOutput::new("asm-obj");
+
+    compile_with(&input, vec![EmitKind::Asm, EmitKind::Obj], Some(output.path.clone()))
+        .expect("asm + obj emit should succeed with LLVM enabled");
+
+    let asm = read(&output.stage("s"));
+    assert!(asm.contains("main"), "asm:\n{asm}");
+    let obj = read_bytes(&output.stage("o"));
+    assert!(obj.starts_with(b"\x7fELF"), "expected ELF object bytes, got: {obj:02x?}");
 }
