@@ -268,6 +268,17 @@ pub enum Rvalue {
         /// Target real type.
         to: TyId,
     },
+    /// GCC-compatible extended bit-field precision adjustment.
+    BitfieldPrecision {
+        /// Operand being reduced to the bit-field precision.
+        op: Operand,
+        /// Result storage type.
+        to: TyId,
+        /// Precision width in bits.
+        width: u32,
+        /// Whether the precision value is signed.
+        signed: bool,
+    },
     /// Take the address of a place.
     AddressOf(Place),
     /// Load the current value of a file-scope global object.

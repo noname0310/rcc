@@ -114,6 +114,10 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::RealFromComplex { complex, to } => {
             format!("RealFromComplex({}, {})", fmt_operand(complex), fmt_ty(tcx, *to))
         }
+        Rvalue::BitfieldPrecision { op, to, width, signed } => {
+            let sign = if *signed { "s" } else { "u" };
+            format!("BitfieldPrecision({}, {}, {sign}{width})", fmt_operand(op), fmt_ty(tcx, *to))
+        }
         Rvalue::AddressOf(place) => format!("&{}", fmt_place(place)),
         Rvalue::LoadGlobal { def, .. } => format!("load global#{}", def.0),
         Rvalue::Len(place) => format!("Len({})", fmt_place(place)),

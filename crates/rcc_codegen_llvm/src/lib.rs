@@ -2787,6 +2787,9 @@ pub mod backend {
                 Rvalue::RealFromComplex { complex, to } => {
                     self.emit_real_from_complex(complex, *to, locals, body)
                 }
+                Rvalue::BitfieldPrecision { op, to, width, signed } => {
+                    self.emit_bitfield_precision(op, *to, *width, *signed, locals, body)
+                }
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
@@ -3339,6 +3342,56 @@ pub mod backend {
                 self.builder.build_int_z_extend(value, to_ty, "zext").map_err(builder_error)?
             };
             Ok(cast.as_basic_value_enum())
+        }
+
+        fn emit_bitfield_precision(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            width: u32,
+            signed: bool,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_int_operand(operand, locals, body)?;
+            let BasicTypeEnum::IntType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "bit-field precision target is not integer"));
+            };
+            let precision_ty = self.context.custom_width_int_type(width);
+            let from_width = value.get_type().get_bit_width();
+            let narrowed = if from_width == width {
+                value
+            } else if from_width > width {
+                self.builder
+                    .build_int_truncate(value, precision_ty, "bf.prec.trunc")
+                    .map_err(builder_error)?
+            } else if signed {
+                self.builder
+                    .build_int_s_extend(value, precision_ty, "bf.prec.sext")
+                    .map_err(builder_error)?
+            } else {
+                self.builder
+                    .build_int_z_extend(value, precision_ty, "bf.prec.zext")
+                    .map_err(builder_error)?
+            };
+
+            let to_width = to_ty.get_bit_width();
+            let adjusted = if to_width == width {
+                narrowed
+            } else if to_width < width {
+                self.builder
+                    .build_int_truncate(narrowed, to_ty, "bf.prec.final.trunc")
+                    .map_err(builder_error)?
+            } else if signed {
+                self.builder
+                    .build_int_s_extend(narrowed, to_ty, "bf.prec.final.sext")
+                    .map_err(builder_error)?
+            } else {
+                self.builder
+                    .build_int_z_extend(narrowed, to_ty, "bf.prec.final.zext")
+                    .map_err(builder_error)?
+            };
+            Ok(adjusted.as_basic_value_enum())
         }
 
         fn emit_int_to_float_cast(

@@ -636,6 +636,15 @@ pub enum ConvertKind {
     /// Complex-to-real conversion (C99 §6.3.1.6): the imaginary part is
     /// discarded. The type-checker emits W0012 at the conversion site.
     ComplexToReal,
+    /// GCC-compatible extended bit-field precision. The expression keeps
+    /// its declared storage type, but the value is truncated to `width`
+    /// bits and then sign/zero-extended back to that storage type.
+    BitfieldPrecision {
+        /// Precision width in bits.
+        width: u32,
+        /// Whether the bit-field is signed.
+        signed: bool,
+    },
 }
 
 /// Small nested module so `HirExprKind` names don't collide with `rcc_ast::BinOp`.

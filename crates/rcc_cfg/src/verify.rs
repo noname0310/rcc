@@ -292,6 +292,10 @@ fn verify_rvalue_typed(
             let _ = verify_operand_typed(body, tcx, hir, complex, at, errors);
             Some(InferredTy::Known(*to))
         }
+        Rvalue::BitfieldPrecision { op, to, .. } => {
+            let _ = verify_operand_typed(body, tcx, hir, op, at, errors);
+            Some(InferredTy::Known(*to))
+        }
         Rvalue::BinaryOp(op, lhs, rhs) => {
             let lhs_ty = verify_operand_typed(body, tcx, hir, lhs, at.clone(), errors)?;
             let rhs_ty = verify_operand_typed(body, tcx, hir, rhs, at, errors)?;

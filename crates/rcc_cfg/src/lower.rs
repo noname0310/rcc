@@ -272,6 +272,16 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
                 push_assign(builder, span, temp, rvalue);
                 return Operand::Copy(Place { base: temp, projection: Vec::new() });
             }
+            if let ConvertKind::BitfieldPrecision { width, signed } = *kind {
+                let temp = builder.alloc_temp(ty, span);
+                push_assign(
+                    builder,
+                    span,
+                    temp,
+                    Rvalue::BitfieldPrecision { op: inner, to: ty, width, signed },
+                );
+                return Operand::Copy(Place { base: temp, projection: Vec::new() });
+            }
             // No-op convert kinds we just pass through (decay /
             // identity). Everything else materialises a `Cast` rvalue
             // with the appropriate `CastKind`.
@@ -2036,6 +2046,7 @@ fn convert_to_cast_kind(
         // casts. They construct/extract complex components and must stay
         // visible to codegen.
         RealToComplex | ComplexToReal => unreachable!("complex conversions are Rvalue nodes"),
+        BitfieldPrecision { .. } => unreachable!("bitfield precision conversion is an Rvalue node"),
 
         // Integer promotion / usual arithmetic are real width changes
         // unless from/to are already identical.

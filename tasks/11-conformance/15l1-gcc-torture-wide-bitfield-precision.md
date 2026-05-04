@@ -1,5 +1,7 @@
 # 11-15l1: gcc-torture wide bit-field precision
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15l    **Milestone:** M6
 
 ## Goal
@@ -30,6 +32,17 @@ storage type.
   `bitfld-3`, `bitfld-5`, `pr32244-1`, `pr34971`.
 - No xfail, skip, or result masking is added.
 - Storage layout remains unchanged for the 15j/15l cases already fixed.
+
+## Result
+- Added `ConvertKind::BitfieldPrecision { width, signed }` and
+  `Rvalue::BitfieldPrecision` so wide bit-field precision is represented as a
+  value conversion, not by mutating record place/storage types.
+- LLVM codegen lowers the conversion as truncate-to-bitfield-width followed by
+  sign/zero extension back to the declared storage type.
+- Prefix/postfix inc/dec results are also precision-wrapped, matching
+  `++u33 == 0` after a full-width increment.
+- Added `wide_bitfield_precision` e2e fixture.
+- WSL gcc-torture scoped probe: 4 pass / 0 fail.
 
 ## References
 - `tasks/11-conformance/15l-gcc-torture-bitfield-precision-cluster.md`

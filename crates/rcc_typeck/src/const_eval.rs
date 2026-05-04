@@ -278,7 +278,9 @@ impl<'a> ConstEval<'a> {
                 // constant. Bail without trying to fold (full complex
                 // const-eval is genuinely hard and is left as future
                 // work for the §6.6p7 arithmetic-constant pass).
-                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
+                ConvertKind::RealToComplex
+                | ConvertKind::ComplexToReal
+                | ConvertKind::BitfieldPrecision { .. } => None,
             },
 
             HirExprKind::Call { .. }
@@ -357,7 +359,9 @@ impl<'a> ConstEval<'a> {
                 ConvertKind::LvalueToRvalue => self.eval_address(operand),
                 ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic => None,
                 // Complex conversions never produce an address constant.
-                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
+                ConvertKind::RealToComplex
+                | ConvertKind::ComplexToReal
+                | ConvertKind::BitfieldPrecision { .. } => None,
             },
 
             // `(T*) icex` — null pointer constant with an integer offset.
@@ -607,6 +611,9 @@ impl<'a> ConstEval<'a> {
                 ConvertKind::IntegerPromotion
                 | ConvertKind::UsualArithmetic
                 | ConvertKind::LvalueToRvalue => self.eval_int(operand),
+                ConvertKind::BitfieldPrecision { width, signed } => {
+                    self.eval_int(operand).map(|value| truncate_to_width(value, width, signed))
+                }
                 // Decay / pointer conversions never produce an
                 // integer-typed result.
                 ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr | ConvertKind::Pointer => None,

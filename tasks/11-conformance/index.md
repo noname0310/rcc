@@ -42,7 +42,7 @@ current numeric milestone already passes.
 - [x] [15j-gcc-torture-aggregate-byval-runtime](15j-gcc-torture-aggregate-byval-runtime.md)
 - [x] [15k-gcc-torture-runtime-signal-cluster-sweep](15k-gcc-torture-runtime-signal-cluster-sweep.md)
 - [x] [15l-gcc-torture-bitfield-precision-cluster](15l-gcc-torture-bitfield-precision-cluster.md)
-- [ ] [15l1-gcc-torture-wide-bitfield-precision](15l1-gcc-torture-wide-bitfield-precision.md)
+- [x] [15l1-gcc-torture-wide-bitfield-precision](15l1-gcc-torture-wide-bitfield-precision.md)
 - [ ] [15m-gcc-torture-scalar-conversion-cluster](15m-gcc-torture-scalar-conversion-cluster.md)
 - [ ] [15n-gcc-torture-vla-lifetime-cluster](15n-gcc-torture-vla-lifetime-cluster.md)
 - [ ] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)

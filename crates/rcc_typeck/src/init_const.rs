@@ -81,7 +81,9 @@ fn is_string_literal_init(body: &Body, expr_id: HirExprId) -> bool {
                 // string-literal leaf and the surrounding pointer-typed
                 // initializer; if they do, it isn't a string-literal
                 // initializer in the recognised shape.
-                ConvertKind::RealToComplex | ConvertKind::ComplexToReal => return false,
+                ConvertKind::RealToComplex
+                | ConvertKind::ComplexToReal
+                | ConvertKind::BitfieldPrecision { .. } => return false,
             },
             HirExprKind::Cast { operand, .. } => current = *operand,
             _ => return false,
