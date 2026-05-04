@@ -104,6 +104,7 @@ fn install_gnu_builtin_libcalls(
                 is_static: false,
                 is_inline: false,
                 is_extern_inline: false,
+                no_instrument_function: false,
                 variadic,
             },
         });
@@ -1025,7 +1026,9 @@ pub fn lower_stmt(
             let id = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Expr(id)
         }
-        StmtKind::InlineAsm(_) => HirStmtKind::Null,
+        StmtKind::InlineAsm(asm) => {
+            lower_inline_asm_stmt(asm, body, scope, crate_, tcx, resolver, session)
+        }
         StmtKind::Compound(block) => {
             let ids = lower_block_items(&block.items, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Block(ids)
@@ -1120,6 +1123,105 @@ pub fn lower_stmt(
     let stmt_id = body.stmts.push(HirStmt { id: HirStmtId(0), span: stmt.span, kind });
     body.stmts[stmt_id].id = stmt_id;
     stmt_id
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_inline_asm_stmt(
+    asm: &rcc_ast::InlineAsm,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> HirStmtKind {
+    let mut stmts = Vec::new();
+    let mut consumed_inputs = vec![false; asm.inputs.len()];
+
+    for (output_idx, output) in asm.outputs.iter().enumerate() {
+        let constraint = asm_constraint_text(&output.constraint);
+        if let Some(input_idx) = matching_inline_asm_input(output_idx, &asm.inputs) {
+            consumed_inputs[input_idx] = true;
+            if constraint.is_some_and(asm_constraint_is_write_only) {
+                let lhs = lower_expr(&output.expr, body, scope, crate_, tcx, resolver, session);
+                let rhs = lower_expr(
+                    &asm.inputs[input_idx].expr,
+                    body,
+                    scope,
+                    crate_,
+                    tcx,
+                    resolver,
+                    session,
+                );
+                let assign = push_hir_expr(
+                    body,
+                    tcx.error,
+                    ValueCat::RValue,
+                    asm.span,
+                    HirExprKind::Assign { lhs, rhs },
+                );
+                stmts.push(push_hir_stmt(body, asm.span, HirStmtKind::Expr(assign)));
+                continue;
+            }
+        }
+
+        // For read/write operands (`+r`, `+m`) and unsupported output-only
+        // shapes, at least preserve operand evaluation. The empty asm forms
+        // in the gcc-torture cluster then become no-ops with correct side
+        // effects instead of disappearing before CFG lowering.
+        let expr = lower_expr(&output.expr, body, scope, crate_, tcx, resolver, session);
+        stmts.push(push_hir_stmt(body, output.span, HirStmtKind::Expr(expr)));
+    }
+
+    for (idx, input) in asm.inputs.iter().enumerate() {
+        if consumed_inputs[idx] {
+            continue;
+        }
+        let expr = lower_expr(&input.expr, body, scope, crate_, tcx, resolver, session);
+        stmts.push(push_hir_stmt(body, input.span, HirStmtKind::Expr(expr)));
+    }
+
+    if stmts.is_empty() {
+        HirStmtKind::Null
+    } else {
+        HirStmtKind::Block(stmts)
+    }
+}
+
+fn matching_inline_asm_input(
+    output_idx: usize,
+    inputs: &[rcc_ast::InlineAsmOperand],
+) -> Option<usize> {
+    let expected = output_idx.to_string();
+    inputs
+        .iter()
+        .position(|input| asm_constraint_text(&input.constraint).is_some_and(|c| c == expected))
+}
+
+fn asm_constraint_text(lit: &rcc_ast::StringLiteral) -> Option<&str> {
+    std::str::from_utf8(&lit.bytes).ok()
+}
+
+fn asm_constraint_is_write_only(constraint: &str) -> bool {
+    constraint.starts_with('=')
+}
+
+fn push_hir_expr(
+    body: &mut Body,
+    ty: TyId,
+    value_cat: ValueCat,
+    span: Span,
+    kind: HirExprKind,
+) -> HirExprId {
+    let id = body.exprs.push(HirExpr { id: HirExprId(0), ty, value_cat, span, kind });
+    body.exprs[id].id = id;
+    id
+}
+
+fn push_hir_stmt(body: &mut Body, span: Span, kind: HirStmtKind) -> HirStmtId {
+    let id = body.stmts.push(HirStmt { id: HirStmtId(0), span, kind });
+    body.stmts[id].id = id;
+    id
 }
 
 fn populate_switch_case_tables(body: &mut Body, root: HirStmtId, session: &mut Session) {
@@ -1285,6 +1387,10 @@ fn populate_switch_case_tables_in_expr(
         | HirExprKind::BuiltinVaCopy { dst: ap, src: last_param } => {
             populate_switch_case_tables_in_expr(body, ap, switch_depth, session);
             populate_switch_case_tables_in_expr(body, last_param, switch_depth, session);
+        }
+        HirExprKind::BuiltinExpect { value, expected } => {
+            populate_switch_case_tables_in_expr(body, value, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, expected, switch_depth, session);
         }
         HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
             populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
@@ -1587,6 +1693,7 @@ fn lower_block_decl(
                 decl.span,
                 ty,
                 &decl.specs,
+                &init_decl.declarator,
                 scope,
                 crate_,
                 resolver,
@@ -1808,6 +1915,7 @@ fn lower_block_scope_function_decl(
     span: Span,
     ty: TyId,
     specs: &rcc_ast::DeclSpecs,
+    declarator: &rcc_ast::Declarator,
     scope: &ScopeStack,
     crate_: &mut HirCrate,
     resolver: &mut Resolver,
@@ -1841,7 +1949,7 @@ fn lower_block_scope_function_decl(
         return Some(def);
     }
 
-    let flags = function_decl_flags(specs);
+    let flags = function_decl_flags(specs, declarator, session);
     let variadic = match tcx.get(ty) {
         Ty::Func { variadic, .. } => *variadic,
         _ => false,
@@ -1856,6 +1964,7 @@ fn lower_block_scope_function_decl(
             is_static: flags.is_static,
             is_inline: flags.is_inline,
             is_extern_inline: flags.is_extern_inline,
+            no_instrument_function: flags.no_instrument_function,
             variadic,
         },
     });
@@ -3769,7 +3878,22 @@ pub fn lower_expr(
                             body.exprs[id].id = id;
                             return id;
                         }
-                        return lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let value_id =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let expected_id =
+                            lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.error,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinExpect {
+                                value: value_id,
+                                expected: expected_id,
+                            },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
                     }
                     "__builtin_add_overflow" | "__builtin_mul_overflow"
                         if session.opts.gnu_builtin_libcalls =>
@@ -6378,7 +6502,7 @@ fn assign_def_ids(
             ExternalDecl::Function(func_def) => {
                 // Function definition — extract name from declarator.
                 if let Some((name, _span)) = func_def.declarator.name {
-                    let flags = function_decl_flags(&func_def.specs);
+                    let flags = function_decl_flags(&func_def.specs, &func_def.declarator, session);
                     let id = if let Some(existing) = resolver
                         .ordinary
                         .get(&name)
@@ -6390,6 +6514,7 @@ fn assign_def_ids(
                             is_static,
                             is_inline,
                             is_extern_inline,
+                            no_instrument_function,
                             ..
                         } = &mut crate_.defs[existing].kind
                         {
@@ -6397,6 +6522,7 @@ fn assign_def_ids(
                             *is_static = flags.is_static;
                             *is_inline = flags.is_inline;
                             *is_extern_inline = flags.is_extern_inline;
+                            *no_instrument_function |= flags.no_instrument_function;
                         }
                         crate_.defs[existing].span = func_def.span;
                         existing
@@ -6411,6 +6537,7 @@ fn assign_def_ids(
                                 is_static: flags.is_static,
                                 is_inline: flags.is_inline,
                                 is_extern_inline: flags.is_extern_inline,
+                                no_instrument_function: flags.no_instrument_function,
                                 variadic: false,
                             },
                         });
@@ -6478,11 +6605,25 @@ fn assign_def_ids(
                                 resolver.ordinary.insert(name, id);
                             }
                         } else if is_function_decl {
-                            let flags = function_decl_flags(&decl.specs);
+                            let flags =
+                                function_decl_flags(&decl.specs, &init_decl.declarator, session);
                             let id = if let Some(existing) =
                                 resolver.ordinary.get(&name).copied().filter(|id| {
                                     matches!(crate_.defs[*id].kind, DefKind::Function { .. })
                                 }) {
+                                if let DefKind::Function {
+                                    no_instrument_function,
+                                    is_static,
+                                    is_inline,
+                                    is_extern_inline,
+                                    ..
+                                } = &mut crate_.defs[existing].kind
+                                {
+                                    *no_instrument_function |= flags.no_instrument_function;
+                                    *is_static = flags.is_static;
+                                    *is_inline = flags.is_inline;
+                                    *is_extern_inline = flags.is_extern_inline;
+                                }
                                 existing
                             } else {
                                 let id = crate_.defs.push(Def {
@@ -6495,6 +6636,7 @@ fn assign_def_ids(
                                         is_static: flags.is_static,
                                         is_inline: flags.is_inline,
                                         is_extern_inline: flags.is_extern_inline,
+                                        no_instrument_function: flags.no_instrument_function,
                                         variadic: false,
                                     },
                                 });
@@ -6550,13 +6692,29 @@ struct FunctionDeclFlags {
     is_static: bool,
     is_inline: bool,
     is_extern_inline: bool,
+    no_instrument_function: bool,
 }
 
-fn function_decl_flags(specs: &rcc_ast::DeclSpecs) -> FunctionDeclFlags {
+fn function_decl_flags(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &rcc_ast::Declarator,
+    session: &Session,
+) -> FunctionDeclFlags {
     let is_inline = specs.func_specs.inline;
     let is_static = specs.storage == Some(StorageClass::Static);
     let is_extern_inline = is_inline && specs.storage == Some(StorageClass::Extern);
-    FunctionDeclFlags { is_static, is_inline, is_extern_inline }
+    let no_instrument_function = attrs_contain_no_instrument_function(&specs.attrs, session)
+        || attrs_contain_no_instrument_function(&declarator.attrs, session);
+    FunctionDeclFlags { is_static, is_inline, is_extern_inline, no_instrument_function }
+}
+
+fn attrs_contain_no_instrument_function(attrs: &[rcc_ast::Attribute], session: &Session) -> bool {
+    attrs.iter().any(|attr| {
+        matches!(
+            session.interner.get(attr.name),
+            "no_instrument_function" | "__no_instrument_function__"
+        )
+    })
 }
 
 fn is_file_scope_function_declarator(declarator: &Declarator) -> bool {
@@ -6742,6 +6900,7 @@ fn finalize_file_scope_def_types(
                     is_static,
                     is_inline,
                     is_extern_inline,
+                    no_instrument_function,
                     variadic,
                 } => {
                     *slot = ty;
@@ -6750,10 +6909,12 @@ fn finalize_file_scope_def_types(
                         _ => false,
                     };
                     if !*has_body {
-                        let flags = function_decl_flags(&decl.specs);
+                        let flags =
+                            function_decl_flags(&decl.specs, &init_decl.declarator, session);
                         *is_static = flags.is_static;
                         *is_inline = flags.is_inline;
                         *is_extern_inline = flags.is_extern_inline;
+                        *no_instrument_function |= flags.no_instrument_function;
                     }
                 }
                 DefKind::Global { ty: slot, quals, init, .. } => {
@@ -10389,6 +10550,7 @@ mod tests {
                 is_static: false,
                 is_inline: false,
                 is_extern_inline: false,
+                no_instrument_function: false,
                 variadic: false,
             },
         });
@@ -10417,7 +10579,7 @@ mod tests {
     }
 
     #[test]
-    fn expr_builtin_expect_lowers_to_value_operand() {
+    fn expr_builtin_expect_preserves_hint_side_effect_operand() {
         let (mut sess, _cap) = Session::for_test();
         let e = Expr {
             id: NodeId(0),
@@ -10430,7 +10592,13 @@ mod tests {
 
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
 
-        assert_eq!(hir_int_value(&body, id), Some(7));
+        match body.exprs[id].kind {
+            HirExprKind::BuiltinExpect { value, expected } => {
+                assert_eq!(hir_int_value(&body, value), Some(7));
+                assert_eq!(hir_int_value(&body, expected), Some(0));
+            }
+            ref other => panic!("expected BuiltinExpect, got {other:?}"),
+        }
     }
 
     #[test]

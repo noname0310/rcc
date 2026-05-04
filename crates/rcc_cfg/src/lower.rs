@@ -363,6 +363,17 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let _ = lower_as_rvalue(builder, cx, *lhs);
             lower_as_rvalue(builder, cx, *rhs)
         }
+        HirExprKind::BuiltinExpect { value, expected } => {
+            // GNU `__builtin_expect` returns its first operand, but the
+            // branch-probability hint operand is still evaluated. Materialise
+            // the first operand before evaluating the hint so side effects in
+            // `expected` cannot change the returned value.
+            let value = lower_as_rvalue(builder, cx, *value);
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(builder, span, temp, Rvalue::Use(value));
+            let _ = lower_as_rvalue(builder, cx, *expected);
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
         HirExprKind::Assign { lhs, rhs } => {
             if let Some(parts) = compound_assign_parts(cx, *lhs, *rhs) {
                 return lower_compound_assign(builder, cx, span, *lhs, parts);

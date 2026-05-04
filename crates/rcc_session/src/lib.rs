@@ -193,6 +193,12 @@ pub struct Options {
     /// option off, HIR lowering emits W0022 while preserving the alias for
     /// compatibility tests.
     pub gnu_function_names: bool,
+    /// Enable GCC `-finstrument-functions` entry/exit hooks.
+    ///
+    /// When enabled, generated functions call `__cyg_profile_func_enter` at
+    /// function entry and `__cyg_profile_func_exit` before each return unless
+    /// the function has GNU `no_instrument_function`.
+    pub instrument_functions: bool,
     /// Enable chibicc/GNU `__va_area__` without a warning.
     ///
     /// `__va_area__` is a non-standard compatibility identifier used by
@@ -247,6 +253,7 @@ impl Default for Options {
             gnu_labels_as_values: false,
             gnu_lvalue_comma: false,
             gnu_function_names: false,
+            instrument_functions: false,
             gnu_va_area: false,
             gnu89_inline: false,
             gnu_builtin_libcalls: false,

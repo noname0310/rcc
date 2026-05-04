@@ -300,6 +300,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinVaStart { .. }
             | HirExprKind::BuiltinVaEnd { .. }
             | HirExprKind::BuiltinVaCopy { .. }
+            | HirExprKind::BuiltinExpect { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }
@@ -647,6 +648,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinVaStart { .. }
             | HirExprKind::BuiltinVaEnd { .. }
             | HirExprKind::BuiltinVaCopy { .. }
+            | HirExprKind::BuiltinExpect { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }

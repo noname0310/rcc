@@ -135,6 +135,7 @@ fn hir_with_function_body(tcx: &mut TyCtxt, body: Body) -> HirCrate {
             is_static: false,
             is_inline: false,
             is_extern_inline: false,
+            no_instrument_function: false,
             variadic: false,
         },
     });

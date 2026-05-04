@@ -5291,6 +5291,7 @@ pub mod backend {
             if body_uses_va_area(body) {
                 this.va_area = Some(this.init_va_area_slot()?);
             }
+            this.emit_instrument_enter()?;
 
             Ok(this)
         }
@@ -5923,6 +5924,7 @@ pub mod backend {
         }
 
         fn emit_return(&self) -> Result<(), CodegenError> {
+            self.emit_instrument_exit()?;
             let ret_ty = self.body.ret_ty.ok_or_else(|| {
                 CodegenError::Internal("CFG body is missing its return type".to_owned())
             })?;
@@ -6018,6 +6020,51 @@ pub mod backend {
                 )));
             }
             self.cx.builder.build_return(Some(&value)).map(|_| ()).map_err(builder_error)
+        }
+
+        fn emit_instrument_enter(&self) -> Result<(), CodegenError> {
+            self.emit_instrument_hook("__cyg_profile_func_enter")
+        }
+
+        fn emit_instrument_exit(&self) -> Result<(), CodegenError> {
+            self.emit_instrument_hook("__cyg_profile_func_exit")
+        }
+
+        fn emit_instrument_hook(&self, name: &str) -> Result<(), CodegenError> {
+            if !self.should_instrument_function() {
+                return Ok(());
+            }
+            let hook = self.instrument_hook_decl(name);
+            let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+            let this_fn = self.function.as_global_value().as_pointer_value();
+            let call_site = ptr_ty.const_null();
+            self.cx
+                .builder
+                .build_call(hook, &[this_fn.into(), call_site.into()], "")
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
+        fn should_instrument_function(&self) -> bool {
+            if !self.cx.session.opts.instrument_functions {
+                return false;
+            }
+            let Some(def) = self.body.def else {
+                return false;
+            };
+            !matches!(
+                self.cx.hir.defs.get(def).map(|def| &def.kind),
+                Some(DefKind::Function { no_instrument_function: true, .. })
+            )
+        }
+
+        fn instrument_hook_decl(&self, name: &str) -> FunctionValue<'ctx> {
+            if let Some(function) = self.cx.module.get_function(name) {
+                return function;
+            }
+            let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+            let fn_ty = self.cx.context.void_type().fn_type(&[ptr_ty.into(), ptr_ty.into()], false);
+            self.cx.module.add_function(name, fn_ty, None)
         }
 
         fn llvm_block(&self, bb: BasicBlockId) -> Result<LlvmBasicBlock<'ctx>, CodegenError> {
@@ -7583,6 +7630,7 @@ mod tests {
                 is_static: opts.is_static,
                 is_inline: opts.is_inline,
                 is_extern_inline: opts.is_extern_inline,
+                no_instrument_function: false,
                 variadic: opts.variadic,
             },
         });

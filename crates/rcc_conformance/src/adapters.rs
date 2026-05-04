@@ -754,6 +754,9 @@ impl Adapter for GccTortureAdapter {
                 .arg("-fgnu-function-names")
                 .arg("-fgnu89-inline")
                 .arg("-fgnu-builtin-libcalls");
+            if gcc_torture_case_requests_flag(&case.path, "-finstrument-functions") {
+                compile.arg("-finstrument-functions");
+            }
         }
         compile.arg("-o").arg(&exe_path).arg(&case.path);
         match run_with_timeout(&mut compile, TIMEOUT) {
@@ -784,6 +787,12 @@ impl Adapter for GccTortureAdapter {
             Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
         }
     }
+}
+
+fn gcc_torture_case_requests_flag(path: &Path, flag: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|src| {
+        src.lines().filter(|line| line.contains("dg-options")).any(|line| line.contains(flag))
+    })
 }
 
 /// `tcc-tests2` adapter (LGPL).

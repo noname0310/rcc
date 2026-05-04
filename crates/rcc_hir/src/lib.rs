@@ -97,6 +97,8 @@ pub enum DefKind {
         /// `inline` definition is also explicitly `extern`, which provides
         /// the external definition (vs. plain `inline`, which does not).
         is_extern_inline: bool,
+        /// GNU `no_instrument_function` attribute.
+        no_instrument_function: bool,
         /// Variadic?
         variadic: bool,
     },
@@ -523,6 +525,16 @@ pub enum HirExprKind {
     /// type checking gives it type `void *`; LLVM codegen materialises the
     /// current function's hidden varargs save-area object.
     BuiltinVaArea,
+    /// GNU `__builtin_expect(value, expected)`.
+    ///
+    /// The runtime value is `value`, but both operands are evaluated so
+    /// side effects in the branch-probability hint are not lost.
+    BuiltinExpect {
+        /// Runtime value returned by the builtin.
+        value: HirExprId,
+        /// Expected value hint, evaluated and discarded.
+        expected: HirExprId,
+    },
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).

@@ -894,6 +894,122 @@ long long llabs(long long b) {
     }
 
     #[test]
+    fn gnu_inline_asm_empty_matching_output_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU inline asm e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_inline_asm_matching_output",
+            r#"
+int val = -2147483647 - 1;
+int main(void) {
+  volatile int i = 0;
+  asm ("" : "=r" (i) : "0" ((long long)val));
+  return i != val;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_inline_asm: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_inline_asm_readwrite_operand_evaluates_once_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU inline asm e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_inline_asm_readwrite_once",
+            r#"
+int count = 0;
+int dummy;
+int *bar(void) {
+  ++count;
+  return &dummy;
+}
+void foo(void) {
+  asm ("" : "+r" (*bar()));
+}
+int main(void) {
+  foo();
+  return count != 1;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_inline_asm: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn instrument_functions_honors_no_instrument_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping -finstrument-functions e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "instrument_functions_no_instrument",
+            r#"
+#define NOCHK __attribute__((no_instrument_function))
+int entry_calls, exit_calls;
+void (*last_fn_entered)(void);
+void (*last_fn_exited)(void);
+
+void __cyg_profile_func_enter(void *, void *) NOCHK;
+void __cyg_profile_func_exit(void *, void *) NOCHK;
+int main(void) NOCHK;
+void nfoo(void) NOCHK;
+
+void foo(void) {
+  if (last_fn_entered != foo)
+    __builtin_abort();
+}
+
+void nfoo(void) {
+  if (entry_calls != 1 || exit_calls != 1)
+    __builtin_abort();
+  foo();
+}
+
+int main(void) {
+  if (entry_calls != 0 || exit_calls != 0)
+    __builtin_abort();
+  foo();
+  if (entry_calls != 1 || exit_calls != 1 || last_fn_exited != foo)
+    __builtin_abort();
+  nfoo();
+  return !(entry_calls == 2 && exit_calls == 2 && last_fn_entered == foo);
+}
+
+void __cyg_profile_func_enter(void *fn, void *parent) {
+  (void)parent;
+  entry_calls++;
+  last_fn_entered = (void (*)(void))fn;
+}
+void __cyg_profile_func_exit(void *fn, void *parent) {
+  (void)parent;
+  exit_calls++;
+  last_fn_exited = (void (*)(void))fn;
+}
+"#,
+            b"",
+            0,
+            Options {
+                gnu_attributes: true,
+                instrument_functions: true,
+                gnu_builtin_libcalls: true,
+                ..Options::default()
+            },
+        );
+    }
+
+    #[test]
     fn differential_vs_host_cc() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping differential e2e: LLVM backend feature is disabled");

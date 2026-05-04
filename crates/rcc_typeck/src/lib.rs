@@ -699,6 +699,17 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::StmtExpr { stmts, result };
             expr_id
         }
+        HirExprKind::BuiltinExpect { value, expected } => {
+            let value2 = visit_expr(value, body, tcx, session, def_info);
+            let value2 = rvalue_decayed(value2, body, tcx);
+            let expected2 = visit_expr(expected, body, tcx, session, def_info);
+            let expected2 = rvalue_decayed(expected2, body, tcx);
+            body.exprs[expr_id].ty = body.exprs[value2].ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind =
+                HirExprKind::BuiltinExpect { value: value2, expected: expected2 };
+            expr_id
+        }
         HirExprKind::Convert { operand, kind } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
             // Preserve the convert kind; just rewire the operand id and
@@ -2617,6 +2628,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinVaStart { .. }
         | HirExprKind::BuiltinVaEnd { .. }
         | HirExprKind::BuiltinVaCopy { .. }
+        | HirExprKind::BuiltinExpect { .. }
         | HirExprKind::BuiltinOverflow { .. }
         | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
