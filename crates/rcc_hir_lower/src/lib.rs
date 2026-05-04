@@ -152,7 +152,7 @@ fn lower_function_bodies(
         let mut scope = ScopeStack::new();
         scope.push_scope();
         resolver.push_tag_scope();
-        lower_function_params(
+        let param_bound_stmts = lower_function_params(
             &func_def.declarator,
             &mut body,
             &mut scope,
@@ -171,6 +171,7 @@ fn lower_function_bodies(
             span: func_def.body.span,
         };
         let root = lower_stmt(&root_stmt, &mut body, &mut scope, crate_, tcx, resolver, session);
+        let root = prepend_function_entry_stmts(&mut body, root, param_bound_stmts);
         populate_switch_case_tables(&mut body, root, session);
         body.root = Some(root);
         resolver.pop_tag_scope();
@@ -190,7 +191,7 @@ fn lower_function_params(
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
     session: &mut Session,
-) {
+) -> Vec<HirStmtId> {
     // The body belongs to the function declarator closest to the
     // declared identifier. In `int (*f(int a))(int c)`, the outer
     // `(int c)` describes the returned function type; only `a` is a
@@ -199,9 +200,10 @@ fn lower_function_params(
         DerivedDeclarator::Function(f) => Some(f),
         _ => None,
     }) else {
-        return;
+        return Vec::new();
     };
 
+    let mut entry_stmts = Vec::new();
     for param in &func_decl.params {
         let raw_ty = lower_type_from_parts(
             &param.specs,
@@ -213,6 +215,16 @@ fn lower_function_params(
             session,
         );
         let ty = adjust_param_type(raw_ty, tcx);
+        lower_param_bound_side_effects(
+            &param.declarator,
+            body,
+            scope,
+            crate_,
+            tcx,
+            resolver,
+            session,
+            &mut entry_stmts,
+        );
         let name = param.declarator.name.map(|(sym, _)| sym);
         let local = body.locals.push(LocalDecl {
             name,
@@ -225,6 +237,79 @@ fn lower_function_params(
         if let Some(sym) = name {
             scope.insert(sym, Binding::Local(local));
         }
+    }
+    entry_stmts
+}
+
+fn prepend_function_entry_stmts(
+    body: &mut Body,
+    root: HirStmtId,
+    mut entry_stmts: Vec<HirStmtId>,
+) -> HirStmtId {
+    if entry_stmts.is_empty() {
+        return root;
+    }
+    match &mut body.stmts[root].kind {
+        HirStmtKind::Block(stmts) => {
+            entry_stmts.extend(std::mem::take(stmts));
+            *stmts = entry_stmts;
+            root
+        }
+        _ => {
+            entry_stmts.push(root);
+            let block = body.stmts.push(HirStmt {
+                id: HirStmtId(0),
+                span: body.stmts[root].span,
+                kind: HirStmtKind::Block(entry_stmts),
+            });
+            body.stmts[block].id = block;
+            block
+        }
+    }
+}
+
+/// C99 adjusts array parameters to pointers, but a non-constant array bound in
+/// a function definition still has entry-time runtime semantics. Lower those
+/// bound expressions as ordinary expression statements before the user body.
+#[allow(clippy::too_many_arguments)]
+fn lower_param_bound_side_effects(
+    declarator: &Declarator,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    for derived in &declarator.derived {
+        let DerivedDeclarator::Array(arr) = derived else {
+            continue;
+        };
+        let Some(size_expr) = &arr.size else {
+            continue;
+        };
+        if eval_array_bound_as_u64(
+            size_expr,
+            DeclScope::Param,
+            Some(scope),
+            tcx,
+            resolver,
+            crate_,
+            session,
+        )
+        .is_some()
+        {
+            continue;
+        }
+        let expr = lower_expr(size_expr, body, scope, crate_, tcx, resolver, session);
+        let stmt = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: size_expr.span,
+            kind: HirStmtKind::Expr(expr),
+        });
+        body.stmts[stmt].id = stmt;
+        out.push(stmt);
     }
 }
 

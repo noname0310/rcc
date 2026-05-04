@@ -3546,6 +3546,43 @@ fn regression_gate_function_prototype_and_definition_share_def_id() {
 }
 
 #[test]
+fn regression_gate_vla_parameter_bound_side_effects_enter_body() {
+    let (hir, _tcx, cap, sess) =
+        lower_and_typeck_snippet("int foo(int a, int b[a++], int c, int d[c++]) { return a + c; }");
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let foo = def_named(&hir, &sess, "foo");
+    let body = hir.bodies.get(&foo.id).expect("missing foo body");
+    assert_eq!(body.locals.len(), 4, "expected four adjusted parameters");
+    let root = body.root.expect("missing root statement");
+    let HirStmtKind::Block(stmts) = &body.stmts[root].kind else {
+        panic!("function body root should be a block");
+    };
+    assert!(stmts.len() >= 3, "expected two entry side effects before user body");
+    assert_post_inc_stmt_targets_local(body, stmts[0], Local(0));
+    assert_post_inc_stmt_targets_local(body, stmts[1], Local(2));
+}
+
+fn assert_post_inc_stmt_targets_local(body: &Body, stmt: rcc_hir::HirStmtId, expected: Local) {
+    let HirStmtKind::Expr(expr) = body.stmts[stmt].kind else {
+        panic!("expected parameter-bound expression statement");
+    };
+    let HirExprKind::Unary { op: rcc_hir::rcc_hir_binop::UnOp::PostInc, operand } =
+        body.exprs[expr].kind
+    else {
+        panic!("expected parameter-bound post-increment expression");
+    };
+    assert!(
+        matches!(body.exprs[operand].kind, HirExprKind::LocalRef(local) if local == expected),
+        "post-increment should target {expected:?}"
+    );
+}
+
+#[test]
 fn regression_gate_volatile_global_preserves_object_qualifier() {
     let (hir, tcx) = lower_snippet("volatile int g;");
     let def = hir.defs.iter().find(|def| matches!(def.kind, DefKind::Global { .. })).unwrap();
