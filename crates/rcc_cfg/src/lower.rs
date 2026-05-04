@@ -374,6 +374,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
         }
+        HirExprKind::OmittedCond { cond, else_expr } => {
+            lower_omitted_ternary(builder, cx, ty, span, *cond, *else_expr)
+        }
         HirExprKind::BuiltinVaArg { ap, .. } => {
             let ap_op = lower_as_rvalue(builder, cx, *ap);
             let dest_local = builder.alloc_temp(ty, span);
@@ -977,8 +980,8 @@ fn lower_ternary(
     // Lower the controlling expression in the current block.
     let cond_op = lower_condition_operand(builder, cx, span, cond);
 
-    // Allocate the result slot and the three new blocks.
-    let result_local = builder.alloc_temp(ty, span);
+    let is_void_result = matches!(cx.tcx.get(ty), Ty::Void);
+    let result_local = (!is_void_result).then(|| builder.alloc_temp(ty, span));
     let then_block = builder.new_block();
     let else_block = builder.new_block();
     let join_block = builder.new_block();
@@ -995,19 +998,104 @@ fn lower_ternary(
     // Then arm.
     builder.switch_to(then_block);
     let then_op = lower_as_rvalue(builder, cx, then_expr);
-    push_assign(builder, span, result_local, Rvalue::Use(then_op));
+    if let Some(result_local) = result_local {
+        push_assign(builder, span, result_local, Rvalue::Use(then_op));
+    }
     builder.goto(join_block, span);
 
-    // Else arm.
+    builder.switch_to(else_block);
+    let else_op = lower_as_rvalue(builder, cx, else_expr);
+    if let Some(result_local) = result_local {
+        push_assign(builder, span, result_local, Rvalue::Use(else_op));
+    }
+    builder.goto(join_block, span);
+
+    builder.switch_to(join_block);
+
+    if let Some(result_local) = result_local {
+        return Operand::Copy(Place { base: result_local, projection: Vec::new() });
+    }
+
+    Operand::Const(Const { kind: ConstKind::Int(0), ty })
+}
+
+/// Lower a GNU omitted-middle conditional `cond ?: else_expr`.
+///
+/// This is not equivalent to lowering a synthetic `cond ? cond : else_expr`:
+/// GNU C requires the first operand to be evaluated exactly once. We
+/// materialize it into the result slot before branching, test that slot, and
+/// only overwrite it on the false arm.
+fn lower_omitted_ternary(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    ty: rcc_hir::TyId,
+    span: Span,
+    cond: rcc_hir::HirExprId,
+    else_expr: rcc_hir::HirExprId,
+) -> Operand {
+    if matches!(cx.tcx.get(ty), Ty::Void) {
+        let cond_ty = cx.body.exprs[cond].ty;
+        let cond_local = builder.alloc_temp(cond_ty, span);
+        let cond_op = lower_as_rvalue(builder, cx, cond);
+        push_assign(builder, span, cond_local, Rvalue::Use(cond_op));
+        let cond_place = Place { base: cond_local, projection: Vec::new() };
+        let discr =
+            normalize_condition_operand(builder, cx, span, Operand::Copy(cond_place), cond_ty);
+
+        let then_block = builder.new_block();
+        let else_block = builder.new_block();
+        let join_block = builder.new_block();
+
+        builder.terminate(Terminator {
+            kind: TerminatorKind::SwitchInt {
+                discr,
+                targets: vec![(Some(0), else_block), (None, then_block)],
+            },
+            span,
+        });
+
+        builder.switch_to(then_block);
+        builder.goto(join_block, span);
+
+        builder.switch_to(else_block);
+        let _else_op = lower_as_rvalue(builder, cx, else_expr);
+        builder.goto(join_block, span);
+
+        builder.switch_to(join_block);
+        return Operand::Const(Const { kind: ConstKind::Int(0), ty });
+    }
+
+    let result_local = builder.alloc_temp(ty, span);
+    let result_place = Place { base: result_local, projection: Vec::new() };
+
+    let cond_op = lower_as_rvalue(builder, cx, cond);
+    push_assign(builder, span, result_local, Rvalue::Use(cond_op));
+    let discr =
+        normalize_condition_operand(builder, cx, span, Operand::Copy(result_place.clone()), ty);
+
+    let then_block = builder.new_block();
+    let else_block = builder.new_block();
+    let join_block = builder.new_block();
+
+    builder.terminate(Terminator {
+        kind: TerminatorKind::SwitchInt {
+            discr,
+            targets: vec![(Some(0), else_block), (None, then_block)],
+        },
+        span,
+    });
+
+    builder.switch_to(then_block);
+    builder.goto(join_block, span);
+
     builder.switch_to(else_block);
     let else_op = lower_as_rvalue(builder, cx, else_expr);
     push_assign(builder, span, result_local, Rvalue::Use(else_op));
     builder.goto(join_block, span);
 
-    // Continue at join.
     builder.switch_to(join_block);
 
-    Operand::Copy(Place { base: result_local, projection: Vec::new() })
+    Operand::Copy(result_place)
 }
 
 /// Lower a `while (cond) body` loop.
@@ -1360,6 +1448,16 @@ fn lower_condition_operand(
 ) -> Operand {
     let value = lower_as_rvalue(builder, cx, expr);
     let ty = cx.body.exprs[expr].ty;
+    normalize_condition_operand(builder, cx, span, value, ty)
+}
+
+fn normalize_condition_operand(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    value: Operand,
+    ty: rcc_hir::TyId,
+) -> Operand {
     if matches!(cx.tcx.get(ty), rcc_hir::Ty::Int { .. }) {
         return value;
     }

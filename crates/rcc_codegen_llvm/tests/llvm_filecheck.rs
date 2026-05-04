@@ -252,6 +252,20 @@ fn bitfield_write_masks_neighbor_bits() {
 }
 
 #[test]
+fn pointer_relational_compare_lowers_via_integer_addresses() {
+    assert_checked(
+        "pointer_relational_compare",
+        r#"
+        // CHECK: ptrtoint ptr
+        // CHECK: icmp ugt i64
+        int f(void) {
+            return (void *)0xffffffffffffffff > (void *)0;
+        }
+        "#,
+    );
+}
+
+#[test]
 fn debug_info_enabled_emits_compile_unit_subprogram_and_local_metadata() {
     let opts = Options { debug_info: true, ..Options::default() };
     assert_checked_with_options(

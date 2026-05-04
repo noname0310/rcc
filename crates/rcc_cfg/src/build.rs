@@ -955,6 +955,10 @@ impl BodyBuilder {
                 self.collect_expr_labels(hir_body, *then_expr, local_map, scopes);
                 self.collect_expr_labels(hir_body, *else_expr, local_map, scopes);
             }
+            HirExprKind::OmittedCond { cond, else_expr } => {
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
+                self.collect_expr_labels(hir_body, *else_expr, local_map, scopes);
+            }
             HirExprKind::BuiltinVaArg { ap, .. } | HirExprKind::BuiltinVaEnd { ap } => {
                 self.collect_expr_labels(hir_body, *ap, local_map, scopes);
             }

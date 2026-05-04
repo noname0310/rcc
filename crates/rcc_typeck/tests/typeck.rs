@@ -29,7 +29,7 @@ use rcc_hir::{
     HirStmt, HirStmtId, HirStmtKind, IntRank, Linkage, Local, LocalDecl, Qual, Ty, TyCtxt, TyId,
     ValueCat,
 };
-use rcc_session::Session;
+use rcc_session::{Options, Session};
 use rcc_span::{Symbol, DUMMY_SP};
 use rcc_typeck::const_eval::{ConstEval, ConstScalar, ConstValue};
 use rcc_typeck::{
@@ -1117,6 +1117,49 @@ fn conditional_void_arms_yield_void() {
 
     assert!(cap.diagnostics().is_empty());
     assert_eq!(body.exprs[expr].ty, tcx.void);
+}
+
+#[test]
+fn gnu_conditional_one_void_arm_yields_void_with_warning() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let then_expr = push_kind(&mut body, tcx.int, HirExprKind::IntConst(2));
+    let one = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let else_expr =
+        push_kind(&mut body, tcx.void, HirExprKind::Cast { operand: one, to: tcx.void });
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Cond { cond, then_expr, else_expr });
+    root_stmt(&mut body, expr);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert_eq!(body.exprs[expr].ty, tcx.void);
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "strict mode should emit W0018, got {diags:?}");
+    assert_eq!(diags[0].code, Some(codes::W0018));
+}
+
+#[test]
+fn gnu_conditional_one_void_arm_flag_suppresses_warning() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let cond = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+    let one = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let then_expr =
+        push_kind(&mut body, tcx.void, HirExprKind::Cast { operand: one, to: tcx.void });
+    let else_expr = push_kind(&mut body, tcx.int, HirExprKind::IntConst(3));
+    let expr = push_kind(&mut body, tcx.error, HirExprKind::Cond { cond, then_expr, else_expr });
+    root_stmt(&mut body, expr);
+
+    let cap = rcc_errors::CaptureEmitter::new();
+    let opts = Options { gnu_conditional_void_operand: true, ..Options::default() };
+    let handler = rcc_errors::Handler::with_emitter(Box::new(cap.clone()));
+    let mut session = Session::with_handler(opts, handler);
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert_eq!(body.exprs[expr].ty, tcx.void);
+    assert!(cap.diagnostics().is_empty());
 }
 
 #[test]

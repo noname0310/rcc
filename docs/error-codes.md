@@ -1237,3 +1237,32 @@ The parser preserves the template, qualifiers, operands, constraints,
 clobbers, and spans for phase-14 validation and LLVM lowering. Enable
 `Options::gnu_inline_asm` to accept the syntax without this
 compatibility warning.
+
+## W0017 — GNU omitted conditional operand extension
+
+GNU C permits the middle operand of `?:` to be omitted:
+
+```c
+int x = y ?: 42;  // warning[W0017] in strict C99 mode
+```
+
+This means `y ? y : 42`, except `y` is evaluated exactly once. The
+parser preserves the construct as its own expression node so HIR and CFG
+lowering can maintain that single-evaluation guarantee. Enable
+`Options::gnu_omitted_conditional_operand` to accept the syntax without
+this compatibility warning.
+
+## W0018 — GNU conditional expression with one void operand
+
+C99 requires both result operands of `?:` to have type `void` when
+either one is void. GNU C accepts a single void arm and gives the whole
+conditional expression type `void`:
+
+```c
+1 ? value : (void)side_effect();  // warning[W0018] in strict C99 mode
+```
+
+The type checker preserves this GNU-compatible void result so
+statement-position uses can continue through CFG/codegen. Enable
+`Options::gnu_conditional_void_operand` to accept the construct without
+this compatibility warning.

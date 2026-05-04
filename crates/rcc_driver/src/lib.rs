@@ -144,7 +144,13 @@ fn emit_ignored_feature_flag_notes(cli: &Cli) {
 fn is_supported_feature_flag(flag: &str) -> bool {
     matches!(
         flag,
-        "gnu-binary-literals" | "gnu-binary-integer-literals" | "gnu-statement-expressions"
+        "gnu-binary-literals"
+            | "gnu-binary-integer-literals"
+            | "gnu-statement-expressions"
+            | "gnu-omitted-conditional-operand"
+            | "gnu-omitted-conditional"
+            | "gnu-conditional-void-operand"
+            | "gnu-conditional-void"
     )
 }
 
@@ -326,6 +332,12 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             .feature_flags
             .iter()
             .any(|flag| flag == "gnu-statement-expressions"),
+        gnu_omitted_conditional_operand: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-omitted-conditional-operand" | "gnu-omitted-conditional")
+        }),
+        gnu_conditional_void_operand: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-conditional-void-operand" | "gnu-conditional-void")
+        }),
         gnu_range_designators: false,
         gnu_attributes: false,
         gnu_inline_asm: false,

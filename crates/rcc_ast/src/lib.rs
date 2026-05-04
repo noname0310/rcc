@@ -647,6 +647,8 @@ pub enum ExprKind {
     Unary { op: UnOp, operand: Box<Expr> },
     /// `a ? b : c`
     Cond { cond: Box<Expr>, then_expr: Box<Expr>, else_expr: Box<Expr> },
+    /// GNU `a ?: b` omitted-middle conditional.
+    OmittedCond { cond: Box<Expr>, else_expr: Box<Expr> },
     /// `a = b`, `a += b`, ...
     Assign { op: AssignOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// `,` operator.

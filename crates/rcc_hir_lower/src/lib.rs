@@ -748,6 +748,10 @@ fn walk_expr_labels(
             walk_expr_labels(then_expr, resolver, session, pass);
             walk_expr_labels(else_expr, resolver, session, pass);
         }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            walk_expr_labels(cond, resolver, session, pass);
+            walk_expr_labels(else_expr, resolver, session, pass);
+        }
         rcc_ast::ExprKind::Call { callee, args } => {
             walk_expr_labels(callee, resolver, session, pass);
             for arg in args {
@@ -3011,6 +3015,11 @@ pub fn lower_expr(
             let e = lower_expr(else_expr, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Cond { cond: c, then_expr: t, else_expr: e }
         }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            let c = lower_expr(cond, body, scope, crate_, tcx, resolver, session);
+            let e = lower_expr(else_expr, body, scope, crate_, tcx, resolver, session);
+            HirExprKind::OmittedCond { cond: c, else_expr: e }
+        }
         rcc_ast::ExprKind::Assign { op, lhs, rhs } => {
             let l = lower_expr(lhs, body, scope, crate_, tcx, resolver, session);
             let r = lower_expr(rhs, body, scope, crate_, tcx, resolver, session);
@@ -4502,6 +4511,14 @@ fn eval_const_expr_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
                 eval_const_expr_as_i128(else_expr)
             }
         }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            let c = eval_const_expr_as_i128(cond)?;
+            if c != 0 {
+                Some(c)
+            } else {
+                eval_const_expr_as_i128(else_expr)
+            }
+        }
         _ => None,
     }
 }
@@ -4613,6 +4630,14 @@ fn eval_enum_value_as_i128(
         rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
             if eval_enum_value_as_i128(cond, resolver, crate_)? != 0 {
                 eval_enum_value_as_i128(then_expr, resolver, crate_)
+            } else {
+                eval_enum_value_as_i128(else_expr, resolver, crate_)
+            }
+        }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            let c = eval_enum_value_as_i128(cond, resolver, crate_)?;
+            if c != 0 {
+                Some(c)
             } else {
                 eval_enum_value_as_i128(else_expr, resolver, crate_)
             }
@@ -8754,6 +8779,27 @@ mod tests {
                 assert_eq!(hir_int_value(&body, else_expr), Some(3));
             }
             ref other => panic!("expected Cond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expr_gnu_omitted_conditional_preserves_single_operand_shape() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::OmittedCond {
+                cond: Box::new(int_lit("1", &mut sess)),
+                else_expr: Box::new(int_lit("3", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+        match body.exprs[id].kind {
+            HirExprKind::OmittedCond { cond, else_expr } => {
+                assert_eq!(hir_int_value(&body, cond), Some(1));
+                assert_eq!(hir_int_value(&body, else_expr), Some(3));
+            }
+            ref other => panic!("expected OmittedCond, got {other:?}"),
         }
     }
 

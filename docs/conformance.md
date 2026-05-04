@@ -40,10 +40,11 @@ host-compiled `assert` helper instead of compiling upstream
 `test/common` with `rcc`. This keeps failures attributed to the selected
 TU rather than later chibicc runtime/helper features.
 
-Stage mode passes `-fgnu-binary-literals` to `rcc` so chibicc's GNU
-`0b...` constants are not misreported as strict-C99 octal errors. Later
-GNU constructs, such as statement expressions and omitted conditional
-operands, remain real failures until their owning tasks land.
+Stage mode passes the GNU compatibility flags needed by landed stage
+tasks (`-fgnu-binary-literals`, `-fgnu-statement-expressions`,
+`-fgnu-omitted-conditional-operand`, and
+`-fgnu-conditional-void-operand`) so remaining failures point at the
+next missing compiler feature instead of already-owned extensions.
 
 ## Suite status
 
@@ -79,6 +80,16 @@ Task 04-20 resolved four GNU-extension gaps:
   `IncludeTokens` instead of an error (C99 §6.10.2p4).
 - **E0014** → `gnu_named_variadic` accepts `args...` syntax.
 - **E0025** → `gnu_permissive_paste` relaxes pp-number paste.
+
+### chibicc stage 1-3 (tasks 11-05..11-08)
+
+Current stage-isolated status:
+
+| Fixture      | State |
+|--------------|-------|
+| `arith.c`    | **Pass** after GNU binary literals, GNU statement expressions, GNU omitted conditional operands, one-void conditional arms, and LLVM pointer relational compare support. |
+| `control.c`  | Fails on GNU control-flow/declarator syntax; owned by tasks 11-09/11-10. |
+| `function.c` | Fails on variadic builtins / `__va_area__` prerequisites; owned by tasks 11-11/11-12. |
 
 ## Interpreting the columns
 

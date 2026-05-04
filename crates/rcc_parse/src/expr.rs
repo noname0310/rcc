@@ -1267,6 +1267,27 @@ fn reduce_conditional(
 ) -> Result<Expr, Box<Expr>> {
     // Consume the `?`.
     p.bump();
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Colon))) {
+        if !p.session.opts.gnu_omitted_conditional_operand {
+            p.session
+                .handler
+                .struct_warn(q_span, "GNU omitted conditional operand is not part of C99")
+                .code(codes::W0017)
+                .note("parsing it as an extension; the first operand is evaluated exactly once")
+                .emit();
+        }
+        p.bump();
+        let Some(else_expr) = parse_expr_bp(p, COND_R_BP) else {
+            return Err(Box::new(cond));
+        };
+        let span = cond.span.to(else_expr.span);
+        let id = p.fresh_id();
+        return Ok(Expr {
+            id,
+            kind: ExprKind::OmittedCond { cond: Box::new(cond), else_expr: Box::new(else_expr) },
+            span,
+        });
+    }
     // `then` is a full expression — no Pratt floor, so any
     // operator weaker than `:` can appear inside. Failure leaves
     // the cursor on the offending token with a diagnostic
@@ -1507,7 +1528,7 @@ mod tests {
     use super::*;
     use crate::phase7::convert;
     use rcc_lexer::{PpNumberKind, PpToken, PpTokenKind, Punct, StringEncoding};
-    use rcc_session::Session;
+    use rcc_session::{Options, Session};
     use rcc_span::{BytePos, FileId, Span};
     use std::sync::Arc;
 
@@ -1516,6 +1537,18 @@ mod tests {
     /// Build a `(Session, FileId)` pair backed by `src`.
     fn mk_session(src: &str) -> (Session, FileId, rcc_errors::CaptureEmitter) {
         let (sess, cap) = Session::for_test();
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        (sess, fid, cap)
+    }
+
+    fn mk_session_with_opts(
+        src: &str,
+        opts: Options,
+    ) -> (Session, FileId, rcc_errors::CaptureEmitter) {
+        let cap = rcc_errors::CaptureEmitter::new();
+        let sess =
+            Session::with_handler(opts, rcc_errors::Handler::with_emitter(Box::new(cap.clone())));
         let fid =
             sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
         (sess, fid, cap)
@@ -1986,9 +2019,23 @@ mod tests {
     /// tests all feed well-formed input.
     fn parse_expr_str(src: &str) -> (Expr, rcc_errors::CaptureEmitter) {
         let (mut sess, fid, cap) = mk_session(src);
+        parse_expr_with_session(src, &mut sess, fid, cap)
+    }
+
+    fn parse_expr_str_with_opts(src: &str, opts: Options) -> (Expr, rcc_errors::CaptureEmitter) {
+        let (mut sess, fid, cap) = mk_session_with_opts(src, opts);
+        parse_expr_with_session(src, &mut sess, fid, cap)
+    }
+
+    fn parse_expr_with_session(
+        src: &str,
+        sess: &mut Session,
+        fid: FileId,
+        cap: rcc_errors::CaptureEmitter,
+    ) -> (Expr, rcc_errors::CaptureEmitter) {
         let pps = lex_ascii(fid, src);
-        let tokens = convert(&mut sess, &pps);
-        let mut parser = Parser::new(&mut sess, tokens);
+        let tokens = convert(sess, &pps);
+        let mut parser = Parser::new(sess, tokens);
         let e = parse_expression(&mut parser).expect("expression parses");
         assert_eq!(
             parser.cursor,
@@ -2683,6 +2730,29 @@ mod tests {
         // Span must cover the whole run.
         assert_eq!(e.span.lo.0, 0);
         assert_eq!(e.span.hi.0, src.len() as u32);
+    }
+
+    #[test]
+    fn gnu_omitted_conditional_builds_extension_node_and_warns() {
+        let (e, cap) = parse_expr_str("a ?: b");
+        match e.kind {
+            ExprKind::OmittedCond { cond, else_expr } => {
+                assert!(matches!(cond.kind, ExprKind::Ident(_)), "cond must be `a`");
+                assert!(matches!(else_expr.kind, ExprKind::Ident(_)), "else must be `b`");
+            }
+            other => panic!("expected OmittedCond, got {other:?}"),
+        }
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "strict mode should emit exactly W0017, got {diags:?}");
+        assert_eq!(diags[0].code, Some(codes::W0017));
+    }
+
+    #[test]
+    fn gnu_omitted_conditional_flag_suppresses_warning() {
+        let opts = Options { gnu_omitted_conditional_operand: true, ..Options::default() };
+        let (e, cap) = parse_expr_str_with_opts("a ?: b", opts);
+        assert!(matches!(e.kind, ExprKind::OmittedCond { .. }));
+        assert!(cap.diagnostics().is_empty(), "flagged GNU mode must not warn");
     }
 
     #[test]

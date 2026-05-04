@@ -412,6 +412,8 @@ impl ChibiccAdapter {
             .arg("--emit=obj")
             .arg("-fgnu-binary-literals")
             .arg("-fgnu-statement-expressions")
+            .arg("-fgnu-omitted-conditional-operand")
+            .arg("-fgnu-conditional-void-operand")
             .arg("-I")
             .arg(case_dir)
             .arg("-o")

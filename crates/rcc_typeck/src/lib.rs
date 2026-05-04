@@ -702,6 +702,19 @@ pub fn visit_expr(
                 HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
             expr_id
         }
+        HirExprKind::OmittedCond { cond, else_expr } => {
+            let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond2 =
+                scalar_control_rvalue(cond2, body, tcx, session, "conditional operator condition");
+            let else2 = visit_expr(else_expr, body, tcx, session, def_info);
+            let else2 = rvalue_decayed(else2, body, tcx);
+            let (result_ty, cond2, else2) =
+                unify_conditional_arms(cond2, else2, body, tcx, session);
+            body.exprs[expr_id].ty = result_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::OmittedCond { cond: cond2, else_expr: else2 };
+            expr_id
+        }
         HirExprKind::Comma { lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             // LHS is evaluated for side effects and discarded — apply
@@ -820,6 +833,21 @@ fn unify_conditional_arms(
     }
 
     if is_void(tcx, then_ty) && is_void(tcx, else_ty) {
+        return (tcx.void, then_expr, else_expr);
+    }
+
+    if is_void(tcx, then_ty) || is_void(tcx, else_ty) {
+        if !session.opts.gnu_conditional_void_operand {
+            session
+                .handler
+                .struct_warn(
+                    body.exprs[then_expr].span,
+                    "GNU conditional expression with one void operand is not part of C99",
+                )
+                .code(rcc_errors::codes::W0018)
+                .note("treating the conditional expression as `void` for GNU compatibility")
+                .emit();
+        }
         return (tcx.void, then_expr, else_expr);
     }
 
@@ -2035,6 +2063,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
         | HirExprKind::Cond { .. }
+        | HirExprKind::OmittedCond { .. }
         | HirExprKind::Comma { .. }
         | HirExprKind::Assign { .. }
         | HirExprKind::Convert { .. }

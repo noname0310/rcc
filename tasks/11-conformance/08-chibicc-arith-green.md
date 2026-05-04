@@ -1,5 +1,7 @@
 # 11-08: chibicc arith.c green
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-05, 11-06, 11-07    **Milestone:** M2+
 
 ## Goal

@@ -106,6 +106,8 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0014, W0014_DESC),
     (W0015, W0015_DESC),
     (W0016, W0016_DESC),
+    (W0017, W0017_DESC),
+    (W0018, W0018_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -808,6 +810,24 @@ const W0015_DESC: &str = "GNU attribute syntax extension";
 /// warning is suppressed when `Options::gnu_inline_asm` is enabled.
 pub const W0016: &str = "W0016";
 const W0016_DESC: &str = "GNU inline assembly syntax extension";
+
+/// GNU omitted-middle conditional accepted in strict C99 mode.
+///
+/// `a ?: b` is a GNU C extension equivalent to `a ? a : b`, except
+/// the first operand is evaluated exactly once. The parser accepts it
+/// as an explicit node and emits this warning unless
+/// `Options::gnu_omitted_conditional_operand` is enabled.
+pub const W0017: &str = "W0017";
+const W0017_DESC: &str = "GNU omitted conditional operand extension";
+
+/// GNU conditional expression with exactly one void arm.
+///
+/// C99 requires both `?:` result operands to be void when either is void.
+/// GNU C accepts a single void arm and gives the whole conditional type
+/// `void`. The type checker emits this warning unless
+/// `Options::gnu_conditional_void_operand` is enabled.
+pub const W0018: &str = "W0018";
+const W0018_DESC: &str = "GNU conditional expression with one void operand";
 
 #[cfg(test)]
 mod tests {

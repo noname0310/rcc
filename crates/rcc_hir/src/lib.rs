@@ -473,6 +473,17 @@ pub enum HirExprKind {
         /// Value when `cond` is zero.
         else_expr: HirExprId,
     },
+    /// GNU `a ?: b` omitted-middle conditional.
+    ///
+    /// `cond` is both the controlling expression and the value when
+    /// non-zero. CFG lowering must evaluate it exactly once, then branch on
+    /// the materialized temporary.
+    OmittedCond {
+        /// Expression evaluated once and reused as the true-arm value.
+        cond: HirExprId,
+        /// Value when `cond` is zero.
+        else_expr: HirExprId,
+    },
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).

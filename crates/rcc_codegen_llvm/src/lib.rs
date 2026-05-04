@@ -3529,14 +3529,30 @@ pub mod backend {
                 BinOp::BitOr => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::Eq => self.emit_eq_ne_binop(op, lhs, rhs, locals, body),
                 BinOp::Ne => self.emit_eq_ne_binop(op, lhs, rhs, locals, body),
-                BinOp::SLt => self.emit_int_compare(IntPredicate::SLT, lhs, rhs, locals, body),
-                BinOp::SLe => self.emit_int_compare(IntPredicate::SLE, lhs, rhs, locals, body),
-                BinOp::SGt => self.emit_int_compare(IntPredicate::SGT, lhs, rhs, locals, body),
-                BinOp::SGe => self.emit_int_compare(IntPredicate::SGE, lhs, rhs, locals, body),
-                BinOp::ULt => self.emit_int_compare(IntPredicate::ULT, lhs, rhs, locals, body),
-                BinOp::ULe => self.emit_int_compare(IntPredicate::ULE, lhs, rhs, locals, body),
-                BinOp::UGt => self.emit_int_compare(IntPredicate::UGT, lhs, rhs, locals, body),
-                BinOp::UGe => self.emit_int_compare(IntPredicate::UGE, lhs, rhs, locals, body),
+                BinOp::SLt => {
+                    self.emit_int_or_ptr_compare(IntPredicate::SLT, lhs, rhs, locals, body)
+                }
+                BinOp::SLe => {
+                    self.emit_int_or_ptr_compare(IntPredicate::SLE, lhs, rhs, locals, body)
+                }
+                BinOp::SGt => {
+                    self.emit_int_or_ptr_compare(IntPredicate::SGT, lhs, rhs, locals, body)
+                }
+                BinOp::SGe => {
+                    self.emit_int_or_ptr_compare(IntPredicate::SGE, lhs, rhs, locals, body)
+                }
+                BinOp::ULt => {
+                    self.emit_int_or_ptr_compare(IntPredicate::ULT, lhs, rhs, locals, body)
+                }
+                BinOp::ULe => {
+                    self.emit_int_or_ptr_compare(IntPredicate::ULE, lhs, rhs, locals, body)
+                }
+                BinOp::UGt => {
+                    self.emit_int_or_ptr_compare(IntPredicate::UGT, lhs, rhs, locals, body)
+                }
+                BinOp::UGe => {
+                    self.emit_int_or_ptr_compare(IntPredicate::UGE, lhs, rhs, locals, body)
+                }
                 BinOp::FLt => self.emit_float_compare(FloatPredicate::OLT, lhs, rhs, locals, body),
                 BinOp::FLe => self.emit_float_compare(FloatPredicate::OLE, lhs, rhs, locals, body),
                 BinOp::FGt => self.emit_float_compare(FloatPredicate::OGT, lhs, rhs, locals, body),
@@ -3933,7 +3949,7 @@ pub mod backend {
             }
         }
 
-        fn emit_int_compare(
+        fn emit_int_or_ptr_compare(
             &self,
             predicate: IntPredicate,
             lhs: &Operand,
@@ -3941,9 +3957,30 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-            let lhs = self.emit_int_operand(lhs, locals, body)?;
-            let rhs = self.emit_int_operand(rhs, locals, body)?;
-            self.emit_int_compare_values(predicate, lhs, rhs)
+            let lhs = self.emit_operand_value(lhs, locals, body)?;
+            let rhs = self.emit_operand_value(rhs, locals, body)?;
+            match (lhs, rhs) {
+                (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
+                    self.emit_int_compare_values(predicate, lhs, rhs)
+                }
+                (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
+                    let int_ty = self.context.i64_type();
+                    let lhs = self
+                        .builder
+                        .build_ptr_to_int(lhs, int_ty, "ptrcmp.l")
+                        .map_err(builder_error)?;
+                    let rhs = self
+                        .builder
+                        .build_ptr_to_int(rhs, int_ty, "ptrcmp.r")
+                        .map_err(builder_error)?;
+                    self.emit_int_compare_values(predicate, lhs, rhs)
+                }
+                (lhs, rhs) => Err(CodegenError::Internal(format!(
+                    "ordered comparison operands have incompatible LLVM types {:?} and {:?}",
+                    lhs.get_type(),
+                    rhs.get_type()
+                ))),
+            }
         }
 
         fn emit_int_compare_values(

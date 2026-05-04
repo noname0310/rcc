@@ -168,6 +168,8 @@ fn warning_names_for_code(code: &str) -> &'static [&'static str] {
         codes::W0014 => &["gnu-range-designator"],
         codes::W0015 => &["gnu-attributes"],
         codes::W0016 => &["gnu-inline-asm"],
+        codes::W0017 => &["gnu-omitted-conditional-operand", "gnu-omitted-conditional"],
+        codes::W0018 => &["gnu-conditional-void-operand", "gnu-conditional-void"],
         _ => &[],
     }
 }

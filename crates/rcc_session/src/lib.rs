@@ -130,6 +130,20 @@ pub struct Options {
     /// With this option off, use of the construct emits W0013 as a
     /// strict-C99 compatibility warning.
     pub gnu_statement_expressions: bool,
+    /// Enable GNU omitted-middle conditional expressions `a ?: b` without a warning.
+    ///
+    /// The parser accepts this syntax in all modes so downstream phases can
+    /// preserve the required "evaluate `a` exactly once" semantics. With this
+    /// option off, use of the construct emits W0017 as a strict-C99
+    /// compatibility warning.
+    pub gnu_omitted_conditional_operand: bool,
+    /// Enable GNU conditional expressions with exactly one `void` operand.
+    ///
+    /// GNU C accepts `cond ? value : (void)expr` as a void expression. C99
+    /// requires a diagnostic unless both arms are void; with this option off,
+    /// type checking emits W0018 while still preserving the GNU-compatible
+    /// void result so statement-position uses can continue.
+    pub gnu_conditional_void_operand: bool,
     /// Enable GNU initializer range designators `[lo ... hi]` without a warning.
     ///
     /// The parser accepts the syntax in all modes so initializer
@@ -174,6 +188,8 @@ impl Default for Options {
             gnu_permissive_paste: false,
             gnu_binary_integer_literals: false,
             gnu_statement_expressions: false,
+            gnu_omitted_conditional_operand: false,
+            gnu_conditional_void_operand: false,
             gnu_range_designators: false,
             gnu_attributes: false,
             gnu_inline_asm: false,

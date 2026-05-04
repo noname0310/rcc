@@ -208,6 +208,22 @@ impl<'a> ConstEval<'a> {
                     self.eval_arith(else_expr)
                 }
             }
+            HirExprKind::OmittedCond { cond, else_expr } => {
+                if let Some(c) = self.eval_int(cond) {
+                    if c != 0 {
+                        Some(c as f64)
+                    } else {
+                        self.eval_arith(else_expr)
+                    }
+                } else {
+                    let c = self.eval_arith(cond)?;
+                    if c != 0.0 {
+                        Some(c)
+                    } else {
+                        self.eval_arith(else_expr)
+                    }
+                }
+            }
 
             HirExprKind::Cast { operand, to } => {
                 let target = self.tcx.get(to);
@@ -538,6 +554,14 @@ impl<'a> ConstEval<'a> {
                 // need not even be a constant expression.
                 if self.eval_int(cond)? != 0 {
                     self.eval_int(then_expr)
+                } else {
+                    self.eval_int(else_expr)
+                }
+            }
+            HirExprKind::OmittedCond { cond, else_expr } => {
+                let c = self.eval_int(cond)?;
+                if c != 0 {
+                    Some(c)
                 } else {
                     self.eval_int(else_expr)
                 }
