@@ -866,6 +866,34 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_builtin_llabs_ignores_abort_definition_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU llabs builtin e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_builtin_llabs",
+            r#"
+long long a = -1;
+long long llabs(long long);
+void abort(void);
+int main(void) {
+  if (llabs(a) != 1)
+    abort();
+  return 0;
+}
+long long llabs(long long b) {
+  abort();
+}
+"#,
+            b"",
+            0,
+            Options { gnu_builtin_libcalls: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn differential_vs_host_cc() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping differential e2e: LLVM backend feature is disabled");

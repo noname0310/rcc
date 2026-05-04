@@ -60,7 +60,7 @@ current numeric milestone already passes.
 - [x] [15s5-gnu-vector-arithmetic](15s5-gnu-vector-arithmetic.md)
 - [x] [15s6-gnu-vector-abi](15s6-gnu-vector-abi.md)
 - [x] [15s7-gnu-vector-cluster-gate](15s7-gnu-vector-cluster-gate.md)
-- [ ] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)
+- [x] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)
 - [ ] [15u-gcc-torture-gnu-inline-asm](15u-gcc-torture-gnu-inline-asm.md)
 - [ ] [15v-gcc-torture-gnu89-legacy](15v-gcc-torture-gnu89-legacy.md)
 - [ ] [15w-gcc-torture-scalar-storage-order](15w-gcc-torture-scalar-storage-order.md)

@@ -1,5 +1,7 @@
 # 11-15t: gcc-torture GNU builtin libcalls
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal

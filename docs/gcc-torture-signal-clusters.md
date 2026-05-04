@@ -8,9 +8,9 @@ Resweep report after `11-15i` and `11-15j`:
 ## Summary
 
 The 15e full gcc-torture run had 61 cases whose reason was
-`non-zero exit code: killed by signal`. After the aligned-record and
-bit-field/aggregate fixes and the GNU vector cluster work, 19 of those now pass
-and 42 remain failing.
+`non-zero exit code: killed by signal`. After the aligned-record,
+bit-field/aggregate, GNU vector, and GNU builtin-libcall work, 27 of those now
+pass and 34 remain failing.
 
 Already fixed by follow-up work:
 
@@ -35,6 +35,14 @@ Already fixed by follow-up work:
 | `scal-to-vec3` | `11-15s1`-`11-15s7`, GNU scalar-to-vector splats |
 | `simd-4` | `11-15s1`-`11-15s7`, GNU vector-to-integer bitcasts |
 | `simd-6` | `11-15s1`-`11-15s7`, GNU vector arithmetic and byte views |
+| `20021127-1` | `11-15t`, GNU `llabs` builtin-libcall folding |
+| `fprintf-chk-1` | `11-15t`, fortify wrapper policy confirmed as ordinary TU-defined functions |
+| `printf-chk-1` | `11-15t`, fortify wrapper policy confirmed as ordinary TU-defined functions |
+| `vfprintf-1` | `11-15t`, libc/varargs call path already passes under explicit GNU builtin-libcall mode |
+| `vfprintf-chk-1` | `11-15t`, fortify wrapper policy confirmed as ordinary TU-defined functions |
+| `vprintf-1` | `11-15t`, libc/varargs call path already passes under explicit GNU builtin-libcall mode |
+| `vprintf-chk-1` | `11-15t`, fortify wrapper policy confirmed as ordinary TU-defined functions |
+| `pr103255` | `11-15t`, `__builtin_offsetof` and integer-pointer cast path already pass |
 
 ## Remaining Clusters
 
@@ -47,7 +55,6 @@ Already fixed by follow-up work:
 | Varargs and `va_list` runtime behavior | `pr64979`, `va-arg-21`, `va-arg-5`, `va-arg-6` | Remaining SysV `va_list` materialization and pointer-to-`va_list` cases. | `11-15p` |
 | Aggregate, pointer, and byte-layout runtime bugs | `pr37573`, `pr49390`, `pr65401` | Large aggregate copies, char-byte views of objects, and aggregate ABI/pointer alias interactions still need smaller reductions. | `11-15q` |
 | GNU field attributes and record member alignment | `pr23467` | Field-level `__attribute__((aligned(N)))` should raise member offset/alignment; `11-15i` only handled record-level alignment. | `11-15r` |
-| GNU builtins, libc, and fortify wrappers | `20021127-1`, `fprintf-chk-1`, `printf-chk-1`, `vfprintf-1`, `vfprintf-chk-1`, `vprintf-1`, `vprintf-chk-1`, `pr103255` | GCC builtin/libcall behavior is only partially modeled; fortify and `__builtin_offsetof` need explicit handling or gating. | `11-15t` |
 | GNU inline asm and instrumentation attributes | `20030222-1`, `990130-1`, `pr49279`, `pr85156`, `eeprof-1` | Inline asm operands/clobbers and instrumentation/noipa/noclone attributes are parsed more broadly than they are semantically implemented. | `11-15u` |
 | GNU89 legacy cases | `920428-1`, `931018-1` | These rely on implicit int and K&R definitions. They are outside C99 and should stay gated behind an explicit GNU89 compatibility decision. | `11-15v` |
 | GNU scalar storage order attribute | `20230630-2` | `scalar_storage_order` changes bit-field byte order; this is a target-specific GNU attribute and not C99. | `11-15w` |

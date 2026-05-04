@@ -5494,6 +5494,9 @@ pub mod backend {
             target: Option<BasicBlockId>,
         ) -> Result<(), CodegenError> {
             let fn_ty = self.callee_fn_ty(callee)?;
+            if self.try_emit_gnu_builtin_llabs_call(callee, args, destination, target, fn_ty)? {
+                return Ok(());
+            }
             let abi = sysv_fn_abi(self.cx.tcx, &self.cx.hir.defs, fn_ty)?;
             if abi.variadic {
                 if args.len() < abi.params.len() {
@@ -5567,6 +5570,81 @@ pub mod backend {
                 Some(target) => self.emit_goto(target),
                 None => self.cx.builder.build_unreachable().map(|_| ()).map_err(builder_error),
             }
+        }
+
+        fn try_emit_gnu_builtin_llabs_call(
+            &self,
+            callee: &Operand,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+            fn_ty: TyId,
+        ) -> Result<bool, CodegenError> {
+            if !self.cx.session.opts.gnu_builtin_libcalls {
+                return Ok(false);
+            }
+            if !self.is_exact_llabs_signature(fn_ty) {
+                return Ok(false);
+            }
+            let Operand::Const(rcc_cfg::Const { kind: ConstKind::Global(def), .. }) = callee else {
+                return Ok(false);
+            };
+            let Some(def_data) = self.cx.hir.defs.get(*def) else {
+                return Ok(false);
+            };
+            if self.cx.session.interner.get(def_data.name) != "llabs" {
+                return Ok(false);
+            }
+            if args.len() != 1 {
+                return Ok(false);
+            }
+
+            let value = self.emit_operand_value(&args[0])?;
+            let BasicValueEnum::IntValue(value) = value else {
+                return Err(CodegenError::Internal(format!(
+                    "llabs argument must lower to an integer, got {:?}",
+                    value.get_type()
+                )));
+            };
+            let zero = value.get_type().const_zero();
+            let neg = self.cx.builder.build_int_neg(value, "llabs.neg").map_err(builder_error)?;
+            let is_neg = self
+                .cx
+                .builder
+                .build_int_compare(IntPredicate::SLT, value, zero, "llabs.isneg")
+                .map_err(builder_error)?;
+            let abs = self
+                .cx
+                .builder
+                .build_select(is_neg, neg, value, "llabs.abs")
+                .map_err(builder_error)?
+                .into_int_value();
+
+            if let Some(dest) = destination {
+                let dest_addr = self.cx.emit_place_addr(dest, &self.locals, self.body)?;
+                self.cx.builder.build_store(dest_addr, abs).map_err(builder_error)?;
+            }
+
+            match target {
+                Some(target) => self.emit_goto(target)?,
+                None => {
+                    self.cx.builder.build_unreachable().map_err(builder_error)?;
+                }
+            }
+            Ok(true)
+        }
+
+        fn is_exact_llabs_signature(&self, fn_ty: TyId) -> bool {
+            matches!(
+                self.cx.tcx.get(fn_ty),
+                Ty::Func {
+                    ret,
+                    params,
+                    variadic: false,
+                    proto: true,
+                } if *ret == self.cx.tcx.long_long
+                    && params.as_slice() == [self.cx.tcx.long_long]
+            )
         }
 
         fn callee_fn_ty(&self, callee: &Operand) -> Result<TyId, CodegenError> {
