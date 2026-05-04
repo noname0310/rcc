@@ -3247,6 +3247,38 @@ fn def_named<'a>(hir: &'a HirCrate, sess: &Session, name: &str) -> &'a rcc_hir::
 }
 
 #[test]
+fn regression_gate_file_scope_typedef_record_pointer_field_resolves_before_tag_materialization() {
+    let src = r#"
+        typedef unsigned int FFelem;
+        struct DUPFFstruct {
+            int maxdeg;
+            int deg;
+            FFelem *coeffs;
+        };
+    "#;
+    let (hir, tcx, cap, sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    assert_no_def_or_local_error_types(&hir, &tcx);
+
+    let rec = def_named(&hir, &sess, "DUPFFstruct");
+    let DefKind::Record { fields, .. } = &rec.kind else {
+        panic!("DUPFFstruct should be a record def");
+    };
+    let coeffs = fields
+        .iter()
+        .find(|field| field.name.is_some_and(|sym| sess.interner.get(sym) == "coeffs"))
+        .expect("missing coeffs field");
+    match tcx.get(coeffs.ty) {
+        Ty::Ptr(q) => assert_eq!(q.ty, tcx.uint),
+        other => panic!("coeffs should be FFelem* / unsigned int*, got {other:?}"),
+    }
+}
+
+#[test]
 fn regression_gate_struct_sizeof_source_survives_lower_and_typeck() {
     let (hir, tcx, cap, sess) = lower_and_typeck_snippet(
         "struct S { char c; int i; }; unsigned long f(void) { struct S s; return sizeof s; }",

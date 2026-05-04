@@ -34,7 +34,7 @@ current numeric milestone already passes.
 - [x] [15f-gcc-torture-deferred-macro-rescan](15f-gcc-torture-deferred-macro-rescan.md)
 - [x] [15b-gcc-torture-remaining-builtin-compat](15b-gcc-torture-remaining-builtin-compat.md)
 - [x] [15g-gcc-torture-overflow-builtins](15g-gcc-torture-overflow-builtins.md)
-- [ ] [15h-gcc-torture-record-typedef-field-lowering](15h-gcc-torture-record-typedef-field-lowering.md)
+- [x] [15h-gcc-torture-record-typedef-field-lowering](15h-gcc-torture-record-typedef-field-lowering.md)
 - [ ] [15c-gcc-torture-pointer-comparison-codegen](15c-gcc-torture-pointer-comparison-codegen.md)
 - [ ] [15d-gcc-torture-vla-layout-codegen](15d-gcc-torture-vla-layout-codegen.md)
 - [ ] [15e-gcc-torture-runtime-signal-triage](15e-gcc-torture-runtime-signal-triage.md)

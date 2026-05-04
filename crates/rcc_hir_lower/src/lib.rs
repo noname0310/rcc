@@ -37,6 +37,7 @@ pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> 
     if session.opts.gnu_builtin_libcalls {
         install_gnu_builtin_libcalls(tcx, session, &mut crate_, &mut resolver);
     }
+    finalize_file_scope_typedef_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_tag_definitions(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
@@ -5618,6 +5619,48 @@ fn materialize_tag_definitions_in_specs(
     }
 }
 
+fn finalize_file_scope_typedef_def_types(
+    ast: &TranslationUnit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    let mut seen_ordinary_defs = FxHashMap::default();
+
+    for ext_decl in &ast.decls {
+        let ExternalDecl::Decl(decl) = ext_decl else { continue };
+        if decl.specs.storage != Some(StorageClass::Typedef) {
+            continue;
+        }
+
+        for init_decl in &decl.inits {
+            let Some((name, _span)) = init_decl.declarator.name else {
+                continue;
+            };
+            let ordinal = seen_file_scope_ordinary_def(&mut seen_ordinary_defs, name, true);
+            let Some(def_id) = find_file_scope_ordinary_def(crate_, name, true, ordinal) else {
+                continue;
+            };
+            if matches!(&crate_.defs[def_id].kind, DefKind::Typedef(ty) if *ty != tcx.error) {
+                continue;
+            }
+            let ty = lower_type_from_parts(
+                &decl.specs,
+                &init_decl.declarator,
+                DeclScope::File,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            if let DefKind::Typedef(slot) = &mut crate_.defs[def_id].kind {
+                *slot = ty;
+            }
+        }
+    }
+}
+
 fn finalize_file_scope_def_types(
     ast: &TranslationUnit,
     tcx: &mut TyCtxt,
@@ -5661,6 +5704,9 @@ fn finalize_file_scope_def_types(
                 else {
                     continue;
                 };
+                if matches!(&crate_.defs[def_id].kind, DefKind::Typedef(ty) if *ty != tcx.error) {
+                    continue;
+                }
                 def_id
             };
 

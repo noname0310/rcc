@@ -1,5 +1,7 @@
 # 11-15h: gcc-torture record typedef field lowering
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15b    **Milestone:** M6
 
 ## Goal
@@ -31,3 +33,12 @@ resolution.
 
 ## References
 - `target/wsl/gcc-torture-15b-builtin-probes.json`
+
+## Result
+- Added a file-scope typedef finalization prepass before record tag
+  materialization so record field specifiers see real typedef types rather
+  than `Ty::Error` placeholders.
+- Added a regression that locks `typedef unsigned int FFelem; struct S {
+  FFelem *coeffs; };` to an `unsigned int *` field type.
+- WSL representative gcc-torture rerun:
+  `gcc-torture::execute::20020406-1` now passes.
