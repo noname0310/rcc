@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 06-29: nested function-declarator parameter lowering
 
 **Phase:** 06-hir-lower    **Depends on:** 06-27    **Milestone:** M6+

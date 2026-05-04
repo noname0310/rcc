@@ -117,7 +117,11 @@ fn lower_function_params(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) {
-    let Some(func_decl) = declarator.derived.iter().find_map(|d| match d {
+    // The body belongs to the function declarator closest to the
+    // declared identifier. In `int (*f(int a))(int c)`, the outer
+    // `(int c)` describes the returned function type; only `a` is a
+    // body parameter.
+    let Some(func_decl) = declarator.derived.iter().rev().find_map(|d| match d {
         DerivedDeclarator::Function(f) => Some(f),
         _ => None,
     }) else {

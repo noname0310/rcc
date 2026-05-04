@@ -230,6 +230,23 @@ fn duplicate_block_scope_tag_definition_is_diagnosed() {
     );
 }
 
+#[test]
+fn function_pointer_return_definition_lowers_body_parameters_from_final_declarator() {
+    let src = r#"
+        int f2(int c, int b) {
+            return c - b;
+        }
+
+        int (*f1(int a, int b))(int c, int b) {
+            if (a != b)
+                return f2;
+            return 0;
+        }
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
 fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
