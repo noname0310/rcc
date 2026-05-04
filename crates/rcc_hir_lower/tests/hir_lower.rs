@@ -843,6 +843,48 @@ fn gnu_aligned_attribute_sets_record_layout_override() {
 }
 
 #[test]
+fn gnu_aligned_attribute_sets_field_layout_override() {
+    let src = r#"
+        struct s1 { int __attribute__((aligned(8))) a; };
+        struct outer { char c; struct s1 m; };
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, mut tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let s1_record = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { fields, .. }
+                if fields.len() == 1 && fields[0].align_override == Some(8) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("struct s1 field should carry GNU aligned(8)");
+    let s1_ty = tcx.intern(Ty::Record(s1_record));
+    let s1_layout = LayoutCx::with_defs(&tcx, &hir.defs).record_layout_of(s1_ty).unwrap();
+    assert_eq!(s1_layout.layout.align, 8);
+    assert_eq!(s1_layout.layout.size, 8);
+
+    let outer_ty = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { fields, .. } if fields.len() == 2 && fields[1].ty == s1_ty => {
+                Some(tcx.intern(Ty::Record(id)))
+            }
+            _ => None,
+        })
+        .expect("outer record should reference aligned struct s1");
+    let outer_layout = LayoutCx::with_defs(&tcx, &hir.defs).record_layout_of(outer_ty).unwrap();
+    assert_eq!(outer_layout.layout.align, 8);
+    assert_eq!(outer_layout.fields[1].offset, 8);
+}
+
+#[test]
 fn aggregate_initializers_skip_unnamed_bitfields() {
     let src = r#"
         struct S { int a:4; int :4; int b:4; int c:4; } x = { 2, 3, 4 };
@@ -1622,6 +1664,7 @@ fn init_record_per_field_assign() {
                     name: Some(a),
                     ty: tcx.int,
                     quals: ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -1630,6 +1673,7 @@ fn init_record_per_field_assign() {
                     name: Some(b),
                     ty: tcx.int,
                     quals: ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -1788,6 +1832,7 @@ fn expr_member_access_preserves_requested_field_name() {
                 name: Some(a),
                 ty: tcx.int,
                 quals: ObjectQuals::none(),
+                align_override: None,
                 offset: None,
                 bit_width: None,
                 span: DUMMY_SP,

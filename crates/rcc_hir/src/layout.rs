@@ -304,7 +304,8 @@ impl<'tcx> LayoutCx<'tcx> {
         let mut bit_unit: Option<BitUnit> = None;
         for (idx, field) in fields.iter().enumerate() {
             if let Some(width) = field.bit_width {
-                let storage = self.layout_of_inner(field.ty, record_stack)?;
+                let storage =
+                    apply_field_align(self.layout_of_inner(field.ty, record_stack)?, field);
                 let storage_bits = storage_size_bits(storage, ty)?;
                 max_align = max_align.max(storage.align);
 
@@ -365,6 +366,7 @@ impl<'tcx> LayoutCx<'tcx> {
             offset = finish_bit_unit(offset, bit_unit.take(), ty)?;
             let (field_layout, flexible) =
                 self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
+            let field_layout = apply_field_align(field_layout, field);
             offset =
                 align_to(offset, field_layout.align).ok_or(LayoutError::SizeOverflow { ty })?;
             layouts.push(FieldLayout {
@@ -402,6 +404,7 @@ impl<'tcx> LayoutCx<'tcx> {
         for (idx, field) in fields.iter().enumerate() {
             let (layout, flexible) =
                 self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
+            let layout = apply_field_align(layout, field);
             let storage_size = if field.bit_width == Some(0) || flexible { 0 } else { layout.size };
             size = size.max(storage_size);
             max_align = max_align.max(layout.align);
@@ -457,6 +460,13 @@ impl<'tcx> LayoutCx<'tcx> {
 
 fn type_layout(layout: TypeLayout) -> Layout {
     Layout { size: layout.size, align: layout.align }
+}
+
+fn apply_field_align(mut layout: Layout, field: &crate::Field) -> Layout {
+    if let Some(align) = field.align_override {
+        layout.align = layout.align.max(align);
+    }
+    layout
 }
 
 fn int_rank_layout(rank: IntRank) -> IntRankLayout {
@@ -576,6 +586,7 @@ mod tests {
                     name: None,
                     ty: tcx.char_,
                     quals: crate::ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -584,6 +595,7 @@ mod tests {
                     name: None,
                     ty: tcx.int,
                     quals: crate::ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -598,6 +610,7 @@ mod tests {
                     name: None,
                     ty: tcx.char_,
                     quals: crate::ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -606,6 +619,7 @@ mod tests {
                     name: None,
                     ty: tcx.long,
                     quals: crate::ObjectQuals::none(),
+                    align_override: None,
                     offset: None,
                     bit_width: None,
                     span: DUMMY_SP,
@@ -618,6 +632,44 @@ mod tests {
 
         assert_eq!(layouts.layout_of(struct_ty).unwrap(), Layout { size: 8, align: 4 });
         assert_eq!(layouts.layout_of(union_ty).unwrap(), Layout { size: 8, align: 8 });
+    }
+
+    #[test]
+    fn field_alignment_override_raises_offset_size_and_record_alignment() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let struct_id = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![
+                Field {
+                    name: None,
+                    ty: tcx.char_,
+                    quals: crate::ObjectQuals::none(),
+                    align_override: None,
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+                Field {
+                    name: None,
+                    ty: tcx.int,
+                    quals: crate::ObjectQuals::none(),
+                    align_override: Some(8),
+                    offset: None,
+                    bit_width: None,
+                    span: DUMMY_SP,
+                },
+            ],
+        );
+        let struct_ty = tcx.intern(Ty::Record(struct_id));
+        let record = LayoutCx::with_defs(&tcx, &defs).record_layout_of(struct_ty).unwrap();
+
+        assert_eq!(record.layout, Layout { size: 16, align: 8 });
+        assert_eq!(record.fields[0].offset, 0);
+        assert_eq!(record.fields[0].storage_align, 1);
+        assert_eq!(record.fields[1].offset, 8);
+        assert_eq!(record.fields[1].storage_align, 8);
     }
 
     #[test]

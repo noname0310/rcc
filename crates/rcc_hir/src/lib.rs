@@ -161,6 +161,8 @@ pub struct Field {
     pub ty: TyId,
     /// Qualifiers that apply to the field object itself.
     pub quals: ObjectQuals,
+    /// GNU `aligned(N)` override attached to this field, if any.
+    pub align_override: Option<u32>,
     /// Offset within the record, in bytes (filled by layout).
     pub offset: Option<u64>,
     /// Bitfield width, if applicable.

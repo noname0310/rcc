@@ -5784,6 +5784,7 @@ pub fn lower_record(
                             name: None,
                             ty: base,
                             quals: object_quals_from_type_quals(&fd.specs.quals),
+                            align_override: aligned_attr_override(&fd.specs.attrs, session),
                             offset: None,
                             bit_width,
                             span: fd.span,
@@ -5839,6 +5840,11 @@ pub fn lower_record(
                         name,
                         ty,
                         quals: declaration_object_quals(&fd.specs, decl),
+                        align_override: field_aligned_attr_override(
+                            &fd.specs.attrs,
+                            &decl.attrs,
+                            session,
+                        ),
                         offset: None,
                         bit_width,
                         span: decl.span,
@@ -5867,6 +5873,18 @@ fn find_anon_record_in_specs(specs: &rcc_ast::DeclSpecs) -> Option<&RecordSpec> 
         }
     }
     None
+}
+
+fn field_aligned_attr_override(
+    spec_attrs: &[rcc_ast::Attribute],
+    declarator_attrs: &[rcc_ast::Attribute],
+    session: &Session,
+) -> Option<u32> {
+    spec_attrs
+        .iter()
+        .chain(declarator_attrs)
+        .filter_map(|attr| aligned_attr_value(attr, session))
+        .max()
 }
 
 /// Validate a bit-field width expression against the field type.

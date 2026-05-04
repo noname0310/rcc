@@ -872,6 +872,7 @@ mod tests {
                         name: Some(Symbol((i + 2) as u32)),
                         ty,
                         quals: ObjectQuals::none(),
+                        align_override: None,
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,

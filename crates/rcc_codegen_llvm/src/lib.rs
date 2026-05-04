@@ -6012,6 +6012,7 @@ pub mod backend {
                 return false;
             };
             align_override.is_some()
+                || fields.iter().any(|field| field.align_override.is_some())
                 || fields.iter().any(|field| field.bit_width.is_some())
                 || fields.iter().any(|field| self.type_needs_explicit_layout(field.ty))
         }
@@ -7044,6 +7045,7 @@ mod tests {
                         name: None,
                         ty: tcx.char_,
                         quals: rcc_hir::ObjectQuals::none(),
+                        align_override: None,
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,
@@ -7052,6 +7054,7 @@ mod tests {
                         name: None,
                         ty: tcx.int,
                         quals: rcc_hir::ObjectQuals::none(),
+                        align_override: None,
                         offset: None,
                         bit_width: None,
                         span: DUMMY_SP,
@@ -7139,6 +7142,7 @@ mod tests {
             name: None,
             ty,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             offset: None,
             bit_width: None,
             span: DUMMY_SP,
@@ -7531,6 +7535,21 @@ mod tests {
     }
 
     #[test]
+    fn record_layout_honors_gnu_field_aligned_override() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let mut aligned_int = field(tcx.int);
+        aligned_int.align_override = Some(8);
+        let record = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.char_), aligned_int]);
+        let record_ty = tcx.intern(Ty::Record(record));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(record_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 16, align: 8 });
+        assert_eq!(layout.fields.iter().map(|field| field.offset).collect::<Vec<_>>(), [0, 8]);
+    }
+
+    #[test]
     fn record_layout_ignores_flexible_array_trailing_size() {
         let mut tcx = TyCtxt::new();
         let mut defs = IndexVec::new();
@@ -7909,6 +7928,27 @@ mod tests {
         assert_eq!(
             lowered.print_to_string().to_string(),
             "%rcc.record.0 = type <{ i32, i32, [24 x i8] }>"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_adds_explicit_padding_for_aligned_fields() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let mut aligned_int = field(tcx.int);
+        aligned_int.align_override = Some(8);
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![field(tcx.char_), aligned_int]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let hir = hir_with_defs(defs);
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(rec_ty).unwrap();
+
+        assert_eq!(
+            lowered.print_to_string().to_string(),
+            "%rcc.record.0 = type <{ i8, [7 x i8], i32, [4 x i8] }>"
         );
     }
 

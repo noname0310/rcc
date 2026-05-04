@@ -51,7 +51,7 @@ current numeric milestone already passes.
 - [x] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)
 - [x] [15p-gcc-torture-varargs-cluster](15p-gcc-torture-varargs-cluster.md)
 - [x] [15q-gcc-torture-aggregate-memory-cluster](15q-gcc-torture-aggregate-memory-cluster.md)
-- [ ] [15r-gcc-torture-gnu-field-alignment](15r-gcc-torture-gnu-field-alignment.md)
+- [x] [15r-gcc-torture-gnu-field-alignment](15r-gcc-torture-gnu-field-alignment.md)
 - [ ] [15s-gcc-torture-gnu-vector-cluster](15s-gcc-torture-gnu-vector-cluster.md)
 - [ ] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)
 - [ ] [15u-gcc-torture-gnu-inline-asm](15u-gcc-torture-gnu-inline-asm.md)

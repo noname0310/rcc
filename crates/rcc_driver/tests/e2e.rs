@@ -108,12 +108,18 @@ mod linux {
     }
 
     fn compile_fixture(fixture: &Fixture, exe: &Path) -> Result<(), String> {
+        compile_fixture_with_options(fixture, exe, Options::default())
+    }
+
+    fn compile_fixture_with_options(
+        fixture: &Fixture,
+        exe: &Path,
+        options: Options,
+    ) -> Result<(), String> {
         let cap = CaptureEmitter::new();
         let handler = Handler::with_emitter(Box::new(cap));
-        let mut session = Session::with_handler(
-            Options { output: Some(exe.to_path_buf()), ..Options::default() },
-            handler,
-        );
+        let mut session =
+            Session::with_handler(Options { output: Some(exe.to_path_buf()), ..options }, handler);
         pipeline::compile(&mut session, &fixture.c_path)
     }
 
@@ -167,12 +173,35 @@ mod linux {
     }
 
     fn assert_source(name: &str, source: &str, stdout: &[u8], status: i32) {
+        assert_source_with_options(name, source, stdout, status, Options::default());
+    }
+
+    fn assert_source_with_options(
+        name: &str,
+        source: &str,
+        stdout: &[u8],
+        status: i32,
+        options: Options,
+    ) {
         let dir = TempSourceDir::new(name);
         let c_path = dir.path.join(format!("{name}.c"));
         fs::write(&c_path, source)
             .unwrap_or_else(|err| panic!("write {}: {err}", c_path.display()));
         let fixture = Fixture { name: name.to_owned(), c_path, stdout: stdout.to_vec(), status };
-        assert_fixture(&fixture);
+        let exe = TempExe::new(name);
+        compile_fixture_with_options(&fixture, &exe.path, options)
+            .unwrap_or_else(|err| panic!("{}: compile/link failed:\n{err}", fixture.name));
+        let run = run_with_timeout(&exe.path, TIMEOUT).unwrap_or_else(|err| {
+            panic!("{}: failed to run {}: {err}", fixture.name, exe.path.display())
+        });
+        assert!(!run.timed_out, "{}: timed out after {:?}", fixture.name, TIMEOUT);
+        assert_eq!(run.output.stdout, fixture.stdout, "{}: stdout mismatch", fixture.name);
+        assert_eq!(
+            run.output.status.code(),
+            Some(fixture.status),
+            "{}: exit status mismatch",
+            fixture.name
+        );
     }
 
     fn host_cc_available() -> bool {
@@ -286,6 +315,28 @@ int main(void) {
         };
         assert_fixture(&fixture);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gnu_field_alignment_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU field alignment e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_field_alignment",
+            r#"
+struct s1 { int __attribute__ ((aligned (8))) a; };
+struct { char c; struct s1 m; } v;
+int main(void) {
+  return ((unsigned long)&v.m & 7) ? 1 : 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
     }
 
     #[test]
