@@ -98,17 +98,18 @@ reference output. The task-16 baseline is:
 
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| tcc-tests2 | 88 | 68 | 8 | 8 | 4 | 86.4 |
+| tcc-tests2 | 88 | 68 | 9 | 7 | 4 | 87.5 |
 
 The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
 TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
-GNU empty-struct/initializer forms, TinyCC binary floating constants, and C11
-`_Generic`. `38_multiple_array_index` is a suite-data whitespace drift case:
+GNU empty-struct/initializer forms, TinyCC binary floating constants, GNU
+flexible-array-member initializers, and C11 `_Generic`.
+`38_multiple_array_index` is a suite-data whitespace drift case:
 GCC and rcc both print a trailing space on every row, while the vendored
 `.expect` kept it only on the final row. `71_macro_empty_arg` is also a
 suite-data newline drift case: the source prints no newline, and GCC/TCC/rcc
 all emit `17` while the vendored `.expect` contains a final CRLF. Remaining
-failures are compiler-bug follow-up tasks `11-16e` through `11-16i`; they are
+failures are compiler-bug follow-up tasks `11-16f` through `11-16j`; they are
 not hidden by the pass-rate gate.
 
 ## Interpreting the columns
@@ -136,7 +137,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; reports only `arith.c`, `control.c`, `function.c` and uses a host-compiled minimal support helper |
 | `GccTortureAdapter`          | interface frozen; implementation M4 |
-| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline after 11-16d is 68 pass, 8 xfail, 8 fail, 4 skip |
+| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline after 11-16e is 68 pass, 9 xfail, 7 fail, 4 skip |
 | `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
 

@@ -69,7 +69,7 @@ current numeric milestone already passes.
 - [x] [16b-tcc-tests2-multidimensional-array-index](16b-tcc-tests2-multidimensional-array-index.md)
 - [x] [16c-tcc-tests2-typedef-function-declarator](16c-tcc-tests2-typedef-function-declarator.md)
 - [x] [16d-tcc-tests2-macro-empty-args](16d-tcc-tests2-macro-empty-args.md)
-- [ ] [16e-tcc-tests2-flexarray-init](16e-tcc-tests2-flexarray-init.md)
+- [x] [16e-tcc-tests2-flexarray-init](16e-tcc-tests2-flexarray-init.md)
 - [ ] [16f-tcc-tests2-dead-code-cfg-panic](16f-tcc-tests2-dead-code-cfg-panic.md)
 - [ ] [16g-tcc-tests2-integer-promotion-bitfield](16g-tcc-tests2-integer-promotion-bitfield.md)
 - [ ] [16h-tcc-tests2-bitfields-layout](16h-tcc-tests2-bitfields-layout.md)

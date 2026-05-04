@@ -213,6 +213,29 @@ fn aggregate_assignment_uses_mem_intrinsics() {
 }
 
 #[test]
+fn flexible_array_member_is_omitted_from_llvm_record_body() {
+    assert_checked(
+        "flexible_array_member",
+        r#"
+        // CHECK: %rcc.record.0 = type { i32 }
+        // CHECK-NOT: incomplete arrays have no LLVM object type
+        // CHECK: @s = internal global %rcc.record.0 { i32 1 }
+        // CHECK: define i32 @read(ptr
+        // CHECK: flex_index_gep
+        // CHECK: define i32 @main()
+        // CHECK: alloca %rcc.record.0
+        struct S { int n; char data[]; };
+        static struct S s = {1};
+        int read(struct S *p) { return p->data[0]; }
+        int main(void) {
+            struct S local = {1};
+            return local.n != s.n;
+        }
+        "#,
+    );
+}
+
+#[test]
 fn volatile_loads_and_stores_survive_ir_emission() {
     assert_checked(
         "volatile_ops",

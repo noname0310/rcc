@@ -2842,6 +2842,12 @@ pub mod backend {
                             }
                         };
                         match self.tcx.get(current_ty) {
+                            Ty::Array { elem, len: None, is_vla: false } => {
+                                let elem_ty = self.type_cx().basic_type_of(elem.ty)?;
+                                ptr =
+                                    self.build_gep(elem_ty, ptr, &[index_val], "flex_index_gep")?;
+                                current_ty = elem.ty;
+                            }
                             Ty::Array { elem, is_vla: true, .. } => {
                                 let elem_ty = self.type_cx().basic_type_of(elem.ty)?;
                                 ptr = self.build_gep(elem_ty, ptr, &[index_val], "index_gep")?;
@@ -6219,6 +6225,25 @@ pub mod backend {
         )
     }
 
+    fn is_flexible_array_field(
+        tcx: &TyCtxt,
+        field_ty: TyId,
+        index: usize,
+        field_count: usize,
+    ) -> bool {
+        index + 1 == field_count
+            && matches!(tcx.get(field_ty), Ty::Array { len: None, is_vla: false, .. })
+    }
+
+    fn has_global_field_entries(entries: &[GlobalInitEntry], index: usize) -> bool {
+        entries.iter().any(|entry| {
+            matches!(
+                entry.path.first(),
+                Some(GlobalInitDesignator::Field(field)) if *field as usize == index
+            )
+        })
+    }
+
     fn byteswap_packed_bits(value: u64, bits: u32) -> Result<u64, CodegenError> {
         if bits == 8 {
             return Ok(value);
@@ -6490,10 +6515,16 @@ pub mod backend {
                 RecordKind::Struct if explicit_layout => {
                     self.explicit_struct_field_types(ty, &field_tys)?
                 }
-                RecordKind::Struct => field_tys
-                    .into_iter()
-                    .map(|field_ty| self.basic_type_of(field_ty))
-                    .collect::<Result<Vec<_>, _>>()?,
+                RecordKind::Struct => {
+                    let mut lowered = Vec::with_capacity(field_tys.len());
+                    for (idx, field_ty) in field_tys.iter().copied().enumerate() {
+                        if self.is_flexible_array_field(field_ty, idx, field_tys.len()) {
+                            continue;
+                        }
+                        lowered.push(self.basic_type_of(field_ty)?);
+                    }
+                    lowered
+                }
                 RecordKind::Union => {
                     let layout = self
                         .layout_cx()
@@ -6538,7 +6569,9 @@ pub mod backend {
                 .map_err(|err| type_error(ty, err.to_string()))?;
             let mut out = Vec::new();
             let mut offset = 0_u64;
-            for (field_ty, field_layout) in field_tys.iter().zip(record_layout.fields.iter()) {
+            for (idx, (field_ty, field_layout)) in
+                field_tys.iter().zip(record_layout.fields.iter()).enumerate()
+            {
                 if field_layout.bit_width.is_some() {
                     if field_layout.storage_size == 0 {
                         continue;
@@ -6564,6 +6597,11 @@ pub mod backend {
                     offset = unit_end;
                     continue;
                 }
+                if self.is_flexible_array_field(*field_ty, idx, field_tys.len())
+                    && field_layout.storage_size == 0
+                {
+                    continue;
+                }
                 if field_layout.offset > offset {
                     out.push(self.padding_type(field_layout.offset - offset, ty)?);
                 }
@@ -6577,6 +6615,16 @@ pub mod backend {
                 out.push(self.padding_type(record_layout.layout.size - offset, ty)?);
             }
             Ok(out)
+        }
+
+        fn is_flexible_array_field(
+            &self,
+            field_ty: TyId,
+            index: usize,
+            field_count: usize,
+        ) -> bool {
+            index + 1 == field_count
+                && matches!(self.tcx.get(field_ty), Ty::Array { len: None, is_vla: false, .. })
         }
 
         fn padding_type(&self, size: u64, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
@@ -6798,6 +6846,15 @@ pub mod backend {
                     }
                     let mut field_values = Vec::with_capacity(fields.len());
                     for (i, field) in fields.iter().enumerate() {
+                        if is_flexible_array_field(self.tcx, field.ty, i, fields.len()) {
+                            if has_global_field_entries(entries, i) {
+                                return Err(type_error(
+                                    field.ty,
+                                    "flexible array member initializers are outside C99",
+                                ));
+                            }
+                            continue;
+                        }
                         let sub_entries: Vec<GlobalInitEntry> = entries
                             .iter()
                             .filter(|e| {
@@ -6922,6 +6979,17 @@ pub mod backend {
                         .into(),
                     );
                     offset = unit_end;
+                    continue;
+                }
+                if is_flexible_array_field(self.tcx, field.ty, i, fields.len())
+                    && field_layout.storage_size == 0
+                {
+                    if has_global_field_entries(entries, i) {
+                        return Err(type_error(
+                            field.ty,
+                            "flexible array member initializers are outside C99",
+                        ));
+                    }
                     continue;
                 }
                 if field_layout.offset > offset {
@@ -7242,6 +7310,17 @@ pub mod backend {
                         RecordKind::Struct => {
                             for (i, field_ty) in field_tys.into_iter().enumerate() {
                                 let field_layout = record_layout.fields[i];
+                                if is_flexible_array_field(self.tcx, field_ty, i, fields.len())
+                                    && field_layout.storage_size == 0
+                                {
+                                    if has_global_field_entries(entries, i) {
+                                        return Err(type_error(
+                                            field_ty,
+                                            "flexible array member initializers are outside C99",
+                                        ));
+                                    }
+                                    continue;
+                                }
                                 let field_size =
                                     u32::try_from(field_layout.storage_size).map_err(|_| {
                                         CodegenError::Internal(

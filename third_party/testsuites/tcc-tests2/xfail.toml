@@ -18,6 +18,10 @@ id = "tcc-tests2::76_dollars_in_identifiers"
 reason = "TinyCC/GNU dollar identifiers are outside C99 and not supported by rcc"
 
 [[xfail]]
+id = "tcc-tests2::80_flexarray"
+reason = "fixture initializes a flexible array member, which GCC rejects under -std=c99 -pedantic-errors; legal C99 flexible-array objects are supported"
+
+[[xfail]]
 id = "tcc-tests2::83_utf8_in_identifiers"
 reason = "raw UTF-8 identifiers are a TinyCC/PCC extension; rcc currently requires C99 identifier spelling"
 
