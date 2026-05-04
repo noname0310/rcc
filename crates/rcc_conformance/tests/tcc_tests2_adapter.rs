@@ -40,6 +40,24 @@ fn compare_normalizes_crlf_expected_output() {
 }
 
 #[test]
+fn compare_trims_known_multiple_array_index_trailing_space_drift_only_for_that_case() {
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = tmp.path().join("38_multiple_array_index.expect");
+    fs::write(&expected, b"x=0: 1 2 3 4\r\nx=1: 5 6 7 8 \r\n").unwrap();
+    let actual = b"x=0: 1 2 3 4 \nx=1: 5 6 7 8 \n";
+
+    assert!(matches!(TccTests2Adapter::compare_outcome(actual, &expected), Outcome::Fail { .. }));
+    assert!(matches!(
+        TccTests2Adapter::compare_outcome_for_stem("38_multiple_array_index", actual, &expected),
+        Outcome::Pass
+    ));
+    assert!(matches!(
+        TccTests2Adapter::compare_outcome_for_stem("00_assignment", actual, &expected),
+        Outcome::Fail { .. }
+    ));
+}
+
+#[test]
 fn run_fails_when_rcc_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let case_path = tmp.path().join("00_assignment.c");

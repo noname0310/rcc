@@ -66,7 +66,7 @@ current numeric milestone already passes.
 - [x] [15w-gcc-torture-scalar-storage-order](15w-gcc-torture-scalar-storage-order.md)
 - [x] [16-tcc-tests2](16-tcc-tests2.md)
 - [x] [16a-tcc-tests2-float-codegen](16a-tcc-tests2-float-codegen.md)
-- [ ] [16b-tcc-tests2-multidimensional-array-index](16b-tcc-tests2-multidimensional-array-index.md)
+- [x] [16b-tcc-tests2-multidimensional-array-index](16b-tcc-tests2-multidimensional-array-index.md)
 - [ ] [16c-tcc-tests2-typedef-function-declarator](16c-tcc-tests2-typedef-function-declarator.md)
 - [ ] [16d-tcc-tests2-macro-empty-args](16d-tcc-tests2-macro-empty-args.md)
 - [ ] [16e-tcc-tests2-flexarray-init](16e-tcc-tests2-flexarray-init.md)

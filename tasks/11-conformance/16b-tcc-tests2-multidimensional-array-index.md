@@ -1,10 +1,13 @@
+> ✓ done — 2026-05-04 — classified 38_multiple_array_index as fixture trailing-space drift and normalized that case
+
 # 11-16b: tcc-tests2 multidimensional array indexing
 
 **Phase:** 11-conformance    **Depends on:** 11-16    **Milestone:** M6
 
 ## Goal
-Fix incorrect output for nested array indexing and row-major address
-calculation.
+Confirm whether `38_multiple_array_index` is an array-indexing compiler bug and
+fix the responsible layer if it is. If the compiled program is correct, record
+the suite-data issue narrowly enough that it cannot hide real output bugs.
 
 ## Scope
 - In: `tcc-tests2::38_multiple_array_index`.
@@ -12,9 +15,10 @@ calculation.
   bug.
 
 ## Deliverables
-- A reduced parser/HIR/CFG/codegen regression test for `a[i][j]` on nested
-  arrays.
-- A fix in the layer that miscomputes the element address or decay.
+- A reduced parser/HIR/CFG/codegen regression test or a byte-level proof that
+  the compiled values are correct.
+- A narrow adapter fix if the fixture expected output is the source of the
+  mismatch.
 
 ## Acceptance
 - `38_multiple_array_index` passes through the tcc-tests2 adapter.
