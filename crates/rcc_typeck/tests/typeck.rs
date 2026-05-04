@@ -821,6 +821,60 @@ fn assignment_to_const_field_emits_e0080() {
 }
 
 #[test]
+fn member_access_on_aggregate_rvalue_is_typed_as_rvalue_field() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let record_def = DefId(7);
+    let rec_ty = record(&mut tcx, record_def.0);
+    let fn_def = DefId(8);
+    let fn_ty =
+        tcx.intern(Ty::Func { ret: rec_ty, params: Vec::new(), variadic: false, proto: true });
+
+    let mut def_info = rcc_data_structures::FxHashMap::default();
+    def_info.insert(
+        record_def,
+        DefSnapshot {
+            ty: None,
+            value_cat: ValueCat::RValue,
+            enumerator_value: None,
+            object_quals: rcc_hir::ObjectQuals::none(),
+            record_fields: Some(vec![FieldSnapshot {
+                name: Some(Symbol(1)),
+                ty: tcx.int,
+                quals: rcc_hir::ObjectQuals::none(),
+            }]),
+        },
+    );
+    def_info.insert(
+        fn_def,
+        DefSnapshot {
+            ty: Some(fn_ty),
+            value_cat: ValueCat::LValue,
+            enumerator_value: None,
+            object_quals: rcc_hir::ObjectQuals::none(),
+            record_fields: None,
+        },
+    );
+
+    let callee = push_kind(&mut body, fn_ty, HirExprKind::DefRef(fn_def));
+    let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: Vec::new() });
+    let field = push_kind(
+        &mut body,
+        tcx.error,
+        HirExprKind::UnresolvedField { base: call, field: Symbol(1), field_span: DUMMY_SP },
+    );
+    root_stmt(&mut body, field);
+
+    let (mut session, cap) = Session::for_test();
+    check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+    assert!(cap.diagnostics().is_empty());
+    assert_eq!(body.exprs[field].ty, tcx.int);
+    assert_eq!(body.exprs[field].value_cat, ValueCat::RValue);
+    assert!(matches!(body.exprs[field].kind, HirExprKind::Field { field_index: 0, .. }));
+}
+
+#[test]
 fn assignment_through_pointer_to_const_emits_e0080() {
     let mut tcx = TyCtxt::new();
     let mut body = Body::default();

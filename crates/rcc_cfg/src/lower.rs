@@ -24,7 +24,7 @@ use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
     Body as HirBody, ConvertKind, Def, DefId, FloatKind, HirExprId, HirExprKind, HirStmtId,
-    HirStmtKind, IntRank, LayoutCx, Local as HirLocal, Ty, TyCtxt, TyId,
+    HirStmtKind, IntRank, LayoutCx, Local as HirLocal, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_span::Span;
 
@@ -292,13 +292,20 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::UnresolvedField { .. } => {
             panic!("unresolved member access reached CFG lowering; run rcc_typeck first")
         }
-        HirExprKind::CompoundLiteral { .. }
-        | HirExprKind::Deref(_)
-        | HirExprKind::Field { .. }
-        | HirExprKind::Index { .. } => {
+        HirExprKind::Field { base, field_index } if expr.value_cat == ValueCat::RValue => {
+            lower_field_as_rvalue(builder, cx, *base, *field_index, span)
+        }
+        HirExprKind::CompoundLiteral { .. } | HirExprKind::Deref(_) | HirExprKind::Index { .. } => {
             // These are lvalues; in value position emit a Copy of the
             // computed Place. The compute itself is delegated to
             // `lower_as_place` so the rules live in exactly one spot.
+            let place = lower_as_place(builder, cx, expr_id);
+            Operand::Copy(place)
+        }
+        HirExprKind::Field { .. } => {
+            // `s.f` is an lvalue iff `s` is. Typeck writes the final
+            // category onto the field node; rvalue fields are handled
+            // above by materialising their base value first.
             let place = lower_as_place(builder, cx, expr_id);
             Operand::Copy(place)
         }
@@ -412,6 +419,19 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             Operand::Const(Const { kind: ConstKind::Int(0), ty })
         }
     }
+}
+
+fn lower_field_as_rvalue(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    base: HirExprId,
+    field_index: u32,
+    span: Span,
+) -> Operand {
+    let base_op = lower_as_rvalue(builder, cx, base);
+    let mut place = operand_to_place(builder, cx, base_op, span);
+    place.projection.push(Projection::Field(field_index));
+    Operand::Copy(place)
 }
 
 /// Lower a HIR expression in *lvalue* position. Returns the [`Place`]
@@ -2439,6 +2459,42 @@ mod tests {
         assert_eq!(place.projection.len(), 1);
         assert!(matches!(place.projection[0], Projection::Field(2)));
         let _body = finish(builder);
+    }
+
+    #[test]
+    fn field_projection_from_call_result_uses_call_destination_temp() {
+        let (mut builder, mut hir_body, mut tcx, map, [_ha, _hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+        let rec_ty = tcx.intern(Ty::Record(rcc_hir::DefId(0)));
+        let func_ty =
+            tcx.intern(Ty::Func { ret: rec_ty, params: Vec::new(), variadic: false, proto: true });
+        let func_ptr_ty = tcx.intern(rcc_hir::Ty::Ptr(rcc_hir::Qual::plain(func_ty)));
+        let callee = def_ref_expr(&mut hir_body, func_ptr_ty, rcc_hir::DefId::new(55));
+        let call = call_expr(&mut hir_body, rec_ty, callee, Vec::new());
+        let field = push_expr(
+            &mut hir_body,
+            int_ty,
+            ValueCat::RValue,
+            HirExprKind::Field { base: call, field_index: 1 },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let op = lower_as_rvalue(&mut builder, &cx, field);
+        let Operand::Copy(Place { base: field_base, projection }) = op else {
+            panic!("expected field copy from materialized call result, got {op:?}");
+        };
+        assert!(matches!(projection.as_slice(), [Projection::Field(1)]));
+
+        let body = finish(builder);
+        let call_dest = body.blocks.iter().find_map(|bb| match &bb.terminator.kind {
+            TerminatorKind::Call { destination: Some(dest), .. } => Some(dest),
+            _ => None,
+        });
+        let Some(dest) = call_dest else {
+            panic!("aggregate call should have a destination temp");
+        };
+        assert_eq!(dest.base, field_base);
+        assert!(dest.projection.is_empty());
     }
 
     /// Calling `lower_as_place` on a non-lvalue HIR shape panics. The

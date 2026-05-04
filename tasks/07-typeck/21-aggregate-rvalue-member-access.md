@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 07-21: aggregate rvalue member access
 
 **Phase:** 07-typeck    **Depends on:** 07-13    **Milestone:** M6+
@@ -29,6 +31,11 @@ Type member access on aggregate rvalues correctly, instead of assuming every
 ## Acceptance
 - `rcc` never panics on aggregate-rvalue member access.
 - `struct S f(void); return f().x;` executes correctly for scalar fields.
+
+## Follow-up
+- `c-testsuite::00204` now advances past this panic and stops at LLVM codegen's
+  aggregate ABI lowering gap (`unsupported direct ABI class`). That belongs to
+  the codegen ABI task set, not this type/category CFG fix.
 
 ## References
 - C99 §6.5.2.3
