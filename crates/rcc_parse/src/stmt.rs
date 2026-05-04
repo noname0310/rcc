@@ -986,7 +986,10 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
                     | Keyword::Union
                     | Keyword::Enum
             ),
-            TokenKind::Ident(sym) => p.scopes.is_typedef(*sym),
+            TokenKind::Ident(sym) => {
+                matches!(p.session.interner.get(*sym), "typeof" | "__typeof" | "__typeof__")
+                    || p.scopes.is_typedef(*sym)
+            }
             _ => false,
         },
         None => false,

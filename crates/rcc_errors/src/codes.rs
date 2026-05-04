@@ -113,6 +113,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0021, W0021_DESC),
     (W0022, W0022_DESC),
     (W0023, W0023_DESC),
+    (W0024, W0024_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -874,6 +875,14 @@ const W0022_DESC: &str = "GNU function name alias";
 /// `Options::gnu_va_area` is enabled.
 pub const W0023: &str = "W0023";
 const W0023_DESC: &str = "GNU __va_area__ compatibility builtin";
+
+/// GNU `typeof` type specifier accepted in strict C99 mode.
+///
+/// `typeof (expr)` and `typeof (type-name)` are GNU C extensions. The parser
+/// preserves them so compatibility declarations can reach HIR lowering and
+/// emits this warning unless `Options::gnu_typeof` is enabled.
+pub const W0024: &str = "W0024";
+const W0024_DESC: &str = "GNU typeof type specifier extension";
 
 #[cfg(test)]
 mod tests {

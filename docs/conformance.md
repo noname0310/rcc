@@ -98,7 +98,7 @@ reference output. The task-16 baseline is:
 
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| tcc-tests2 | 88 | 66 | 8 | 10 | 4 | 84.1 |
+| tcc-tests2 | 88 | 67 | 8 | 9 | 4 | 85.2 |
 
 The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
 TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
@@ -106,7 +106,7 @@ GNU empty-struct/initializer forms, TinyCC binary floating constants, and C11
 `_Generic`. `38_multiple_array_index` is a suite-data whitespace drift case:
 GCC and rcc both print a trailing space on every row, while the vendored
 `.expect` kept it only on the final row. Remaining failures are compiler-bug
-follow-up tasks `11-16c` through `11-16i`; they are not hidden by the
+follow-up tasks `11-16d` through `11-16i`; they are not hidden by the
 pass-rate gate.
 
 ## Interpreting the columns
@@ -134,7 +134,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; reports only `arith.c`, `control.c`, `function.c` and uses a host-compiled minimal support helper |
 | `GccTortureAdapter`          | interface frozen; implementation M4 |
-| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline after 11-16b is 66 pass, 8 xfail, 10 fail, 4 skip |
+| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline after 11-16c is 67 pass, 8 xfail, 9 fail, 4 skip |
 | `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
 

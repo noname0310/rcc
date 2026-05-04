@@ -170,6 +170,9 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-labels-as-values"
             | "gnu-computed-goto"
             | "gnu-lvalue-comma"
+            | "gnu-typeof"
+            | "gnu-typeof-expr"
+            | "gnu-typeof-type"
             | "gnu-function-names"
             | "gnu-function-name"
             | "gnu-function"
@@ -402,6 +405,9 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             .iter()
             .any(|flag| matches!(flag.as_str(), "gnu-labels-as-values" | "gnu-computed-goto")),
         gnu_lvalue_comma: cli.feature_flags.iter().any(|flag| flag == "gnu-lvalue-comma"),
+        gnu_typeof: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-typeof" | "gnu-typeof-expr" | "gnu-typeof-type")
+        }),
         gnu_function_names: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-function-names" | "gnu-function-name" | "gnu-function")
         }),

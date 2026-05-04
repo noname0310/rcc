@@ -161,6 +161,10 @@ pub enum TypeSpec {
     Enum(EnumSpec),
     /// `__builtin_va_list`
     BuiltinVaList,
+    /// GNU `typeof (expression)`.
+    TypeofExpr(Box<Expr>),
+    /// GNU `typeof (type-name)`.
+    TypeofType(Box<TypeName>),
 }
 
 /// `struct`/`union` specifier.

@@ -170,7 +170,7 @@ pub struct DeclSpecs { pub attrs: Vec<Attribute>, /* ... */ }
 pub enum StorageClass { Typedef, Extern, Static, Auto, Register }
 pub struct TypeQuals { pub const_: bool, pub volatile: bool, pub restrict: bool }
 pub struct FuncSpecs { pub inline: bool }
-pub enum TypeSpec { Void, Char, Short, Int, Long, Float, Double, Signed, Unsigned, Bool, Complex, Imaginary, TypedefName(Symbol), Record(RecordSpec), Enum(EnumSpec) }
+pub enum TypeSpec { Void, Char, Short, Int, Long, Float, Double, Signed, Unsigned, Bool, Complex, Imaginary, TypedefName(Symbol), Record(RecordSpec), Enum(EnumSpec), TypeofExpr(Box<Expr>), TypeofType(Box<TypeName>) }
 pub struct RecordSpec { pub attrs: Vec<Attribute>, /* ... */ }
 pub enum RecordKind { Struct, Union }
 pub struct EnumSpec { pub attrs: Vec<Attribute>, /* ... */ }

@@ -186,6 +186,13 @@ pub struct Options {
     /// classifies comma expressions as rvalues, so with this option off the
     /// type checker emits W0021 while preserving GNU semantics for recovery.
     pub gnu_lvalue_comma: bool,
+    /// Enable GNU `typeof` type specifiers without a warning.
+    ///
+    /// GNU C accepts `typeof (expr)` and `typeof (type-name)` as declaration
+    /// specifiers. The parser preserves the syntax in all modes for
+    /// compatibility suites; with this option off, each use emits W0024 as a
+    /// strict-C99 compatibility warning.
+    pub gnu_typeof: bool,
     /// Enable GNU `__FUNCTION__` predefined function name alias without a warning.
     ///
     /// C99 defines `__func__` as an implicit function-scope identifier. GNU C
@@ -252,6 +259,7 @@ impl Default for Options {
             gnu_case_ranges: false,
             gnu_labels_as_values: false,
             gnu_lvalue_comma: false,
+            gnu_typeof: false,
             gnu_function_names: false,
             instrument_functions: false,
             gnu_va_area: false,

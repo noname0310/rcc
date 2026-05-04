@@ -175,6 +175,7 @@ fn warning_names_for_code(code: &str) -> &'static [&'static str] {
         codes::W0021 => &["gnu-lvalue-comma"],
         codes::W0022 => &["gnu-function-names", "gnu-function-name", "gnu-function"],
         codes::W0023 => &["gnu-va-area", "chibicc-va-area", "va-area"],
+        codes::W0024 => &["gnu-typeof", "gnu-typeof-expr", "gnu-typeof-type", "typeof"],
         _ => &[],
     }
 }

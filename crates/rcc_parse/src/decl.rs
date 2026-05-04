@@ -94,6 +94,7 @@ enum BaseKind {
     Typedef,
     Record,
     Enum,
+    Typeof,
 }
 
 /// Running type-state used to reject illegal multisets of type
@@ -154,6 +155,14 @@ pub fn parse_decl_specs(p: &mut Parser<'_>) -> Option<DeclSpecs> {
                 }
             }
             TokenKind::Ident(sym) => {
+                if is_gnu_typeof_name(p, *sym) {
+                    accept_typeof(p, &mut specs, &mut state, tok_span);
+                    if first_span.is_none() {
+                        first_span = Some(tok_span);
+                    }
+                    last_span = last_consumed_span(p, tok_span);
+                    continue;
+                }
                 // Typedef-name recognition: only when no type
                 // specifier has been accepted yet for this run.
                 if state.base.is_none()
@@ -397,7 +406,7 @@ fn accept_base(
                 && !state.signed_flag
                 && !state.unsigned_flag
         }
-        BaseKind::Typedef | BaseKind::Record | BaseKind::Enum => {
+        BaseKind::Typedef | BaseKind::Record | BaseKind::Enum | BaseKind::Typeof => {
             // unreachable: those kinds take different entry points.
             true
         }
@@ -596,6 +605,94 @@ fn accept_enum(p: &mut Parser<'_>, specs: &mut DeclSpecs, state: &mut TypeState,
     let e = parse_enum_spec(p);
     state.base = Some(BaseKind::Enum);
     specs.type_specs.push(TypeSpec::Enum(e));
+}
+
+fn accept_typeof(p: &mut Parser<'_>, specs: &mut DeclSpecs, state: &mut TypeState, span: Span) {
+    if state.base.is_some() || !is_type_state_clean(state) {
+        specifier_conflict(p, "cannot combine `typeof` with previous type specifier", span);
+        let _ = parse_gnu_typeof_spec(p, span);
+        return;
+    }
+    if let Some(spec) = parse_gnu_typeof_spec(p, span) {
+        state.base = Some(BaseKind::Typeof);
+        specs.type_specs.push(spec);
+    }
+}
+
+fn parse_gnu_typeof_spec(p: &mut Parser<'_>, typeof_span: Span) -> Option<TypeSpec> {
+    if !p.session.opts.gnu_typeof {
+        p.session
+            .handler
+            .struct_warn(typeof_span, "GNU `typeof` type specifier is not part of C99")
+            .code(codes::W0024)
+            .note("parsing it as an extension for compatibility declarations")
+            .emit();
+    }
+
+    p.bump(); // `typeof` / `__typeof` / `__typeof__`
+
+    let _lparen_span = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) => {
+            let span = tok.span;
+            p.bump();
+            span
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `(` after GNU `typeof`")
+                .code(codes::E0061)
+                .emit();
+            return None;
+        }
+    };
+
+    let spec = if starts_type_name_at_cursor(p) {
+        let ty = parse_type_name(p);
+        TypeSpec::TypeofType(Box::new(ty))
+    } else {
+        let expr = crate::expr::parse_expression(p)?;
+        TypeSpec::TypeofExpr(Box::new(expr))
+    };
+    expect_rparen(p, "GNU `typeof`");
+    Some(spec)
+}
+
+fn starts_type_name_at_cursor(p: &Parser<'_>) -> bool {
+    let at = crate::attr::skip_attribute_groups_at(p, p.cursor);
+    match p.tokens.get(at).map(|t| &t.kind) {
+        Some(TokenKind::Keyword(kw)) => is_type_name_start_kw(*kw),
+        Some(TokenKind::Ident(sym)) => p.scopes.is_typedef(*sym),
+        _ => false,
+    }
+}
+
+fn is_type_name_start_kw(kw: Keyword) -> bool {
+    matches!(
+        kw,
+        Keyword::Void
+            | Keyword::Char
+            | Keyword::Short
+            | Keyword::Int
+            | Keyword::Long
+            | Keyword::Float
+            | Keyword::Double
+            | Keyword::Signed
+            | Keyword::Unsigned
+            | Keyword::Bool
+            | Keyword::Complex
+            | Keyword::Imaginary
+            | Keyword::Struct
+            | Keyword::Union
+            | Keyword::Enum
+            | Keyword::Const
+            | Keyword::Volatile
+            | Keyword::Restrict
+    )
+}
+
+fn is_gnu_typeof_name(p: &Parser<'_>, sym: Symbol) -> bool {
+    matches!(p.session.interner.get(sym), "typeof" | "__typeof" | "__typeof__")
 }
 
 fn is_type_state_clean(state: &TypeState) -> bool {

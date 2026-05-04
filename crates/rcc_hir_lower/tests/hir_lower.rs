@@ -2232,6 +2232,48 @@ fn snippet_function_declaration_is_function_prototype() {
 }
 
 #[test]
+fn snippet_function_typedef_declaration_merges_with_definition() {
+    let src = "typedef int functype(int); extern functype func; int func(int i) { return i + 1; }";
+    let (hir, tcx, cap) =
+        checked_snippet_with_options(src, Options { gnu_typeof: true, ..Options::default() });
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let function_defs: Vec<_> =
+        hir.defs.iter().filter(|def| matches!(def.kind, DefKind::Function { .. })).collect();
+    assert_eq!(function_defs.len(), 1, "function typedef declaration should not create a global");
+    let DefKind::Function { ty, has_body, .. } = function_defs[0].kind else {
+        unreachable!();
+    };
+    assert!(has_body);
+    assert!(
+        matches!(tcx.get(ty), Ty::Func { ret, params, .. } if *ret == tcx.int && params == &[tcx.int])
+    );
+}
+
+#[test]
+fn snippet_gnu_typeof_function_redeclaration_merges_with_function_def() {
+    let src = r#"
+        int set_anon_super(void);
+        int set_anon_super(void) { return 42; }
+        typedef int sas_type(void);
+        extern typeof(set_anon_super) set_anon_super;
+        extern sas_type set_anon_super;
+    "#;
+    let (hir, tcx, cap) =
+        checked_snippet_with_options(src, Options { gnu_typeof: true, ..Options::default() });
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let function_defs: Vec<_> =
+        hir.defs.iter().filter(|def| matches!(def.kind, DefKind::Function { .. })).collect();
+    assert_eq!(function_defs.len(), 1, "typeof redeclarations should reuse the function def");
+    let DefKind::Function { ty, has_body, .. } = function_defs[0].kind else {
+        unreachable!();
+    };
+    assert!(has_body);
+    assert!(
+        matches!(tcx.get(ty), Ty::Func { ret, params, proto: true, .. } if *ret == tcx.int && params.is_empty())
+    );
+}
+
+#[test]
 fn builtin_va_list_function_parameter_adjusts_to_pointer() {
     let (hir, tcx) = lower_snippet("typedef __builtin_va_list va_list; int sink(va_list);");
     let def = hir

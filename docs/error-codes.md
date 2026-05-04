@@ -1341,3 +1341,17 @@ void f(int n, ...) {
 HIR lowering accepts `__va_area__` only inside variadic functions so the
 compatibility suite can exercise runtime varargs behaviour. Enable
 `Options::gnu_va_area` to accept it without this compatibility warning.
+
+## W0024 — GNU typeof type specifier extension
+
+`typeof (expr)` and `typeof (type-name)` are GNU C declaration
+specifiers, not C99 syntax:
+
+```c
+int f(void);
+extern typeof(f) f;  // warning[W0024] in strict C99 mode
+```
+
+The parser preserves the specifier so compatibility declarations can
+reach HIR lowering. Enable `Options::gnu_typeof` or pass
+`-fgnu-typeof` to accept it without this compatibility warning.

@@ -287,6 +287,42 @@ fn gnu_statement_expression_option_suppresses_warning() {
 }
 
 #[test]
+fn gnu_typeof_expr_warns_in_default_mode() {
+    let src = "int f(void); extern typeof(f) f;";
+    let (tu, diags) = parse_ok_with_options(src, Options::default());
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0024)),
+        "expected W0024 for GNU typeof in strict mode, got {diags:#?}"
+    );
+    let ExternalDecl::Decl(decl) = &tu.decls[1] else {
+        panic!("expected typeof declaration");
+    };
+    assert!(matches!(decl.specs.type_specs.as_slice(), [TypeSpec::TypeofExpr(_)]));
+}
+
+#[test]
+fn gnu_typeof_option_suppresses_warning() {
+    let src = "int f(void); extern __typeof__(f) f;";
+    let opts = Options { gnu_typeof: true, ..Options::default() };
+    let (_tu, diags) = parse_ok_with_options(src, opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0024)),
+        "gnu option should suppress W0024, got {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_typeof_type_name_is_preserved() {
+    let src = "extern typeof(int (*)(int)) fp;";
+    let opts = Options { gnu_typeof: true, ..Options::default() };
+    let (tu, _diags) = parse_ok_with_options(src, opts);
+    let ExternalDecl::Decl(decl) = &tu.decls[0] else {
+        panic!("expected declaration");
+    };
+    assert!(matches!(decl.specs.type_specs.as_slice(), [TypeSpec::TypeofType(_)]));
+}
+
+#[test]
 fn gnu_statement_expression_preserves_labels_and_gotos() {
     let src = "void f(void) { int x = ({ label: 1; goto label; }); }";
     let tu = parse_ok(src);

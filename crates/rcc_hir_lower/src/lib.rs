@@ -855,6 +855,8 @@ fn walk_decl_specs_labels(
                     }
                 }
             }
+            TypeSpec::TypeofExpr(expr) => walk_expr_labels(expr, resolver, session, pass),
+            TypeSpec::TypeofType(ty) => walk_type_name_labels(ty, resolver, session, pass),
             _ => {}
         }
     }
@@ -4912,6 +4914,125 @@ fn lower_typedef_name_in_scope(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_typeof_expr_to_ty(
+    expr: &rcc_ast::Expr,
+    scope: Option<&ScopeStack>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    let expr = peel_ast_parens(expr);
+    match &expr.kind {
+        rcc_ast::ExprKind::Ident(sym) => {
+            lower_typeof_ident_to_ty(*sym, expr.span, scope, resolver, crate_, tcx, session)
+        }
+        rcc_ast::ExprKind::IntLit(lit) => match lit.suffix {
+            rcc_ast::IntSuffix::None => tcx.int,
+            rcc_ast::IntSuffix::U => tcx.uint,
+            rcc_ast::IntSuffix::L => tcx.long,
+            rcc_ast::IntSuffix::UL => tcx.ulong,
+            rcc_ast::IntSuffix::LL => tcx.long_long,
+            rcc_ast::IntSuffix::ULL => tcx.ulong_long,
+        },
+        rcc_ast::ExprKind::FloatLit(lit) => match lit.suffix {
+            rcc_ast::FloatSuffix::None => tcx.double,
+            rcc_ast::FloatSuffix::F => tcx.float,
+            rcc_ast::FloatSuffix::L => tcx.long_double,
+        },
+        rcc_ast::ExprKind::CharLit(_) => tcx.int,
+        rcc_ast::ExprKind::StringLit(lit) => {
+            let len = lit.bytes.len().saturating_add(1) as u64;
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(len), is_vla: false })
+        }
+        rcc_ast::ExprKind::SizeofExpr(_) | rcc_ast::ExprKind::SizeofType(_) => tcx.ulong,
+        _ => {
+            session
+                .handler
+                .struct_err(
+                    expr.span,
+                    "unsupported GNU `typeof` expression; only identifiers and literals are currently lowered",
+                )
+                .code(rcc_errors::codes::E0061)
+                .emit();
+            tcx.error
+        }
+    }
+}
+
+fn peel_ast_parens(mut expr: &rcc_ast::Expr) -> &rcc_ast::Expr {
+    while let rcc_ast::ExprKind::Paren(inner) = &expr.kind {
+        expr = inner;
+    }
+    expr
+}
+
+fn lower_typeof_ident_to_ty(
+    sym: Symbol,
+    span: Span,
+    scope: Option<&ScopeStack>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    if let Some(binding) = scope.and_then(|scope| scope.lookup(sym)) {
+        return match binding {
+            Binding::Def(def) => def_type_for_typeof(def, span, crate_, tcx, session),
+            Binding::Local(_) => {
+                let name = session.interner.get(sym);
+                session
+                    .handler
+                    .struct_err(
+                        span,
+                        format!("GNU `typeof` of local identifier `{name}` is not lowered yet"),
+                    )
+                    .code(rcc_errors::codes::E0061)
+                    .emit();
+                tcx.error
+            }
+        };
+    }
+
+    if let Some(&def) = resolver.ordinary.get(&sym) {
+        return def_type_for_typeof(def, span, crate_, tcx, session);
+    }
+
+    let name = session.interner.get(sym);
+    session
+        .handler
+        .struct_err(span, format!("use of undeclared identifier `{name}` in GNU `typeof`"))
+        .code(rcc_errors::codes::E0071)
+        .emit();
+    tcx.error
+}
+
+fn def_type_for_typeof(
+    def: DefId,
+    span: Span,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    let ty = match &crate_.defs[def].kind {
+        DefKind::Function { ty, .. }
+        | DefKind::Global { ty, .. }
+        | DefKind::Typedef(ty)
+        | DefKind::Enumerator { ty, .. } => *ty,
+        DefKind::Record { .. } | DefKind::Enum { .. } => tcx.error,
+    };
+    if ty == tcx.error {
+        let name = session.interner.get(crate_.defs[def].name);
+        session
+            .handler
+            .struct_err(span, format!("cannot determine type of `{name}` for GNU `typeof`"))
+            .code(rcc_errors::codes::E0061)
+            .emit();
+    }
+    ty
+}
+
 /// Lower declaration specifiers plus a declarator into a complete HIR type.
 ///
 /// This is the canonical type-construction entry point for HIR lowering.
@@ -5396,6 +5517,27 @@ fn lower_specs_to_base_ty_in_scope(
             }
             TypeSpec::Enum(spec) => {
                 return lower_enum_spec_to_ty(spec, tcx, resolver, crate_, session);
+            }
+            TypeSpec::TypeofType(ty) => {
+                return lower_type_name_in_scope(
+                    ty,
+                    DeclScope::File,
+                    typedef_scope,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                );
+            }
+            TypeSpec::TypeofExpr(expr) => {
+                return lower_typeof_expr_to_ty(
+                    expr,
+                    typedef_scope,
+                    resolver,
+                    crate_,
+                    tcx,
+                    session,
+                );
             }
             _ => {}
         }
@@ -5899,7 +6041,11 @@ fn lower_builtin_specs_to_base_ty(
             TypeSpec::BuiltinVaList => {
                 return tcx.builtin_va_list;
             }
-            TypeSpec::TypedefName(_) | TypeSpec::Record(_) | TypeSpec::Enum(_) => {
+            TypeSpec::TypedefName(_)
+            | TypeSpec::Record(_)
+            | TypeSpec::Enum(_)
+            | TypeSpec::TypeofExpr(_)
+            | TypeSpec::TypeofType(_) => {
                 saw_unsupported = true;
             }
         }
@@ -6672,6 +6818,8 @@ fn assign_def_ids(
     crate_: &mut HirCrate,
     resolver: &mut Resolver,
 ) {
+    let mut function_typedefs = FxHashSet::default();
+
     for ext_decl in &ast.decls {
         match ext_decl {
             ExternalDecl::Function(func_def) => {
@@ -6762,13 +6910,24 @@ fn assign_def_ids(
                 for init_decl in &decl.inits {
                     if let Some((name, _span)) = init_decl.declarator.name {
                         let duplicate_in_decl = !names_in_decl.insert(name);
-                        let is_function_decl =
-                            !is_typedef && is_file_scope_function_declarator(&init_decl.declarator);
+                        let declares_function_type = declaration_base_is_function_type(
+                            &decl.specs,
+                            &init_decl.declarator,
+                            &function_typedefs,
+                            resolver,
+                            crate_,
+                        );
+                        let is_function_decl = !is_typedef
+                            && (is_file_scope_function_declarator(&init_decl.declarator)
+                                || declares_function_type);
                         let is_global_object_decl = !is_typedef && !is_function_decl;
                         if duplicate_in_decl && !is_global_object_decl {
                             emit_duplicate_ordinary(name, decl.span, session);
                         }
                         if is_typedef {
+                            let is_function_typedef =
+                                is_file_scope_function_declarator(&init_decl.declarator)
+                                    || declares_function_type;
                             let id = crate_.defs.push(Def {
                                 id: DefId(0),
                                 name,
@@ -6778,6 +6937,9 @@ fn assign_def_ids(
                             crate_.defs[id].id = id;
                             if !duplicate_in_decl {
                                 resolver.ordinary.insert(name, id);
+                            }
+                            if is_function_typedef {
+                                function_typedefs.insert(name);
                             }
                         } else if is_function_decl {
                             let flags =
@@ -6894,6 +7056,65 @@ fn attrs_contain_no_instrument_function(attrs: &[rcc_ast::Attribute], session: &
 
 fn is_file_scope_function_declarator(declarator: &Declarator) -> bool {
     matches!(declarator.derived.last(), Some(DerivedDeclarator::Function(_)))
+}
+
+fn declaration_base_is_function_type(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &Declarator,
+    function_typedefs: &FxHashSet<Symbol>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    if !declarator.derived.is_empty() {
+        return false;
+    }
+    specs_name_function_type(specs, function_typedefs, resolver, crate_)
+}
+
+fn specs_name_function_type(
+    specs: &rcc_ast::DeclSpecs,
+    function_typedefs: &FxHashSet<Symbol>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    specs.type_specs.iter().any(|spec| match spec {
+        TypeSpec::TypedefName(sym) => function_typedefs.contains(sym),
+        TypeSpec::TypeofExpr(expr) => typeof_expr_names_function(expr, resolver, crate_),
+        TypeSpec::TypeofType(ty) => {
+            type_name_names_function_type(ty, function_typedefs, resolver, crate_)
+        }
+        _ => false,
+    })
+}
+
+fn type_name_names_function_type(
+    ty: &rcc_ast::TypeName,
+    function_typedefs: &FxHashSet<Symbol>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    is_file_scope_function_declarator(&ty.declarator)
+        || declaration_base_is_function_type(
+            &ty.specs,
+            &ty.declarator,
+            function_typedefs,
+            resolver,
+            crate_,
+        )
+}
+
+fn typeof_expr_names_function(
+    expr: &rcc_ast::Expr,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    let rcc_ast::ExprKind::Ident(sym) = &peel_ast_parens(expr).kind else {
+        return false;
+    };
+    resolver
+        .ordinary
+        .get(sym)
+        .is_some_and(|def| matches!(crate_.defs[*def].kind, DefKind::Function { .. }))
 }
 
 fn finalize_file_scope_tag_definitions(
