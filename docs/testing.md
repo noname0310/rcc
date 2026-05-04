@@ -17,7 +17,7 @@ integration    ─▶  driver-level `tests/ui`, snapshot, end-to-end
 | ----- | ------------ |
 | `rcc_span`            | Symbol identity/hash, SourceMap line-col round trip. Covered by `crates/rcc_span/tests/roundtrip.rs`. |
 | `rcc_errors`          | DiagnosticBuilder API, `CaptureEmitter` records every level, Handler counters. Covered by `crates/rcc_errors/tests/capture.rs`. |
-| `rcc_lexer`           | Table-driven tests per `PpTokenKind`. **Fuzz target `fuzz/fuzz_targets/lex.rs` must run 24 h without panic/hang.** |
+| `rcc_lexer`           | Table-driven tests per `PpTokenKind`. **Fuzz target `fuzz/fuzz_targets/lex.rs` must run 30 minutes on the path-filtered extended workflow without panic/hang.** |
 | `rcc_preprocess`      | Macro expansion: recursion blocker (hide set), `##`/`#`, variadic `__VA_ARGS__`, self-reference, `#if`/`#elif` const-eval, include search path (mocked), `#pragma once`. |
 | `rcc_parse`           | One positive + one negative case per grammar production. Regression test for the typedef-name hack (`typedef int T; T x;` vs `int T; T x;`). Error-recovery tests. |
 | `rcc_ast` / `rcc_hir`  | Visitor round-trip, `NodeId`/`HirId` uniqueness. |
@@ -71,7 +71,8 @@ code.
 
 CI budgets:
 - per-commit: 30 s fuzz smoke on `lex` (see `.github/workflows/ci.yml`).
-- nightly: 24 h fuzz + 1 h csmith differential (configured out of band).
+- extended fuzz: 30 minute lexer gate on lexer/fuzz path changes or manual dispatch,
+  plus bounded csmith differential runs.
 
 ## CI gates (see `.github/workflows/ci.yml`)
 

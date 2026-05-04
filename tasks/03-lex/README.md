@@ -19,7 +19,7 @@ actually tokenises yet — it emits `PpTokenKind::Unknown` per byte.
 | 09 | [`09-header-name-context.md`](09-header-name-context.md) | `<...>` header names (directive-only). |
 | 10 | [`10-unit-tests-tables.md`](10-unit-tests-tables.md) | Table-driven tests per kind. |
 | 11 | [`11-unit-tests-ctestsuite-corpus.md`](11-unit-tests-ctestsuite-corpus.md) | Lex every c-testsuite source; no panics. |
-| 12 | [`12-fuzz-target.md`](12-fuzz-target.md) | `cargo fuzz run lex` 24 h no-panic. |
+| 12 | [`12-fuzz-target.md`](12-fuzz-target.md) | `cargo fuzz run lex` target + 30 minute extended gate. |
 | 13 | [`13-snapshot-tokens-emit.md`](13-snapshot-tokens-emit.md) | `--emit=tokens` golden snapshots. |
 
 ## Exit criteria

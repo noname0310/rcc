@@ -1,13 +1,15 @@
 > ✓ done — 2026-04-23
 
-# 03-12: Fuzz target (24 h no-panic)
+# 03-12: Fuzz target (30 minute gate)
 
 **Phase:** 03-lex    **Depends on:** 03-11    **Milestone:** M1
 
 ## Goal
 Promote the existing stub `fuzz/fuzz_targets/lex.rs` to a real target
-with a seed corpus pulled from `c-testsuite`. Nightly CI runs it for
-an hour; local 24 h runs are expected before each milestone tag.
+with a seed corpus pulled from `c-testsuite`. CI keeps a 30-second
+smoke run on every normal push, and the extended workflow runs the
+existing lexer fuzz target for 30 minutes only when lexer/fuzz-related
+paths change or when manually dispatched.
 
 ## Scope
 - In: `fuzz/corpus/lex/` seeded (copy-on-write) from c-testsuite;

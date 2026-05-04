@@ -14,7 +14,7 @@ Many tests have reference output files; adapter compares them.
 - Out: MultiSource / benchmarks (future).
 
 ## Deliverables
-- Adapter + nightly job.
+- Adapter + manual job.
 
 ## Acceptance
 - Subset pass rate reported; no unexplained regressions for 3

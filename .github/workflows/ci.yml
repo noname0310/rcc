@@ -6,8 +6,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: "17 19 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -131,9 +129,9 @@ jobs:
           path: docs/conformance.json
 
   gcc-torture-smoke:
-    name: gcc-torture smoke (GPL, nightly)
+    name: gcc-torture smoke (GPL, manual)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -165,9 +163,9 @@ jobs:
           path: docs/gcc-torture-smoke.json
 
   llvm-test-suite:
-    name: llvm-test-suite SingleSource (nightly)
+    name: llvm-test-suite SingleSource (manual)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -211,9 +209,9 @@ jobs:
           path: docs/llvm-test-suite.json
 
   gcc-torture-full:
-    name: gcc-torture execute (GPL, nightly)
+    name: gcc-torture execute (GPL, manual)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0

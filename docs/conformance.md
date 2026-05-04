@@ -164,7 +164,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; current required gate is 3 pass, 0 fail |
 | `GccTortureAdapter`          | implemented; smoke/full execute modes are GPL-gated |
 | `TccTests2Adapter`           | implemented at task 11-16; current WSL baseline is 75 pass, 9 xfail, 0 fail, 4 skip |
-| `LlvmTestSuiteAdapter`       | implemented at task 11-17; nightly curated SingleSource subset currently 6 pass, 0 fail |
+| `LlvmTestSuiteAdapter`       | implemented at task 11-17; manual curated SingleSource subset currently 6 pass, 0 fail |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
 
 ## XFail lists

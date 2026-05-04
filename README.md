@@ -36,7 +36,7 @@ xtask/                 # cargo xtask fetch-testsuites / show-manifest
 third_party/
   MANIFEST.toml        # Pinned external C test suites
   testsuites/          # Populated by `cargo xtask fetch-testsuites`
-fuzz/                  # cargo-fuzz targets (nightly)
+fuzz/                  # cargo-fuzz targets (extended/manual)
 docs/
   architecture.md
   interfaces.md

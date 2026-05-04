@@ -16,7 +16,7 @@ KPI row.
 - Out: tcc's "runtime" tests that need its libtcc headers.
 
 ## Deliverables
-- Adapter + nightly CI job.
+- Adapter + manual CI job.
 - Report row.
 
 ## Acceptance

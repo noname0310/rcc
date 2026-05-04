@@ -13,7 +13,7 @@ which KPI cells are required; failures block merge.
 - In: `.github/workflows/ci.yml` additions: new `conformance` job
   that checks out, fetches **permissive** suites, builds `rcc`,
   runs the binary, verifies thresholds.
-- Out: nightly GCC torture / csmith job (phase 12).
+- Out: manual GCC torture / csmith job (phase 12).
 
 ## Deliverables
 - `conformance` job uploads `docs/conformance.json` as an artifact.

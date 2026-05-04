@@ -28,7 +28,7 @@ tasks/
 ├── 09-codegen-llvm/          ← CFG → LLVM IR via inkwell
 ├── 10-driver/                ← `rcc` binary, --emit, UI/snapshot/E2E
 ├── 11-conformance/           ← milestone-indexed KPI targets per suite
-├── 12-fuzz-differential/     ← cargo-fuzz corpora + csmith nightly
+├── 12-fuzz-differential/     ← cargo-fuzz corpora + bounded csmith differential
 ├── 13-quality/               ← opt levels, diag polish, bench, release
 ├── 14-lang-extensions/       ← _Pragma, __attribute__, __has_include, asm, -U, -M
 └── 15-builtin-rt/            ← TargetInfo, freestanding headers, __builtin_*, sysroot

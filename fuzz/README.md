@@ -2,14 +2,14 @@
 
 This directory is a **sub-workspace** (see the top-level `Cargo.toml`
 `exclude = ["fuzz"]` and `fuzz/Cargo.toml`'s own empty `[workspace]`
-table). It exists so that `cargo-fuzz` can pull nightly-only features
-without infecting the main workspace.
+table). It exists so that `cargo-fuzz` can pull Rust nightly toolchain
+features without infecting the main workspace.
 
 Targets:
 
 | target       | entry point                           | purpose                                         |
 |--------------|---------------------------------------|-------------------------------------------------|
-| `lex`        | `fuzz_targets/lex.rs`                 | 24 h no-panic gate for `rcc_lexer` (M1)        |
+| `lex`        | `fuzz_targets/lex.rs`                 | 30 minute path-filtered no-panic gate for `rcc_lexer` |
 | `preprocess` | `fuzz_targets/preprocess.rs`          | `Session` + `Preprocessor::run` pipeline (M5)  |
 
 ## Prerequisites
@@ -85,36 +85,34 @@ cargo +nightly fuzz run lex -- -max_total_time=30 -max_len=131072
 Exit code is non-zero iff libFuzzer reported a crash, slow unit, or
 leak — that is the acceptance gate.
 
-### Local milestone run (≥ 10 min, up to 24 h)
+### Local milestone run
 
 ```bash
 cargo +nightly fuzz run lex -- -max_total_time=600 -max_len=131072   # 10 min
-cargo +nightly fuzz run lex -- -max_total_time=86400 -max_len=131072 # 24 h
+cargo +nightly fuzz run lex -- -max_total_time=1800 -max_len=131072  # 30 min
 ```
 
 Any discovered crash is written to `fuzz/artifacts/lex/` and should be
 minified (`cargo +nightly fuzz tmin lex <artifact>`) and then filed as
 a new task under 03-lex/ or the relevant downstream phase.
 
-### Nightly 24 h-class run
+### Extended 30 minute run
 
-The scheduled workflow lives at `.github/workflows/fuzz-nightly.yml`.
-GitHub-hosted runners currently cap a single job at 6 h, so the
-workflow runs four independent lex shards at just under 6 h each. This
-gives a 24 h-class aggregate fuzzing budget without relying on a
-self-hosted runner.
+The extended workflow lives at `.github/workflows/fuzz-lex-30m.yml`.
+It runs the existing `lex` target once for 30 minutes when lexer/fuzz
+paths change, or when manually dispatched. This is the default
+personal-project release gate: long enough to catch shallow lexer
+regressions without running compute on an unconditional cron.
 
 Manual dispatch accepts shorter values for development:
 
 ```bash
-gh workflow run fuzz-nightly.yml -f max_total_time=60 -f max_len=131072
+gh workflow run fuzz-lex-30m.yml -f max_total_time=60 -f max_len=131072
 ```
 
-Each shard uploads `fuzz/corpus/lex/` and its crash directory. Failures
-use the repository's normal GitHub Actions notifications. To route
-alerts into Slack, email, or another incident bridge, configure the
-repository secret `FUZZ_ALERT_WEBHOOK_URL`; the workflow posts a small
-JSON payload containing the failing shard and run URL.
+The workflow uploads `fuzz/corpus/lex/` and its crash directory.
+Failures use the repository's normal GitHub Actions notifications and
+uploaded artifacts; no external incident channel is assumed.
 
 ## Running the preprocess fuzzer
 
@@ -185,7 +183,7 @@ fuzzer reports it before proceeding to any longer runs.
 
 ```bash
 cargo +nightly fuzz run preprocess -- -max_total_time=600 -max_len=131072   # 10 min
-cargo +nightly fuzz run preprocess -- -max_total_time=86400 -max_len=131072 # 24 h
+cargo +nightly fuzz run preprocess -- -max_total_time=1800 -max_len=131072  # 30 min
 ```
 
 Crashes land in `fuzz/artifacts/preprocess/`. Minify with
@@ -232,7 +230,7 @@ best-effort local environment for this particular task.
 ## References
 
 - Task spec (lex): [`tasks/03-lex/12-fuzz-target.md`](../tasks/03-lex/12-fuzz-target.md).
-- Nightly task spec: [`tasks/12-fuzz-differential/01-lexer-fuzz-24h.md`](../tasks/12-fuzz-differential/01-lexer-fuzz-24h.md).
+- Extended task spec: [`tasks/12-fuzz-differential/01-lexer-fuzz-30m.md`](../tasks/12-fuzz-differential/01-lexer-fuzz-30m.md).
 - Task spec (preprocess): [`tasks/04-preprocess/19-fuzz-target.md`](../tasks/04-preprocess/19-fuzz-target.md).
 - GitHub-hosted runner limits: <https://docs.github.com/en/actions/reference/usage-limits-for-self-hosted-runners>.
 - cargo-fuzz book: <https://rust-fuzz.github.io/book/cargo-fuzz.html>.

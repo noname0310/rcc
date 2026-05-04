@@ -16,7 +16,7 @@ pointers. Serves as an early warning for regressions, not a gate.
 
 ## Deliverables
 - Subset file + adapter branch.
-- nightly-only CI job (respects GPL gate).
+- manual CI job (respects GPL gate).
 
 ## Acceptance
 - Nightly CI exposes numbers for the subset.
@@ -26,7 +26,7 @@ pointers. Serves as an early warning for regressions, not a gate.
 - Added a tracked smoke subset list with 35 `gcc.c-torture/execute` files.
 - Added `GccTortureAdapter` discovery and run support behind the existing
   GPL gate; the GPL source checkout remains ignored.
-- Added a nightly/workflow-dispatch CI job that fetches gcc-torture with
+- Added a workflow-dispatch CI job that fetches gcc-torture with
   `--include-gpl`, builds the LLVM-enabled driver, runs the subset, and
   uploads the JSON report.
 - Local WSL validation: 35 discovered, 35 passed, 0 failed, pass rate 1.000.

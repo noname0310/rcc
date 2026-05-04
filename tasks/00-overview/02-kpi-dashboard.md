@@ -10,7 +10,7 @@ numbers inline, so changing a target is a one-file edit.
 
 ## KPI matrix
 
-| Milestone | c-testsuite | chibicc subset                | gcc-torture execute | csmith 24 h |
+| Milestone | c-testsuite | chibicc subset                | gcc-torture execute | csmith bounded |
 |-----------|------------:|-------------------------------|--------------------:|-------------|
 | M1        | parse-only: small corpus boots | —                | —                   | —           |
 | M2        | hello-world class             | stages 1–3         | —                   | —           |

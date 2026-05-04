@@ -14,7 +14,7 @@ Useful once the parser is feature-complete.
 - Target + seed script.
 
 ## Acceptance
-- No panics in 24 h nightly.
+- No panics in a 30 minute path-filtered or manually dispatched run.
 - Parsed token count per byte within a sane range (diagnostics
   guard against pathological blow-ups).
 

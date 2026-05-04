@@ -1,0 +1,82 @@
+name: Fuzz Lex 30m
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fuzz-lex-30m.yml"
+      - "fuzz/**"
+      - "crates/rcc_lexer/**"
+      - "crates/rcc_span/**"
+      - "crates/rcc_errors/**"
+      - "crates/rcc_session/**"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "libFuzzer total seconds"
+        required: false
+        default: "1800"
+      max_len:
+        description: "Maximum generated input length"
+        required: false
+        default: "131072"
+concurrency:
+  group: fuzz-lex-30m-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FUZZ_MAX_TOTAL_TIME: ${{ inputs.max_total_time || '1800' }}
+  FUZZ_MAX_LEN: ${{ inputs.max_len || '131072' }}
+
+jobs:
+  lex:
+    name: lex 30m
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep one deterministic shard for the personal-project extended gate:
+        # enough to catch shallow lexer regressions without burning long CI time.
+        shard: [0]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+
+      - name: Run lex fuzzer shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p "fuzz/artifacts/lex/shard-${SHARD}"
+          cd fuzz
+          cargo +nightly fuzz run lex --target x86_64-unknown-linux-gnu -- \
+            -max_total_time="${FUZZ_MAX_TOTAL_TIME}" \
+            -max_len="${FUZZ_MAX_LEN}" \
+            -rss_limit_mb=4096 \
+            -seed="$((100000 + SHARD))" \
+            -artifact_prefix="artifacts/lex/shard-${SHARD}/" \
+            -print_final_stats=1
+
+      - name: Upload lex corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lex-fuzz-shard-${{ matrix.shard }}
+          path: |
+            fuzz/corpus/lex
+            fuzz/artifacts/lex/shard-${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14

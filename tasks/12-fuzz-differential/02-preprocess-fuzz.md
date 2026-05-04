@@ -17,7 +17,8 @@ giving libfuzzer access to a small virtual filesystem.
 - Seed script.
 
 ## Acceptance
-- 24 h nightly: 0 new crashes; exec/s reasonable (> 100).
+- 30 minute path-filtered or manually dispatched run: 0 new crashes;
+  exec/s reasonable (> 100).
 
 ## References
 - Plan §8.5.

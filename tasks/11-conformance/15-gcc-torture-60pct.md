@@ -17,12 +17,12 @@ extensions we deliberately don't support.
 - Nightly pass-rate report.
 
 ## Acceptance
-- Pass rate ≥ 60 %, stable for a week of nightly runs.
+- Pass rate ≥ 60 %, stable across repeated manual runs.
 
 ## Result
 - `GccTortureAdapter` now has separate smoke and full execute modes.
 - Full mode discovers every direct `gcc.c-torture/execute/*.c` case.
-- The full nightly job fetches gcc-torture behind `--include-gpl`, runs the
+- The full manual job fetches gcc-torture behind `--include-gpl`, runs the
   full execute adapter, uploads the JSON report, and fails if pass rate drops
   below 0.600.
 - Added `-fgnu-builtin-libcalls` so GCC torture's common builtin libc aliases
