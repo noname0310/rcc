@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rcc_span       = { path = "../crates/rcc_span" }
+rcc_errors     = { path = "../crates/rcc_errors" }
 rcc_lexer      = { path = "../crates/rcc_lexer" }
 rcc_preprocess = { path = "../crates/rcc_preprocess" }
 rcc_parse      = { path = "../crates/rcc_parse" }
@@ -24,6 +25,12 @@ doc  = false
 [[bin]]
 name = "preprocess"
 path = "fuzz_targets/preprocess.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
 test = false
 doc  = false
 

@@ -11,6 +11,7 @@ Targets:
 |--------------|---------------------------------------|-------------------------------------------------|
 | `lex`        | `fuzz_targets/lex.rs`                 | 30 minute path-filtered no-panic gate for `rcc_lexer` |
 | `preprocess` | `fuzz_targets/preprocess.rs`          | `Session` + `Preprocessor::run` pipeline (M5)  |
+| `parse`      | `fuzz_targets/parse.rs`               | `lex -> preprocess -> parse` AST recovery gate |
 
 ## Prerequisites
 
@@ -30,6 +31,7 @@ Each target has its own curated seed directory under `corpus/`:
 |--------------|-----------------------|--------------------------------------------------------------------|
 | `lex`        | `corpus/lex/`         | `third_party/testsuites/c-testsuite/tests/single-exec/`            |
 | `preprocess` | `corpus/preprocess/`  | `third_party/testsuites/chibicc/test/` (preprocessor-heavy inputs) |
+| `parse`      | `corpus/parse/`       | c-testsuite standalone TUs + chibicc parser-heavy fixtures         |
 
 Both sets are checked in so fresh clones can run the fuzzer without a
 vendored suite. To refresh from a freshly fetched testsuite, run the
@@ -39,12 +41,14 @@ matching script:
 # Linux / macOS / CI
 ./scripts/fuzz/seed-lex.sh
 ./scripts/fuzz/seed-preprocess.sh
+./scripts/fuzz/seed-parse.sh
 ```
 
 ```powershell
 # Windows local dev
 powershell -ExecutionPolicy Bypass -File scripts/fuzz/seed-lex.ps1
 powershell -ExecutionPolicy Bypass -File scripts/fuzz/seed-preprocess.ps1
+powershell -ExecutionPolicy Bypass -File scripts/fuzz/seed-parse.ps1
 ```
 
 The scripts are idempotent — they overwrite existing seed files with
@@ -207,12 +211,36 @@ Crashes land in `fuzz/artifacts/preprocess/`. Minify with
 `cargo +nightly fuzz tmin preprocess <artifact>` and file a follow-up
 task under `tasks/04-preprocess/` or the relevant downstream phase.
 
+## Running the parse fuzzer
+
+The `parse` target runs the phase-7 parser entrypoint after preprocessing:
+
+```text
+String::from_utf8_lossy
+ → Session::with_handler(CaptureEmitter)
+ → Preprocessor::run(file_id)
+ → rcc_parse::parse(session, pp_tokens)
+```
+
+Invalid C should produce diagnostics, not panics. To keep the target focused
+on parser recovery rather than macro-expansion blowups, it discards inputs
+whose preprocessed token stream exceeds either 64 Ki tokens or a 64x
+input-byte ratio.
+
+```bash
+cargo +nightly fuzz run parse -- -max_total_time=60 -max_len=131072
+```
+
+The extended workflow at `.github/workflows/fuzz-parse-30m.yml` runs the
+target for 30 minutes when parse/preprocess/lexer/fuzz paths change, or when
+manually dispatched.
+
 ## Windows caveats
 
 libFuzzer on Windows targets MSVC's `clang.exe` runtime. In practice,
 on stock `nightly-x86_64-pc-windows-msvc`:
 
-- `cargo +nightly fuzz build lex` (and `... build preprocess`) may
+- `cargo +nightly fuzz build lex` (and `... build preprocess` / `... build parse`) may
   fail with link-time errors referring to missing `libfuzzer.lib` /
   ASAN runtime. This is an upstream toolchain gap, not an `rcc` issue.
 - Even when `cargo +nightly fuzz build <target>` succeeds, the
@@ -249,6 +277,7 @@ best-effort local environment for this particular task.
 - Task spec (lex): [`tasks/03-lex/12-fuzz-target.md`](../tasks/03-lex/12-fuzz-target.md).
 - Extended task spec: [`tasks/12-fuzz-differential/01-lexer-fuzz-30m.md`](../tasks/12-fuzz-differential/01-lexer-fuzz-30m.md).
 - Task spec (preprocess): [`tasks/04-preprocess/19-fuzz-target.md`](../tasks/04-preprocess/19-fuzz-target.md).
+- Task spec (parse): [`tasks/12-fuzz-differential/03-parser-fuzz.md`](../tasks/12-fuzz-differential/03-parser-fuzz.md).
 - GitHub-hosted runner limits: <https://docs.github.com/en/actions/reference/usage-limits-for-self-hosted-runners>.
 - cargo-fuzz book: <https://rust-fuzz.github.io/book/cargo-fuzz.html>.
 - libFuzzer flags: <https://llvm.org/docs/LibFuzzer.html#options>.

@@ -113,6 +113,7 @@ name = "rcc-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "rcc_errors",
  "rcc_lexer",
  "rcc_parse",
  "rcc_preprocess",
