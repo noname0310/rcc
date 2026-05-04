@@ -178,43 +178,47 @@ const ROWS: &[(&str, &str)] = &[
     ("#define TRIPLE(x) x, x, x\nTRIPLE(7)\n",                   "7 , 7 , 7"),
     // 18: argument re-expansion across a deeper chain.
     ("#define A x\n#define F(a) a\nF(A)\n",                      "x"),
+    // 19: intentionally empty actual arguments preserve separators exactly
+    //     like tcc-tests2 71_macro_empty_arg.
+    ("#define T(a,b,c) a b c\nT(1,+,2) T(+,,) T(,2,*) T(,7,) T(,,)\n",
+                                                                 "1 + 2 + 2 * 7"),
 
     // ── stringize `#` ──────────────────────────────────────────────
-    // 19: bare stringize — the identifier becomes a string literal.
+    // 20: bare stringize — the identifier becomes a string literal.
     ("#define STR(x) #x\nSTR(hello)\n",                          "\"hello\""),
-    // 20: multi-token argument is stringised with a single space
+    // 21: multi-token argument is stringised with a single space
     //     between each token (§6.10.3.2p2). [chibicc]
     ("#define STR(x) #x\nSTR(a + b)\n",                          "\"a + b\""),
-    // 21: backslash and quote inside the argument are escaped.
+    // 22: backslash and quote inside the argument are escaped.
     ("#define STR(x) #x\nSTR(\"q\")\n",                          "\"\\\"q\\\"\""),
-    // 22: empty argument stringises to an empty literal. [chibicc]
+    // 23: empty argument stringises to an empty literal. [chibicc]
     ("#define STR(x) #x\nSTR()\n",                               "\"\""),
-    // 23: interleaving stringised pieces.
+    // 24: interleaving stringised pieces.
     ("#define S(x) #x \" and \" #x\nS(yo)\n",                    "\"yo\" \" and \" \"yo\""),
 
     // ── paste `##` ─────────────────────────────────────────────────
-    // 24: identifier paste.                                        [chibicc]
+    // 25: identifier paste.                                        [chibicc]
     ("#define CAT(a,b) a##b\nCAT(foo,bar)\n",                    "foobar"),
-    // 25: paste of two pp-numbers.                                 [chibicc]
+    // 26: paste of two pp-numbers.                                 [chibicc]
     ("#define CAT(a,b) a##b\nCAT(1,2)\n",                        "12"),
-    // 26: paste with empty right operand re-emits the left operand.
+    // 27: paste with empty right operand re-emits the left operand.
     ("#define CAT(a,b) a##b\nCAT(foo,)\n",                       "foo"),
-    // 27: paste with empty left operand re-emits the right operand.
+    // 28: paste with empty left operand re-emits the right operand.
     ("#define CAT(a,b) a##b\nCAT(,bar)\n",                       "bar"),
-    // 28: paste result is rescanned for further expansion.
+    // 29: paste result is rescanned for further expansion.
     ("#define FOO 42\n#define CAT(a,b) a##b\nCAT(F,OO)\n",       "42"),
-    // 29: indirection layer to stringify-then-paste a value.       [chibicc]
+    // 30: indirection layer to stringify-then-paste a value.       [chibicc]
     ("#define GLUE(a,b) a##b\n#define MKVAR(n) GLUE(var_,n)\nMKVAR(1)\n",
                                                                  "var_1"),
 
     // ── variadic `__VA_ARGS__` ─────────────────────────────────────
-    // 30: bare variadic forwarding — commas are preserved.         [chibicc]
+    // 31: bare variadic forwarding — commas are preserved.         [chibicc]
     ("#define V(...) __VA_ARGS__\nV(1,2,3)\n",                   "1 , 2 , 3"),
-    // 31: named parameter plus variadic tail.                      [chibicc]
+    // 32: named parameter plus variadic tail.                      [chibicc]
     ("#define L(x,...) x+__VA_ARGS__\nL(1,2,3)\n",               "1 + 2 , 3"),
-    // 32: variadic passed through an indirection.                  [chibicc]
+    // 33: variadic passed through an indirection.                  [chibicc]
     ("#define CALL(f,...) f(__VA_ARGS__)\nCALL(foo,1,2)\n",      "foo ( 1 , 2 )"),
-    // 33: zero variadic arguments → the parameter substitutes to
+    // 34: zero variadic arguments → the parameter substitutes to
     //     an empty sequence (C99 §6.10.3p5 as interpreted by the
     //     default `gnu_va_args_elision = true` option; the token
     //     output drops the variadic parameter cleanly).

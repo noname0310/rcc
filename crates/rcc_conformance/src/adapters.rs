@@ -819,6 +819,10 @@ impl TccTests2Adapter {
             // vendored .expect file only kept the trailing space on the last
             // line, while GCC/TCC-compatible execution prints it on all rows.
             "38_multiple_array_index" => TccCompareMode::TrimTrailingSpacesPerLine,
+            // The source prints `printf("%d", ...)` without a newline. GCC,
+            // TCC, and rcc all produce `17`; the vendored .expect file has a
+            // final CRLF.
+            "71_macro_empty_arg" => TccCompareMode::AllowFinalNewlineDrift,
             _ => TccCompareMode::Exact,
         };
         Self::compare_outcome_inner(actual_output, expected_path, mode)
@@ -1022,12 +1026,14 @@ impl Adapter for TccTests2Adapter {
 enum TccCompareMode {
     Exact,
     TrimTrailingSpacesPerLine,
+    AllowFinalNewlineDrift,
 }
 
 fn normalize_tcc_output(bytes: &[u8], mode: TccCompareMode) -> Vec<u8> {
     let normalized = normalize_stdout_newlines(bytes);
     match mode {
         TccCompareMode::Exact => normalized,
+        TccCompareMode::AllowFinalNewlineDrift => strip_one_final_newline(normalized),
         TccCompareMode::TrimTrailingSpacesPerLine => {
             let mut out = Vec::with_capacity(normalized.len());
             for line in normalized.split_inclusive(|b| *b == b'\n') {
@@ -1045,6 +1051,13 @@ fn normalize_tcc_output(bytes: &[u8], mode: TccCompareMode) -> Vec<u8> {
             out
         }
     }
+}
+
+fn strip_one_final_newline(mut bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    bytes
 }
 
 /// `llvm-test-suite` SingleSource adapter.

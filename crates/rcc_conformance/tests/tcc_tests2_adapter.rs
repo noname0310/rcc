@@ -58,6 +58,24 @@ fn compare_trims_known_multiple_array_index_trailing_space_drift_only_for_that_c
 }
 
 #[test]
+fn compare_allows_known_macro_empty_arg_final_newline_drift_only_for_that_case() {
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = tmp.path().join("71_macro_empty_arg.expect");
+    fs::write(&expected, b"17\r\n").unwrap();
+    let actual = b"17";
+
+    assert!(matches!(TccTests2Adapter::compare_outcome(actual, &expected), Outcome::Fail { .. }));
+    assert!(matches!(
+        TccTests2Adapter::compare_outcome_for_stem("71_macro_empty_arg", actual, &expected),
+        Outcome::Pass
+    ));
+    assert!(matches!(
+        TccTests2Adapter::compare_outcome_for_stem("00_assignment", actual, &expected),
+        Outcome::Fail { .. }
+    ));
+}
+
+#[test]
 fn run_fails_when_rcc_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let case_path = tmp.path().join("00_assignment.c");
