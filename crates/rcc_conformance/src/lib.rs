@@ -154,6 +154,18 @@ impl Report {
 /// Errors from discovery / execution are converted into `Fail` outcomes so a
 /// broken adapter doesn't silently skip a whole suite.
 pub fn run_suites(rrcc_path: &Path, suites: &[Suite]) -> Report {
+    run_suites_with_cases(rrcc_path, suites, &[])
+}
+
+/// Run supplied suites, restricting execution to exact case ids when
+/// `case_ids` is non-empty.
+///
+/// The filter is applied after adapter discovery. An unmatched requested id is
+/// reported as a failure so typos do not silently produce an empty green
+/// report. Expected-failure entries outside the selected ids are ignored while
+/// filtering, since they are not part of the requested run.
+pub fn run_suites_with_cases(rrcc_path: &Path, suites: &[Suite], case_ids: &[String]) -> Report {
+    let case_filter: BTreeSet<&str> = case_ids.iter().map(String::as_str).collect();
     let mut report = Report::default();
     for suite in suites {
         let mut sr = SuiteReport { name: suite.name.clone(), ..Default::default() };
@@ -177,8 +189,26 @@ pub fn run_suites(rrcc_path: &Path, suites: &[Suite]) -> Report {
                 continue;
             }
         };
+        let cases = if case_filter.is_empty() {
+            cases
+        } else {
+            cases.into_iter().filter(|case| case_filter.contains(case.id.as_str())).collect()
+        };
         let discovered_ids: BTreeSet<_> = cases.iter().map(|case| case.id.as_str()).collect();
+        for id in &case_filter {
+            if !discovered_ids.contains(id) {
+                sr.cases.insert(
+                    (*id).to_owned(),
+                    Outcome::Fail {
+                        reason: "case filter did not match a discovered test case".into(),
+                    },
+                );
+            }
+        }
         for (id, reason) in &xfail_map {
+            if !case_filter.is_empty() && !case_filter.contains(id.as_str()) {
+                continue;
+            }
             if !discovered_ids.contains(id.as_str()) {
                 sr.cases.insert(
                     id.clone(),
@@ -273,5 +303,39 @@ mod tests {
         assert_eq!(suite.counts().pass, 2);
         assert_eq!(suite.counts().xfail, 0);
         assert_eq!(suite.pass_rate(), 1.0);
+    }
+
+    #[test]
+    fn run_suites_with_cases_runs_only_selected_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let suite = Suite {
+            name: "suite".into(),
+            root: tmp.path().to_path_buf(),
+            adapter: Box::new(FixedAdapter { outcome: Outcome::Fail { reason: "boom".into() } }),
+        };
+        let cases = vec!["suite::pass".to_owned()];
+
+        let report = run_suites_with_cases(Path::new("rcc"), &[suite], &cases);
+        let suite = &report.suites[0];
+        assert_eq!(suite.counts().pass, 1);
+        assert_eq!(suite.counts().fail, 0);
+        assert!(suite.cases.contains_key("suite::pass"));
+        assert!(!suite.cases.contains_key("suite::known-fail"));
+    }
+
+    #[test]
+    fn run_suites_with_cases_reports_unmatched_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let suite = Suite {
+            name: "suite".into(),
+            root: tmp.path().to_path_buf(),
+            adapter: Box::new(FixedAdapter { outcome: Outcome::Pass }),
+        };
+        let cases = vec!["suite::missing".to_owned()];
+
+        let report = run_suites_with_cases(Path::new("rcc"), &[suite], &cases);
+        let suite = &report.suites[0];
+        assert_eq!(suite.counts().fail, 1);
+        assert!(matches!(suite.cases.get("suite::missing"), Some(Outcome::Fail { .. })));
     }
 }

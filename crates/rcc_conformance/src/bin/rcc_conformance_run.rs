@@ -61,6 +61,13 @@ struct Cli {
     /// fixtures without compiling upstream `test/common` with `rcc`.
     #[arg(long, value_enum, default_value_t = Mode::Compile)]
     mode: Mode,
+
+    /// Exact test-case id to run, e.g. `chibicc::control`.
+    ///
+    /// May be repeated. When omitted, every case discovered by each selected
+    /// suite is run.
+    #[arg(long = "case")]
+    cases: Vec<String>,
 }
 
 /// Known suite names and whether they require `--include-gpl`.
@@ -96,7 +103,11 @@ fn main() -> anyhow::Result<()> {
         suites.push(build_suite(name, cli.include_gpl, cli.mode)?);
     }
 
-    let report = rcc_conformance::run_suites(&cli.rcc, &suites);
+    let report = if cli.cases.is_empty() {
+        rcc_conformance::run_suites(&cli.rcc, &suites)
+    } else {
+        rcc_conformance::run_suites_with_cases(&cli.rcc, &suites, &cli.cases)
+    };
 
     let json = report.to_json_pretty();
 

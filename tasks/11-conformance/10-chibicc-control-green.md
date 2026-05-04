@@ -1,5 +1,7 @@
 # 11-10: chibicc control.c green
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-08, 11-09    **Milestone:** M3+
 
 ## Goal
