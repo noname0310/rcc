@@ -6245,6 +6245,7 @@ mod tests {
             span: DUMMY_SP,
             kind: rcc_hir::DefKind::Record {
                 kind: rcc_hir::RecordKind::Struct,
+                align_override: None,
                 layout: None,
                 fields: vec![
                     rcc_hir::Field {

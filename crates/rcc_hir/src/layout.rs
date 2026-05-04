@@ -253,7 +253,7 @@ impl<'tcx> LayoutCx<'tcx> {
             return Err(LayoutError::Unsupported { ty, feature: "recursive record by value" });
         }
         let def_data = defs.get(def).ok_or(LayoutError::MissingDefinition { def })?;
-        let DefKind::Record { kind, layout, fields } = &def_data.kind else {
+        let DefKind::Record { kind, align_override, layout, fields } = &def_data.kind else {
             return Err(LayoutError::ExpectedRecord { def });
         };
         if let Some(layout) = layout {
@@ -280,8 +280,12 @@ impl<'tcx> LayoutCx<'tcx> {
 
         record_stack.push(def);
         let result = match kind {
-            RecordKind::Struct => self.struct_layout_details(ty, fields, record_stack),
-            RecordKind::Union => self.union_layout_details(ty, fields, record_stack),
+            RecordKind::Struct => {
+                self.struct_layout_details(ty, fields, *align_override, record_stack)
+            }
+            RecordKind::Union => {
+                self.union_layout_details(ty, fields, *align_override, record_stack)
+            }
         };
         record_stack.pop();
         result
@@ -291,6 +295,7 @@ impl<'tcx> LayoutCx<'tcx> {
         &self,
         ty: TyId,
         fields: &[crate::Field],
+        align_override: Option<u32>,
         record_stack: &mut Vec<DefId>,
     ) -> LayoutResult<RecordLayout> {
         let mut offset = 0_u64;
@@ -377,6 +382,9 @@ impl<'tcx> LayoutCx<'tcx> {
             }
         }
         offset = finish_bit_unit(offset, bit_unit, ty)?;
+        if let Some(align) = align_override {
+            max_align = max_align.max(align);
+        }
         let size = align_to(offset, max_align).ok_or(LayoutError::SizeOverflow { ty })?;
         Ok(RecordLayout { layout: Layout { size, align: max_align }, fields: layouts })
     }
@@ -385,6 +393,7 @@ impl<'tcx> LayoutCx<'tcx> {
         &self,
         ty: TyId,
         fields: &[crate::Field],
+        align_override: Option<u32>,
         record_stack: &mut Vec<DefId>,
     ) -> LayoutResult<RecordLayout> {
         let mut size = 0_u64;
@@ -403,6 +412,9 @@ impl<'tcx> LayoutCx<'tcx> {
                 storage_size,
                 storage_align: layout.align,
             });
+        }
+        if let Some(align) = align_override {
+            max_align = max_align.max(align);
         }
         let size = align_to(size, max_align).ok_or(LayoutError::SizeOverflow { ty })?;
         Ok(RecordLayout { layout: Layout { size, align: max_align }, fields: layouts })
@@ -514,7 +526,7 @@ mod tests {
             id: DefId(0),
             name: Symbol(1),
             span: DUMMY_SP,
-            kind: DefKind::Record { kind, layout: None, fields },
+            kind: DefKind::Record { kind, align_override: None, layout: None, fields },
         });
         defs[id].id = id;
         id

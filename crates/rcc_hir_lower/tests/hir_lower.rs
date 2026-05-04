@@ -804,6 +804,33 @@ fn s6_7_5_sizeof_type_array_bound_is_fixed() {
 }
 
 #[test]
+fn gnu_aligned_attribute_sets_record_layout_override() {
+    let src = r#"
+        typedef struct x { int a; int b; } __attribute__((aligned(32))) X;
+        typedef struct y { X x[32]; int c; } Y;
+        Y y[2];
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, mut tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let x_record = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { fields, align_override: Some(32), .. } if fields.len() == 2 => {
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("aligned struct x record should carry an override");
+    let x_ty = tcx.intern(Ty::Record(x_record));
+    let x_layout = LayoutCx::with_defs(&tcx, &hir.defs).layout_of(x_ty).unwrap();
+    assert_eq!(x_layout.align, 32);
+    assert_eq!(x_layout.size, 32);
+}
+
+#[test]
 fn s6_7_5_array_of_pointers() {
     // int *x[10]; — array of 10 pointers to int.
     // Right-left: x → [10] (innermost) → * → int.
@@ -1553,6 +1580,7 @@ fn init_record_per_field_assign() {
         span: DUMMY_SP,
         kind: DefKind::Record {
             kind: RecordKind::Struct,
+            align_override: None,
             layout: None,
             fields: vec![
                 rcc_hir::Field {
@@ -1719,6 +1747,7 @@ fn expr_member_access_preserves_requested_field_name() {
         span: DUMMY_SP,
         kind: DefKind::Record {
             kind: RecordKind::Struct,
+            align_override: None,
             layout: None,
             fields: vec![rcc_hir::Field {
                 name: Some(a),

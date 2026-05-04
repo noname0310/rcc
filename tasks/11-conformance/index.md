@@ -38,7 +38,7 @@ current numeric milestone already passes.
 - [x] [15c-gcc-torture-pointer-comparison-codegen](15c-gcc-torture-pointer-comparison-codegen.md)
 - [x] [15d-gcc-torture-vla-layout-codegen](15d-gcc-torture-vla-layout-codegen.md)
 - [x] [15e-gcc-torture-runtime-signal-triage](15e-gcc-torture-runtime-signal-triage.md)
-- [ ] [15i-gcc-torture-aligned-attribute-layout](15i-gcc-torture-aligned-attribute-layout.md)
+- [x] [15i-gcc-torture-aligned-attribute-layout](15i-gcc-torture-aligned-attribute-layout.md)
 - [ ] [15j-gcc-torture-aggregate-byval-runtime](15j-gcc-torture-aggregate-byval-runtime.md)
 - [ ] [15k-gcc-torture-runtime-signal-cluster-sweep](15k-gcc-torture-runtime-signal-cluster-sweep.md)
 - [ ] [16-tcc-tests2](16-tcc-tests2.md)

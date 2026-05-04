@@ -859,6 +859,7 @@ mod tests {
             span: DUMMY_SP,
             kind: DefKind::Record {
                 kind: RecordKind::Struct,
+                align_override: None,
                 layout: None,
                 fields: fields
                     .into_iter()

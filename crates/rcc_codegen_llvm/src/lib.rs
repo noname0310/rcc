@@ -5755,7 +5755,7 @@ pub mod backend {
                 return Ok(existing);
             }
 
-            let (kind, field_tys) = {
+            let (kind, field_tys, explicit_layout) = {
                 let def_data = self.hir.defs.get(def).ok_or_else(|| {
                     type_error(ty, format!("record definition {def:?} is missing"))
                 })?;
@@ -5763,7 +5763,11 @@ pub mod backend {
                     return self
                         .type_error(ty, "record type does not reference a record definition");
                 };
-                (*kind, fields.iter().map(|field| field.ty).collect::<Vec<_>>())
+                (
+                    *kind,
+                    fields.iter().map(|field| field.ty).collect::<Vec<_>>(),
+                    self.record_needs_explicit_layout(def),
+                )
             };
 
             let record_name = format!("rcc.record.{}", def.0);
@@ -5778,6 +5782,9 @@ pub mod backend {
             }
 
             let field_types = match kind {
+                RecordKind::Struct if explicit_layout => {
+                    self.explicit_struct_field_types(ty, &field_tys)?
+                }
                 RecordKind::Struct => field_tys
                     .into_iter()
                     .map(|field_ty| self.basic_type_of(field_ty))
@@ -5790,8 +5797,62 @@ pub mod backend {
                     vec![self.context.i8_type().array_type(array_len(layout.size, ty)?).into()]
                 }
             };
-            record.set_body(&field_types, false);
+            record.set_body(&field_types, explicit_layout && kind == RecordKind::Struct);
             Ok(record)
+        }
+
+        fn record_needs_explicit_layout(&self, def: DefId) -> bool {
+            let Some(def_data) = self.hir.defs.get(def) else {
+                return false;
+            };
+            let DefKind::Record { align_override, fields, .. } = &def_data.kind else {
+                return false;
+            };
+            align_override.is_some()
+                || fields.iter().any(|field| self.type_needs_explicit_layout(field.ty))
+        }
+
+        fn type_needs_explicit_layout(&self, ty: TyId) -> bool {
+            match self.tcx.get(ty) {
+                Ty::Record(def) => self.record_needs_explicit_layout(*def),
+                Ty::Array { elem, .. } => self.type_needs_explicit_layout(elem.ty),
+                _ => false,
+            }
+        }
+
+        fn explicit_struct_field_types(
+            &mut self,
+            ty: TyId,
+            field_tys: &[TyId],
+        ) -> Result<Vec<BasicTypeEnum<'ctx>>, CodegenError> {
+            let record_layout = self
+                .layout_cx()
+                .record_layout_of(ty)
+                .map_err(|err| type_error(ty, err.to_string()))?;
+            let mut out = Vec::new();
+            let mut offset = 0_u64;
+            for (field_ty, field_layout) in field_tys.iter().zip(record_layout.fields.iter()) {
+                if field_layout.bit_width.is_some() {
+                    return self
+                        .type_error(ty, "explicit LLVM bit-field record layout is deferred");
+                }
+                if field_layout.offset > offset {
+                    out.push(self.padding_type(field_layout.offset - offset, ty)?);
+                }
+                out.push(self.basic_type_of(*field_ty)?);
+                offset = field_layout
+                    .offset
+                    .checked_add(field_layout.storage_size)
+                    .ok_or_else(|| type_error(ty, "explicit struct field offset overflow"))?;
+            }
+            if record_layout.layout.size > offset {
+                out.push(self.padding_type(record_layout.layout.size - offset, ty)?);
+            }
+            Ok(out)
+        }
+
+        fn padding_type(&self, size: u64, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            Ok(self.context.i8_type().array_type(array_len(size, ty)?).into())
         }
 
         fn enum_type(&mut self, ty: TyId, def: DefId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
@@ -6004,6 +6065,9 @@ pub mod backend {
 
             match kind {
                 RecordKind::Struct => {
+                    if self.type_cx.type_needs_explicit_layout(ty) {
+                        return self.build_explicit_struct_const(ty, fields, entries);
+                    }
                     let mut field_values = Vec::with_capacity(fields.len());
                     for (i, field) in fields.iter().enumerate() {
                         let sub_entries: Vec<GlobalInitEntry> = entries
@@ -6078,6 +6142,66 @@ pub mod backend {
                     Ok(struct_ty.const_named_struct(&[byte_array_ty.const_zero().into()]).into())
                 }
             }
+        }
+
+        fn build_explicit_struct_const(
+            &mut self,
+            ty: TyId,
+            fields: &[rcc_hir::Field],
+            entries: &[GlobalInitEntry],
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let record_layout = self
+                .layout_cx()
+                .record_layout_of(ty)
+                .map_err(|err| type_error(ty, err.to_string()))?;
+            let mut values = Vec::new();
+            let mut offset = 0_u64;
+            for (i, field) in fields.iter().enumerate() {
+                let field_layout = record_layout.fields[i];
+                if field_layout.bit_width.is_some() {
+                    return Err(CodegenError::Internal(
+                        "explicit LLVM bit-field record constants are deferred".to_owned(),
+                    ));
+                }
+                if field_layout.offset > offset {
+                    values.push(self.padding_const(field_layout.offset - offset, ty)?.into());
+                }
+                let sub_entries: Vec<GlobalInitEntry> = entries
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e.path.first(),
+                            Some(GlobalInitDesignator::Field(idx)) if *idx as usize == i
+                        )
+                    })
+                    .cloned()
+                    .map(|mut e| {
+                        e.path = e.path.into_iter().skip(1).collect();
+                        e
+                    })
+                    .collect();
+                values.push(self.build_const_value(field.ty, &sub_entries)?);
+                offset = field_layout.offset.checked_add(field_layout.storage_size).ok_or_else(
+                    || {
+                        CodegenError::Internal(
+                            "explicit struct constant field offset overflow".to_owned(),
+                        )
+                    },
+                )?;
+            }
+            if record_layout.layout.size > offset {
+                values.push(self.padding_const(record_layout.layout.size - offset, ty)?.into());
+            }
+            let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+            Ok(struct_ty.const_named_struct(&values).into())
+        }
+
+        fn padding_const(
+            &self,
+            size: u64,
+            ty: TyId,
+        ) -> Result<inkwell::values::ArrayValue<'ctx>, CodegenError> {
+            Ok(self.context.i8_type().array_type(array_len(size, ty)?).const_zero())
         }
 
         #[allow(unsafe_code)]
@@ -6590,6 +6714,7 @@ mod tests {
             span: DUMMY_SP,
             kind: rcc_hir::DefKind::Record {
                 kind: RecordKind::Struct,
+                align_override: None,
                 layout: None,
                 fields: vec![
                     Field {
@@ -6706,7 +6831,23 @@ mod tests {
             id: DefId(0),
             name: Symbol(3),
             span: DUMMY_SP,
-            kind: DefKind::Record { kind, layout: None, fields },
+            kind: DefKind::Record { kind, align_override: None, layout: None, fields },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    fn aligned_record_def(
+        defs: &mut IndexVec<DefId, Def>,
+        kind: RecordKind,
+        align: u32,
+        fields: Vec<Field>,
+    ) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name: Symbol(4),
+            span: DUMMY_SP,
+            kind: DefKind::Record { kind, align_override: Some(align), layout: None, fields },
         });
         defs[id].id = id;
         id
@@ -7049,6 +7190,24 @@ mod tests {
 
         assert_eq!(layout.layout, Layout { size: 8, align: 8 });
         assert_eq!(layout.fields.iter().map(|field| field.offset).collect::<Vec<_>>(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn record_layout_honors_gnu_aligned_override() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let record = aligned_record_def(
+            &mut defs,
+            RecordKind::Struct,
+            32,
+            vec![field(tcx.int), field(tcx.int)],
+        );
+        let record_ty = tcx.intern(Ty::Record(record));
+
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(record_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 32, align: 32 });
+        assert_eq!(layout.fields.iter().map(|field| field.offset).collect::<Vec<_>>(), [0, 4]);
     }
 
     #[test]
@@ -7397,6 +7556,7 @@ mod tests {
         let node_ptr = tcx.intern(Ty::Ptr(Qual::plain(node_ty)));
         defs[node].kind = DefKind::Record {
             kind: RecordKind::Struct,
+            align_override: None,
             layout: None,
             fields: vec![field(tcx.int), field(node_ptr)],
         };
@@ -7406,6 +7566,30 @@ mod tests {
         let lowered = types.basic_type_of(node_ty).unwrap();
 
         assert_eq!(lowered.print_to_string().to_string(), "%rcc.record.0 = type { i32, ptr }");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_adds_explicit_tail_padding_for_aligned_records() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = aligned_record_def(
+            &mut defs,
+            RecordKind::Struct,
+            32,
+            vec![field(tcx.int), field(tcx.int)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let hir = hir_with_defs(defs);
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(rec_ty).unwrap();
+
+        assert_eq!(
+            lowered.print_to_string().to_string(),
+            "%rcc.record.0 = type <{ i32, i32, [24 x i8] }>"
+        );
     }
 
     #[cfg(feature = "llvm")]

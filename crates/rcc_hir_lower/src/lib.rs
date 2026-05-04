@@ -542,12 +542,18 @@ fn create_incomplete_tag(
     resolver: &mut Resolver,
 ) -> DefId {
     let kind = match expected_kind {
-        TagKind::Struct => {
-            DefKind::Record { kind: RecordKind::Struct, layout: None, fields: Vec::new() }
-        }
-        TagKind::Union => {
-            DefKind::Record { kind: RecordKind::Union, layout: None, fields: Vec::new() }
-        }
+        TagKind::Struct => DefKind::Record {
+            kind: RecordKind::Struct,
+            align_override: None,
+            layout: None,
+            fields: Vec::new(),
+        },
+        TagKind::Union => DefKind::Record {
+            kind: RecordKind::Union,
+            align_override: None,
+            layout: None,
+            fields: Vec::new(),
+        },
         TagKind::Enum => DefKind::Enum { repr: tcx.int, variants: Vec::new() },
     };
     let id = crate_.defs.push(Def { id: DefId(0), name: tag, span: tag_span, kind });
@@ -4243,7 +4249,8 @@ fn lower_type_from_parts_in_scope(
     if base == tcx.error {
         return tcx.error;
     }
-    apply_declarator_with_base_quals_in_scope(
+    apply_aligned_attr_override_to_record(base, &specs.attrs, tcx, crate_, session);
+    let ty = apply_declarator_with_base_quals_in_scope(
         base,
         specs.quals,
         declarator,
@@ -4253,7 +4260,50 @@ fn lower_type_from_parts_in_scope(
         resolver,
         crate_,
         session,
-    )
+    );
+    apply_aligned_attr_override_to_record(ty, &declarator.attrs, tcx, crate_, session);
+    ty
+}
+
+fn apply_aligned_attr_override_to_record(
+    ty: TyId,
+    attrs: &[rcc_ast::Attribute],
+    tcx: &TyCtxt,
+    crate_: &mut HirCrate,
+    session: &Session,
+) {
+    let Some(align) = aligned_attr_override(attrs, session) else {
+        return;
+    };
+    let Ty::Record(def_id) = *tcx.get(ty) else {
+        return;
+    };
+    let DefKind::Record { align_override, .. } = &mut crate_.defs[def_id].kind else {
+        return;
+    };
+    *align_override = Some(align_override.map_or(align, |existing| existing.max(align)));
+}
+
+fn aligned_attr_override(attrs: &[rcc_ast::Attribute], session: &Session) -> Option<u32> {
+    attrs.iter().filter_map(|attr| aligned_attr_value(attr, session)).max()
+}
+
+fn aligned_attr_value(attr: &rcc_ast::Attribute, session: &Session) -> Option<u32> {
+    let name = session.interner.get(attr.name);
+    if !matches!(name, "aligned" | "__aligned__" | "aligned__") {
+        return None;
+    }
+    let [arg] = attr.args.as_slice() else {
+        return None;
+    };
+    let [token] = arg.tokens.as_slice() else {
+        return None;
+    };
+    let rcc_ast::AttributeTokenKind::Int(raw) = token.kind else {
+        return None;
+    };
+    let align = u32::try_from(raw).ok()?;
+    (align != 0 && align.is_power_of_two()).then_some(align)
 }
 
 /// Lower an AST `type-name` (used by casts, `sizeof(type)`, and compound
@@ -4373,7 +4423,12 @@ fn lower_record_spec_to_ty(
             id: DefId(0),
             name,
             span: spec.span,
-            kind: DefKind::Record { kind: hir_kind, layout: None, fields: Vec::new() },
+            kind: DefKind::Record {
+                kind: hir_kind,
+                align_override: None,
+                layout: None,
+                fields: Vec::new(),
+            },
         });
         crate_.defs[id].id = id;
         id
@@ -5390,7 +5445,12 @@ pub fn lower_record(
     let Some(field_decls) = spec.fields.as_ref() else {
         // Bare tag reference; nothing to lower. Caller shouldn't normally
         // pass a non-defining spec, but stay defensive.
-        return DefKind::Record { kind, layout: None, fields: Vec::new() };
+        return DefKind::Record {
+            kind,
+            align_override: aligned_attr_override(&spec.attrs, session),
+            layout: None,
+            fields: Vec::new(),
+        };
     };
 
     for fd in field_decls {
@@ -5473,7 +5533,12 @@ pub fn lower_record(
         }
     }
 
-    DefKind::Record { kind, layout: None, fields: out_fields }
+    DefKind::Record {
+        kind,
+        align_override: aligned_attr_override(&spec.attrs, session),
+        layout: None,
+        fields: out_fields,
+    }
 }
 
 /// Return the inline anonymous `RecordSpec` inside a field's

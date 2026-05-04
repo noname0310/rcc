@@ -117,6 +117,8 @@ pub enum DefKind {
     Record {
         /// Struct or union?
         kind: RecordKind,
+        /// GNU `aligned(N)` override, when enabled by the frontend.
+        align_override: Option<u32>,
         /// Resolved layout (filled after type checking).
         layout: Option<Layout>,
         /// Fields in declaration order.
