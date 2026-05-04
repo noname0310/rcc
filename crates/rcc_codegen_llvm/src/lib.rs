@@ -2818,6 +2818,7 @@ pub mod backend {
                 Rvalue::BitfieldPrecision { op, to, width, signed } => {
                     self.emit_bitfield_precision(op, *to, *width, *signed, locals, body)
                 }
+                Rvalue::VectorInit { ty, lanes } => self.emit_vector_init(*ty, lanes, locals, body),
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
@@ -2938,6 +2939,36 @@ pub mod backend {
                 .build_int_z_extend(overflow, c_int_ty, "overflow.to.int")
                 .map(|value| value.as_basic_value_enum())
                 .map_err(builder_error)
+        }
+
+        fn emit_vector_init(
+            &self,
+            ty: TyId,
+            lanes: &[Operand],
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let BasicTypeEnum::VectorType(vector_ty) = self.type_cx().basic_type_of(ty)? else {
+                return Err(type_lowering_error(ty, "vector initializer target is not a vector"));
+            };
+            let mut vector = vector_ty.const_zero();
+            let index_ty = self.context.i32_type();
+            for (idx, lane) in lanes.iter().enumerate() {
+                let idx = u64::try_from(idx).map_err(|_| {
+                    CodegenError::Internal("vector lane index overflowed".to_owned())
+                })?;
+                let lane_value = self.emit_operand_value(lane, locals, body)?;
+                vector = self
+                    .builder
+                    .build_insert_element(
+                        vector,
+                        lane_value,
+                        index_ty.const_int(idx, false),
+                        "vec.init",
+                    )
+                    .map_err(builder_error)?;
+            }
+            Ok(vector.as_basic_value_enum())
         }
 
         fn emit_va_arg(
@@ -6631,6 +6662,23 @@ pub mod backend {
                 GlobalInitValue::StringLiteral(def_id) => {
                     let global = self.get_or_create_string_literal(*def_id)?;
                     Ok(global.as_pointer_value().into())
+                }
+                GlobalInitValue::Vector(lanes) => {
+                    let Ty::Vector { elem, lanes: expected_lanes, .. } = self.tcx.get(ty) else {
+                        return Err(type_error(ty, "vector initializer value used for non-vector"));
+                    };
+                    if lanes.len() != *expected_lanes as usize {
+                        return Err(CodegenError::Internal(format!(
+                            "vector initializer has {} lanes, expected {}",
+                            lanes.len(),
+                            expected_lanes
+                        )));
+                    }
+                    let mut lane_values = Vec::with_capacity(lanes.len());
+                    for lane in lanes {
+                        lane_values.push(self.global_init_value_to_llvm(lane, *elem)?);
+                    }
+                    Ok(inkwell::types::VectorType::const_vector(&lane_values).as_basic_value_enum())
                 }
                 GlobalInitValue::Zero => Ok(self.type_cx.basic_type_of(ty)?.const_zero()),
                 GlobalInitValue::Error => Err(CodegenError::Internal(
@@ -11250,6 +11298,45 @@ mod tests {
 
         let ir = cx.ir_text();
         assert!(ir.contains("@x = internal global i32 5"), "IR:\n{ir}");
+    }
+
+    /// `static v4si v = { 1, 2 };` emits a first-class LLVM vector constant.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vector_global_emits_lane_constant_initializer() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let vector_ty = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("v");
+        let init = GlobalInit {
+            ty: vector_ty,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: vector_ty,
+                expr: None,
+                value: GlobalInitValue::Vector(vec![
+                    GlobalInitValue::Int(1),
+                    GlobalInitValue::Int(2),
+                    GlobalInitValue::Zero,
+                    GlobalInitValue::Zero,
+                ]),
+                span: DUMMY_SP,
+            }],
+        };
+        let _g = global_def_with_init(&mut defs, name, vector_ty, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.module().print_to_string().to_string();
+        assert!(
+            ir.contains("@v = internal global <4 x i32> <i32 1, i32 2, i32 0, i32 0>"),
+            "IR:\n{ir}"
+        );
     }
 
     #[cfg(feature = "llvm")]

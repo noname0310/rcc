@@ -245,6 +245,11 @@ pub enum GlobalInitValue {
     },
     /// String literal global.
     StringLiteral(DefId),
+    /// GNU vector constant, stored lane-by-lane.
+    ///
+    /// Vectors are scalar-like objects in HIR. Their lane list is not a
+    /// `GlobalInitDesignator` path through an aggregate.
+    Vector(Vec<GlobalInitValue>),
     /// GNU labels-as-values block address for a function-local label.
     LabelAddress {
         /// Function containing the label.
@@ -473,6 +478,15 @@ pub enum HirExprKind {
         /// Initializer statements to execute when the compound literal is
         /// evaluated.
         init_stmts: Vec<HirStmtId>,
+    },
+    /// GNU vector initializer value.
+    ///
+    /// This is an rvalue expression, not an aggregate lvalue projection.
+    VectorInit {
+        /// Result vector type.
+        ty: TyId,
+        /// Lane expressions in lane order.
+        lanes: Vec<HirExprId>,
     },
     /// `&expr`
     AddressOf(HirExprId),

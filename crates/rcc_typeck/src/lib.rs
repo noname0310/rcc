@@ -141,6 +141,11 @@ fn fold_global_initializer_values(
         let Some(expr) = entry.expr else {
             continue;
         };
+        if matches!(entry.value, GlobalInitValue::Vector(_)) {
+            entry.value =
+                fold_global_vector_initializer_value(body, expr, entry.ty, defs, tcx, session);
+            continue;
+        }
         let mut eval = ConstEval::with_defs_and_session(tcx, Some(body), Some(defs), Some(session));
         entry.value = match eval.eval_scalar(expr) {
             Some(ConstScalar::Int(v)) => GlobalInitValue::Int(v),
@@ -155,6 +160,39 @@ fn fold_global_initializer_values(
             },
         };
     }
+}
+
+fn fold_global_vector_initializer_value(
+    body: &Body,
+    expr: HirExprId,
+    ty: TyId,
+    defs: &rcc_data_structures::IndexVec<DefId, rcc_hir::Def>,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> GlobalInitValue {
+    let HirExprKind::VectorInit { ty: expr_ty, lanes } = &body.exprs[expr].kind else {
+        return GlobalInitValue::Error;
+    };
+    if *expr_ty != ty {
+        return GlobalInitValue::Error;
+    }
+    let Ty::Vector { lanes: expected_lanes, .. } = tcx.get(ty) else {
+        return GlobalInitValue::Error;
+    };
+    if lanes.len() != *expected_lanes as usize {
+        return GlobalInitValue::Error;
+    }
+
+    let mut eval = ConstEval::with_defs_and_session(tcx, Some(body), Some(defs), Some(session));
+    let mut values = Vec::with_capacity(lanes.len());
+    for lane in lanes {
+        values.push(match eval.eval_scalar(*lane) {
+            Some(ConstScalar::Int(v)) => GlobalInitValue::Int(v),
+            Some(ConstScalar::Float(v)) => GlobalInitValue::Float(v),
+            Some(ConstScalar::Address { .. }) | None => GlobalInitValue::Error,
+        });
+    }
+    GlobalInitValue::Vector(values)
 }
 
 /// Per-`DefId` snapshot of the information `check_body` needs about a
@@ -716,6 +754,24 @@ pub fn visit_expr(
             body.exprs[expr_id].ty = ty;
             body.exprs[expr_id].value_cat = ValueCat::LValue;
             body.exprs[expr_id].kind = HirExprKind::CompoundLiteral { ty, local, init_stmts };
+            expr_id
+        }
+        HirExprKind::VectorInit { ty, lanes } => {
+            let elem_ty = match tcx.get(ty) {
+                Ty::Vector { elem, .. } => *elem,
+                _ => tcx.error,
+            };
+            let lanes = lanes
+                .into_iter()
+                .map(|lane| {
+                    let lane = visit_expr(lane, body, tcx, session, def_info);
+                    let lane = rvalue_decayed(lane, body, tcx);
+                    coerce_to(lane, elem_ty, body, tcx, session).expr()
+                })
+                .collect();
+            body.exprs[expr_id].ty = ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::VectorInit { ty, lanes };
             expr_id
         }
         HirExprKind::Assign { lhs, rhs } => {
@@ -2407,6 +2463,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::AddressOf(_)
         | HirExprKind::LabelAddr(_)
         | HirExprKind::BuiltinVaArea
+        | HirExprKind::VectorInit { .. }
         | HirExprKind::Cond { .. }
         | HirExprKind::OmittedCond { .. }
         | HirExprKind::Assign { .. }

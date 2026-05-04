@@ -50,8 +50,31 @@ pub fn is_const_init_expr(
     if is_string_literal_init(body, expr_id) {
         return true;
     }
+    if let Some(lanes) = vector_init_lanes(body, expr_id) {
+        return lanes.iter().all(|lane| is_const_init_expr(body, *lane, defs, tcx));
+    }
     let mut ce = ConstEval::with_defs_and_session(tcx, Some(body), defs, None);
     ce.eval_scalar(expr_id).is_some()
+}
+
+fn vector_init_lanes(body: &Body, expr_id: HirExprId) -> Option<&[HirExprId]> {
+    match &body.exprs.get(expr_id)?.kind {
+        HirExprKind::VectorInit { lanes, .. } => Some(lanes.as_slice()),
+        HirExprKind::Convert { operand, kind } => match kind {
+            ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic => {
+                vector_init_lanes(body, *operand)
+            }
+            ConvertKind::ArrayToPtr
+            | ConvertKind::FuncToPtr
+            | ConvertKind::LvalueToRvalue
+            | ConvertKind::Pointer
+            | ConvertKind::RealToComplex
+            | ConvertKind::ComplexToReal
+            | ConvertKind::BitfieldPrecision { .. } => None,
+        },
+        HirExprKind::Cast { operand, .. } => vector_init_lanes(body, *operand),
+        _ => None,
+    }
 }
 
 /// Walk through the §6.3 implicit-conversion wrappers the type
@@ -165,6 +188,24 @@ mod tests {
         let ok = check_init_const(&body, &[add], None, &tcx, &mut session);
         assert!(ok);
         assert!(cap.diagnostics().is_empty(), "no E0084 expected for `2 + 3`");
+    }
+
+    #[test]
+    fn vector_init_is_const_when_all_lanes_are_const() {
+        let mut tcx = TyCtxt::new();
+        let vector_ty = tcx.intern(rcc_hir::Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let mut body = Body::default();
+        let one = push(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let two = push(&mut body, tcx.int, HirExprKind::IntConst(2));
+        let three = push(&mut body, tcx.int, HirExprKind::IntConst(3));
+        let four = push(&mut body, tcx.int, HirExprKind::IntConst(4));
+        let vector = push(
+            &mut body,
+            vector_ty,
+            HirExprKind::VectorInit { ty: vector_ty, lanes: vec![one, two, three, four] },
+        );
+
+        assert!(is_const_init_expr(&body, vector, None, &tcx));
     }
 
     /// Acceptance fixture: `static int x = foo();` — call expression,

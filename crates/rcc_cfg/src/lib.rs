@@ -279,6 +279,13 @@ pub enum Rvalue {
         /// Whether the precision value is signed.
         signed: bool,
     },
+    /// Construct a GNU vector value lane-by-lane.
+    VectorInit {
+        /// Result vector type.
+        ty: TyId,
+        /// Lane operands in lane order.
+        lanes: Vec<Operand>,
+    },
     /// Take the address of a place.
     AddressOf(Place),
     /// Load the current value of a file-scope global object.

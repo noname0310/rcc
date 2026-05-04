@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15s2: GNU vector initializers and compound literals
 
 **Phase:** 11-conformance    **Depends on:** 11-15s1    **Milestone:** M6

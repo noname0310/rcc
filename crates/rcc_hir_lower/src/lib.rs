@@ -1260,6 +1260,11 @@ fn populate_switch_case_tables_in_expr(
                 populate_switch_case_tables_in_stmt(body, stmt, switch_depth, session);
             }
         }
+        HirExprKind::VectorInit { lanes, .. } => {
+            for lane in lanes {
+                populate_switch_case_tables_in_expr(body, lane, switch_depth, session);
+            }
+        }
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             populate_switch_case_tables_in_expr(body, cond, switch_depth, session);
             populate_switch_case_tables_in_expr(body, then_expr, switch_depth, session);
@@ -2211,6 +2216,13 @@ pub fn lower_initializer(
                 lower_string_array_initializer(target, target_ty, expr, span, body, tcx, out);
                 return;
             }
+            if let Ty::Vector { elem, lanes, .. } = tcx.get(target_ty).clone() {
+                lower_vector_initializer(
+                    target, target_ty, elem, lanes, items, span, body, scope, crate_, tcx,
+                    resolver, session, out,
+                );
+                return;
+            }
             lower_initializer_list(
                 target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
             );
@@ -2382,6 +2394,13 @@ fn lower_global_initializer_into(
         rcc_ast::Initializer::List(items) => {
             if let Some(expr) = braced_string_array_initializer_expr(target_ty, items, tcx) {
                 lower_global_string_array_initializer(target_ty, expr, span, path, tcx, out);
+                return;
+            }
+            if let Ty::Vector { elem, lanes, .. } = tcx.get(target_ty).clone() {
+                lower_global_vector_initializer(
+                    target_ty, elem, lanes, items, span, path, body, scope, crate_, tcx, resolver,
+                    session, out,
+                );
                 return;
             }
             if lower_global_flat_brace_elision_initializer(
@@ -2627,6 +2646,103 @@ fn lower_global_initializer_list(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn lower_vector_initializer(
+    target: HirExprId,
+    target_ty: TyId,
+    elem_ty: TyId,
+    lanes: u32,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) {
+    let lane_exprs = lower_vector_lane_exprs(
+        elem_ty, lanes, items, span, body, scope, crate_, tcx, resolver, session,
+    );
+    let init_expr = push_vector_init_expr(target_ty, lane_exprs, span, body);
+    emit_assign_stmt(target, init_expr, span, body, out);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_vector_lane_exprs(
+    elem_ty: TyId,
+    lanes: u32,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Vec<HirExprId> {
+    let mut exprs = Vec::with_capacity(lanes as usize);
+    for (desigs, sub_init) in items {
+        if !desigs.is_empty() {
+            emit_invalid_initializer_designator(
+                span,
+                "designator cannot initialize a vector object",
+                session,
+            );
+            continue;
+        }
+        let Some(expr) = scalar_initializer_expr(sub_init) else {
+            emit_invalid_initializer_designator(
+                span,
+                "vector initializer lane must be a scalar expression",
+                session,
+            );
+            continue;
+        };
+        if exprs.len() >= lanes as usize {
+            emit_invalid_initializer_designator(
+                span,
+                "vector initializer has more elements than lanes",
+                session,
+            );
+            break;
+        }
+        exprs.push(lower_expr(expr, body, scope, crate_, tcx, resolver, session));
+    }
+    while exprs.len() < lanes as usize {
+        exprs.push(push_int_const(0, elem_ty, span, body));
+    }
+    exprs
+}
+
+fn scalar_initializer_expr(init: &rcc_ast::Initializer) -> Option<&rcc_ast::Expr> {
+    match init {
+        rcc_ast::Initializer::Expr(expr) => Some(expr),
+        rcc_ast::Initializer::List(items) if items.len() == 1 && items[0].0.is_empty() => {
+            scalar_initializer_expr(&items[0].1)
+        }
+        rcc_ast::Initializer::List(_) => None,
+    }
+}
+
+fn push_vector_init_expr(
+    ty: TyId,
+    lanes: Vec<HirExprId>,
+    span: Span,
+    body: &mut Body,
+) -> HirExprId {
+    let id = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty,
+        value_cat: ValueCat::RValue,
+        span,
+        kind: HirExprKind::VectorInit { ty, lanes },
+    });
+    body.exprs[id].id = id;
+    id
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lower_file_scope_compound_literal_address(
     expr: &rcc_ast::Expr,
     crate_: &mut HirCrate,
@@ -2699,6 +2815,35 @@ fn materialize_file_scope_compound_literal(
         crate_.global_init_bodies.insert(def_id, init_body);
     }
     def_id
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_vector_initializer(
+    target_ty: TyId,
+    elem_ty: TyId,
+    lanes: u32,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    path: Vec<GlobalInitDesignator>,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<GlobalInitEntry>,
+) {
+    let lane_exprs = lower_vector_lane_exprs(
+        elem_ty, lanes, items, span, body, scope, crate_, tcx, resolver, session,
+    );
+    let expr = push_vector_init_expr(target_ty, lane_exprs, span, body);
+    out.push(GlobalInitEntry {
+        path,
+        ty: target_ty,
+        expr: Some(expr),
+        value: GlobalInitValue::Vector(vec![GlobalInitValue::Error; lanes as usize]),
+        span,
+    });
 }
 
 fn compound_literal_symbol(crate_: &HirCrate, session: &mut Session) -> Symbol {

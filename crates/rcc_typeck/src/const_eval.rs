@@ -289,6 +289,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
             | HirExprKind::CompoundLiteral { .. }
+            | HirExprKind::VectorInit { .. }
             | HirExprKind::AddressOf(_)
             | HirExprKind::LabelAddr(_)
             | HirExprKind::Deref(_)
@@ -635,6 +636,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
             | HirExprKind::CompoundLiteral { .. }
+            | HirExprKind::VectorInit { .. }
             | HirExprKind::AddressOf(_)
             | HirExprKind::LabelAddr(_)
             | HirExprKind::Deref(_)

@@ -391,6 +391,48 @@ fn volatile_local_metadata_survives_to_cfg() {
 }
 
 #[test]
+fn gnu_vector_initializer_reaches_cfg_as_vector_rvalue() {
+    let src = r#"
+        typedef int v4si __attribute__((vector_size(16)));
+        int main(void) {
+            v4si x = { 1, 2, 3, 4 };
+            return 0;
+        }
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let lowered = lower_checked_with_options("gnu-vector-init", src, opts);
+
+    let vector_ty = lowered
+        .hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Typedef(ty) if matches!(lowered.tcx.get(ty), Ty::Vector { .. }) => Some(ty),
+            _ => None,
+        })
+        .expect("vector typedef");
+
+    let body = &lowered.bodies[0].1;
+    let mut vector_init_count = 0;
+    for block in body.blocks.iter() {
+        for stmt in &block.statements {
+            if let StatementKind::Assign { place, rvalue: Rvalue::VectorInit { ty, lanes } } =
+                &stmt.kind
+            {
+                assert_eq!(*ty, vector_ty);
+                assert_eq!(lanes.len(), 4);
+                assert!(
+                    place.projection.is_empty(),
+                    "vector initializer should assign a scalar-like vector place"
+                );
+                vector_init_count += 1;
+            }
+        }
+    }
+    assert_eq!(vector_init_count, 1, "expected one vector initializer rvalue");
+}
+
+#[test]
 fn invalid_return_stops_before_cfg() {
     let diagnostics = expect_errors(
         "invalid-return",

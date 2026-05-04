@@ -1010,6 +1010,11 @@ impl BodyBuilder {
                 }
                 scopes.pop().expect("collect_labels: compound literal scope stack underflow");
             }
+            HirExprKind::VectorInit { lanes, .. } => {
+                for lane in lanes {
+                    self.collect_expr_labels(hir_body, *lane, local_map, scopes);
+                }
+            }
             HirExprKind::Cond { cond, then_expr, else_expr } => {
                 self.collect_expr_labels(hir_body, *cond, local_map, scopes);
                 self.collect_expr_labels(hir_body, *then_expr, local_map, scopes);

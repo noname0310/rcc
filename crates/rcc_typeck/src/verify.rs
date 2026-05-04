@@ -92,7 +92,7 @@ impl VerifyCx<'_> {
                 entry.ty,
                 format_args!("global def#{} initializer entry #{idx} type", def_id.0),
             );
-            if matches!(entry.value, GlobalInitValue::Error) {
+            if global_init_value_has_error(&entry.value) {
                 self.report(
                     entry.span,
                     format_args!("global def#{} initializer entry #{idx}", def_id.0),
@@ -156,6 +156,16 @@ impl VerifyCx<'_> {
                     );
                     self.verify_local(body, def_id, kind, expr.span, *local);
                 }
+                HirExprKind::VectorInit { ty, lanes } => {
+                    self.verify_ty(
+                        expr.span,
+                        *ty,
+                        format_args!("{kind} def#{} vector-initializer type", def_id.0),
+                    );
+                    for lane in lanes {
+                        self.verify_expr_id(body, def_id, kind, expr.span, *lane, Local(0));
+                    }
+                }
                 _ => {}
             }
         }
@@ -202,6 +212,14 @@ impl VerifyCx<'_> {
             .struct_err(span, format!("typed HIR invariant violation: {context} {message}"))
             .code(rcc_errors::codes::E0088)
             .emit();
+    }
+}
+
+fn global_init_value_has_error(value: &GlobalInitValue) -> bool {
+    match value {
+        GlobalInitValue::Error => true,
+        GlobalInitValue::Vector(lanes) => lanes.iter().any(global_init_value_has_error),
+        _ => false,
     }
 }
 

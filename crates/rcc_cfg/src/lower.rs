@@ -317,6 +317,13 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         }
         HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
         HirExprKind::SizeofType(ty) => lower_sizeof_type(cx, expr_id, *ty),
+        HirExprKind::VectorInit { ty, lanes } => {
+            let lane_ops =
+                lanes.iter().map(|lane| lower_as_rvalue(builder, cx, *lane)).collect::<Vec<_>>();
+            let temp = builder.alloc_temp(*ty, span);
+            push_assign(builder, span, temp, Rvalue::VectorInit { ty: *ty, lanes: lane_ops });
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
         HirExprKind::AddressOf(operand) => {
             if let Some(def) = direct_global_ref(cx, *operand) {
                 return Operand::Const(Const { kind: ConstKind::Global(def), ty });

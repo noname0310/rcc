@@ -677,6 +677,9 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
             operand_contains_field_projection(complex, expected)
         }
         Rvalue::BitfieldPrecision { op, .. } => operand_contains_field_projection(op, expected),
+        Rvalue::VectorInit { lanes, .. } => {
+            lanes.iter().any(|lane| operand_contains_field_projection(lane, expected))
+        }
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_field_projection(lhs, expected)
                 || operand_contains_field_projection(rhs, expected)
@@ -718,6 +721,9 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
         Rvalue::ComplexFromReal { real, .. } => operand_contains_int_const(real, expected),
         Rvalue::RealFromComplex { complex, .. } => operand_contains_int_const(complex, expected),
         Rvalue::BitfieldPrecision { op, .. } => operand_contains_int_const(op, expected),
+        Rvalue::VectorInit { lanes, .. } => {
+            lanes.iter().any(|lane| operand_contains_int_const(lane, expected))
+        }
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
@@ -931,6 +937,11 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         }
         Rvalue::BitfieldPrecision { op, .. } => {
             assert_operand_valid(name, def, body, op);
+        }
+        Rvalue::VectorInit { lanes, .. } => {
+            for lane in lanes {
+                assert_operand_valid(name, def, body, lane);
+            }
         }
         Rvalue::BinaryOp(_, lhs, rhs) => {
             assert_operand_valid(name, def, body, lhs);

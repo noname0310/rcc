@@ -340,6 +340,38 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_initializer_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector initializer e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_initializer",
+            r#"
+typedef int v4si __attribute__((vector_size(16)));
+int main(void) {
+  v4si x = { 1, 2 };
+  int *p = (int *)&x;
+  if (p[0] != 1) return 1;
+  if (p[1] != 2) return 2;
+  if (p[2] != 0) return 3;
+  if (p[3] != 0) return 4;
+  x = (v4si){ 4, 3, 2, 1 };
+  if (p[0] != 4) return 5;
+  if (p[1] != 3) return 6;
+  if (p[2] != 2) return 7;
+  if (p[3] != 1) return 8;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");

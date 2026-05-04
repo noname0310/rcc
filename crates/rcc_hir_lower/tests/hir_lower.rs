@@ -957,6 +957,76 @@ fn gnu_vector_size_attribute_rejects_invalid_byte_size() {
 }
 
 #[test]
+fn gnu_vector_initializer_lowers_to_vector_value_not_aggregate_paths() {
+    let src = r#"
+        typedef int v4si __attribute__((vector_size(16)));
+        v4si g = { 1 + 0, 2 };
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let init = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Global { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .expect("vector global initializer");
+    assert_eq!(init.entries.len(), 1);
+    assert!(init.entries[0].path.is_empty(), "vector lanes must not use aggregate paths");
+    match &init.entries[0].value {
+        GlobalInitValue::Vector(lanes) => {
+            assert_eq!(lanes.len(), 4);
+            assert!(matches!(lanes[0], GlobalInitValue::Int(1)));
+            assert!(matches!(lanes[1], GlobalInitValue::Int(2)));
+            assert!(matches!(lanes[2], GlobalInitValue::Int(0) | GlobalInitValue::Zero));
+            assert!(matches!(lanes[3], GlobalInitValue::Int(0) | GlobalInitValue::Zero));
+        }
+        other => panic!("expected vector initializer value, got {other:?}"),
+    }
+}
+
+#[test]
+fn gnu_vector_compound_literal_uses_vector_init_expression() {
+    let src = r#"
+        typedef int v4si __attribute__((vector_size(16)));
+        int main(void) {
+            v4si x;
+            x = (v4si){ 1, 2, 3, 4 };
+            return 0;
+        }
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let body = hir.bodies.values().next().expect("main body");
+    let (literal_local, init_stmts) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match &expr.kind {
+            HirExprKind::CompoundLiteral { local, init_stmts, .. } => Some((*local, init_stmts)),
+            _ => None,
+        })
+        .expect("vector compound literal");
+    assert!(
+        init_stmts.iter().any(|stmt| match body.stmts[*stmt].kind {
+            HirStmtKind::Expr(expr) => match &body.exprs[expr].kind {
+                HirExprKind::Assign { lhs, rhs } => {
+                    matches!(body.exprs[*lhs].kind, HirExprKind::LocalRef(local) if local == literal_local)
+                        && matches!(&body.exprs[*rhs].kind, HirExprKind::VectorInit { lanes, .. } if lanes.len() == 4)
+                }
+                _ => false,
+            },
+            _ => false,
+        }),
+        "compound literal initializer should assign one VectorInit to its backing local"
+    );
+}
+
+#[test]
 fn aggregate_initializers_skip_unnamed_bitfields() {
     let src = r#"
         struct S { int a:4; int :4; int b:4; int c:4; } x = { 2, 3, 4 };
