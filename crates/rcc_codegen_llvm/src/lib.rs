@@ -4051,9 +4051,9 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-            let lhs = self.emit_operand_value(lhs, locals, body)?;
-            let rhs = self.emit_operand_value(rhs, locals, body)?;
-            match (lhs, rhs) {
+            let lhs_value = self.emit_operand_value(lhs, locals, body)?;
+            let rhs_value = self.emit_operand_value(rhs, locals, body)?;
+            match (lhs_value, rhs_value) {
                 (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                     let predicate = match op {
                         BinOp::Eq => IntPredicate::EQ,
@@ -4087,6 +4087,24 @@ pub mod backend {
                     };
                     self.emit_int_compare_values(predicate, lhs, rhs)
                 }
+                (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(int)) => {
+                    let predicate = match op {
+                        BinOp::Eq => IntPredicate::EQ,
+                        BinOp::Ne => IntPredicate::NE,
+                        _ => unreachable!("non-equality op routed to emit_eq_ne_binop"),
+                    };
+                    let int_ty = self.operand_ty(rhs, body)?;
+                    self.emit_pointer_int_compare_values(predicate, ptr, int, int_ty, "ptreq")
+                }
+                (BasicValueEnum::IntValue(int), BasicValueEnum::PointerValue(ptr)) => {
+                    let predicate = match op {
+                        BinOp::Eq => IntPredicate::EQ,
+                        BinOp::Ne => IntPredicate::NE,
+                        _ => unreachable!("non-equality op routed to emit_eq_ne_binop"),
+                    };
+                    let int_ty = self.operand_ty(lhs, body)?;
+                    self.emit_pointer_int_compare_values(predicate, ptr, int, int_ty, "ptreq")
+                }
                 (lhs, rhs) => Err(CodegenError::Internal(format!(
                     "equality operands have incompatible LLVM types {:?} and {:?}",
                     lhs.get_type(),
@@ -4103,9 +4121,9 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-            let lhs = self.emit_operand_value(lhs, locals, body)?;
-            let rhs = self.emit_operand_value(rhs, locals, body)?;
-            match (lhs, rhs) {
+            let lhs_value = self.emit_operand_value(lhs, locals, body)?;
+            let rhs_value = self.emit_operand_value(rhs, locals, body)?;
+            match (lhs_value, rhs_value) {
                 (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => {
                     self.emit_int_compare_values(predicate, lhs, rhs)
                 }
@@ -4121,12 +4139,38 @@ pub mod backend {
                         .map_err(builder_error)?;
                     self.emit_int_compare_values(predicate, lhs, rhs)
                 }
+                (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(int)) => {
+                    let int_ty = self.operand_ty(rhs, body)?;
+                    self.emit_pointer_int_compare_values(predicate, ptr, int, int_ty, "ptrcmp")
+                }
+                (BasicValueEnum::IntValue(int), BasicValueEnum::PointerValue(ptr)) => {
+                    let int_ty = self.operand_ty(lhs, body)?;
+                    self.emit_pointer_int_compare_values(predicate, ptr, int, int_ty, "ptrcmp")
+                }
                 (lhs, rhs) => Err(CodegenError::Internal(format!(
                     "ordered comparison operands have incompatible LLVM types {:?} and {:?}",
                     lhs.get_type(),
                     rhs.get_type()
                 ))),
             }
+        }
+
+        fn emit_pointer_int_compare_values(
+            &self,
+            predicate: IntPredicate,
+            ptr: PointerValue<'ctx>,
+            int: IntValue<'ctx>,
+            int_ty: TyId,
+            name: &str,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let intptr_ty = self.context.i64_type();
+            let ptr = self
+                .builder
+                .build_ptr_to_int(ptr, intptr_ty, &format!("{name}.ptr"))
+                .map_err(builder_error)?;
+            let int =
+                self.cast_int_value(int, intptr_ty, self.is_signed_integer_ty(int_ty)?, "intptr")?;
+            self.emit_int_compare_values(predicate, ptr, int)
         }
 
         fn emit_int_compare_values(
@@ -8487,6 +8531,41 @@ mod tests {
             assert!(ir.contains(opcode), "missing opcode {opcode:?} in IR:\n{ir}");
             assert!(ir.contains("zext i1"), "comparison did not widen to int in IR:\n{ir}");
         }
+    }
+
+    /// Pointer-vs-null equality reaches CFG as pointer/int; codegen must
+    /// normalize that pair instead of treating it as an internal error.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn pointer_null_equality_uses_intptr_compare() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(int_ty)));
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(501)), ptr_ty, false));
+        let body = cfg_body_with_locals(
+            int_ty,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::BinaryOp(
+                            BinOp::Eq,
+                            local_copy(Local(1)),
+                            int_const(int_ty, 0),
+                        ),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__ptr_eq_null", int_ty, body);
+        assert!(ir.contains("ptrtoint ptr"), "IR should cast pointer to intptr:\n{ir}");
+        assert!(ir.contains("icmp eq i64"), "IR should compare intptr values:\n{ir}");
+        assert!(ir.contains("zext i1"), "IR should widen bool to C int:\n{ir}");
     }
 
     /// Floating binops and unary `FNeg` use floating LLVM opcodes and result
