@@ -79,6 +79,7 @@ fn lower_function_bodies(
         let mut body = Body::default();
         let mut scope = ScopeStack::new();
         scope.push_scope();
+        resolver.push_tag_scope();
         lower_function_params(
             &func_def.declarator,
             &mut body,
@@ -99,6 +100,7 @@ fn lower_function_bodies(
         let root = lower_stmt(&root_stmt, &mut body, &mut scope, crate_, tcx, resolver, session);
         populate_switch_case_tables(&mut body, root, session);
         body.root = Some(root);
+        resolver.pop_tag_scope();
         scope.pop_scope();
         resolver.labels.clear();
 
@@ -153,14 +155,50 @@ fn lower_function_params(
 pub struct Resolver {
     /// Ordinary namespace: (name) -> `DefId`.
     pub ordinary: FxHashMap<Symbol, DefId>,
-    /// Tag namespace: `struct`/`union`/`enum` tags.
+    /// File-scope tag namespace: `struct`/`union`/`enum` tags.
     pub tags: FxHashMap<Symbol, DefId>,
+    tag_scopes: Vec<FxHashMap<Symbol, DefId>>,
     /// Labels are strictly per-function; populated then flushed per body.
     pub labels: FxHashMap<Symbol, rcc_hir::HirStmtId>,
     /// Interned string literals (content symbol -> generated `Global`
     /// `DefId`). Used by [`lower_expr`] so that repeated identical
     /// string literals reuse the same internally-linked global.
     pub strings: FxHashMap<Symbol, DefId>,
+}
+
+impl Resolver {
+    fn push_tag_scope(&mut self) {
+        self.tag_scopes.push(FxHashMap::default());
+    }
+
+    fn pop_tag_scope(&mut self) {
+        self.tag_scopes.pop();
+    }
+
+    fn lookup_tag(&self, tag: Symbol) -> Option<DefId> {
+        for scope in self.tag_scopes.iter().rev() {
+            if let Some(&def) = scope.get(&tag) {
+                return Some(def);
+            }
+        }
+        self.tags.get(&tag).copied()
+    }
+
+    fn lookup_current_tag(&self, tag: Symbol) -> Option<DefId> {
+        if let Some(scope) = self.tag_scopes.last() {
+            scope.get(&tag).copied()
+        } else {
+            self.tags.get(&tag).copied()
+        }
+    }
+
+    fn insert_tag(&mut self, tag: Symbol, def: DefId) {
+        if let Some(scope) = self.tag_scopes.last_mut() {
+            scope.insert(tag, def);
+        } else {
+            self.tags.insert(tag, def);
+        }
+    }
 }
 
 /// A binding visible in a particular scope.
@@ -342,12 +380,12 @@ impl From<RecordKind> for TagKind {
 
 /// Resolve a struct/union/enum tag reference.
 ///
-/// Looks up `tag` in `resolver.tags`. If found, checks that the stored
-/// definition has the same `TagKind` as `expected_kind`. On mismatch,
-/// emits `E0072` and returns `None`.
+/// Looks up `tag` in the nearest visible tag scope. If found, checks
+/// that the stored definition has the same `TagKind` as
+/// `expected_kind`. On mismatch, emits `E0072` and returns `None`.
 ///
-/// If the tag is not yet in the table (forward declaration), creates a
-/// new incomplete `Def` of the appropriate kind, registers it, and
+/// If the tag is not yet visible (forward declaration), creates a new
+/// incomplete `Def` in the current tag scope, registers it, and
 /// returns the fresh `DefId`.
 pub fn resolve_tag(
     tag: Symbol,
@@ -358,50 +396,84 @@ pub fn resolve_tag(
     resolver: &mut Resolver,
     session: &mut Session,
 ) -> Option<DefId> {
-    if let Some(&existing_id) = resolver.tags.get(&tag) {
-        // Check kind matches.
-        let def = &crate_.defs[existing_id];
-        let actual_kind = match &def.kind {
-            DefKind::Record { kind, .. } => TagKind::from(*kind),
-            DefKind::Enum { .. } => TagKind::Enum,
-            _ => {
-                // Should not happen — tags table only has Record/Enum.
-                return Some(existing_id);
-            }
-        };
-        if actual_kind != expected_kind {
-            let tag_str = session.interner.get(tag);
-            session
-                .handler
-                .struct_err(
-                    tag_span,
-                    format!(
-                        "use of `{tag_str}` as `{}` but previously declared as `{}`",
-                        expected_kind.keyword(),
-                        actual_kind.keyword(),
-                    ),
-                )
-                .code(rcc_errors::codes::E0072)
-                .emit();
-            return None;
-        }
-        Some(existing_id)
-    } else {
-        // Forward declaration — create an incomplete def.
-        let kind = match expected_kind {
-            TagKind::Struct => {
-                DefKind::Record { kind: RecordKind::Struct, layout: None, fields: Vec::new() }
-            }
-            TagKind::Union => {
-                DefKind::Record { kind: RecordKind::Union, layout: None, fields: Vec::new() }
-            }
-            TagKind::Enum => DefKind::Enum { repr: tcx.int, variants: Vec::new() },
-        };
-        let id = crate_.defs.push(Def { id: DefId(0), name: tag, span: tag_span, kind });
-        crate_.defs[id].id = id;
-        resolver.tags.insert(tag, id);
-        Some(id)
+    if let Some(existing_id) = resolver.lookup_tag(tag) {
+        return validate_tag_kind(tag, tag_span, existing_id, expected_kind, crate_, session);
     }
+    Some(create_incomplete_tag(tag, tag_span, expected_kind, crate_, tcx, resolver))
+}
+
+fn resolve_tag_definition(
+    tag: Symbol,
+    tag_span: Span,
+    expected_kind: TagKind,
+    crate_: &mut HirCrate,
+    tcx: &TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<DefId> {
+    if let Some(existing_id) = resolver.lookup_current_tag(tag) {
+        return validate_tag_kind(tag, tag_span, existing_id, expected_kind, crate_, session);
+    }
+    Some(create_incomplete_tag(tag, tag_span, expected_kind, crate_, tcx, resolver))
+}
+
+fn validate_tag_kind(
+    tag: Symbol,
+    tag_span: Span,
+    existing_id: DefId,
+    expected_kind: TagKind,
+    crate_: &HirCrate,
+    session: &mut Session,
+) -> Option<DefId> {
+    let def = &crate_.defs[existing_id];
+    let actual_kind = match &def.kind {
+        DefKind::Record { kind, .. } => TagKind::from(*kind),
+        DefKind::Enum { .. } => TagKind::Enum,
+        _ => {
+            // Should not happen — tag scopes only hold Record/Enum.
+            return Some(existing_id);
+        }
+    };
+    if actual_kind != expected_kind {
+        let tag_str = session.interner.get(tag);
+        session
+            .handler
+            .struct_err(
+                tag_span,
+                format!(
+                    "use of `{tag_str}` as `{}` but previously declared as `{}`",
+                    expected_kind.keyword(),
+                    actual_kind.keyword(),
+                ),
+            )
+            .code(rcc_errors::codes::E0072)
+            .emit();
+        return None;
+    }
+    Some(existing_id)
+}
+
+fn create_incomplete_tag(
+    tag: Symbol,
+    tag_span: Span,
+    expected_kind: TagKind,
+    crate_: &mut HirCrate,
+    tcx: &TyCtxt,
+    resolver: &mut Resolver,
+) -> DefId {
+    let kind = match expected_kind {
+        TagKind::Struct => {
+            DefKind::Record { kind: RecordKind::Struct, layout: None, fields: Vec::new() }
+        }
+        TagKind::Union => {
+            DefKind::Record { kind: RecordKind::Union, layout: None, fields: Vec::new() }
+        }
+        TagKind::Enum => DefKind::Enum { repr: tcx.int, variants: Vec::new() },
+    };
+    let id = crate_.defs.push(Def { id: DefId(0), name: tag, span: tag_span, kind });
+    crate_.defs[id].id = id;
+    resolver.insert_tag(tag, id);
+    id
 }
 
 /// Two-pass label resolution for a single function body.
@@ -583,9 +655,9 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
 /// so subsequent expression references resolve correctly. Scope
 /// management:
 ///
-/// - A `Compound` block pushes a fresh scope frame on entry and pops
-///   it on exit.
-/// - A `For` statement pushes a fresh scope frame around the init /
+/// - A `Compound` block pushes fresh ordinary and tag scope frames on
+///   entry and pops them on exit.
+/// - A `For` statement pushes fresh ordinary and tag scope frames around the init /
 ///   condition / step / body because C99 §6.8.5p5 gives the init
 ///   declaration the same scope as the loop body.
 ///
@@ -634,9 +706,11 @@ pub fn lower_stmt(
         }
         StmtKind::For { init, cond, step, body: body_stmt } => {
             // C99 §6.8.5p5: the for-init declaration has the same scope
-            // as the loop body. Push a fresh frame so any declared
-            // locals are visible to cond / step / body but not outside.
+            // as the loop body. Push fresh ordinary and tag frames so
+            // declared identifiers are visible to cond / step / body
+            // but not outside.
             scope.push_scope();
+            resolver.push_tag_scope();
             let init_id = init.as_deref().and_then(|item| match item {
                 BlockItem::Stmt(s) => {
                     Some(lower_stmt(s, body, scope, crate_, tcx, resolver, session))
@@ -650,6 +724,7 @@ pub fn lower_stmt(
             let step_id =
                 step.as_ref().map(|e| lower_expr(e, body, scope, crate_, tcx, resolver, session));
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
+            resolver.pop_tag_scope();
             scope.pop_scope();
             HirStmtKind::For { init: init_id, cond: cond_id, step: step_id, body: body_id }
         }
@@ -875,6 +950,7 @@ fn lower_block_items(
     session: &mut Session,
 ) -> Vec<HirStmtId> {
     scope.push_scope();
+    resolver.push_tag_scope();
     let mut out: Vec<HirStmtId> = Vec::with_capacity(items.len());
     for item in items {
         match item {
@@ -887,6 +963,7 @@ fn lower_block_items(
             }
         }
     }
+    resolver.pop_tag_scope();
     scope.pop_scope();
     out
 }
@@ -3211,7 +3288,8 @@ fn lower_record_spec_to_ty(
     };
 
     let def_id = if let Some(tag) = spec.tag {
-        let Some(id) = resolve_tag(tag, spec.span, expected, crate_, tcx, resolver, session) else {
+        let resolver_fn = if spec.fields.is_some() { resolve_tag_definition } else { resolve_tag };
+        let Some(id) = resolver_fn(tag, spec.span, expected, crate_, tcx, resolver, session) else {
             return tcx.error;
         };
         id
@@ -3245,7 +3323,9 @@ fn lower_enum_spec_to_ty(
     session: &mut Session,
 ) -> TyId {
     let def_id = if let Some(tag) = spec.tag {
-        let Some(id) = resolve_tag(tag, spec.span, TagKind::Enum, crate_, tcx, resolver, session)
+        let resolver_fn =
+            if spec.enumerators.is_some() { resolve_tag_definition } else { resolve_tag };
+        let Some(id) = resolver_fn(tag, spec.span, TagKind::Enum, crate_, tcx, resolver, session)
         else {
             return tcx.error;
         };

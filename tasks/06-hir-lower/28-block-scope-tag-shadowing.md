@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 06-28: block-scope tag shadowing
 
 **Phase:** 06-hir-lower    **Depends on:** 06-18    **Milestone:** M6+

@@ -177,6 +177,59 @@ fn file_scope_array_size_accepts_integer_constant_expression() {
     }
 }
 
+#[test]
+fn block_scope_struct_definition_shadows_file_scope_tag() {
+    let src = r#"
+        struct T;
+        struct T { int x; };
+
+        int main(void) {
+            struct T v;
+            { struct T { int z; }; }
+            v.x = 2;
+            return v.x != 2;
+        }
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
+#[test]
+fn nested_block_struct_definition_shadows_outer_block_tag() {
+    let src = r#"
+        int main(void) {
+            struct T { int x; } s1;
+            s1.x = 1;
+            {
+                struct T { int y; } s2;
+                s2.y = 1;
+                if (s1.x - s2.y != 0)
+                    return 1;
+            }
+            return 0;
+        }
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
+#[test]
+fn duplicate_block_scope_tag_definition_is_diagnosed() {
+    let src = r#"
+        int main(void) {
+            struct T { int x; };
+            struct T { int y; };
+            return 0;
+        }
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|diag| diag.code == Some(rcc_errors::codes::E0070)),
+        "same-scope duplicate tag definition should emit E0070: {diags:?}"
+    );
+}
+
 fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
