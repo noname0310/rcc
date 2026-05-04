@@ -355,11 +355,20 @@ impl<'a> Preprocessor<'a> {
 
         self.install_static_predefined("__builtin_abort", "abort");
         self.install_static_predefined("__builtin_exit", "exit");
+        self.install_static_predefined("__builtin_printf", "printf");
+        self.install_static_predefined("__builtin_sprintf", "sprintf");
+        self.install_static_predefined("__builtin_snprintf", "snprintf");
+        self.install_static_predefined("__builtin_malloc", "malloc");
+        self.install_static_predefined("__builtin_alloca", "alloca");
         self.install_static_predefined("__builtin_memcpy", "memcpy");
         self.install_static_predefined("__builtin_memset", "memset");
         self.install_static_predefined("__builtin_memcmp", "memcmp");
         self.install_static_predefined("__builtin_strcmp", "strcmp");
+        self.install_static_predefined("__builtin_strcpy", "strcpy");
+        self.install_static_predefined("__builtin_strncpy", "strncpy");
+        self.install_static_predefined("__builtin_strchr", "strchr");
         self.install_static_predefined("__builtin_strlen", "strlen");
+        self.install_variadic_predefined("__builtin_prefetch", &["addr"], "((void)(addr))");
     }
 
     fn install_static_predefined(&mut self, name: &str, body_src: &str) {
@@ -378,6 +387,33 @@ impl<'a> Preprocessor<'a> {
         self.macros.define(MacroDef {
             name: name_sym,
             kind: MacroKind::ObjectLike,
+            body,
+            def_span,
+            is_predefined: true,
+        });
+    }
+
+    fn install_variadic_predefined(&mut self, name: &str, params: &[&str], body_src: &str) {
+        let file_label = format!("<predefined:{name}>");
+        let file_id = {
+            let mut sm = self.session.source_map.write().unwrap();
+            sm.add_file(PathBuf::from(file_label), Arc::from(body_src))
+        };
+        let body: Vec<PpToken> = rcc_lexer::tokenize(file_id, body_src)
+            .filter(|t| {
+                !matches!(t.kind, PpTokenKind::Whitespace | PpTokenKind::Newline | PpTokenKind::Eof)
+            })
+            .collect();
+        let name_sym = self.session.interner.intern(name);
+        let param_syms = params.iter().map(|param| self.session.interner.intern(param)).collect();
+        let def_span = Span::new(file_id, BytePos(0), BytePos(body_src.len() as u32));
+        self.macros.define(MacroDef {
+            name: name_sym,
+            kind: MacroKind::FunctionLike {
+                params: param_syms,
+                variadic: true,
+                named_variadic: None,
+            },
             body,
             def_span,
             is_predefined: true,
@@ -1478,6 +1514,29 @@ mod run_tests {
             let def = pp.macros.get(*sym).unwrap_or_else(|| panic!("{label} must be defined"));
             assert!(def.is_predefined, "{label} must carry is_predefined=true");
         }
+    }
+
+    #[test]
+    fn gnu_builtin_libcall_aliases_are_explicitly_feature_gated() {
+        let src = "__builtin_printf(\"x\")\n__builtin_prefetch(p, 0, 3)\n";
+
+        let (mut strict_sess, strict_id, _cap) = seed(src);
+        let mut strict_pp = Preprocessor::new(&mut strict_sess);
+        let strict_out = strict_pp.run(strict_id);
+        assert_eq!(
+            joined_text(&strict_pp, &strict_out),
+            "__builtin_printf(\"x\")__builtin_prefetch(p,0,3)",
+            "strict C99 mode must not silently define GNU builtin aliases",
+        );
+
+        let opts =
+            rcc_session::Options { gnu_builtin_libcalls: true, ..rcc_session::Options::default() };
+        let (mut gnu_sess, gnu_id, cap) = seed_with_opts(opts, src);
+        let mut gnu_pp = Preprocessor::new(&mut gnu_sess);
+        let gnu_out = gnu_pp.run(gnu_id);
+
+        assert_eq!(joined_text(&gnu_pp, &gnu_out), "printf(\"x\")((void)(p))");
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
     }
 
     #[test]

@@ -61,15 +61,28 @@ fn install_gnu_builtin_libcalls(
         is_volatile: false,
         is_restrict: false,
     }));
+    let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
 
     let builtins = [
         ("abort", tcx.void, Vec::new(), false),
         ("exit", tcx.void, vec![tcx.int], false),
+        ("printf", tcx.int, vec![const_char_ptr], true),
+        ("fprintf", tcx.int, vec![void_ptr, const_char_ptr], true),
+        ("sprintf", tcx.int, vec![char_ptr, const_char_ptr], true),
+        ("snprintf", tcx.int, vec![char_ptr, tcx.ulong, const_char_ptr], true),
+        ("vprintf", tcx.int, vec![const_char_ptr, tcx.builtin_va_list], false),
+        ("vfprintf", tcx.int, vec![void_ptr, const_char_ptr, tcx.builtin_va_list], false),
+        ("malloc", void_ptr, vec![tcx.ulong], false),
+        ("alloca", void_ptr, vec![tcx.ulong], false),
         ("memcpy", void_ptr, vec![void_ptr, const_void_ptr, tcx.ulong], false),
         ("memset", void_ptr, vec![void_ptr, tcx.int, tcx.ulong], false),
         ("memcmp", tcx.int, vec![const_void_ptr, const_void_ptr, tcx.ulong], false),
         ("strcmp", tcx.int, vec![const_char_ptr, const_char_ptr], false),
+        ("strcpy", char_ptr, vec![char_ptr, const_char_ptr], false),
+        ("strncpy", char_ptr, vec![char_ptr, const_char_ptr, tcx.ulong], false),
+        ("strchr", char_ptr, vec![const_char_ptr, tcx.int], false),
         ("strlen", tcx.ulong, vec![const_char_ptr], false),
+        ("tmpnam", char_ptr, vec![char_ptr], false),
     ];
 
     for (name, ret, params, variadic) in builtins {

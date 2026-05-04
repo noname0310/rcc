@@ -100,6 +100,8 @@ fn gnu_builtin_libcalls_injects_external_libc_declarations() {
             char dst[4];
             char src[4];
             __builtin_memcpy(dst, src, 4);
+            __builtin_printf("%s", dst);
+            __builtin_prefetch(dst, 0, 3);
             if (__builtin_strlen(dst) == 99)
                 abort();
             return __CHAR_BIT__ == 8 ? 0 : 1;
@@ -118,7 +120,7 @@ fn gnu_builtin_libcalls_injects_external_libc_declarations() {
     rcc_typeck::check(&mut sess, &mut tcx, &mut hir);
 
     assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
-    for name in ["memcpy", "strlen", "abort"] {
+    for name in ["memcpy", "strlen", "abort", "printf"] {
         let def = hir
             .defs
             .iter()

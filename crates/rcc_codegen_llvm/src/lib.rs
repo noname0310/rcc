@@ -497,7 +497,13 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             }
             Ty::Array { elem, .. } => self.classify_array(ty, elem.ty, offset, chunks),
             Ty::Record(_) => self.classify_record(ty, offset, chunks),
-            Ty::BuiltinVaList => self.classify_record(ty, offset, chunks),
+            Ty::BuiltinVaList => {
+                let layout = self
+                    .layout
+                    .layout_of(ty)
+                    .map_err(|err| type_lowering_error(ty, err.to_string()))?;
+                merge_range(chunks, offset, layout.size, AbiClass::Memory, ty)
+            }
             Ty::Void | Ty::Func { .. } | Ty::Error => {
                 Err(type_lowering_error(ty, "type cannot appear inside an ABI aggregate"))
             }
@@ -6763,6 +6769,23 @@ mod tests {
         assert_eq!(abi.params[0].classes, [AbiClass::Integer]);
         assert_eq!(abi.params[1].classes, [AbiClass::Sse]);
         assert_eq!(abi.params[2].classes, [AbiClass::Integer]);
+    }
+
+    #[test]
+    fn sysv_abi_classifies_builtin_va_list_param_as_memory() {
+        let mut tcx = TyCtxt::new();
+        let ret = tcx.void;
+        let va_list = tcx.builtin_va_list;
+        let fn_ty = func_ty(&mut tcx, ret, vec![va_list], false);
+        let defs = IndexVec::new();
+
+        let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+        assert_eq!(abi.params[0].classes, [AbiClass::Memory]);
+        assert!(matches!(
+            abi.params[0].kind,
+            AbiParamKind::Indirect { byval: true, align: 8, size: 24 }
+        ));
     }
 
     #[test]
