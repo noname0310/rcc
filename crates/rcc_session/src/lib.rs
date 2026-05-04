@@ -8,7 +8,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 pub use rcc_errors::WarningConfig;
@@ -389,6 +390,8 @@ pub struct Session {
     pub handler: Handler,
     /// Headers resolved by preprocessing, in encounter order.
     pub source_dependencies: Arc<RwLock<Vec<SourceDependency>>>,
+    /// In-memory files used by tests and fuzz targets.
+    virtual_files: Arc<RwLock<HashMap<PathBuf, Arc<str>>>>,
 }
 
 impl Session {
@@ -403,6 +406,7 @@ impl Session {
             interner: Interner::new(),
             handler,
             source_dependencies: Arc::new(RwLock::new(Vec::new())),
+            virtual_files: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -415,6 +419,7 @@ impl Session {
             interner: Interner::new(),
             handler,
             source_dependencies: Arc::new(RwLock::new(Vec::new())),
+            virtual_files: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -432,8 +437,35 @@ impl Session {
             interner: Interner::new(),
             handler,
             source_dependencies: Arc::new(RwLock::new(Vec::new())),
+            virtual_files: Arc::new(RwLock::new(HashMap::new())),
         };
         (sess, cap)
+    }
+
+    /// Register an in-memory file under `path`.
+    ///
+    /// This is deliberately session-local rather than a global hook:
+    /// fuzz targets and tests can synthesize small include trees while
+    /// production driver paths keep using the host filesystem.
+    pub fn add_virtual_file(&self, path: PathBuf, src: Arc<str>) {
+        self.virtual_files.write().unwrap().insert(path, src);
+    }
+
+    /// Return `true` when `path` names a session-local virtual file.
+    pub fn has_virtual_file(&self, path: &Path) -> bool {
+        self.virtual_files.read().unwrap().contains_key(path)
+    }
+
+    /// Load a source file from the virtual layer first, then disk.
+    ///
+    /// The returned file is always registered in the [`SourceMap`], so
+    /// downstream diagnostics can render spans exactly as they do for
+    /// ordinary files.
+    pub fn load_source_file(&self, path: &Path) -> std::io::Result<rcc_span::FileId> {
+        if let Some(src) = self.virtual_files.read().unwrap().get(path).cloned() {
+            return Ok(self.source_map.write().unwrap().add_file(path.to_path_buf(), src));
+        }
+        self.source_map.write().unwrap().load_file(path)
     }
 
     /// Record a source dependency resolved by the preprocessor.

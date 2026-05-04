@@ -44,21 +44,34 @@ pub fn resolve_header(
     current_dir: &Path,
     include_paths: &[PathBuf],
 ) -> Option<PathBuf> {
+    resolve_header_with(name, system, current_dir, include_paths, Path::is_file)
+}
+
+fn resolve_header_with<F>(
+    name: &str,
+    system: bool,
+    current_dir: &Path,
+    include_paths: &[PathBuf],
+    mut exists: F,
+) -> Option<PathBuf>
+where
+    F: FnMut(&Path) -> bool,
+{
     let as_path = Path::new(name);
     if as_path.is_absolute() {
-        return if as_path.is_file() { Some(as_path.to_path_buf()) } else { None };
+        return if exists(as_path) { Some(as_path.to_path_buf()) } else { None };
     }
 
     if !system {
         let candidate = current_dir.join(as_path);
-        if candidate.is_file() {
+        if exists(&candidate) {
             return Some(candidate);
         }
     }
 
     for dir in include_paths {
         let candidate = dir.join(as_path);
-        if candidate.is_file() {
+        if exists(&candidate) {
             return Some(candidate);
         }
     }
@@ -173,7 +186,11 @@ impl Preprocessor<'_> {
             include_paths.push(builtin);
         }
 
-        let Some(resolved) = resolve_header(name, is_system, &current_dir, &include_paths) else {
+        let Some(resolved) =
+            resolve_header_with(name, is_system, &current_dir, &include_paths, |path| {
+                path.is_file() || self.session.has_virtual_file(path)
+            })
+        else {
             self.session.handler.emit(&cannot_find_header(directive_span, name, is_system));
             return Vec::new();
         };
@@ -195,7 +212,7 @@ impl Preprocessor<'_> {
             .map(|f| f.id);
         let new_file = match existing {
             Some(id) => id,
-            None => match self.session.source_map.write().unwrap().load_file(&resolved) {
+            None => match self.session.load_source_file(&resolved) {
                 Ok(id) => id,
                 Err(err) => {
                     self.session.handler.emit(&cannot_load_header(directive_span, &resolved, &err));
@@ -308,6 +325,7 @@ fn cannot_load_header(span: Span, path: &Path, err: &std::io::Error) -> Diagnost
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Arc;
 
     use rcc_errors::{CaptureEmitter, Handler};
     use rcc_session::{Options, Session};
@@ -524,6 +542,30 @@ mod tests {
                 "{header} must be recorded as a system dependency: {deps:?}"
             );
         }
+    }
+
+    #[test]
+    fn process_include_resolves_session_virtual_files() {
+        let (mut sess, _cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_vfs__");
+        let main_path = root.join("main.c");
+        let header_path = root.join("virtual.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"virtual.h\"\n"));
+        sess.add_virtual_file(header_path.clone(), Arc::from("int from_virtual;\n"));
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = out
+            .iter()
+            .map(|tok| {
+                let sm = sess.source_map.read().unwrap();
+                let file = sm.file(tok.span.file);
+                file.src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
+            })
+            .collect::<String>();
+
+        assert_eq!(text, "intfrom_virtual;");
+        assert!(sess.source_dependencies().iter().any(|dep| dep.path == header_path));
     }
 
     #[test]

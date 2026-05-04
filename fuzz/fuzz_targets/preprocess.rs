@@ -25,13 +25,36 @@
 //!   want the fuzzer to surface (see the task's acceptance bullet
 //!   "stack overflow on recursive macro is caught within seconds").
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
 
 use rcc_preprocess::Preprocessor;
 use rcc_session::{Options, Session};
+
+/// Segment separator for multi-file fuzz inputs.
+///
+/// Segment 0 is the root translation unit. Segments 1..N are installed
+/// as virtual headers using [`VIRTUAL_HEADER_NAMES`]. This keeps the
+/// target deterministic and avoids per-input disk I/O while still
+/// fuzzing C99 `#include` resolution, include guards, and `#pragma once`.
+const VIRTUAL_FILE_SEPARATOR: &[u8] = b"\n/*__RCC_FUZZ_VIRTUAL_FILE__*/\n";
+
+/// Fixed virtual header names addressable from fuzzed `#include` lines.
+const VIRTUAL_HEADER_NAMES: &[&str] = &[
+    "test.h",
+    "include1.h",
+    "include2.h",
+    "include3.h",
+    "include4.h",
+    "test/pragma-once.c",
+    "fuzz0.h",
+    "fuzz1.h",
+];
+
+/// Virtual root used as both the root file's directory and a system include path.
+const VIRTUAL_ROOT: &str = "__rcc_fuzz_vfs__";
 
 /// Per-input byte cap (128 KiB, matching the `fuzz-preprocess` alias's
 /// `-max_len`). Inputs above this are discarded so a stray direct
@@ -42,15 +65,49 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT {
         return;
     }
-    let src: Arc<str> = Arc::from(String::from_utf8_lossy(data).into_owned());
+    let segments = split_segments(data, VIRTUAL_FILE_SEPARATOR);
+    let Some((main_bytes, header_bytes)) = segments.split_first() else {
+        return;
+    };
+    let src: Arc<str> = Arc::from(String::from_utf8_lossy(main_bytes).into_owned());
 
-    let mut session = Session::new(Options::default());
-    let file = {
-        let mut sm = match session.source_map.write() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        sm.add_file(PathBuf::from("<fuzz>"), src)
+    let root = PathBuf::from(VIRTUAL_ROOT);
+    let main_path = root.join("main.c");
+    let mut session =
+        Session::new(Options { include_paths: vec![root.clone()], ..Options::default() });
+    for (name, bytes) in VIRTUAL_HEADER_NAMES.iter().zip(header_bytes.iter().copied()) {
+        session.add_virtual_file(root.join(Path::new(name)), lossless_fuzz_text(bytes));
+    }
+    let file = session
+        .source_map
+        .write()
+        .map(|mut sm| sm.add_file(main_path, src))
+        .ok();
+    let Some(file) = file else {
+        return;
     };
     let _ = Preprocessor::new(&mut session).run(file);
 });
+
+fn split_segments<'a>(mut data: &'a [u8], separator: &[u8]) -> Vec<&'a [u8]> {
+    if separator.is_empty() {
+        return vec![data];
+    }
+
+    let mut segments = Vec::new();
+    while let Some(pos) = find_bytes(data, separator) {
+        let (head, tail) = data.split_at(pos);
+        segments.push(head);
+        data = &tail[separator.len()..];
+    }
+    segments.push(data);
+    segments
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn lossless_fuzz_text(bytes: &[u8]) -> Arc<str> {
+    Arc::from(String::from_utf8_lossy(bytes).into_owned())
+}

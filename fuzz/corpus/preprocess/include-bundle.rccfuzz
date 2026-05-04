@@ -1,0 +1,31 @@
+#include "test.h"
+#include "include1.h"
+#include <fuzz0.h>
+ASSERT(7, include2);
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#define ASSERT(x, y) assert(x, y, #y)
+void assert(int expected, int actual, char *code);
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#include "include2.h"
+int include1 = 5;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include2 = 7;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include3 = 3;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include4 = 4;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#pragma once
+int pragma_once_seen = 1;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int fuzz0 = 0;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int fuzz1 = 1;

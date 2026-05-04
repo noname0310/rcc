@@ -164,6 +164,23 @@ Exit code is non-zero iff libFuzzer reports a crash, leak, or
 timeout. That is the acceptance gate tracked under
 `tasks/04-preprocess/19-fuzz-target.md`.
 
+### Extended preprocess run
+
+The path-filtered workflow at
+`.github/workflows/fuzz-preprocess-30m.yml` runs the same target for 30
+minutes when preprocess/fuzz paths change, or when manually dispatched.
+The target treats one fuzz input as a small virtual include tree:
+segment 0 is the root translation unit, and later segments are installed
+as synthetic headers such as `test.h`, `include1.h`, and `fuzz0.h`.
+Segments are separated by:
+
+```text
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+```
+
+This exercises `#include`, include guards, and `#pragma once` without
+creating temporary files for every mutation.
+
 ### Recursive-macro sanity check
 
 As documented in the task's Acceptance, a manually-introduced bug of

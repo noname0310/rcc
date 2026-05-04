@@ -41,6 +41,7 @@ fuzz/corpus/lex/*
 fuzz/corpus/preprocess/*
 !fuzz/corpus/preprocess/*.c
 !fuzz/corpus/preprocess/*.h
+!fuzz/corpus/preprocess/*.rccfuzz
 fuzz/artifacts/
 
 # Conformance reports

@@ -45,8 +45,11 @@ $Seeds = @(
     'compat.c',       # 396 B — pragma pack + misc attrs
     'extern.c',       # 351 B — extern + forward decls
     'offsetof.c',     # 284 B — `#include <stddef.h>` style header usage
+    'test.h',         # 464 B — chibicc assert/prototype header
     'include1.h',     # 114 B — header chained via `#include "include2.h"`
-    'include2.h'      #  19 B — terminal header in the include chain
+    'include2.h',     #  19 B — terminal header in the include chain
+    'include3.h',     #  15 B — macro.c computed include fixture
+    'include4.h'      #  15 B — macro.c computed include fixture
 )
 
 foreach ($name in $Seeds) {
@@ -58,6 +61,41 @@ foreach ($name in $Seeds) {
     }
     Copy-Item -LiteralPath $src -Destination $dst -Force
 }
+
+$Bundle = @'
+#include "test.h"
+#include "include1.h"
+#include <fuzz0.h>
+ASSERT(7, include2);
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#define ASSERT(x, y) assert(x, y, #y)
+void assert(int expected, int actual, char *code);
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#include "include2.h"
+int include1 = 5;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include2 = 7;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include3 = 3;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int include4 = 4;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#pragma once
+int pragma_once_seen = 1;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int fuzz0 = 0;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+int fuzz1 = 1;
+'@
+Set-Content -LiteralPath (Join-Path $DstDir 'include-bundle.rccfuzz') -Value $Bundle -NoNewline
 
 $Count = (Get-ChildItem -LiteralPath $DstDir -File).Count
 Write-Host "seeded $Count files into $DstDir"
