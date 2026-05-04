@@ -140,9 +140,9 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (compile)   | interface frozen; implementation M6 |
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; reports only `arith.c`, `control.c`, `function.c` and uses a host-compiled minimal support helper |
-| `GccTortureAdapter`          | interface frozen; implementation M4 |
-| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline after 11-16f is 70 pass, 9 xfail, 5 fail, 4 skip |
-| `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |
+| `GccTortureAdapter`          | implemented; smoke/full execute modes are GPL-gated |
+| `TccTests2Adapter`           | implemented at task 11-16; current WSL baseline is 75 pass, 9 xfail, 0 fail, 4 skip |
+| `LlvmTestSuiteAdapter`       | implemented at task 11-17; nightly curated SingleSource subset currently 6 pass, 0 fail |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
 
 ## XFail lists

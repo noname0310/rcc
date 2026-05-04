@@ -163,6 +163,53 @@ jobs:
         with:
           name: gcc-torture-smoke-report
           path: docs/gcc-torture-smoke.json
+
+  llvm-test-suite:
+    name: llvm-test-suite SingleSource (nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev
+          echo "LLVM_SYS_181_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+      - name: Fetch llvm-test-suite
+        run: cargo xtask fetch-testsuites --only llvm-test-suite
+      - name: Build rcc with LLVM
+        run: cargo build --release -p rcc_driver --features rcc_codegen_llvm/llvm
+      - name: Run llvm-test-suite SingleSource subset
+        run: |
+          cargo run --release --package rcc_conformance --bin rcc_conformance_run -- \
+            --rcc target/release/rcc \
+            --suite llvm-test-suite \
+            --output docs/llvm-test-suite.json
+      - name: Check llvm-test-suite subset
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("docs/llvm-test-suite.json").read_text())
+          suite = next(s for s in report["suites"] if s["name"] == "llvm-test-suite")
+          cases = suite["cases"]
+          fail = [name for name, case in cases.items() if case["status"] == "fail"]
+          print(f"llvm-test-suite subset: {len(cases) - len(fail)} pass / {len(fail)} fail")
+          if fail:
+              raise SystemExit("llvm-test-suite subset failures: " + ", ".join(fail))
+          PY
+      - name: Upload llvm-test-suite report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-test-suite-report
+          path: docs/llvm-test-suite.json
+
   gcc-torture-full:
     name: gcc-torture execute (GPL, nightly)
     runs-on: ubuntu-latest

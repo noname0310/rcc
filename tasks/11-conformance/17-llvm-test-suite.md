@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-17: llvm-test-suite SingleSource
 
 **Phase:** 11-conformance    **Depends on:** 01-05    **Milestone:** M7

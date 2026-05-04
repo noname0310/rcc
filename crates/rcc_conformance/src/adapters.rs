@@ -1085,12 +1085,91 @@ fn strip_one_final_newline(mut bytes: Vec<u8>) -> Vec<u8> {
 /// `llvm-test-suite` SingleSource adapter.
 pub struct LlvmTestSuiteAdapter;
 
-impl Adapter for LlvmTestSuiteAdapter {
-    fn discover(&self, _root: &Path) -> anyhow::Result<Vec<TestCase>> {
-        Ok(Vec::new())
+const LLVM_SINGLE_SOURCE_SUBSET: &[&str] = &[
+    "2002-04-17-PrintfChar",
+    "2002-05-02-ArgumentTest",
+    "2002-05-03-NotTest",
+    "2003-04-22-Switch",
+    "2003-07-08-BitOpsTest",
+    "2003-10-13-SwitchTest",
+];
+
+impl LlvmTestSuiteAdapter {
+    /// Pure comparison logic for LLVM `.reference_output` files.
+    ///
+    /// LLVM SingleSource references include a final `exit N` line after stdout.
+    pub fn compare_outcome(stdout: &[u8], exit_code: Option<i32>, expected_path: &Path) -> Outcome {
+        let expected = match std::fs::read(expected_path) {
+            Ok(e) => normalize_stdout_newlines(&e),
+            Err(e) => {
+                return Outcome::Skip {
+                    reason: format!("cannot read {}: {e}", expected_path.display()),
+                };
+            }
+        };
+        let mut actual = normalize_stdout_newlines(stdout);
+        actual.extend_from_slice(format!("exit {}\n", exit_code.unwrap_or(-1)).as_bytes());
+        if actual == expected {
+            Outcome::Pass
+        } else {
+            Outcome::Fail { reason: "stdout/exit mismatch".into() }
+        }
     }
-    fn run(&self, _rcc: &Path, _case: &TestCase) -> anyhow::Result<Outcome> {
-        Ok(Outcome::Skip { reason: "llvm-test-suite adapter not yet implemented".into() })
+
+    fn unit_tests_dir(root: &Path) -> PathBuf {
+        root.join("SingleSource").join("UnitTests")
+    }
+
+    fn reference_path(case: &TestCase) -> PathBuf {
+        case.path.with_extension("reference_output")
+    }
+}
+
+impl Adapter for LlvmTestSuiteAdapter {
+    fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+        let dir = Self::unit_tests_dir(root);
+        anyhow::ensure!(dir.is_dir(), "llvm-test-suite UnitTests dir not found: {}", dir.display());
+        let mut cases = Vec::new();
+        for stem in LLVM_SINGLE_SOURCE_SUBSET {
+            let path = dir.join(format!("{stem}.c"));
+            let reference = path.with_extension("reference_output");
+            if path.is_file() && reference.is_file() {
+                cases.push(TestCase { id: format!("llvm-test-suite::{stem}"), path });
+            }
+        }
+        cases.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(cases)
+    }
+
+    fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let expected_path = Self::reference_path(case);
+        let tmp = tempfile::tempdir()?;
+        let exe_path =
+            if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
+
+        let mut compile = Command::new(rcc_path);
+        compile.arg("-w").arg("-lm").arg("-o").arg(&exe_path).arg(&case.path);
+        match run_with_timeout(&mut compile, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                let mut actual = o.stdout;
+                actual.extend_from_slice(&o.stderr);
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "rcc compile/link failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&actual).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => return Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") }),
+        }
+
+        let mut exec = Command::new(&exe_path);
+        match run_with_timeout(&mut exec, TIMEOUT) {
+            Ok(o) => Ok(Self::compare_outcome(&o.stdout, o.status.code(), &expected_path)),
+            Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
+        }
     }
 }
 
