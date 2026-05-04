@@ -378,7 +378,14 @@ impl ChibiccAdapter {
             anyhow::anyhow!("cannot derive directory from {}", case.path.display())
         })?;
         let mut cmd = Command::new(rcc_path);
-        cmd.arg("--emit=pp").arg("-I").arg(case_dir).arg(&case.path);
+        cmd.arg("--emit=pp")
+            .arg("-fgnu-permissive-redefinition")
+            .arg("-fgnu-named-variadic")
+            .arg("-fgnu-permissive-paste")
+            .arg("-fgnu-va-args-elision")
+            .arg("-I")
+            .arg(case_dir)
+            .arg(&case.path);
         match run_with_timeout(&mut cmd, TIMEOUT) {
             Ok(o) if o.status.success() => Ok(Outcome::Pass),
             Ok(o) => Ok(Outcome::Fail {

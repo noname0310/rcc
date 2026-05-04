@@ -147,6 +147,24 @@ fn gnu89_inline_flag_sets_frontend_option() {
 }
 
 #[test]
+fn gnu_preprocessor_compat_flags_set_frontend_options() {
+    let cli = parse(&[
+        "rcc",
+        "-fgnu-va-args-elision",
+        "-fgnu-permissive-redefinition",
+        "-fgnu-named-variadic",
+        "-fgnu-permissive-paste",
+        "hello.c",
+    ]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_va_args_elision);
+    assert!(opts.gnu_permissive_redefinition);
+    assert!(opts.gnu_named_variadic);
+    assert!(opts.gnu_permissive_paste);
+}
+
+#[test]
 fn strict_binary_integer_literal_is_rejected() {
     let input = TempCFile::new("strict-binary", "int x = 0b10;\n");
     let output = input.sibling("ast");

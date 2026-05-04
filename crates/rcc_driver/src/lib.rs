@@ -146,6 +146,14 @@ fn is_supported_feature_flag(flag: &str) -> bool {
         flag,
         "gnu-binary-literals"
             | "gnu-binary-integer-literals"
+            | "gnu-va-args-elision"
+            | "gnu-comma-va-args"
+            | "gnu-permissive-redefinition"
+            | "gnu-permissive-macro-redefinition"
+            | "gnu-named-variadic"
+            | "gnu-named-variadic-macros"
+            | "gnu-permissive-paste"
+            | "gnu-permissive-token-paste"
             | "gnu-statement-expressions"
             | "gnu-omitted-conditional-operand"
             | "gnu-omitted-conditional"
@@ -334,10 +342,22 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         link: link_options_from_cli(cli),
         debug_info: cli.debug_info,
         include_gpl_tests: cli.include_gpl_tests,
-        gnu_va_args_elision: false,
-        gnu_permissive_redefinition: false,
-        gnu_named_variadic: false,
-        gnu_permissive_paste: false,
+        gnu_va_args_elision: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-va-args-elision" | "gnu-comma-va-args")),
+        gnu_permissive_redefinition: cli.feature_flags.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                "gnu-permissive-redefinition" | "gnu-permissive-macro-redefinition"
+            )
+        }),
+        gnu_named_variadic: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-named-variadic" | "gnu-named-variadic-macros")
+        }),
+        gnu_permissive_paste: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-permissive-paste" | "gnu-permissive-token-paste")
+        }),
         gnu_binary_integer_literals: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-binary-literals" | "gnu-binary-integer-literals")
         }),
