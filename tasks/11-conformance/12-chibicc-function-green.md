@@ -1,6 +1,6 @@
 # 11-12: chibicc function.c green
 
-**Phase:** 11-conformance    **Depends on:** 11-10, 11-11    **Milestone:** M6
+**Phase:** 11-conformance    **Depends on:** 11-10, 11a, 11b, 11c, 11d    **Milestone:** M6
 
 ## Goal
 Make the stage-isolated chibicc `function.c` TU pass end-to-end.

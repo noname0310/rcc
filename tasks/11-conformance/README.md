@@ -26,6 +26,10 @@ future milestones, or documented policy decisions.
 | 09 | [`09-gnu-control-flow-extensions.md`](09-gnu-control-flow-extensions.md) | GNU case ranges + computed goto. |
 | 10 | [`10-chibicc-control-green.md`](10-chibicc-control-green.md) | chibicc `control.c` green. |
 | 11 | [`11-chibicc-function-prereq-triage.md`](11-chibicc-function-prereq-triage.md) | classify `function.c` blockers. |
+| 11a | [`11a-function-stage-common-support.md`](11a-function-stage-common-support.md) | host-compiled chibicc `common` support for `function.c`. |
+| 11b | [`11b-function-name-predefined-identifiers.md`](11b-function-name-predefined-identifiers.md) | C99 `__func__` and GNU `__FUNCTION__`. |
+| 11c | [`11c-function-va-area-compat.md`](11c-function-va-area-compat.md) | chibicc `__va_area__` compatibility. |
+| 11d | [`11d-function-abi-runtime-smoke.md`](11d-function-abi-runtime-smoke.md) | reduced ABI/runtime slices for `function.c`. |
 | 12 | [`12-chibicc-function-green.md`](12-chibicc-function-green.md) | chibicc `function.c` green. |
 | 13 | [`13-chibicc-preprocess.md`](13-chibicc-preprocess.md) | chibicc preprocessor @ M5. |
 | 14 | [`14-gcc-torture-smoke.md`](14-gcc-torture-smoke.md) | gcc-torture smoke @ M4. |
