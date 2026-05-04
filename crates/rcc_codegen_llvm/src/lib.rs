@@ -628,6 +628,63 @@ struct IntPart {
     bits: u32,
 }
 
+#[cfg(feature = "llvm")]
+#[derive(Copy, Clone, Debug, Default)]
+struct VariadicRegUsage {
+    gp: u32,
+    fp: u32,
+}
+
+#[cfg(feature = "llvm")]
+impl VariadicRegUsage {
+    fn from_fixed(params: &[AbiParam]) -> Self {
+        let mut usage = Self::default();
+        for param in params {
+            let (gp, fp) = abi_reg_usage(param);
+            usage.gp = usage.gp.saturating_add(gp);
+            usage.fp = usage.fp.saturating_add(fp);
+        }
+        usage
+    }
+
+    fn select_arg(
+        &mut self,
+        tcx: &TyCtxt,
+        defs: &IndexVec<DefId, Def>,
+        ty: TyId,
+        abi: AbiParam,
+    ) -> Result<AbiParam, CodegenError> {
+        let (gp, fp) = abi_reg_usage(&abi);
+        let overflows = self.gp.saturating_add(gp) > 6 || self.fp.saturating_add(fp) > 8;
+        if overflows && is_aggregate_abi_ty(tcx, ty) {
+            let layout = LayoutCx::with_defs(tcx, defs)
+                .layout_of(ty)
+                .map_err(|err| type_lowering_error(ty, err.to_string()))?;
+            return Ok(indirect_param(ty, layout));
+        }
+        self.gp = self.gp.saturating_add(gp);
+        self.fp = self.fp.saturating_add(fp);
+        Ok(abi)
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn abi_reg_usage(param: &AbiParam) -> (u32, u32) {
+    let AbiParamKind::Direct(units) = &param.kind else {
+        return (0, 0);
+    };
+    units.iter().fold((0, 0), |(gp, fp), unit| match unit.class {
+        AbiClass::Integer => (gp + 1, fp),
+        AbiClass::Sse | AbiClass::SseUp => (gp, fp + 1),
+        _ => (gp, fp),
+    })
+}
+
+#[cfg(feature = "llvm")]
+fn is_aggregate_abi_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Array { .. } | Ty::Record(_) | Ty::BuiltinVaList)
+}
+
 fn indirect_param(ty: TyId, layout: Layout) -> AbiParam {
     AbiParam {
         source: ty,
@@ -774,6 +831,28 @@ fn float_size(kind: FloatKind) -> u64 {
         FloatKind::F32 => 4,
         FloatKind::F64 => 8,
         FloatKind::F80 => 16,
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn checked_u32(count: usize, stride: u32, context: &str) -> Result<u32, CodegenError> {
+    let count = u32::try_from(count)
+        .map_err(|_| CodegenError::Internal(format!("{context} count overflowed")))?;
+    count
+        .checked_mul(stride)
+        .ok_or_else(|| CodegenError::Internal(format!("{context} byte count overflowed")))
+}
+
+#[cfg(feature = "llvm")]
+fn round_up_to(value: u64, align: u64) -> Option<u64> {
+    if align <= 1 {
+        return Some(value);
+    }
+    let rem = value % align;
+    if rem == 0 {
+        Some(value)
+    } else {
+        value.checked_add(align - rem)
     }
 }
 
@@ -1707,6 +1786,7 @@ pub mod backend {
             &self,
             call: CallSiteValue<'ctx>,
             abi: &FnAbi,
+            variadic_args: &[AbiParam],
         ) -> Result<(), CodegenError> {
             if abi.ret.zeroext {
                 let zeroext_kind = Attribute::get_named_enum_kind_id("zeroext");
@@ -1733,7 +1813,7 @@ pub mod backend {
                 })?;
             }
 
-            for param in &abi.params {
+            for param in abi.params.iter().chain(variadic_args.iter()) {
                 match &param.kind {
                     AbiParamKind::Direct(units) => {
                         param_index = param_index
@@ -2699,8 +2779,327 @@ pub mod backend {
                 }
             };
             let ap_ptr = self.emit_place_addr(ap_place, locals, body)?;
+            if self.is_memory_aggregate_ty(ty) {
+                return self.emit_aggregate_va_arg(ap_ptr, ty);
+            }
             let llvm_ty = self.type_cx().basic_type_of(ty)?;
             self.builder.build_va_arg(ap_ptr, llvm_ty, "va_arg").map_err(builder_error)
+        }
+
+        fn emit_aggregate_va_arg(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            ty: TyId,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let llvm_ty = self.type_cx().basic_type_of(ty)?;
+            let dest =
+                self.builder.build_alloca(llvm_ty, "va_arg.aggregate").map_err(builder_error)?;
+            let classifier = SysvParamClassifier::new(self.tcx, &self.hir.defs);
+            let abi = classifier.classify_param(ty)?;
+            let layout = self.memory_layout(ty)?;
+
+            match &abi.kind {
+                AbiParamKind::Indirect { align, size, .. } => {
+                    let src = self.va_arg_overflow_addr(ap_ptr, *align, *size)?;
+                    self.emit_memcpy(dest, ty, src, ty)?;
+                }
+                AbiParamKind::Direct(units) => {
+                    self.emit_direct_aggregate_va_arg(ap_ptr, dest, ty, units, layout)?;
+                }
+            }
+
+            self.builder.build_load(llvm_ty, dest, "va_arg.aggregate.load").map_err(builder_error)
+        }
+
+        fn emit_direct_aggregate_va_arg(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            dest: PointerValue<'ctx>,
+            ty: TyId,
+            units: &[AbiParamUnit],
+            layout: Layout,
+        ) -> Result<(), CodegenError> {
+            let gp_units = units.iter().filter(|unit| unit.class == AbiClass::Integer).count();
+            let fp_units = units
+                .iter()
+                .filter(|unit| matches!(unit.class, AbiClass::Sse | AbiClass::SseUp))
+                .count();
+            let gp_bytes = checked_u32(gp_units, 8, "va_arg GP register usage")?;
+            let fp_bytes = checked_u32(fp_units, 16, "va_arg FP register usage")?;
+
+            let gp_offset_ptr = self.va_list_i32_field_ptr(ap_ptr, 0, "va.gp_offset.ptr")?;
+            let fp_offset_ptr = self.va_list_i32_field_ptr(ap_ptr, 1, "va.fp_offset.ptr")?;
+            let gp_offset = self
+                .builder
+                .build_load(self.context.i32_type(), gp_offset_ptr, "va.gp_offset")
+                .map_err(builder_error)?
+                .into_int_value();
+            let fp_offset = self
+                .builder
+                .build_load(self.context.i32_type(), fp_offset_ptr, "va.fp_offset")
+                .map_err(builder_error)?
+                .into_int_value();
+
+            let can_use_gp = self.va_arg_offset_fits(gp_offset, 48, gp_bytes, "va.gp.ok")?;
+            let can_use_fp = self.va_arg_offset_fits(fp_offset, 176, fp_bytes, "va.fp.ok")?;
+            let use_regs = self
+                .builder
+                .build_and(can_use_gp, can_use_fp, "va.regs.ok")
+                .map_err(builder_error)?;
+            self.emit_direct_va_arg_selected(
+                ap_ptr,
+                dest,
+                ty,
+                units,
+                layout,
+                use_regs,
+                gp_offset,
+                fp_offset,
+                gp_offset_ptr,
+                fp_offset_ptr,
+                gp_bytes,
+                fp_bytes,
+            )?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn emit_direct_va_arg_selected(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            dest: PointerValue<'ctx>,
+            _ty: TyId,
+            units: &[AbiParamUnit],
+            layout: Layout,
+            use_regs: IntValue<'ctx>,
+            gp_offset: IntValue<'ctx>,
+            fp_offset: IntValue<'ctx>,
+            gp_offset_ptr: PointerValue<'ctx>,
+            fp_offset_ptr: PointerValue<'ctx>,
+            gp_bytes: u32,
+            fp_bytes: u32,
+        ) -> Result<(), CodegenError> {
+            let reg_save_area_ptr = self.va_list_ptr_field_ptr(ap_ptr, 3, "va.reg_save.ptr")?;
+            let reg_save_area = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    reg_save_area_ptr,
+                    "va.reg_save",
+                )
+                .map_err(builder_error)?
+                .into_pointer_value();
+            let (overflow, overflow_next, overflow_ptr) =
+                self.va_arg_overflow_candidate(ap_ptr, layout.align, layout.size)?;
+            let mut gp_index = 0_u32;
+            let mut fp_index = 0_u32;
+
+            for (unit_idx, unit) in units.iter().enumerate() {
+                let offset = if unit.class == AbiClass::Integer {
+                    let offset = self.add_i32_const(gp_offset, gp_index * 8, "va.gp.slot")?;
+                    gp_index += 1;
+                    offset
+                } else {
+                    let offset = self.add_i32_const(fp_offset, fp_index * 16, "va.fp.slot")?;
+                    fp_index += 1;
+                    offset
+                };
+                let reg_offset = self
+                    .builder
+                    .build_int_z_extend(offset, self.context.i64_type(), "va.slot.ext")
+                    .map_err(builder_error)?;
+                let src = self.build_gep(
+                    self.context.i8_type(),
+                    reg_save_area,
+                    &[reg_offset],
+                    "va.slot",
+                )?;
+                let unit_ty = self.type_cx().abi_unit_type(*unit)?;
+                let reg_value =
+                    self.builder.build_load(unit_ty, src, "va.unit").map_err(builder_error)?;
+                let mem_offset = self
+                    .context
+                    .i64_type()
+                    .const_int(abi_unit_offset(unit_idx, "va_arg aggregate")?, false);
+                let mem_src =
+                    self.build_gep(self.context.i8_type(), overflow, &[mem_offset], "va.mem.slot")?;
+                let mem_value = self
+                    .builder
+                    .build_load(unit_ty, mem_src, "va.mem.unit")
+                    .map_err(builder_error)?;
+                let value = self
+                    .builder
+                    .build_select(use_regs, reg_value, mem_value, "va.unit.select")
+                    .map_err(builder_error)?;
+                self.store_abi_unit(dest, abi_unit_offset(unit_idx, "va_arg aggregate")?, value)?;
+            }
+
+            let selected_overflow = self
+                .builder
+                .build_select(use_regs, overflow, overflow_next, "va.overflow.select")
+                .map_err(builder_error)?
+                .into_pointer_value();
+            self.builder.build_store(overflow_ptr, selected_overflow).map_err(builder_error)?;
+
+            if gp_bytes != 0 {
+                let next = self.add_i32_const(gp_offset, gp_bytes, "va.gp.next")?;
+                let selected = self
+                    .builder
+                    .build_select(use_regs, next, gp_offset, "va.gp.select")
+                    .map_err(builder_error)?
+                    .into_int_value();
+                self.builder.build_store(gp_offset_ptr, selected).map_err(builder_error)?;
+            }
+            if fp_bytes != 0 {
+                let next = self.add_i32_const(fp_offset, fp_bytes, "va.fp.next")?;
+                let selected = self
+                    .builder
+                    .build_select(use_regs, next, fp_offset, "va.fp.select")
+                    .map_err(builder_error)?
+                    .into_int_value();
+                self.builder.build_store(fp_offset_ptr, selected).map_err(builder_error)?;
+            }
+            Ok(())
+        }
+
+        fn va_arg_overflow_addr(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            align: u32,
+            size: u64,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            let overflow_ptr = self.va_list_ptr_field_ptr(ap_ptr, 2, "va.overflow.ptr")?;
+            let overflow = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    overflow_ptr,
+                    "va.overflow",
+                )
+                .map_err(builder_error)?
+                .into_pointer_value();
+            let aligned = self.align_overflow_arg_ptr(overflow, align)?;
+            let step = round_up_to(size, 8).ok_or_else(|| {
+                CodegenError::Internal("va_arg overflow size overflowed".to_owned())
+            })?;
+            let step = self.context.i64_type().const_int(step, false);
+            let next =
+                self.build_gep(self.context.i8_type(), aligned, &[step], "va.overflow.next")?;
+            self.builder.build_store(overflow_ptr, next).map_err(builder_error)?;
+            Ok(aligned)
+        }
+
+        fn va_arg_overflow_candidate(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            align: u32,
+            size: u64,
+        ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>), CodegenError>
+        {
+            let overflow_ptr = self.va_list_ptr_field_ptr(ap_ptr, 2, "va.overflow.ptr")?;
+            let overflow = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    overflow_ptr,
+                    "va.overflow",
+                )
+                .map_err(builder_error)?
+                .into_pointer_value();
+            let aligned = self.align_overflow_arg_ptr(overflow, align)?;
+            let step = round_up_to(size, 8).ok_or_else(|| {
+                CodegenError::Internal("va_arg overflow size overflowed".to_owned())
+            })?;
+            let step = self.context.i64_type().const_int(step, false);
+            let next =
+                self.build_gep(self.context.i8_type(), aligned, &[step], "va.overflow.next")?;
+            Ok((aligned, next, overflow_ptr))
+        }
+
+        fn align_overflow_arg_ptr(
+            &self,
+            ptr: PointerValue<'ctx>,
+            align: u32,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            if align <= 8 {
+                return Ok(ptr);
+            }
+            let int_ty = self.context.i64_type();
+            let ptr_int = self
+                .builder
+                .build_ptr_to_int(ptr, int_ty, "va.align.int")
+                .map_err(builder_error)?;
+            let add = int_ty.const_int(u64::from(align - 1), false);
+            let rounded =
+                self.builder.build_int_add(ptr_int, add, "va.align.add").map_err(builder_error)?;
+            let mask = int_ty.const_int(!(u64::from(align) - 1), false);
+            let aligned =
+                self.builder.build_and(rounded, mask, "va.align.mask").map_err(builder_error)?;
+            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+            self.builder.build_int_to_ptr(aligned, ptr_ty, "va.align.ptr").map_err(builder_error)
+        }
+
+        fn va_list_i32_field_ptr(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            field: u64,
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            self.va_list_field_ptr(ap_ptr, field, name)
+        }
+
+        fn va_list_ptr_field_ptr(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            field: u64,
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            self.va_list_field_ptr(ap_ptr, field, name)
+        }
+
+        fn va_list_field_ptr(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            field: u64,
+            name: &str,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            let va_ty = self.type_cx().basic_type_of(self.tcx.builtin_va_list)?;
+            let i32_ty = self.context.i32_type();
+            let zero = i32_ty.const_zero();
+            let field = i32_ty.const_int(field, false);
+            self.build_gep(va_ty, ap_ptr, &[zero, field], name)
+        }
+
+        fn va_arg_offset_fits(
+            &self,
+            offset: IntValue<'ctx>,
+            limit: u32,
+            needed: u32,
+            name: &str,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            if needed == 0 {
+                return Ok(self.context.bool_type().const_int(1, false));
+            }
+            let max = limit.checked_sub(needed).ok_or_else(|| {
+                CodegenError::Internal("va_arg register usage exceeds save area".to_owned())
+            })?;
+            let max = self.context.i32_type().const_int(u64::from(max), false);
+            self.builder
+                .build_int_compare(IntPredicate::ULE, offset, max, name)
+                .map_err(builder_error)
+        }
+
+        fn add_i32_const(
+            &self,
+            value: IntValue<'ctx>,
+            addend: u32,
+            name: &str,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            if addend == 0 {
+                return Ok(value);
+            }
+            let addend = value.get_type().const_int(u64::from(addend), false);
+            self.builder.build_int_add(value, addend, name).map_err(builder_error)
         }
 
         fn emit_complex_from_real(
@@ -4346,9 +4745,16 @@ pub mod backend {
                 self.push_call_arg(arg, param_abi, &mut llvm_args)?;
             }
 
+            let classifier = SysvParamClassifier::new(self.cx.tcx, &self.cx.hir.defs);
+            let mut variadic_usage = VariadicRegUsage::from_fixed(&abi.params);
+            let mut variadic_arg_abis = Vec::new();
             for arg in args.iter().skip(abi.params.len()) {
-                let value = self.cx.emit_operand_value(arg, &self.locals, self.body)?;
-                llvm_args.push(value.into());
+                let arg_ty = self.operand_ty(arg)?;
+                let param_abi = classifier.classify_param(arg_ty)?;
+                let param_abi =
+                    variadic_usage.select_arg(self.cx.tcx, &self.cx.hir.defs, arg_ty, param_abi)?;
+                self.push_call_arg(arg, &param_abi, &mut llvm_args)?;
+                variadic_arg_abis.push(param_abi);
             }
 
             let fn_type = self.cx.type_cx().fn_type_of(fn_ty)?;
@@ -4374,7 +4780,7 @@ pub mod backend {
                     .map_err(builder_error)?
             };
 
-            self.cx.apply_call_abi_attrs(call, &abi)?;
+            self.cx.apply_call_abi_attrs(call, &abi, &variadic_arg_abis)?;
             self.store_call_result(call, &abi.ret, destination)?;
 
             match target {
@@ -4575,7 +4981,7 @@ pub mod backend {
         }
 
         fn va_start_intrinsic(&self) -> FunctionValue<'ctx> {
-            let name = "llvm.va_start.p0";
+            let name = "llvm.va_start";
             self.cx.module.get_function(name).unwrap_or_else(|| {
                 let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
                 let fn_ty = self.cx.context.void_type().fn_type(&[ptr_ty.into()], false);
@@ -4584,7 +4990,7 @@ pub mod backend {
         }
 
         fn va_end_intrinsic(&self) -> FunctionValue<'ctx> {
-            let name = "llvm.va_end.p0";
+            let name = "llvm.va_end";
             self.cx.module.get_function(name).unwrap_or_else(|| {
                 let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
                 let fn_ty = self.cx.context.void_type().fn_type(&[ptr_ty.into()], false);
@@ -4593,7 +4999,7 @@ pub mod backend {
         }
 
         fn va_copy_intrinsic(&self) -> FunctionValue<'ctx> {
-            let name = "llvm.va_copy.p0";
+            let name = "llvm.va_copy";
             self.cx.module.get_function(name).unwrap_or_else(|| {
                 let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
                 let fn_ty =
@@ -10453,6 +10859,83 @@ mod tests {
         assert!(ir.contains("va_start"), "IR missing va_start:\n{ir}");
         assert!(ir.contains("va_arg"), "IR missing va_arg:\n{ir}");
         assert!(ir.contains("va_end"), "IR missing va_end:\n{ir}");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn aggregate_va_arg_uses_sysv_materialization_not_llvm_va_arg() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let va_list_ty = tcx.builtin_va_list;
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.long_double), field(tcx.long_double)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let fn_ty = func_ty(&mut tcx, int_ty, vec![int_ty], true);
+        let fn_name = session.interner.intern("__test_va_aggregate");
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, variadic: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false)); // 0: ret
+        locals.push(cfg_local_decl(None, int_ty, true)); // 1: last param
+        locals.push(cfg_local_decl(None, va_list_ty, false)); // 2: ap
+        locals.push(cfg_local_decl(None, rec_ty, false)); // 3: aggregate tmp
+
+        let ap_place = local_place(Local(2));
+        let last_place = local_place(Local(1));
+        let agg_place = local_place(Local(3));
+        let block0 = cfg_block(
+            Vec::new(),
+            TerminatorKind::BuiltinVaStart {
+                ap: Operand::Copy(ap_place.clone()),
+                last_param: Operand::Copy(last_place),
+                target: BasicBlockId(1),
+            },
+        );
+        let block1 = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: agg_place,
+                    rvalue: Rvalue::BuiltinVaArg {
+                        ap: Operand::Copy(ap_place.clone()),
+                        ty: rec_ty,
+                    },
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Goto(BasicBlockId(2)),
+        );
+        let block2 = cfg_block(
+            Vec::new(),
+            TerminatorKind::BuiltinVaEnd { ap: Operand::Copy(ap_place), target: BasicBlockId(3) },
+        );
+        let block3 = cfg_block(vec![assign_ret(int_ty, 0)], TerminatorKind::Return);
+
+        let mut cfg_blocks = IndexVec::new();
+        cfg_blocks.push(block0);
+        cfg_blocks.push(block1);
+        cfg_blocks.push(block2);
+        cfg_blocks.push(block3);
+
+        let body = Body { def: Some(def), locals, blocks: cfg_blocks, ret_ty: Some(int_ty) };
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        let ir = codegen(&mut session, &tcx, &hir, &bodies).unwrap().ir_text;
+
+        assert!(!ir.contains("va_arg "), "aggregate va_arg must be lowered manually:\n{ir}");
+        assert!(!ir.contains("ptr null"), "aggregate va_arg must not read through null:\n{ir}");
+        assert!(ir.contains("va.overflow"), "IR should advance overflow_arg_area:\n{ir}");
     }
 
     #[cfg(feature = "llvm")]

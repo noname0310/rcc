@@ -1,5 +1,7 @@
 # 09-29: aggregate va_arg lowering
 
+> ✓ done — 2026-05-04
+
 **Phase:** 09-codegen-llvm    **Depends on:** 09-19, 09-28    **Milestone:** M6+
 
 ## Goal
@@ -28,14 +30,18 @@ read from null.
 ## Deliverables
 - Codegen helper for aggregate `va_arg` materialization.
 - Regression test that rejects `ptr null` aggregate `va_arg` IR.
-- `c-testsuite::00204` runs and matches expected stdout, unless a later
-  independent bug is exposed and explicitly split.
+- `c-testsuite::00204` runs without crashing; its remaining stdout mismatch is
+  the independently split integer-constant typing bug `07-22`.
 
 ## Acceptance
 - `va_arg(ap, struct { long double x; })` does not lower through `ptr null`.
 - Focused aggregate-vararg executable exits successfully.
 - `c-testsuite::00204` no longer segfaults in `myprintf`.
 - Full c-testsuite run has no new failures.
+
+## Follow-up
+- `07-22` owns the newly exposed `0xabcd0000` sign-extension mismatch in
+  `00204`'s `MOVI` section.
 
 ## References
 - `third_party/testsuites/c-testsuite/tests/single-exec/00204.c`
