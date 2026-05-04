@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rcc_driver::{options_from_cli, run, Cli, ExitCode};
+use rcc_session::OptLevel;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -59,6 +60,24 @@ fn unsupported_std_is_rejected_during_cli_parse() {
     let err = Cli::try_parse_from(["rcc", "-std=c11", "hello.c"]).unwrap_err().to_string();
 
     assert!(err.contains("unsupported standard 'c11'"), "{err}");
+}
+
+#[test]
+fn optimization_spelling_maps_to_session_options() {
+    for (spelling, expected) in [
+        ("-O", OptLevel::Less),
+        ("-O0", OptLevel::None),
+        ("-O1", OptLevel::Less),
+        ("-O2", OptLevel::Default),
+        ("-O3", OptLevel::Aggressive),
+    ] {
+        let cli = parse(&["rcc", spelling, "hello.c"]);
+        let opts = options_from_cli(&cli);
+        assert_eq!(opts.opt_level, expected, "{spelling}");
+    }
+
+    let cli = parse(&["rcc", "--opt-level=aggressive", "hello.c"]);
+    assert_eq!(options_from_cli(&cli).opt_level, OptLevel::Aggressive);
 }
 
 #[test]

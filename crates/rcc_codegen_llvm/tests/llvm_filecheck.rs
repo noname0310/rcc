@@ -10,7 +10,7 @@ use rcc_codegen_llvm::codegen;
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
-use rcc_session::{Options, Session};
+use rcc_session::{OptLevel, Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,4 +328,30 @@ fn debug_info_disabled_keeps_ir_free_of_debug_metadata() {
         }
         "#,
     );
+}
+
+#[test]
+fn opt_level_default_runs_llvm_optimization_pipeline() {
+    let src = r#"
+        int f(int x) {
+            int y = x + 1;
+            return y;
+        }
+    "#;
+    let o0 = render_with_options(
+        "opt_level_o0",
+        src,
+        Options { opt_level: OptLevel::None, ..Options::default() },
+    );
+    let o2 = render_with_options(
+        "opt_level_o2",
+        src,
+        Options { opt_level: OptLevel::Default, ..Options::default() },
+    );
+
+    assert!(o0.contains("alloca"), "O0 should preserve stack-shaped CFG IR:\n{o0}");
+    assert!(o0.contains("store i32"), "O0 should preserve stores:\n{o0}");
+    assert!(!o2.contains("alloca"), "O2 should promote stack temporaries:\n{o2}");
+    assert!(!o2.contains("store i32"), "O2 should remove the local store:\n{o2}");
+    assert!(o2.contains("ret i32"), "O2 should still return an i32:\n{o2}");
 }

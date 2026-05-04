@@ -12,7 +12,7 @@ mod linux {
 
     use rcc_driver::pipeline;
     use rcc_errors::{CaptureEmitter, Handler};
-    use rcc_session::{Options, Session};
+    use rcc_session::{OptLevel, Options, Session};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -271,6 +271,38 @@ mod linux {
         for fixture in &fixtures {
             assert_fixture(fixture);
         }
+    }
+
+    #[test]
+    fn o0_and_o2_emit_equivalent_runtime_behavior() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping opt-level e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        let source = r#"
+int main(void) {
+  int sum = 0;
+  for (int i = 0; i < 10; i = i + 1)
+    sum = sum + i;
+  return sum == 45 ? 0 : 1;
+}
+"#;
+
+        assert_source_with_options(
+            "opt_level_o0",
+            source,
+            b"",
+            0,
+            Options { opt_level: OptLevel::None, ..Options::default() },
+        );
+        assert_source_with_options(
+            "opt_level_o2",
+            source,
+            b"",
+            0,
+            Options { opt_level: OptLevel::Default, ..Options::default() },
+        );
     }
 
     #[test]

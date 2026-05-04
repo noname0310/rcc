@@ -10,7 +10,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 
 ## Tasks (pick in order)
 
-- [ ] [01-opt-level-wiring](01-opt-level-wiring.md)
+- [x] [01-opt-level-wiring](01-opt-level-wiring.md)
 - [ ] [02-diagnostic-quality-sweep](02-diagnostic-quality-sweep.md)
 - [ ] [03-warning-categories](03-warning-categories.md)
 - [ ] [04-diagnostic-pragmas](04-diagnostic-pragmas.md)

@@ -366,6 +366,9 @@ where
             if let Some(standard) = text.strip_prefix("-std=") {
                 return OsString::from(format!("--std={standard}"));
             }
+            if let Some(level) = normalize_opt_level_arg(&text) {
+                return OsString::from(format!("--opt-level={level}"));
+            }
             if let Some(path) = text.strip_prefix("-MF").filter(|rest| !rest.is_empty()) {
                 return OsString::from(format!("--dependency-file={path}"));
             }
@@ -393,6 +396,16 @@ where
             }
         })
         .collect()
+}
+
+fn normalize_opt_level_arg(arg: &str) -> Option<&'static str> {
+    match arg {
+        "-O" | "-O1" => Some("less"),
+        "-O0" => Some("none"),
+        "-O2" => Some("default"),
+        "-O3" => Some("aggressive"),
+        _ => None,
+    }
 }
 
 fn parse_define(raw: &str) -> Result<(String, Option<String>), String> {

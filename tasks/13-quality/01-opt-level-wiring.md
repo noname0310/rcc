@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 13-01: Optimization level wiring
 
 **Phase:** 13-quality    **Depends on:** 09-14    **Milestone:** M7

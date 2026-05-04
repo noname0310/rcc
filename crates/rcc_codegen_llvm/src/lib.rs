@@ -961,7 +961,6 @@ pub mod backend {
     use inkwell::module::FlagBehavior;
     use inkwell::module::Linkage as LlvmLinkage;
     use inkwell::module::Module;
-    #[cfg(test)]
     use inkwell::passes::PassBuilderOptions;
     use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target};
     use inkwell::targets::{TargetData, TargetMachine, TargetTriple};
@@ -1193,6 +1192,22 @@ pub mod backend {
             self.module.verify().map_err(|err| {
                 CodegenError::Internal(format!("LLVM module verifier failed: {}", err.to_string()))
             })
+        }
+
+        /// Run LLVM's default optimization pipeline for the selected `-O` level.
+        pub fn optimize_module(&self) -> Result<(), CodegenError> {
+            let Some(pipeline) = optimization_pass_pipeline(self.session.opts.opt_level) else {
+                return Ok(());
+            };
+            let machine = self.target_machine()?;
+            let options = PassBuilderOptions::create();
+            self.module.run_passes(pipeline, &machine, options).map_err(|err| {
+                CodegenError::Internal(format!(
+                    "LLVM optimization pipeline `{pipeline}` failed: {}",
+                    err.to_string()
+                ))
+            })?;
+            self.verify_module()
         }
 
         /// Run just LLVM's mem2reg pass for backend tests that assert the
@@ -7551,6 +7566,7 @@ pub mod backend {
         GlobalCx::new(&cx).materialize_all_globals()?;
         cx.finalize_debug_info();
         cx.verify_module()?;
+        cx.optimize_module()?;
         let ir_text = cx.ir_text();
         let assembly_text = needs_assembly.then(|| cx.assembly_text()).transpose()?;
         let object_bytes = needs_object.then(|| cx.object_bytes()).transpose()?;
@@ -7563,6 +7579,15 @@ pub mod backend {
             rcc_session::OptLevel::Less => OptimizationLevel::Less,
             rcc_session::OptLevel::Default => OptimizationLevel::Default,
             rcc_session::OptLevel::Aggressive => OptimizationLevel::Aggressive,
+        }
+    }
+
+    fn optimization_pass_pipeline(level: rcc_session::OptLevel) -> Option<&'static str> {
+        match level {
+            rcc_session::OptLevel::None => None,
+            rcc_session::OptLevel::Less => Some("default<O1>"),
+            rcc_session::OptLevel::Default => Some("default<O2>"),
+            rcc_session::OptLevel::Aggressive => Some("default<O3>"),
         }
     }
 
