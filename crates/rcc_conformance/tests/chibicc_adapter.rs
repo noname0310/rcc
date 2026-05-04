@@ -154,6 +154,13 @@ fn discover_real_suite_stage_1_to_3_count() {
 }
 
 #[test]
+fn stage_common_support_is_function_only() {
+    assert!(ChibiccAdapter::uses_stage_common("chibicc::function"));
+    assert!(!ChibiccAdapter::uses_stage_common("chibicc::arith"));
+    assert!(!ChibiccAdapter::uses_stage_common("chibicc::control"));
+}
+
+#[test]
 fn run_stage_1_to_3_does_not_require_common_helper() {
     let tmp = tempfile::tempdir().unwrap();
     let test_dir = tmp.path().join("test");

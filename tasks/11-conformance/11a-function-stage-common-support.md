@@ -1,5 +1,7 @@
 # 11a: function.c stage common support
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-11    **Milestone:** M4+
 
 ## Goal

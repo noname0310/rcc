@@ -237,11 +237,10 @@ pub enum ChibiccMode {
     /// fixtures (`arith.c`, `control.c`, and `function.c`).
     ///
     /// Unlike [`ChibiccMode::Compile`], this mode never compiles upstream
-    /// `test/common` with `rcc`. That helper intentionally uses later-stage
-    /// language/runtime features and would hide whether the selected fixture
-    /// itself failed. Instead, this mode links a generated host-compiled
-    /// support object containing only the `assert` helper declared by
-    /// `test/test.h`.
+    /// `test/common` with `rcc`. Most early fixtures link a generated
+    /// host-compiled support object containing only the `assert` helper.
+    /// `function.c` is the exception: it needs the helper functions from
+    /// `test/common`, so that file is compiled with host `cc`.
     Stages1To3,
 }
 
@@ -269,9 +268,9 @@ impl ChibiccAdapter {
     }
 
     /// Adapter restricted to the stage-1..3 chibicc slice. Discovery emits
-    /// only `arith.c`, `control.c`, and `function.c`, and execution links a
-    /// generated host-compiled support object instead of compiling
-    /// `test/common` with `rcc`.
+    /// only `arith.c`, `control.c`, and `function.c`. Execution uses host
+    /// `cc` for support code so `rcc` failures stay isolated to the selected
+    /// fixture.
     pub const fn stages1_to_3() -> Self {
         Self { mode: ChibiccMode::Stages1To3 }
     }
@@ -284,6 +283,13 @@ impl ChibiccAdapter {
 
     /// File stems of the stage-isolated chibicc fixtures.
     pub const STAGE_1_TO_3_FIXTURES: &'static [&'static str] = &["arith", "control", "function"];
+
+    /// Whether a stage-isolated case needs upstream chibicc `test/common`
+    /// instead of the generated one-function support source.
+    #[must_use]
+    pub fn uses_stage_common(case_id: &str) -> bool {
+        case_id == "chibicc::function"
+    }
 
     /// Path to the support file compiled alongside every test.
     fn common_path(root: &Path) -> std::path::PathBuf {
@@ -389,10 +395,10 @@ impl ChibiccAdapter {
 
     /// Stage-isolated compile + link + execute path.
     ///
-    /// The selected fixture is compiled by `rcc`, while the tiny `assert`
-    /// implementation is generated on the fly and compiled with host `cc`.
-    /// This avoids routing upstream `test/common` through `rcc`, because that
-    /// helper depends on later features unrelated to the early chibicc slice.
+    /// The selected fixture is compiled by `rcc`, while support code is
+    /// compiled with host `cc`. Most fixtures use a generated `assert` helper;
+    /// `function.c` uses upstream `test/common` because it also needs helper
+    /// functions such as `true_fn`, `add_all`, and `struct_test4`.
     fn run_stage_1_to_3(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
         let case_dir = case.path.parent().ok_or_else(|| {
             anyhow::anyhow!("cannot derive directory from {}", case.path.display())
@@ -400,7 +406,6 @@ impl ChibiccAdapter {
 
         let tmp = tempfile::tempdir()?;
         let test_obj = tmp.path().join("test.o");
-        let support_src = tmp.path().join("stage_support.c");
         let support_obj = tmp.path().join("stage_support.o");
         let exe_path =
             if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
@@ -439,10 +444,24 @@ impl ChibiccAdapter {
             }
         }
 
-        // Step 2: compile only the generated assert helper with host cc.
-        std::fs::write(&support_src, Self::stage_support_source())?;
+        // Step 2: compile the support helper with host cc. `function.c` needs
+        // the upstream helper functions; smaller fixtures only need `assert`.
         let mut compile_support = Command::new("cc");
-        compile_support.arg("-std=c99").arg("-c").arg(&support_src).arg("-o").arg(&support_obj);
+        compile_support.arg("-std=c99").arg("-c");
+        if Self::uses_stage_common(&case.id) {
+            let common = case_dir.join("common");
+            if !common.exists() {
+                return Ok(Outcome::Fail {
+                    reason: format!("stage common helper not found: {}", common.display()),
+                });
+            }
+            compile_support.arg("-x").arg("c").arg(&common);
+        } else {
+            let support_src = tmp.path().join("stage_support.c");
+            std::fs::write(&support_src, Self::stage_support_source())?;
+            compile_support.arg(&support_src);
+        }
+        compile_support.arg("-o").arg(&support_obj);
         match run_with_timeout(&mut compile_support, TIMEOUT) {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
