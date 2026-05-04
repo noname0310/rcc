@@ -21,7 +21,7 @@ fn def#0() -> int {
 
   bb3:
     _2 = 2;
-    goto -> bb4;
+    goto -> bb5;
 
   bb4:
     _2 = 3;
@@ -31,5 +31,8 @@ fn def#0() -> int {
     _0 = copy _2;
     StorageDead(_2);
     return;
+
+  bb6:
+    goto -> bb2;
 
 }

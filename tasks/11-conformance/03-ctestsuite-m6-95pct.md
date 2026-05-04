@@ -1,5 +1,7 @@
 # 11-03: c-testsuite @ M6 ≥ 95 %
 
+> ✓ done — 2026-05-04 — local CI-equivalent c-testsuite runs: 204 pass, 11 fail, 5 xfail, pass_rate=0.950 (3 consecutive runs)
+
 **Phase:** 11-conformance    **Depends on:** 11-02, 08-13, 09-13    **Milestone:** M6
 
 ## Goal

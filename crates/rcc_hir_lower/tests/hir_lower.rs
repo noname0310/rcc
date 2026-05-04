@@ -55,6 +55,128 @@ pub fn lower_snippet(src: &str) -> (HirCrate, TyCtxt) {
     (hir, tcx)
 }
 
+#[test]
+fn block_scope_function_declaration_binds_def_without_local_storage() {
+    let src = r#"
+        int f1(char *p) { return *p + 1; }
+        int main(void) {
+            char s = 1;
+            int f1(char *);
+            return f1(&s);
+        }
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let main_def = DefId(1);
+    let body = hir.bodies.get(&main_def).expect("main body");
+
+    assert!(
+        body.locals.iter().all(|decl| !matches!(tcx.get(decl.ty), Ty::Func { .. })),
+        "block-scope function prototype must not allocate local storage: {:?}",
+        body.locals
+    );
+
+    let call = body
+        .exprs
+        .iter()
+        .find_map(|expr| match &expr.kind {
+            HirExprKind::Call { callee, .. } => Some(*callee),
+            _ => None,
+        })
+        .expect("call expression");
+    match body.exprs[call].kind {
+        HirExprKind::Convert { operand, .. } => {
+            assert!(matches!(body.exprs[operand].kind, HirExprKind::DefRef(DefId(0))));
+        }
+        HirExprKind::DefRef(DefId(0)) => {}
+        ref other => panic!("expected call through DefRef(0), got {other:?}"),
+    }
+}
+
+#[test]
+fn block_scope_static_object_binds_internal_global_without_local_storage() {
+    let src = r#"
+        int main(void) {
+            static int fred = 4567;
+            fred = fred + 1;
+            return fred;
+        }
+    "#;
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let (static_def, init) = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Global { linkage: Linkage::Internal, init: Some(init), .. } => {
+                Some((id, init))
+            }
+            _ => None,
+        })
+        .expect("block-scope static should lower to an internal global");
+    assert!(
+        init.entries.iter().any(|entry| matches!(entry.value, GlobalInitValue::Int(4567))),
+        "static initializer should be represented as a global initializer: {init:?}"
+    );
+
+    let main_body = hir.bodies.get(&DefId(0)).expect("main body");
+    assert!(main_body.locals.is_empty(), "static object must not allocate an automatic local");
+    assert!(
+        main_body
+            .exprs
+            .iter()
+            .any(|expr| matches!(expr.kind, HirExprKind::DefRef(def) if def == static_def)),
+        "uses of the block-scope static should resolve to the generated global def"
+    );
+}
+
+#[test]
+fn file_scope_tentative_definitions_merge_with_explicit_initializer() {
+    let src = "int x, x = 3, x; int main(void) { return x; }";
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let globals: Vec<_> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match &def.kind {
+            DefKind::Global { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(globals.len(), 1, "all file-scope `x` declarations should merge");
+    assert!(
+        globals[0].entries.iter().any(|entry| matches!(entry.value, GlobalInitValue::Int(3))),
+        "explicit initializer must win over tentative zero markers: {:?}",
+        globals[0]
+    );
+}
+
+#[test]
+fn file_scope_array_size_accepts_integer_constant_expression() {
+    let src = r#"
+        #define BASE 0x1e
+        int array[BASE + 1];
+        int main(void) { return sizeof(array) == sizeof(int) * 31 ? 0 : 1; }
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let array_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .expect("global array");
+    match tcx.get(array_ty) {
+        Ty::Array { len: Some(31), .. } => {}
+        other => panic!("expected complete array[31], got {other:?}"),
+    }
+}
+
 fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
@@ -801,6 +923,38 @@ fn composite_enum_explicit_resets_counter() {
 }
 
 #[test]
+fn composite_enum_initializer_can_reference_prior_enumerator() {
+    let (mut sess, _cap) = Session::for_test();
+    let tcx = TyCtxt::new();
+    let a = intern(&mut sess, "A");
+    let b = intern(&mut sess, "B");
+    let c = intern(&mut sess, "C");
+    let b_value = Expr {
+        id: NodeId(0),
+        kind: ExprKind::Binary {
+            op: rcc_ast::BinOp::Add,
+            lhs: Box::new(ident_expr(&mut sess, "A")),
+            rhs: Box::new(int_lit("7", &mut sess)),
+        },
+        span: DUMMY_SP,
+    };
+    let spec =
+        enum_spec(None, vec![(a, Some(int_lit("148", &mut sess))), (b, Some(b_value)), (c, None)]);
+    let mut resolver = Resolver::default();
+    let mut crate_ = HirCrate::default();
+
+    let kind = lower_enum(&spec, &tcx, &mut resolver, &mut crate_, &mut sess);
+
+    match kind {
+        DefKind::Enum { variants, .. } => {
+            let values: Vec<i128> = variants.iter().map(|v| v.value).collect();
+            assert_eq!(values, vec![148, 155, 156]);
+        }
+        other => panic!("expected enum, got {other:?}"),
+    }
+}
+
+#[test]
 fn composite_enum_duplicate_emits_e0078() {
     // enum { A }; enum { A = 1 };  — second `A` is duplicate.
     let (mut sess, cap) = Session::for_test();
@@ -1466,7 +1620,7 @@ fn snippet_extern_then_definition_globals_are_both_typed() {
             _ => None,
         })
         .collect();
-    assert_eq!(tys.len(), 2);
+    assert_eq!(tys.len(), 1);
     assert!(tys.iter().all(|ty| *ty == tcx.int));
 }
 
@@ -1881,6 +2035,30 @@ fn snippet_char_array_string_initializer_completes_length_and_writes_chars() {
 }
 
 #[test]
+fn snippet_wide_string_initializer_completes_wchar_array_by_codepoint() {
+    let (hir, tcx) = lower_snippet("typedef int wchar_t; void f(void) { wchar_t s[] = L\"A世\"; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.int),
+        other => panic!("expected completed wchar_t[3], got {other:?}"),
+    }
+    let mut elems = Vec::new();
+    for stmt in body.stmts.iter() {
+        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
+        if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
+            continue;
+        }
+        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
+        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        elems.push((i, v));
+    }
+    elems.sort();
+    assert_eq!(elems, vec![(0, 0x41), (1, 0x4e16), (2, 0)]);
+}
+
+#[test]
 fn snippet_incomplete_array_list_completes_from_element_count() {
     let (hir, tcx) = lower_snippet("void f(void) { int a[] = {1,2,3}; }");
     let body = hir.bodies.values().next().expect("missing function body");
@@ -2042,7 +2220,9 @@ fn snippet_typeck_folds_global_integer_initializer_expr() {
     let (def_id, def) = hir
         .defs
         .iter_enumerated()
-        .find(|(_, d)| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .find(|(_, d)| {
+            matches!(&d.kind, DefKind::Global { init: Some(init), .. } if !init.entries.is_empty())
+        })
         .expect("missing initialized global");
     let DefKind::Global { init: Some(init), .. } = &def.kind else {
         panic!("expected initialized global");
@@ -2068,7 +2248,9 @@ fn snippet_typeck_folds_global_address_initializer() {
     let (x_def, _) = globals[0];
     let (_, p_def) = globals
         .into_iter()
-        .find(|(_, d)| matches!(d.kind, DefKind::Global { init: Some(_), .. }))
+        .find(|(_, d)| {
+            matches!(&d.kind, DefKind::Global { init: Some(init), .. } if !init.entries.is_empty())
+        })
         .expect("missing pointer initializer");
     let DefKind::Global { init: Some(init), .. } = &p_def.kind else {
         panic!("expected initialized pointer global");
@@ -2235,11 +2417,12 @@ fn snippet_duplicate_block_declarator_diagnoses_without_overwriting_binding() {
 
 #[test]
 fn snippet_duplicate_file_scope_declarator_diagnoses() {
-    let (_hir, _tcx, cap) = lower_snippet_with_diagnostics("int a, a;");
+    let (hir, _tcx, cap) = lower_snippet_with_diagnostics("int a, a;");
     assert!(
-        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0070)),
-        "duplicate file-scope declarator in one declaration should emit E0070"
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0070)),
+        "repeated file-scope tentative declarations should merge without E0070"
     );
+    assert_eq!(hir.defs.iter().filter(|def| matches!(def.kind, DefKind::Global { .. })).count(), 1);
 }
 
 #[test]
@@ -2441,10 +2624,11 @@ fn snippet_extern_global_has_external_linkage() {
     let (hir, _tcx) = lower_snippet("extern int errno;");
     let def =
         hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).expect("missing global");
-    let DefKind::Global { linkage, .. } = def.kind else {
+    let DefKind::Global { linkage, init, .. } = &def.kind else {
         unreachable!();
     };
-    assert_eq!(linkage, Linkage::External);
+    assert_eq!(*linkage, Linkage::External);
+    assert!(init.is_none(), "`extern int errno;` is a declaration, not a tentative definition");
 }
 
 #[test]
@@ -2456,6 +2640,20 @@ fn snippet_static_global_has_internal_linkage() {
         unreachable!();
     };
     assert_eq!(linkage, Linkage::Internal);
+}
+
+#[test]
+fn snippet_tentative_global_gets_zero_initializer_marker() {
+    let (hir, tcx) = lower_snippet("int counter;");
+    let def =
+        hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).expect("missing global");
+    let DefKind::Global { linkage, init: Some(init), ty, .. } = &def.kind else {
+        panic!("expected tentative definition to carry an empty zero-init marker");
+    };
+    assert_eq!(*linkage, Linkage::External);
+    assert_eq!(*ty, tcx.int);
+    assert_eq!(init.ty, tcx.int);
+    assert!(init.entries.is_empty(), "empty GlobalInit means implicit zero initialization");
 }
 
 #[test]

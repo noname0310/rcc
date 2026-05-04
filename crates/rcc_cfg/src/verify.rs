@@ -71,6 +71,8 @@ pub enum CfgErrorKind {
 /// Verifier projection category.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProjectionKind {
+    /// File-scope global object base.
+    Global(DefId),
     /// Pointer dereference.
     Deref,
     /// Record field index.
@@ -369,41 +371,109 @@ fn verify_place_typed(
     at: CfgLocation,
     errors: &mut Vec<CfgError>,
 ) -> Option<TyId> {
-    verify_local(body, place.base, at.clone(), errors);
-    let mut ty = body.locals.get(place.base).map(|decl| decl.ty)?;
-    for projection in &place.projection {
-        match projection {
-            Projection::Deref => match tcx.get(ty) {
+    let mut projections = place.projection.iter();
+    let mut ty = match projections.next() {
+        Some(Projection::Global(def)) => {
+            let Some(hir) = hir else {
+                errors.push(CfgError {
+                    at: at.clone(),
+                    kind: CfgErrorKind::InvalidGlobalObjectLoad { def: *def, ty: TyId(0) },
+                });
+                return None;
+            };
+            let Some(def_data) = hir.defs.get(*def) else {
+                errors.push(CfgError {
+                    at: at.clone(),
+                    kind: CfgErrorKind::InvalidGlobalObjectLoad { def: *def, ty: TyId(0) },
+                });
+                return None;
+            };
+            let DefKind::Global { ty, .. } = &def_data.kind else {
+                errors.push(CfgError {
+                    at: at.clone(),
+                    kind: CfgErrorKind::InvalidGlobalObjectLoad { def: *def, ty: TyId(0) },
+                });
+                return None;
+            };
+            *ty
+        }
+        Some(first) => {
+            verify_local(body, place.base, at.clone(), errors);
+            let mut ty = body.locals.get(place.base).map(|decl| decl.ty)?;
+            ty = verify_projection_step(body, tcx, hir, ty, first, at.clone(), errors)?;
+            ty
+        }
+        None => {
+            verify_local(body, place.base, at.clone(), errors);
+            body.locals.get(place.base).map(|decl| decl.ty)?
+        }
+    };
+    for projection in projections {
+        if let Projection::Global(def) = projection {
+            errors.push(CfgError {
+                at: at.clone(),
+                kind: CfgErrorKind::InvalidProjection {
+                    base_ty: ty,
+                    projection: ProjectionKind::Global(*def),
+                },
+            });
+            return None;
+        }
+        ty = verify_projection_step(body, tcx, hir, ty, projection, at.clone(), errors)?;
+    }
+    Some(ty)
+}
+
+fn verify_projection_step(
+    body: &Body,
+    tcx: &TyCtxt,
+    hir: Option<&HirCrate>,
+    mut ty: TyId,
+    projection: &Projection,
+    at: CfgLocation,
+    errors: &mut Vec<CfgError>,
+) -> Option<TyId> {
+    match projection {
+        Projection::Global(def) => {
+            errors.push(CfgError {
+                at,
+                kind: CfgErrorKind::InvalidProjection {
+                    base_ty: ty,
+                    projection: ProjectionKind::Global(*def),
+                },
+            });
+            return None;
+        }
+        Projection::Deref => match tcx.get(ty) {
+            Ty::Ptr(q) => ty = q.ty,
+            _ => {
+                errors.push(CfgError {
+                    at,
+                    kind: CfgErrorKind::InvalidProjection {
+                        base_ty: ty,
+                        projection: ProjectionKind::Deref,
+                    },
+                });
+                return None;
+            }
+        },
+        Projection::Field(index) => {
+            ty = verify_field_projection(tcx, hir, ty, *index, at.clone(), errors)?;
+        }
+        Projection::Index(index) => {
+            let _ = verify_operand_typed(body, tcx, hir, index, at.clone(), errors);
+            match tcx.get(ty) {
+                Ty::Array { elem, .. } => ty = elem.ty,
                 Ty::Ptr(q) => ty = q.ty,
                 _ => {
                     errors.push(CfgError {
                         at,
                         kind: CfgErrorKind::InvalidProjection {
                             base_ty: ty,
-                            projection: ProjectionKind::Deref,
+                            projection: ProjectionKind::Index,
                         },
                     });
                     return None;
-                }
-            },
-            Projection::Field(index) => {
-                ty = verify_field_projection(tcx, hir, ty, *index, at.clone(), errors)?;
-            }
-            Projection::Index(index) => {
-                let _ = verify_operand_typed(body, tcx, hir, index, at.clone(), errors);
-                match tcx.get(ty) {
-                    Ty::Array { elem, .. } => ty = elem.ty,
-                    Ty::Ptr(q) => ty = q.ty,
-                    _ => {
-                        errors.push(CfgError {
-                            at,
-                            kind: CfgErrorKind::InvalidProjection {
-                                base_ty: ty,
-                                projection: ProjectionKind::Index,
-                            },
-                        });
-                        return None;
-                    }
                 }
             }
         }
@@ -615,21 +685,14 @@ fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
 fn verify_storage(body: &Body, errors: &mut Vec<CfgError>) {
     let mut live = vec![0usize; body.locals.len()];
     let mut dead = vec![0usize; body.locals.len()];
-    for (bb, block) in body.blocks.iter_enumerated() {
-        for (index, stmt) in block.statements.iter().enumerate() {
+    for (_, block) in body.blocks.iter_enumerated() {
+        for stmt in &block.statements {
             match stmt.kind {
                 StatementKind::StorageLive(local) if (local.0 as usize) < live.len() => {
                     live[local.0 as usize] += 1;
                 }
                 StatementKind::StorageDead(local) if (local.0 as usize) < dead.len() => {
-                    let idx = local.0 as usize;
-                    dead[idx] += 1;
-                    if live[idx] == 0 {
-                        errors.push(CfgError {
-                            at: CfgLocation::Statement { block: bb, index },
-                            kind: CfgErrorKind::StorageDeadWithoutLive { local },
-                        });
-                    }
+                    dead[local.0 as usize] += 1;
                 }
                 _ => {}
             }
@@ -642,6 +705,12 @@ fn verify_storage(body: &Body, errors: &mut Vec<CfgError>) {
         }
         let idx = local.0 as usize;
         let (live_count, dead_count) = (live[idx], dead[idx]);
+        if live_count == 0 && dead_count > 0 {
+            errors.push(CfgError {
+                at: CfgLocation::Body,
+                kind: CfgErrorKind::StorageDeadWithoutLive { local },
+            });
+        }
         if live_count == 0 && dead_count == 0 {
             continue;
         }
@@ -800,6 +869,29 @@ mod tests {
             err.kind,
             CfgErrorKind::UnbalancedStorage { local: Local(1), live: 1, dead: 0 }
         )));
+    }
+
+    #[test]
+    fn verify_accepts_storage_live_in_later_block_order() {
+        let mut body = base_body();
+        body.locals.push(local_decl(true));
+        body.blocks[BasicBlockId(0)].terminator.kind = TerminatorKind::Goto(BasicBlockId(2));
+        body.blocks.push(BasicBlock {
+            statements: vec![Statement {
+                kind: StatementKind::StorageDead(Local(1)),
+                span: DUMMY_SP,
+            }],
+            terminator: Terminator { kind: TerminatorKind::Return, span: DUMMY_SP },
+        });
+        body.blocks.push(BasicBlock {
+            statements: vec![Statement {
+                kind: StatementKind::StorageLive(Local(1)),
+                span: DUMMY_SP,
+            }],
+            terminator: Terminator { kind: TerminatorKind::Goto(BasicBlockId(1)), span: DUMMY_SP },
+        });
+
+        assert!(verify_body(&body, &tcx()).is_ok());
     }
 
     #[test]

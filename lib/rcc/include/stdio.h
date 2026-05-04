@@ -8,9 +8,14 @@ typedef struct __rcc_FILE FILE;
 #define EOF (-1)
 
 extern int printf(const char *, ...);
+extern int fprintf(FILE *, const char *, ...);
 extern int sprintf(char *, const char *, ...);
 extern int puts(const char *);
 extern int putchar(int);
+
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
 
 extern FILE *fopen(const char *, const char *);
 extern int fclose(FILE *);

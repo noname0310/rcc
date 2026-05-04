@@ -170,6 +170,12 @@ pub struct Place {
 /// One step of a place projection.
 #[derive(Debug, Clone)]
 pub enum Projection {
+    /// File-scope global object base.
+    ///
+    /// This projection is only valid as the first element of a [`Place`]'s
+    /// projection list. `Place::base` is ignored in that shape; the projection
+    /// carries the HIR definition id for the global storage.
+    Global(DefId),
     /// `*base` — pointer dereference.
     Deref,
     /// `base.field` — record field index.

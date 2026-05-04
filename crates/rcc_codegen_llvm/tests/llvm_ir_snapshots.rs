@@ -39,7 +39,8 @@ fn render(name: &str, src: &str) -> String {
 fn normalize_ir(ir: &str) -> String {
     let mut out = String::new();
     for line in ir.replace("\r\n", "\n").lines() {
-        let line = line.trim_end();
+        let normalized = normalize_local_symbol_ids(line.trim_end());
+        let line = normalized.as_str();
         if line.starts_with("target datalayout = ") {
             out.push_str("target datalayout = \"<normalized>\"");
         } else {
@@ -47,6 +48,24 @@ fn normalize_ir(ir: &str) -> String {
         }
         out.push('\n');
     }
+    out
+}
+
+fn normalize_local_symbol_ids(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some((prefix, at)) =
+        [("%param", rest.find("%param")), ("%local", rest.find("%local"))]
+            .into_iter()
+            .filter_map(|(prefix, idx)| idx.map(|idx| (prefix, idx)))
+            .min_by_key(|(_, idx)| *idx)
+    {
+        out.push_str(&rest[..at + prefix.len()]);
+        let after_prefix = &rest[at + prefix.len()..];
+        let digits = after_prefix.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        rest = &after_prefix[digits..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -90,10 +109,10 @@ fn branch_if_else() {
     define i32 @f(i32 %0) {
     entry:
       %ret.addr = alloca i32, align 4
-      %param10.addr = alloca i32, align 4
-      %param.unit = getelementptr i8, ptr %param10.addr, i64 0
+      %param.addr = alloca i32, align 4
+      %param.unit = getelementptr i8, ptr %param.addr, i64 0
       store i32 %0, ptr %param.unit, align 4
-      %load = load i32, ptr %param10.addr, align 4
+      %load = load i32, ptr %param.addr, align 4
       switch i32 %load, label %bb1 [
         i32 0, label %bb2
       ]
@@ -125,10 +144,10 @@ fn direct_call() {
     define i32 @callee(i32 %0) {
     entry:
       %ret.addr = alloca i32, align 4
-      %param10.addr = alloca i32, align 4
-      %param.unit = getelementptr i8, ptr %param10.addr, i64 0
+      %param.addr = alloca i32, align 4
+      %param.unit = getelementptr i8, ptr %param.addr, i64 0
       store i32 %0, ptr %param.unit, align 4
-      %load = load i32, ptr %param10.addr, align 4
+      %load = load i32, ptr %param.addr, align 4
       store i32 %load, ptr %ret.addr, align 4
       %load1 = load i32, ptr %ret.addr, align 4
       ret i32 %load1
@@ -189,16 +208,16 @@ fn aggregate_local_field() {
     define i32 @f() {
     entry:
       %ret.addr = alloca i32, align 4
-      %local15.addr = alloca %rcc.record.0, align 8
-      call void @llvm.lifetime.start.p0(i64 8, ptr %local15.addr)
-      call void @llvm.memset.p0.i64(ptr align 4 %local15.addr, i8 0, i64 8, i1 false)
-      store i32 1, ptr %local15.addr, align 4
-      %field_gep = getelementptr i8, ptr %local15.addr, i64 4
+      %local.addr = alloca %rcc.record.0, align 8
+      call void @llvm.lifetime.start.p0(i64 8, ptr %local.addr)
+      call void @llvm.memset.p0.i64(ptr align 4 %local.addr, i8 0, i64 8, i1 false)
+      store i32 1, ptr %local.addr, align 4
+      %field_gep = getelementptr i8, ptr %local.addr, i64 4
       store i32 2, ptr %field_gep, align 4
-      %field_gep1 = getelementptr i8, ptr %local15.addr, i64 4
+      %field_gep1 = getelementptr i8, ptr %local.addr, i64 4
       %load = load i32, ptr %field_gep1, align 4
       store i32 %load, ptr %ret.addr, align 4
-      call void @llvm.lifetime.end.p0(i64 8, ptr %local15.addr)
+      call void @llvm.lifetime.end.p0(i64 8, ptr %local.addr)
       %load2 = load i32, ptr %ret.addr, align 4
       ret i32 %load2
     }
@@ -229,18 +248,18 @@ fn vla_sizeof() {
     define i64 @f(i32 %0) {
     entry:
       %ret.addr = alloca i64, align 8
-      %param12.addr = alloca i32, align 4
+      %param.addr = alloca i32, align 4
       %tmp3.addr = alloca i64, align 8
       %tmp4.addr = alloca i64, align 8
       %tmp5.addr = alloca i64, align 8
-      %param.unit = getelementptr i8, ptr %param12.addr, i64 0
+      %param.unit = getelementptr i8, ptr %param.addr, i64 0
       store i32 %0, ptr %param.unit, align 4
-      %load = load i32, ptr %param12.addr, align 4
+      %load = load i32, ptr %param.addr, align 4
       %sext = sext i32 %load to i64
       store i64 %sext, ptr %tmp3.addr, align 8
       %vla_len = load i64, ptr %tmp3.addr, align 8
       %vla_stack = call ptr @llvm.stacksave.p0()
-      %local13.addr = alloca i32, i64 %vla_len, align 4
+      %local.addr = alloca i32, i64 %vla_len, align 4
       %len = load i64, ptr %tmp3.addr, align 8
       store i64 %len, ptr %tmp4.addr, align 8
       %load1 = load i64, ptr %tmp4.addr, align 8

@@ -55,6 +55,12 @@ pub struct Preprocessor<'a> {
     pub include_guards: FxHashMap<FileId, Symbol>,
     /// Files that should be processed at most once (`#pragma once`).
     pub pragma_once: FxHashMap<FileId, ()>,
+    /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
+    /// snapshots. These pragmas are not part of C99, but system headers
+    /// and conformance fixtures commonly use them as benign state-saving
+    /// directives. Supporting them here prevents the unknown-pragma path
+    /// from silently changing macro semantics.
+    pub macro_stack: FxHashMap<Symbol, Vec<Option<MacroDef>>>,
     /// Per-file `#line` overrides that retarget `__FILE__` /
     /// `__LINE__` expansion (task 04-15). The lexer is unchanged; the
     /// built-in expander consults this map when computing values.
@@ -84,6 +90,7 @@ impl<'a> Preprocessor<'a> {
             macros: MacroTable::default(),
             include_guards: FxHashMap::default(),
             pragma_once: FxHashMap::default(),
+            macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
             predefined_installed: false,
             halted: false,
@@ -496,6 +503,10 @@ impl<'a> Preprocessor<'a> {
     ///   (`FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE`); accepted
     ///   silently. The implementation may ignore any state-setting
     ///   per §6.10.6p2, but must not diagnose.
+    /// - **`#pragma push_macro("NAME")` / `pop_macro("NAME")`** —
+    ///   GNU/MSVC-compatible macro state snapshots. C99 says unknown
+    ///   pragmas are ignored, but treating these two as known avoids a
+    ///   common non-C99 header idiom from altering macro expansion.
     /// - Anything else (including a bare `#pragma` with no tokens)
     ///   is unknown; we warn with W0001 and proceed. Warnings do
     ///   **not** bump `Handler::has_errors`.
@@ -509,9 +520,44 @@ impl<'a> Preprocessor<'a> {
             // gcc/clang. Nothing to warn about.
             None if tokens.is_empty() => {}
             Some("once") | Some("STDC") => {}
+            Some("push_macro") => {
+                if let Some(name) = pragma_macro_name(tokens, src) {
+                    self.push_macro_pragma(name);
+                }
+            }
+            Some("pop_macro") => {
+                if let Some(name) = pragma_macro_name(tokens, src) {
+                    self.pop_macro_pragma(name);
+                }
+            }
             _ => {
                 let diag = unknown_pragma(span, tokens, src);
                 self.session.handler.emit(&diag);
+            }
+        }
+    }
+
+    fn push_macro_pragma(&mut self, name: &str) {
+        let sym = self.session.interner.intern(name);
+        let snapshot = self.macros.get(sym).cloned();
+        self.macro_stack.entry(sym).or_default().push(snapshot);
+    }
+
+    fn pop_macro_pragma(&mut self, name: &str) {
+        let sym = self.session.interner.intern(name);
+        let Some(stack) = self.macro_stack.get_mut(&sym) else {
+            return;
+        };
+        let Some(snapshot) = stack.pop() else {
+            return;
+        };
+        if stack.is_empty() {
+            self.macro_stack.remove(&sym);
+        }
+        match snapshot {
+            Some(def) => self.macros.define(def),
+            None => {
+                self.macros.undef(sym);
             }
         }
     }
@@ -815,6 +861,21 @@ fn error_directive(span: Span, message: &str) -> rcc_errors::Diagnostic {
             .into()],
         help: vec![],
     }
+}
+
+fn pragma_macro_name<'src>(tokens: &[PpToken], src: &'src str) -> Option<&'src str> {
+    let [name, lparen, string, rparen] = tokens else {
+        return None;
+    };
+    if !matches!(name.kind, PpTokenKind::Ident)
+        || !matches!(lparen.kind, PpTokenKind::Punct(Punct::LParen))
+        || !matches!(string.kind, PpTokenKind::StringLit { .. })
+        || !matches!(rparen.kind, PpTokenKind::Punct(Punct::RParen))
+    {
+        return None;
+    }
+    let raw = src.get(string.span.lo.0 as usize..string.span.hi.0 as usize)?;
+    raw.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
 }
 
 /// Build the W0001 warning for an unrecognised `#pragma`. Labels the
@@ -1878,6 +1939,35 @@ dead1
                 cap.diagnostics()
             );
         }
+    }
+
+    #[test]
+    fn pragma_push_pop_macro_restores_saved_definition() {
+        let src = r#"
+#define abort "111"
+abort
+#pragma push_macro("abort")
+#undef abort
+#define abort "222"
+abort
+#pragma push_macro("abort")
+#undef abort
+#define abort "333"
+abort
+#pragma pop_macro("abort")
+abort
+#pragma pop_macro("abort")
+abort
+"#;
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"111\"\"222\"\"333\"\"222\"\"111\"");
+        assert!(
+            cap.diagnostics().is_empty(),
+            "push/pop pragmas should be known: {:?}",
+            cap.diagnostics()
+        );
     }
 
     #[test]

@@ -927,9 +927,12 @@ fn assert_operand_valid(name: &str, def: DefId, body: &Body, operand: &Operand) 
 }
 
 fn assert_place_valid(name: &str, def: DefId, body: &Body, place: &Place) {
-    assert_local_valid(name, def, body, place.base);
+    if !matches!(place.projection.first(), Some(Projection::Global(_))) {
+        assert_local_valid(name, def, body, place.base);
+    }
     for projection in &place.projection {
         match projection {
+            Projection::Global(_) => {}
             Projection::Deref | Projection::Field(_) => {}
             Projection::Index(index) => assert_operand_valid(name, def, body, index),
         }

@@ -666,7 +666,7 @@ pub fn lower_stmt(
             // existing integer-constant evaluator. Non-foldable
             // expressions fall through as `None`; the switch-collection
             // pass (task 06-10 / typeck) can emit its own diagnostic.
-            let folded = eval_enum_value_as_i128(value);
+            let folded = eval_enum_value_as_i128(value, resolver, crate_);
             let body_id = lower_stmt(body_stmt, body, scope, crate_, tcx, resolver, session);
             HirStmtKind::Case { value: folded, body: body_id }
         }
@@ -960,12 +960,51 @@ fn lower_block_decl(
             crate_,
             session,
         );
+        if matches!(tcx.get(ty), Ty::Func { .. }) {
+            let def_id = lower_block_scope_function_decl(
+                name,
+                decl.span,
+                ty,
+                &decl.specs,
+                scope,
+                crate_,
+                resolver,
+                tcx,
+                session,
+            );
+            if let Some(def_id) = def_id {
+                scope.insert(name, Binding::Def(def_id));
+            }
+            continue;
+        }
         if let Some(init) = &init_decl.init {
             ty = complete_initializer_type(ty, init, tcx);
         }
         if is_incomplete_array_ty(ty, tcx) {
             emit_incomplete_array_at_block_scope(init_decl.declarator.span, session);
             ty = tcx.error;
+        }
+        if decl.specs.storage == Some(StorageClass::Static) {
+            let duplicate = scope.lookup_current(name).is_some();
+            if duplicate {
+                emit_duplicate_ordinary(name, decl.span, session);
+            }
+            let def_id = lower_block_scope_static_object_decl(
+                name,
+                decl.span,
+                ty,
+                &decl.specs,
+                init_decl,
+                scope,
+                crate_,
+                tcx,
+                resolver,
+                session,
+            );
+            if !duplicate {
+                scope.insert(name, Binding::Def(def_id));
+            }
+            continue;
         }
         let vla_len = lower_top_level_vla_len(
             &init_decl.declarator,
@@ -1036,6 +1075,125 @@ fn lower_block_decl(
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_block_scope_static_object_decl(
+    name: Symbol,
+    span: Span,
+    ty: TyId,
+    specs: &rcc_ast::DeclSpecs,
+    init_decl: &rcc_ast::InitDeclarator,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> DefId {
+    let unique_name = block_static_symbol(name, crate_, session);
+    let global_init = if let Some(init) = &init_decl.init {
+        let mut init_body = Body::default();
+        let global_init = lower_global_initializer(
+            ty,
+            init,
+            init_decl.declarator.span,
+            &mut init_body,
+            scope,
+            crate_,
+            tcx,
+            resolver,
+            session,
+        );
+        Some((global_init, init_body))
+    } else {
+        Some((GlobalInit { ty, entries: Vec::new() }, Body::default()))
+    };
+
+    let def_id = crate_.defs.push(Def {
+        id: DefId(0),
+        name: unique_name,
+        span,
+        kind: DefKind::Global {
+            ty,
+            quals: declaration_object_quals(specs, &init_decl.declarator),
+            linkage: Linkage::Internal,
+            init: global_init.as_ref().map(|(init, _)| init.clone()),
+        },
+    });
+    crate_.defs[def_id].id = def_id;
+    if let Some((_init, init_body)) = global_init {
+        if !init_body.exprs.is_empty() {
+            crate_.global_init_bodies.insert(def_id, init_body);
+        }
+    }
+    def_id
+}
+
+fn block_static_symbol(name: Symbol, crate_: &HirCrate, session: &mut Session) -> Symbol {
+    let original = session.interner.get(name).to_owned();
+    let ordinal = crate_.defs.len();
+    session.interner.intern(&format!("__rcc_block_static_{original}_{ordinal}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_block_scope_function_decl(
+    name: Symbol,
+    span: Span,
+    ty: TyId,
+    specs: &rcc_ast::DeclSpecs,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> Option<DefId> {
+    match scope.lookup_current(name) {
+        Some(Binding::Def(def)) if matches!(crate_.defs[def].kind, DefKind::Function { .. }) => {
+            return Some(def);
+        }
+        Some(_) => {
+            emit_duplicate_ordinary(name, span, session);
+            return None;
+        }
+        None => {}
+    }
+
+    if let Some(def) = resolver
+        .ordinary
+        .get(&name)
+        .copied()
+        .filter(|def| matches!(crate_.defs[*def].kind, DefKind::Function { .. }))
+    {
+        if let DefKind::Function { ty: slot, variadic, .. } = &mut crate_.defs[def].kind {
+            *slot = ty;
+            *variadic = match tcx.get(ty) {
+                Ty::Func { variadic, .. } => *variadic,
+                _ => false,
+            };
+        }
+        return Some(def);
+    }
+
+    let flags = function_decl_flags(specs);
+    let variadic = match tcx.get(ty) {
+        Ty::Func { variadic, .. } => *variadic,
+        _ => false,
+    };
+    let def = crate_.defs.push(Def {
+        id: DefId(0),
+        name,
+        span,
+        kind: DefKind::Function {
+            ty,
+            has_body: false,
+            is_static: flags.is_static,
+            is_inline: flags.is_inline,
+            is_extern_inline: flags.is_extern_inline,
+            variadic,
+        },
+    });
+    crate_.defs[def].id = def;
+    Some(def)
 }
 
 /// Lower the runtime bound for a block-scope VLA declaration.
@@ -1137,7 +1295,17 @@ fn array_initializer_list_len(items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initi
 }
 
 fn is_string_array_initializer(ty: TyId, expr: &rcc_ast::Expr, tcx: &TyCtxt) -> bool {
-    matches!(&expr.kind, rcc_ast::ExprKind::StringLit(_)) && is_char_array_ty(ty, tcx)
+    let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
+        return false;
+    };
+    match lit.encoding {
+        rcc_ast::LiteralEncoding::None | rcc_ast::LiteralEncoding::Utf8 => {
+            is_char_array_ty(ty, tcx)
+        }
+        rcc_ast::LiteralEncoding::Wide
+        | rcc_ast::LiteralEncoding::Utf16
+        | rcc_ast::LiteralEncoding::Utf32 => is_integer_array_ty(ty, tcx),
+    }
 }
 
 fn is_char_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
@@ -1151,11 +1319,32 @@ fn is_char_like_ty(ty: TyId, tcx: &TyCtxt) -> bool {
     matches!(tcx.get(ty), Ty::Int { rank: IntRank::Char, .. })
 }
 
+fn is_integer_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
+    match tcx.get(ty) {
+        Ty::Array { elem, .. } => matches!(tcx.get(elem.ty), Ty::Int { .. } | Ty::Enum(_)),
+        _ => false,
+    }
+}
+
 fn string_initializer_len(expr: &rcc_ast::Expr) -> Option<u64> {
     let rcc_ast::ExprKind::StringLit(lit) = &expr.kind else {
         return None;
     };
-    Some((lit.bytes.len() + 1) as u64)
+    Some((string_literal_elements(lit).len() + 1) as u64)
+}
+
+fn string_literal_elements(lit: &rcc_ast::StringLiteral) -> Vec<i128> {
+    match lit.encoding {
+        rcc_ast::LiteralEncoding::None | rcc_ast::LiteralEncoding::Utf8 => {
+            lit.bytes.iter().map(|&b| i128::from(b)).collect()
+        }
+        rcc_ast::LiteralEncoding::Wide
+        | rcc_ast::LiteralEncoding::Utf16
+        | rcc_ast::LiteralEncoding::Utf32 => match std::str::from_utf8(&lit.bytes) {
+            Ok(text) => text.chars().map(|ch| i128::from(ch as u32)).collect(),
+            Err(_) => lit.bytes.iter().map(|&b| i128::from(b)).collect(),
+        },
+    }
 }
 
 /// Flatten a brace-enclosed initialiser (`Initializer::List`) into a
@@ -1234,7 +1423,7 @@ fn lower_string_array_initializer(
     let Ty::Array { elem, len, .. } = tcx.get(target_ty).clone() else {
         return;
     };
-    let mut values: Vec<i128> = lit.bytes.iter().map(|&b| i128::from(b)).collect();
+    let mut values = string_literal_elements(lit);
     values.push(0);
     let write_len = len.unwrap_or(values.len() as u64);
     for i in 0..write_len {
@@ -1550,7 +1739,7 @@ fn lower_global_string_array_initializer(
     let Ty::Array { elem, len, .. } = tcx.get(target_ty).clone() else {
         return;
     };
-    let mut values: Vec<i128> = lit.bytes.iter().map(|&b| i128::from(b)).collect();
+    let mut values = string_literal_elements(lit);
     values.push(0);
     let write_len = len.unwrap_or(values.len() as u64);
     for i in 0..write_len {
@@ -2270,6 +2459,27 @@ pub fn lower_expr(
                         });
                         body.exprs[id].id = id;
                         return id;
+                    }
+                    "__builtin_expect" => {
+                        if args.len() != 2 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_expect` requires exactly 2 arguments",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        return lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
                     }
                     _ => {}
                 }
@@ -3544,6 +3754,43 @@ fn eval_const_expr_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
             eval_const_expr_as_i128(operand).and_then(i128::checked_neg)
         }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::BitNot, operand } => {
+            eval_const_expr_as_i128(operand).map(|v| !v)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::LogNot, operand } => {
+            eval_const_expr_as_i128(operand).map(|v| i128::from(v == 0))
+        }
+        rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_const_expr_as_i128(lhs)?;
+            let r = eval_const_expr_as_i128(rhs)?;
+            match op {
+                rcc_ast::BinOp::Add => l.checked_add(r),
+                rcc_ast::BinOp::Sub => l.checked_sub(r),
+                rcc_ast::BinOp::Mul => l.checked_mul(r),
+                rcc_ast::BinOp::Div => (r != 0).then(|| l.checked_div(r)).flatten(),
+                rcc_ast::BinOp::Rem => (r != 0).then(|| l.checked_rem(r)).flatten(),
+                rcc_ast::BinOp::Shl => u32::try_from(r).ok().and_then(|shift| l.checked_shl(shift)),
+                rcc_ast::BinOp::Shr => u32::try_from(r).ok().and_then(|shift| l.checked_shr(shift)),
+                rcc_ast::BinOp::Lt => Some(i128::from(l < r)),
+                rcc_ast::BinOp::Le => Some(i128::from(l <= r)),
+                rcc_ast::BinOp::Gt => Some(i128::from(l > r)),
+                rcc_ast::BinOp::Ge => Some(i128::from(l >= r)),
+                rcc_ast::BinOp::Eq => Some(i128::from(l == r)),
+                rcc_ast::BinOp::Ne => Some(i128::from(l != r)),
+                rcc_ast::BinOp::BitAnd => Some(l & r),
+                rcc_ast::BinOp::BitXor => Some(l ^ r),
+                rcc_ast::BinOp::BitOr => Some(l | r),
+                rcc_ast::BinOp::LogAnd => Some(i128::from(l != 0 && r != 0)),
+                rcc_ast::BinOp::LogOr => Some(i128::from(l != 0 || r != 0)),
+            }
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            if eval_const_expr_as_i128(cond)? != 0 {
+                eval_const_expr_as_i128(then_expr)
+            } else {
+                eval_const_expr_as_i128(else_expr)
+            }
+        }
         _ => None,
     }
 }
@@ -3601,15 +3848,63 @@ fn eval_bit_width(expr: &rcc_ast::Expr) -> Option<i64> {
 ///
 /// Returns `None` on unrecognised shapes; the caller then emits a
 /// diagnostic on behalf of the broken enumerator.
-fn eval_enum_value_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
+fn eval_enum_value_as_i128(
+    expr: &rcc_ast::Expr,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> Option<i128> {
     match &expr.kind {
         rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
-        rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner),
+        rcc_ast::ExprKind::Ident(name) => {
+            let def_id = *resolver.ordinary.get(name)?;
+            match &crate_.defs.get(def_id)?.kind {
+                DefKind::Enumerator { value, .. } => Some(*value),
+                _ => None,
+            }
+        }
+        rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner, resolver, crate_),
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
-            eval_enum_value_as_i128(operand).and_then(i128::checked_neg)
+            eval_enum_value_as_i128(operand, resolver, crate_).and_then(i128::checked_neg)
         }
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
-            eval_enum_value_as_i128(operand)
+            eval_enum_value_as_i128(operand, resolver, crate_)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::BitNot, operand } => {
+            eval_enum_value_as_i128(operand, resolver, crate_).map(|v| !v)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::LogNot, operand } => {
+            eval_enum_value_as_i128(operand, resolver, crate_).map(|v| i128::from(v == 0))
+        }
+        rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_enum_value_as_i128(lhs, resolver, crate_)?;
+            let r = eval_enum_value_as_i128(rhs, resolver, crate_)?;
+            match op {
+                rcc_ast::BinOp::Add => l.checked_add(r),
+                rcc_ast::BinOp::Sub => l.checked_sub(r),
+                rcc_ast::BinOp::Mul => l.checked_mul(r),
+                rcc_ast::BinOp::Div => (r != 0).then(|| l.checked_div(r)).flatten(),
+                rcc_ast::BinOp::Rem => (r != 0).then(|| l.checked_rem(r)).flatten(),
+                rcc_ast::BinOp::Shl => u32::try_from(r).ok().and_then(|shift| l.checked_shl(shift)),
+                rcc_ast::BinOp::Shr => u32::try_from(r).ok().and_then(|shift| l.checked_shr(shift)),
+                rcc_ast::BinOp::Lt => Some(i128::from(l < r)),
+                rcc_ast::BinOp::Le => Some(i128::from(l <= r)),
+                rcc_ast::BinOp::Gt => Some(i128::from(l > r)),
+                rcc_ast::BinOp::Ge => Some(i128::from(l >= r)),
+                rcc_ast::BinOp::Eq => Some(i128::from(l == r)),
+                rcc_ast::BinOp::Ne => Some(i128::from(l != r)),
+                rcc_ast::BinOp::BitAnd => Some(l & r),
+                rcc_ast::BinOp::BitXor => Some(l ^ r),
+                rcc_ast::BinOp::BitOr => Some(l | r),
+                rcc_ast::BinOp::LogAnd => Some(i128::from(l != 0 && r != 0)),
+                rcc_ast::BinOp::LogOr => Some(i128::from(l != 0 || r != 0)),
+            }
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            if eval_enum_value_as_i128(cond, resolver, crate_)? != 0 {
+                eval_enum_value_as_i128(then_expr, resolver, crate_)
+            } else {
+                eval_enum_value_as_i128(else_expr, resolver, crate_)
+            }
         }
         _ => None,
     }
@@ -3652,7 +3947,7 @@ pub fn lower_enum(
 
     for enumerator in enumerators {
         let value = if let Some(value_expr) = &enumerator.value {
-            match eval_enum_value_as_i128(value_expr) {
+            match eval_enum_value_as_i128(value_expr, resolver, crate_) {
                 Some(v) => v,
                 None => {
                     session
@@ -4024,7 +4319,10 @@ fn assign_def_ids(
                 for init_decl in &decl.inits {
                     if let Some((name, _span)) = init_decl.declarator.name {
                         let duplicate_in_decl = !names_in_decl.insert(name);
-                        if duplicate_in_decl {
+                        let is_function_decl =
+                            !is_typedef && is_file_scope_function_declarator(&init_decl.declarator);
+                        let is_global_object_decl = !is_typedef && !is_function_decl;
+                        if duplicate_in_decl && !is_global_object_decl {
                             emit_duplicate_ordinary(name, decl.span, session);
                         }
                         if is_typedef {
@@ -4038,7 +4336,7 @@ fn assign_def_ids(
                             if !duplicate_in_decl {
                                 resolver.ordinary.insert(name, id);
                             }
-                        } else if is_file_scope_function_declarator(&init_decl.declarator) {
+                        } else if is_function_decl {
                             let flags = function_decl_flags(&decl.specs);
                             let id = if let Some(existing) =
                                 resolver.ordinary.get(&name).copied().filter(|id| {
@@ -4072,22 +4370,30 @@ fn assign_def_ids(
                                 Some(StorageClass::Extern) => Linkage::External,
                                 _ => Linkage::External,
                             };
-                            let id = crate_.defs.push(Def {
-                                id: DefId(0),
-                                name,
-                                span: decl.span,
-                                kind: DefKind::Global {
-                                    ty: tcx.error,
-                                    quals: declaration_object_quals(
-                                        &decl.specs,
-                                        &init_decl.declarator,
-                                    ),
-                                    linkage,
-                                    init: None,
-                                },
-                            });
-                            crate_.defs[id].id = id;
-                            if !duplicate_in_decl {
+                            let id = if let Some(existing) =
+                                resolver.ordinary.get(&name).copied().filter(|id| {
+                                    matches!(crate_.defs[*id].kind, DefKind::Global { .. })
+                                }) {
+                                existing
+                            } else {
+                                let id = crate_.defs.push(Def {
+                                    id: DefId(0),
+                                    name,
+                                    span: decl.span,
+                                    kind: DefKind::Global {
+                                        ty: tcx.error,
+                                        quals: declaration_object_quals(
+                                            &decl.specs,
+                                            &init_decl.declarator,
+                                        ),
+                                        linkage,
+                                        init: None,
+                                    },
+                                });
+                                crate_.defs[id].id = id;
+                                id
+                            };
+                            if !duplicate_in_decl || is_global_object_decl {
                                 resolver.ordinary.insert(name, id);
                             }
                         }
@@ -4179,6 +4485,16 @@ fn finalize_file_scope_def_types(
                     continue;
                 };
                 def_id
+            } else if !is_typedef {
+                let Some(def_id) = resolver
+                    .ordinary
+                    .get(&name)
+                    .copied()
+                    .filter(|id| matches!(crate_.defs[*id].kind, DefKind::Global { .. }))
+                else {
+                    continue;
+                };
+                def_id
             } else {
                 let ordinal =
                     seen_file_scope_ordinary_def(&mut seen_ordinary_defs, name, is_typedef);
@@ -4201,7 +4517,8 @@ fn finalize_file_scope_def_types(
             if let Some(init) = &init_decl.init {
                 ty = complete_initializer_type(ty, init, tcx);
             }
-            let global_init = init_decl.init.as_ref().map(|init| {
+            let has_explicit_init = init_decl.init.is_some();
+            let global_init = if let Some(init) = &init_decl.init {
                 let mut init_body = Body::default();
                 let scope = ScopeStack::new();
                 let global_init = lower_global_initializer(
@@ -4218,8 +4535,18 @@ fn finalize_file_scope_def_types(
                 if !init_body.exprs.is_empty() {
                     crate_.global_init_bodies.insert(def_id, init_body);
                 }
-                global_init
-            });
+                Some(global_init)
+            } else if decl.specs.storage != Some(StorageClass::Extern)
+                && matches!(crate_.defs[def_id].kind, DefKind::Global { .. })
+            {
+                // C99 §6.9.2: a file-scope declaration without `extern`
+                // and without an initializer is a tentative definition.
+                // If no real initializer appears, it behaves as though it
+                // had a zero initializer at the end of the translation unit.
+                Some(GlobalInit { ty, entries: Vec::new() })
+            } else {
+                None
+            };
 
             match &mut crate_.defs[def_id].kind {
                 DefKind::Typedef(slot) => *slot = ty,
@@ -4246,7 +4573,9 @@ fn finalize_file_scope_def_types(
                 DefKind::Global { ty: slot, quals, init, .. } => {
                     *slot = ty;
                     *quals = declaration_object_quals(&decl.specs, &init_decl.declarator);
-                    *init = global_init;
+                    if has_explicit_init || init.is_none() {
+                        *init = global_init;
+                    }
                 }
                 _ => {}
             }
@@ -7720,6 +8049,23 @@ mod tests {
             }
             other => panic!("expected Call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn expr_builtin_expect_lowers_to_value_operand() {
+        let (mut sess, _cap) = Session::for_test();
+        let e = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Call {
+                callee: Box::new(ident_expr(&mut sess, "__builtin_expect")),
+                args: vec![int_lit("7", &mut sess), int_lit("0", &mut sess)],
+            },
+            span: DUMMY_SP,
+        };
+
+        let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
+
+        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(7)));
     }
 
     #[test]

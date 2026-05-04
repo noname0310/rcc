@@ -220,8 +220,8 @@ pub fn sysv_fn_abi(
     defs: &IndexVec<DefId, Def>,
     ty: TyId,
 ) -> Result<FnAbi, CodegenError> {
-    let (ret, params, variadic) = match tcx.get(ty) {
-        Ty::Func { ret, params, variadic, .. } => (*ret, params.clone(), *variadic),
+    let (ret, params, variadic, proto) = match tcx.get(ty) {
+        Ty::Func { ret, params, variadic, proto } => (*ret, params.clone(), *variadic, *proto),
         _ => return Err(type_lowering_error(ty, "not a function type")),
     };
 
@@ -233,7 +233,7 @@ pub fn sysv_fn_abi(
     let fixed_param_count =
         ret.llvm_param_count() + lowered.iter().map(AbiParam::llvm_param_count).sum::<usize>();
 
-    Ok(FnAbi { ret, params: lowered, variadic, fixed_param_count })
+    Ok(FnAbi { ret, params: lowered, variadic: variadic || !proto, fixed_param_count })
 }
 
 /// Classify one C function return type for the baseline SysV x86-64 ABI.
@@ -2070,14 +2070,42 @@ pub mod backend {
         // 09-09: Place address, operand load, and store helpers
         // ---------------------------------------------------------------
 
-        fn place_is_volatile(&self, place: &Place, body: &Body) -> Result<bool, CodegenError> {
-            let decl = body.locals.get(place.base).ok_or_else(|| {
-                CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+        fn global_place_base(
+            &self,
+            place: &Place,
+        ) -> Result<Option<(DefId, TyId, rcc_hir::ObjectQuals)>, CodegenError> {
+            let Some(Projection::Global(def)) = place.projection.first() else {
+                return Ok(None);
+            };
+            let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                CodegenError::Internal(format!("global definition {def:?} is missing"))
             })?;
-            let mut current_ty = decl.ty;
-            let mut current_volatile = decl.quals.is_volatile;
-            for proj in &place.projection {
+            let DefKind::Global { ty, quals, .. } = &def_data.kind else {
+                return Err(CodegenError::Internal(format!(
+                    "definition {def:?} is not a global object"
+                )));
+            };
+            Ok(Some((*def, *ty, *quals)))
+        }
+
+        fn place_is_volatile(&self, place: &Place, body: &Body) -> Result<bool, CodegenError> {
+            let (mut current_ty, mut current_volatile, start) = if let Some((_def, ty, quals)) =
+                self.global_place_base(place)?
+            {
+                (ty, quals.is_volatile, 1)
+            } else {
+                let decl = body.locals.get(place.base).ok_or_else(|| {
+                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+                })?;
+                (decl.ty, decl.quals.is_volatile, 0)
+            };
+            for proj in place.projection.iter().skip(start) {
                 match proj {
+                    Projection::Global(def) => {
+                        return Err(CodegenError::Internal(format!(
+                            "global projection {def:?} must be first in a place"
+                        )));
+                    }
                     Projection::Deref => {
                         let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
                             return Err(invalid_place_projection("dereference", current_ty));
@@ -2120,13 +2148,30 @@ pub mod backend {
             body: &Body,
             prefix_len: usize,
         ) -> Result<bool, CodegenError> {
-            let decl = body.locals.get(place.base).ok_or_else(|| {
-                CodegenError::Internal(format!("place base local {:?} is missing", place.base))
-            })?;
-            let mut vol = decl.quals.is_volatile;
-            let mut current_ty = decl.ty;
+            let (mut vol, mut current_ty) = if let Some((_def, ty, quals)) =
+                self.global_place_base(place)?
+            {
+                (quals.is_volatile, ty)
+            } else {
+                let decl = body.locals.get(place.base).ok_or_else(|| {
+                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
+                })?;
+                (decl.quals.is_volatile, decl.ty)
+            };
             for proj in place.projection.iter().take(prefix_len) {
                 match proj {
+                    Projection::Global(def) => {
+                        let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                            CodegenError::Internal(format!("global definition {def:?} is missing"))
+                        })?;
+                        let DefKind::Global { ty, quals, .. } = &def_data.kind else {
+                            return Err(CodegenError::Internal(format!(
+                                "definition {def:?} is not a global object"
+                            )));
+                        };
+                        vol = quals.is_volatile;
+                        current_ty = *ty;
+                    }
                     Projection::Field(idx) => {
                         let (_, field_ty, quals) = self.record_field_info(current_ty, *idx)?;
                         vol |= quals.is_volatile;
@@ -2389,20 +2434,42 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<PointerValue<'ctx>, CodegenError> {
-            let mut ptr = *locals.get(place.base).ok_or_else(|| {
-                CodegenError::Internal(format!("missing LLVM storage for local {:?}", place.base))
-            })?;
-            let mut current_ty = body
-                .locals
-                .get(place.base)
-                .ok_or_else(|| {
-                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
-                })?
-                .ty;
+            let (mut ptr, mut current_ty, start) =
+                if let Some((def, ty, _quals)) = self.global_place_base(place)? {
+                    let global = self.global_decl(def).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "global definition {def:?} was not declared before place lowering"
+                        ))
+                    })?;
+                    (global.as_pointer_value(), ty, 1)
+                } else {
+                    let ptr = *locals.get(place.base).ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "missing LLVM storage for local {:?}",
+                            place.base
+                        ))
+                    })?;
+                    let ty = body
+                        .locals
+                        .get(place.base)
+                        .ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "place base local {:?} is missing",
+                                place.base
+                            ))
+                        })?
+                        .ty;
+                    (ptr, ty, 0)
+                };
 
-            for (i, proj) in place.projection.iter().enumerate() {
+            for (i, proj) in place.projection.iter().enumerate().skip(start) {
                 let prefix_object_vol = self.place_prefix_object_volatile(place, body, i)?;
                 match proj {
+                    Projection::Global(def) => {
+                        return Err(CodegenError::Internal(format!(
+                            "global projection {def:?} must be first in a place"
+                        )));
+                    }
                     Projection::Deref => {
                         let Ty::Ptr(pointee) = self.tcx.get(current_ty) else {
                             return Err(invalid_place_projection("dereference", current_ty));
@@ -2492,6 +2559,9 @@ pub mod backend {
                     }
                     let addr = self.emit_place_addr(place, locals, body)?;
                     let ty = self.place_ty(place, body)?;
+                    if matches!(self.tcx.get(ty), Ty::Func { .. }) {
+                        return Ok(addr.into());
+                    }
                     let llvm_ty = self.type_cx().basic_type_of(ty)?;
                     let volatile = self.place_is_volatile(place, body)?;
                     self.emit_memory_load(llvm_ty, addr, "load", volatile)
@@ -3756,15 +3826,28 @@ pub mod backend {
 
         /// Resolve the HIR type of a place from the body's local declarations.
         fn place_ty(&self, place: &Place, body: &Body) -> Result<TyId, CodegenError> {
-            let mut ty = body
-                .locals
-                .get(place.base)
-                .ok_or_else(|| {
-                    CodegenError::Internal(format!("place base local {:?} is missing", place.base))
-                })?
-                .ty;
-            for proj in &place.projection {
+            let (mut ty, start) = if let Some((_def, ty, _quals)) = self.global_place_base(place)? {
+                (ty, 1)
+            } else {
+                let ty = body
+                    .locals
+                    .get(place.base)
+                    .ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "place base local {:?} is missing",
+                            place.base
+                        ))
+                    })?
+                    .ty;
+                (ty, 0)
+            };
+            for proj in place.projection.iter().skip(start) {
                 match proj {
+                    Projection::Global(def) => {
+                        return Err(CodegenError::Internal(format!(
+                            "global projection {def:?} must be first in a place"
+                        )));
+                    }
                     Projection::Deref => {
                         let Ty::Ptr(pointee) = self.tcx.get(ty) else {
                             return Err(invalid_place_projection("dereference", ty));
@@ -4828,6 +4911,9 @@ pub mod backend {
             unit: AbiParamUnit,
         ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
             match unit.kind {
+                AbiParamUnitKind::Source(ty) if matches!(self.tcx.get(ty), Ty::Func { .. }) => {
+                    Ok(self.ptr_type().into())
+                }
                 AbiParamUnitKind::Source(ty) => self.basic_type_of(ty),
                 AbiParamUnitKind::Integer { bits } => {
                     Ok(self.context.custom_width_int_type(bits).into())
@@ -4859,8 +4945,16 @@ pub mod backend {
                 (*kind, fields.iter().map(|field| field.ty).collect::<Vec<_>>())
             };
 
-            let record = self.context.opaque_struct_type(&format!("rcc.record.{}", def.0));
+            let record_name = format!("rcc.record.{}", def.0);
+            let record = self
+                .context
+                .get_struct_type(&record_name)
+                .unwrap_or_else(|| self.context.opaque_struct_type(&record_name));
             self.cache.insert(ty, record.into());
+
+            if !record.is_opaque() {
+                return Ok(record);
+            }
 
             let field_types = match kind {
                 RecordKind::Struct => field_tys
@@ -4916,16 +5010,19 @@ pub mod backend {
     /// Helper for lowering HIR `GlobalInit` values into LLVM constants and
     /// interning string literals into module-private globals.
     /// Build an LLVM array constant whose elements are arbitrary
-    /// Build an LLVM array constant whose elements are arbitrary
     /// `BasicValueEnum`s.  `ArrayType::const_array` in inkwell 0.6 only
     /// accepts `&[ArrayValue]`; this helper uses the generic
     /// `ArrayValue::new_const_array` which accepts any `AsValueRef`.
+    ///
+    /// `new_const_array` expects the element type, not the final array type.
+    /// Passing `[N x T]` here creates a `[N x [N x T]]` constant that LLVM's
+    /// verifier rejects when attached to a `[N x T]` global.
     #[allow(unsafe_code)]
     fn const_array<'ctx>(
-        ty: inkwell::types::ArrayType<'ctx>,
+        elem_ty: BasicTypeEnum<'ctx>,
         values: &[BasicValueEnum<'ctx>],
     ) -> inkwell::values::ArrayValue<'ctx> {
-        unsafe { inkwell::values::ArrayValue::new_const_array(&ty, values) }
+        unsafe { inkwell::values::ArrayValue::new_const_array(&elem_ty, values) }
     }
 
     /// Constant `inbounds GEP` on a pointer by an i8 offset.
@@ -5065,8 +5162,8 @@ pub mod backend {
                 elements.push(self.build_const_value(elem_ty, &sub_entries)?);
             }
 
-            let array_ty = llvm_elem_ty.array_type(u32_len);
-            Ok(const_array(array_ty, &elements).into())
+            let _array_ty = llvm_elem_ty.array_type(u32_len);
+            Ok(const_array(llvm_elem_ty, &elements).into())
         }
 
         fn build_record_const(
@@ -5148,8 +5245,7 @@ pub mod backend {
                             .collect();
 
                         let bytes = self.build_const_bytes(field.ty, &sub_entries, size)?;
-                        let byte_array_ty = self.context.i8_type().array_type(size);
-                        let byte_array = const_array(byte_array_ty, &bytes);
+                        let byte_array = const_array(self.context.i8_type().into(), &bytes);
                         let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
                         return Ok(struct_ty.const_named_struct(&[byte_array.into()]).into());
                     }
@@ -5167,14 +5263,19 @@ pub mod backend {
             ty: TyId,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             match value {
-                GlobalInitValue::Int(n) => {
-                    let BasicTypeEnum::IntType(int_ty) = self.type_cx.basic_type_of(ty)? else {
-                        return Err(CodegenError::Internal(
-                            "Int value for non-int type".to_owned(),
-                        ));
-                    };
-                    Ok(int_ty.const_int(*n as u64, *n < 0).into())
-                }
+                GlobalInitValue::Int(n) => match self.type_cx.basic_type_of(ty)? {
+                    BasicTypeEnum::IntType(int_ty) => {
+                        Ok(int_ty.const_int(*n as u64, *n < 0).into())
+                    }
+                    BasicTypeEnum::FloatType(float_ty) => {
+                        Ok(float_ty.const_float(*n as f64).into())
+                    }
+                    BasicTypeEnum::PointerType(ptr_ty) if *n == 0 => Ok(ptr_ty.const_null().into()),
+                    other => Err(CodegenError::Internal(format!(
+                        "Int value for non-int type {:?}",
+                        other
+                    ))),
+                },
                 GlobalInitValue::Float(f) => match self.type_cx.basic_type_of(ty)? {
                     BasicTypeEnum::FloatType(float_ty) => Ok(float_ty.const_float(*f).into()),
                     other => Err(CodegenError::Internal(format!(
@@ -9490,6 +9591,36 @@ mod tests {
         assert!(ir.contains("@x = internal global i32 5"), "IR:\n{ir}");
     }
 
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn integer_leaf_initializes_double_global() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("x");
+        let init = GlobalInit {
+            ty: tcx.double,
+            entries: vec![GlobalInitEntry {
+                path: vec![],
+                ty: tcx.double,
+                expr: None,
+                value: GlobalInitValue::Int(100),
+                span: DUMMY_SP,
+            }],
+        };
+        let _g = global_def_with_init(&mut defs, name, tcx.double, Linkage::External, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        cx.verify_module().unwrap();
+        let ir = cx.ir_text();
+        assert!(ir.contains("@x = global double 1.000000e+02"), "IR:\n{ir}");
+    }
+
     /// Missing initializer entries produce zero-fill.
     #[cfg(feature = "llvm")]
     #[test]
@@ -9835,6 +9966,74 @@ mod tests {
 
         let ir = cx.ir_text();
         assert!(ir.contains("i32 7"));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn array_of_struct_global_initializer_matches_global_type() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let sub_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(2), is_vla: false });
+        let struct_def_id =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(sub_arr_ty)]);
+        let struct_ty = tcx.intern(Ty::Record(struct_def_id));
+        let global_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(struct_ty), len: Some(1), is_vla: false });
+
+        let a_name = session.interner.intern("a");
+        let init = GlobalInit {
+            ty: global_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Index(0),
+                        rcc_hir::GlobalInitDesignator::Field(0),
+                    ],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(1),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Index(0),
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Index(0),
+                    ],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(2),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        rcc_hir::GlobalInitDesignator::Index(0),
+                        rcc_hir::GlobalInitDesignator::Field(1),
+                        rcc_hir::GlobalInitDesignator::Index(1),
+                    ],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(3),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _a = global_def_with_init(&mut defs, a_name, global_ty, Linkage::External, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        cx.verify_module().unwrap();
+        let ir = cx.ir_text();
+        assert!(ir.contains("@a = global [1 x %rcc.record."), "IR:\n{ir}");
+        assert!(ir.contains("{ i32 1, [2 x i32] [i32 2, i32 3] }"), "IR:\n{ir}");
     }
 
     #[cfg(feature = "llvm")]

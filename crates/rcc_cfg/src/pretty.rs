@@ -140,6 +140,10 @@ fn fmt_place(place: &Place) -> String {
     let mut out = fmt_local(place.base);
     for proj in &place.projection {
         match proj {
+            Projection::Global(def) => {
+                out.clear();
+                let _ = write!(out, "global#{}", def.0);
+            }
             Projection::Deref => out.push_str(".*"),
             Projection::Field(index) => {
                 let _ = write!(out, ".field{index}");

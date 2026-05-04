@@ -24,4 +24,7 @@ fn def#0() -> int {
   bb4:
     return;
 
+  bb5:
+    goto -> bb2;
+
 }

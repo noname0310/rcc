@@ -139,6 +139,9 @@ impl Adapter for CTestSuiteAdapter {
         // Step 2: link with host cc
         let mut link_cmd = Command::new("cc");
         link_cmd.arg("-o").arg(&exe_path).arg(&obj_path);
+        if !cfg!(windows) {
+            link_cmd.arg("-lm");
+        }
         match run_with_timeout(&mut link_cmd, TIMEOUT) {
             Ok(o) if o.status.success() => {}
             Ok(o) => {

@@ -84,6 +84,29 @@ fn expect_errors(name: &str, src: &str, expected_codes: &[&'static str]) -> Vec<
     diagnostics
 }
 
+fn expect_warnings_and_lower(name: &str, src: &str, expected_codes: &[&'static str]) -> Lowered {
+    let mut checked = check_snippet(name, src);
+    let diagnostics = checked.cap.diagnostics();
+    assert!(
+        !checked.session.handler.has_errors(),
+        "{name}: warnings should not stop CFG/codegen: {diagnostics:?}"
+    );
+    for code in expected_codes {
+        assert!(
+            diagnostics.iter().any(|d| d.code == Some(*code)),
+            "{name}: expected warning {code}, got {diagnostics:?}"
+        );
+    }
+    let mut bodies: Vec<_> =
+        build_bodies(&mut checked.session, &checked.tcx, &checked.hir).into_iter().collect();
+    bodies.sort_by_key(|(def, _)| def.0);
+    for (_, body) in &bodies {
+        verify_body_with_hir(body, &checked.tcx, &checked.hir)
+            .unwrap_or_else(|errors| panic!("{name}: CFG verifier errors: {errors:?}"));
+    }
+    Lowered { tcx: checked.tcx, hir: checked.hir, bodies }
+}
+
 #[test]
 fn member_access_field_index_survives_to_cfg() {
     let lowered = lower_checked(
@@ -184,6 +207,51 @@ fn global_object_address_stays_address_value() {
             )
         }),
         "return &x should pass the global address constant through to the pointer return slot"
+    );
+}
+
+#[test]
+fn global_object_assignment_lowers_to_global_place() {
+    let lowered = lower_checked("global-object-assign", "int x; int f(void) { x = 7; return x; }");
+    let body = only_body(&lowered);
+    let x = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                } if matches!(place.projection.as_slice(), [Projection::Global(def)] if *def == x)
+                    && matches!(c.kind, ConstKind::Int(7))
+            )
+        }),
+        "x = 7 should store through a global place, not panic in lower_as_place"
+    );
+}
+
+#[test]
+fn global_object_field_assignment_lowers_to_projected_global_place() {
+    let lowered = lower_checked(
+        "global-object-field-assign",
+        "typedef struct { int x; int y; } S; S v; int f(void) { v.x = 1; return v.x; }",
+    );
+    let body = only_body(&lowered);
+    let v = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                } if matches!(
+                    place.projection.as_slice(),
+                    [Projection::Global(def), Projection::Field(0)] if *def == v
+                ) && matches!(c.kind, ConstKind::Int(1))
+            )
+        }),
+        "v.x = 1 should store through a projected global place"
     );
 }
 
@@ -291,21 +359,23 @@ fn invalid_return_stops_before_cfg() {
 }
 
 #[test]
-fn invalid_pointer_assignment_stops_before_cfg() {
-    expect_errors(
-        "invalid-pointer-assignment",
+fn incompatible_pointer_assignment_warns_and_reaches_cfg() {
+    let lowered = expect_warnings_and_lower(
+        "incompatible-pointer-assignment",
         "int f(char *q) { int *p; p = q; return 0; }",
         &["E0082"],
     );
+    assert_eq!(lowered.bodies.len(), 1);
 }
 
 #[test]
-fn invalid_call_coercion_stops_before_cfg() {
-    expect_errors(
-        "invalid-call-coercion",
+fn incompatible_call_pointer_coercion_warns_and_reaches_cfg() {
+    let lowered = expect_warnings_and_lower(
+        "incompatible-call-coercion",
         "int sink(int *p); int f(char *q) { return sink(q); }",
         &["E0082"],
     );
+    assert_eq!(lowered.bodies.len(), 1);
 }
 
 #[test]

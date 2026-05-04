@@ -918,14 +918,22 @@ fn coerce_to(
     match is_assignable(tcx, body, dst, src_ty, expr) {
         Ok(()) | Err(AssignError::Narrowing) => {}
         Err(AssignError::QualifierLoss) => {
-            emit_pointer_conversion_error(
+            emit_pointer_conversion_warning(
                 session,
                 body.exprs[expr].span,
                 ConvertError::QualifierLoss,
             );
-            return CoerceResult::Error(mark_expr_error(body, tcx, expr));
+            return CoerceResult::Converted(push_pointer_convert(body, expr, dst));
         }
         Err(AssignError::Incompatible) => {
+            if is_pointer(tcx, dst) && is_pointer(tcx, src_ty) {
+                emit_pointer_conversion_warning(
+                    session,
+                    body.exprs[expr].span,
+                    ConvertError::Incompatible,
+                );
+                return CoerceResult::Converted(push_pointer_convert(body, expr, dst));
+            }
             if is_pointer(tcx, dst) || is_pointer(tcx, src_ty) {
                 emit_pointer_conversion_error(
                     session,
@@ -968,6 +976,10 @@ fn coerce_to(
                 };
             }
             Err(err) => {
+                if err == ConvertError::QualifierLoss {
+                    emit_pointer_conversion_warning(session, body.exprs[expr].span, err);
+                    return CoerceResult::Converted(push_pointer_convert(body, expr, dst));
+                }
                 emit_pointer_conversion_error(session, body.exprs[expr].span, err);
                 return CoerceResult::Error(mark_expr_error(body, tcx, expr));
             }
@@ -1000,6 +1012,15 @@ fn emit_pointer_conversion_error(session: &mut Session, span: rcc_span::Span, er
     session.handler.struct_err(span, msg).code(rcc_errors::codes::E0082).emit();
 }
 
+fn emit_pointer_conversion_warning(session: &mut Session, span: rcc_span::Span, err: ConvertError) {
+    let msg = match err {
+        ConvertError::QualifierLoss => "implicit pointer conversion discards qualifiers",
+        ConvertError::Incompatible => "incompatible pointer conversion",
+        ConvertError::IntegerPointerMix => "integer-pointer conversion requires a cast",
+    };
+    session.handler.struct_warn(span, msg).code(rcc_errors::codes::E0082).emit();
+}
+
 /// Diagnostic-emitting type-checker for `HirExprKind::Binary`. Updates
 /// `body.exprs[expr_id]` in place with the resolved type and rewires
 /// the lhs/rhs references to whatever `Convert` wrappers the conversion
@@ -1025,16 +1046,37 @@ fn type_binary(
     let (result_ty, lhs_final, rhs_final) = match op {
         // Arithmetic: usual arithmetic conversions, integer-only for `%`.
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-            // `+`/`-` accept pointer arithmetic; the others demand
-            // arithmetic operands. We handle pointer arithmetic in a
-            // best-effort fashion here: result type is the pointer side.
+            // `+`/`-` accept pointer arithmetic, but the result differs:
+            // pointer +/- integer keeps the pointer type; pointer - pointer
+            // yields `ptrdiff_t` (LP64 `long` for our current target model).
             if matches!(op, BinOp::Add | BinOp::Sub)
-                && (matches!(*tcx.get(lhs_ty), Ty::Ptr(_))
-                    || matches!(*tcx.get(rhs_ty), Ty::Ptr(_)))
+                && (is_pointer(tcx, lhs_ty) || is_pointer(tcx, rhs_ty))
             {
-                let result_ty =
-                    if matches!(*tcx.get(lhs_ty), Ty::Ptr(_)) { lhs_ty } else { rhs_ty };
-                (result_ty, lhs, rhs)
+                match (op, is_pointer(tcx, lhs_ty), is_pointer(tcx, rhs_ty)) {
+                    (BinOp::Add, true, false) if is_integer(tcx, rhs_ty) => {
+                        let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                        let rhs =
+                            if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
+                        (lhs_ty, lhs, rhs)
+                    }
+                    (BinOp::Add, false, true) if is_integer(tcx, lhs_ty) => {
+                        let lhs_p = integer_promotion(tcx, lhs_ty, None);
+                        let lhs =
+                            if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
+                        (rhs_ty, lhs, rhs)
+                    }
+                    (BinOp::Sub, true, false) if is_integer(tcx, rhs_ty) => {
+                        let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                        let rhs =
+                            if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
+                        (lhs_ty, lhs, rhs)
+                    }
+                    (BinOp::Sub, true, true) => (tcx.long, lhs, rhs),
+                    _ => {
+                        invalid_operands(session, span, binop_symbol(op));
+                        (tcx.error, lhs, rhs)
+                    }
+                }
             } else if op == BinOp::Rem {
                 if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
                     invalid_operands(session, span, "%");
@@ -1416,6 +1458,7 @@ fn type_call(
         // still default-promote them so downstream HIR never contains raw
         // pre-promotion argument types.
         for (i, arg) in args.iter_mut().enumerate() {
+            *arg = rvalue_decayed(*arg, body, tcx);
             if let Some(param_ty) = params.get(i) {
                 *arg = match coerce_to(*arg, *param_ty, body, tcx, session) {
                     CoerceResult::Noop(expr)
@@ -1430,6 +1473,7 @@ fn type_call(
         // K&R-style prototype-less function: every argument goes through
         // default argument promotions (C99 §6.5.2.2p6).
         for arg in args.iter_mut() {
+            *arg = rvalue_decayed(*arg, body, tcx);
             *arg = default_arg_promote(*arg, body, tcx);
         }
     }
@@ -1507,6 +1551,10 @@ fn default_arg_promote(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> Hi
 /// Non-integer types pass through unchanged so callers can chain this with
 /// the usual arithmetic conversions blindly.
 pub fn integer_promotion(tcx: &TyCtxt, ty: TyId, bit_width: Option<u32>) -> TyId {
+    if matches!(tcx.get(ty), Ty::Enum(_)) {
+        return tcx.int;
+    }
+
     let Ty::Int { signed, rank } = *tcx.get(ty) else {
         return ty;
     };
@@ -2244,7 +2292,7 @@ fn is_narrowing_arithmetic(tcx: &TyCtxt, src: TyId, dst: TyId) -> bool {
 /// floating, real or complex). `_Complex` is included because §6.5.16.1
 /// treats every arithmetic type uniformly.
 fn is_arithmetic(tcx: &TyCtxt, a: TyId) -> bool {
-    matches!(tcx.get(a), Ty::Int { .. } | Ty::Float(_) | Ty::Complex(_))
+    matches!(tcx.get(a), Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_) | Ty::Complex(_))
 }
 
 /// True iff `a` is a pointer type.
@@ -2582,7 +2630,7 @@ fn push_pointer_convert(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExp
 
 /// True iff `t` is an integer type per C99 §6.2.5p17.
 fn is_integer(tcx: &TyCtxt, t: TyId) -> bool {
-    matches!(tcx.get(t), Ty::Int { .. })
+    matches!(tcx.get(t), Ty::Int { .. } | Ty::Enum(_))
 }
 
 /// True iff `t` is a `_Complex` floating type per C99 §6.2.5p11.
@@ -2707,6 +2755,13 @@ mod tests {
         for ty in [tcx.void, tcx.float, tcx.double, tcx.long_double, tcx.error] {
             assert_eq!(integer_promotion(&tcx, ty, None), ty);
         }
+    }
+
+    #[test]
+    fn integer_promotion_enum_to_int() {
+        let mut tcx = TyCtxt::new();
+        let enum_ty = tcx.intern(Ty::Enum(DefId(0)));
+        assert_eq!(integer_promotion(&tcx, enum_ty, None), tcx.int);
     }
 
     #[test]
@@ -4946,7 +5001,7 @@ mod tests {
     }
 
     #[test]
-    fn coercion_assignment_incompatible_pointer_emits_e0082_and_marks_rhs_error() {
+    fn coercion_assignment_incompatible_pointer_warns_but_recovers() {
         let mut tcx = TyCtxt::new();
         let (mut session, cap) = Session::for_test();
         let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
@@ -4961,13 +5016,45 @@ mod tests {
 
         check_body(&mut body, &mut tcx, &mut session);
 
-        let HirExprKind::Assign { rhs: checked_rhs, .. } = body.exprs[assign].kind else {
+        let HirExprKind::Assign { .. } = body.exprs[assign].kind else {
             panic!("expected assignment expression");
         };
-        assert_eq!(body.exprs[checked_rhs].ty, tcx.error);
+        assert!(!session.handler.has_errors(), "pointer-to-pointer mismatch should recover");
         assert!(
             cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
-            "expected E0082, got {:?}",
+            "expected E0082 warning, got {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
+    fn coercion_assignment_qualifier_loss_warns_but_recovers() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let const_void_ptr = tcx.intern(Ty::Ptr(Qual {
+            ty: tcx.void,
+            is_const: true,
+            is_volatile: false,
+            is_restrict: false,
+        }));
+        let mut body = Body::default();
+        let p = push_local(&mut body, Some(session.interner.intern("p")), void_ptr, false);
+        let q = push_local(&mut body, Some(session.interner.intern("q")), const_void_ptr, false);
+        let lhs = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(p));
+        let rhs = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(q));
+        let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+        set_root_expr(&mut body, assign);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let HirExprKind::Assign { .. } = body.exprs[assign].kind else {
+            panic!("expected assignment expression");
+        };
+        assert!(!session.handler.has_errors(), "qualifier loss should be recoverable");
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
+            "expected E0082 warning, got {:?}",
             cap.diagnostics()
         );
     }
@@ -5019,7 +5106,7 @@ mod tests {
     }
 
     #[test]
-    fn coercion_call_argument_error_is_not_silent() {
+    fn coercion_call_argument_incompatible_pointer_warns_but_recovers() {
         let mut tcx = TyCtxt::new();
         let (mut session, cap) = Session::for_test();
         let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
@@ -5044,12 +5131,48 @@ mod tests {
         let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
             panic!("expected call expression");
         };
-        assert_eq!(body.exprs[args[0]].ty, tcx.error);
+        assert_eq!(body.exprs[args[0]].ty, char_ptr);
         assert!(
             cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0082)),
             "expected E0082, got {:?}",
             cap.diagnostics()
         );
+        assert!(!session.handler.has_errors());
+    }
+
+    #[test]
+    fn call_argument_array_decays_before_parameter_coercion() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(4), is_vla: false });
+        let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![int_ptr],
+            variadic: false,
+            proto: true,
+        });
+        let fn_ptr = tcx.intern(Ty::Ptr(Qual::plain(fn_ty)));
+        let mut body = Body::default();
+        let f = push_local(&mut body, Some(session.interner.intern("f")), fn_ptr, false);
+        let a = push_local(&mut body, Some(session.interner.intern("a")), arr_ty, false);
+        let callee = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(f));
+        let arg = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(a));
+        let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![arg] });
+        set_root_expr(&mut body, call);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+            panic!("expected call expression");
+        };
+        assert_eq!(body.exprs[args[0]].ty, int_ptr);
+        assert!(matches!(
+            body.exprs[args[0]].kind,
+            HirExprKind::Convert { kind: ConvertKind::ArrayToPtr, .. }
+        ));
+        assert!(!session.handler.has_errors());
     }
 
     /// Acceptance: `1 + 2.0` — IntConst is wrapped in `Convert(IntToFloat, f64)`
@@ -5169,6 +5292,29 @@ mod tests {
         };
         assert_eq!(nl, lhs);
         assert_eq!(nr, rhs);
+    }
+
+    /// Pointer subtraction yields `ptrdiff_t`, not the pointer type. CFG uses
+    /// that HIR result type to allocate the `PtrDiff` temporary.
+    #[test]
+    fn pointer_difference_yields_long() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let lhs = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(Local(0)));
+        let rhs = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(Local(1)));
+        let bin = push_kind(&mut body, tcx.error, HirExprKind::Binary { op: BinOp::Sub, lhs, rhs });
+        let (mut session, _cap) = Session::for_test();
+
+        type_binary(bin, BinOp::Sub, lhs, rhs, DUMMY_SP, &mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[bin].ty, tcx.long);
+        let HirExprKind::Binary { lhs: new_lhs, rhs: new_rhs, .. } = body.exprs[bin].kind else {
+            panic!("expected Binary kind");
+        };
+        assert_eq!(body.exprs[new_lhs].ty, ptr_ty);
+        assert_eq!(body.exprs[new_rhs].ty, ptr_ty);
+        assert!(!session.handler.has_errors());
     }
 
     /// Comparison `1 < 2` returns `int` regardless of operand types.

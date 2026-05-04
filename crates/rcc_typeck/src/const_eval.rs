@@ -324,7 +324,14 @@ impl<'a> ConstEval<'a> {
             // wrappers the typeck pass inserts.
             HirExprKind::Convert { operand, kind } => match kind {
                 ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr => self.eval_address(operand),
-                ConvertKind::Pointer | ConvertKind::LvalueToRvalue => self.eval_address(operand),
+                ConvertKind::Pointer => {
+                    if let Some(addr) = self.eval_address(operand) {
+                        return Some(addr);
+                    }
+                    let value = self.eval_int(operand)?;
+                    (value == 0).then_some((None, 0))
+                }
+                ConvertKind::LvalueToRvalue => self.eval_address(operand),
                 ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic => None,
                 // Complex conversions never produce an address constant.
                 ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
@@ -1395,6 +1402,33 @@ mod tests {
             push(&mut body, char_ptr, HirExprKind::Binary { op: BinOp::Add, lhs: cast, rhs: five });
         let mut ce = ConstEval::new(&tcx, Some(&body));
         assert_eq!(ce.eval_address(added), Some((None, 5)));
+    }
+
+    /// Typeck lowers `int (*fp)() = 0;` as a pointer conversion wrapper,
+    /// not an explicit cast. That wrapper still represents the C99 null
+    /// pointer constant and is a valid static initializer.
+    #[test]
+    fn eval_address_null_pointer_conversion() {
+        use rcc_hir::Qual;
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let zero = push(&mut body, tcx.int, HirExprKind::IntConst(0));
+        let fn_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let fn_ptr = tcx.intern(Ty::Ptr(Qual::plain(fn_ty)));
+        let converted = push(
+            &mut body,
+            fn_ptr,
+            HirExprKind::Convert { operand: zero, kind: ConvertKind::Pointer },
+        );
+
+        let mut ce = ConstEval::new(&tcx, Some(&body));
+        assert_eq!(ce.eval_address(converted), Some((None, 0)));
+        let mut ce = ConstEval::new(&tcx, Some(&body));
+        assert!(matches!(
+            ce.eval_scalar(converted),
+            Some(ConstScalar::Address { def: None, offset: 0 })
+        ));
     }
 
     /// `&local_var` is *not* an address constant per C99 §6.6p8 — it

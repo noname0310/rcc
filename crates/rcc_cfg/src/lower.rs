@@ -20,7 +20,7 @@
 //! terminate the current block with a `SwitchInt` and continue lowering
 //! at a fresh join block.
 //!
-use rcc_data_structures::IndexVec;
+use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
     Body as HirBody, ConvertKind, Def, DefId, FloatKind, HirExprId, HirExprKind, HirStmtId,
@@ -177,6 +177,19 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let lhs_ty = cx.body.exprs[*lhs].ty;
             let rhs_ty = cx.body.exprs[*rhs].ty;
             let cfg_op = pick_binop(*op, lhs_ty, rhs_ty, cx.tcx);
+            let rhs_op =
+                if matches!(cfg_op, BinOp::Shl | BinOp::AShr | BinOp::LShr) && rhs_ty != lhs_ty {
+                    let rhs_temp = builder.alloc_temp(lhs_ty, span);
+                    push_assign(
+                        builder,
+                        span,
+                        rhs_temp,
+                        Rvalue::Cast { op: rhs_op, to: lhs_ty, kind: CastKind::IntToInt },
+                    );
+                    Operand::Copy(Place { base: rhs_temp, projection: Vec::new() })
+                } else {
+                    rhs_op
+                };
             let temp = builder.alloc_temp(ty, span);
             push_assign(builder, span, temp, Rvalue::BinaryOp(cfg_op, lhs_op, rhs_op));
             Operand::Copy(Place { base: temp, projection: Vec::new() })
@@ -214,6 +227,18 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
                     return Operand::Const(Const { kind: ConstKind::Global(def), ty });
                 }
             }
+            if *kind == ConvertKind::ArrayToPtr
+                && matches!(cx.tcx.get(cx.body.exprs[*operand].ty), Ty::Array { .. })
+            {
+                let mut place = lower_as_place(builder, cx, *operand);
+                place.projection.push(Projection::Index(Operand::Const(Const {
+                    kind: ConstKind::Int(0),
+                    ty: cx.tcx.long,
+                })));
+                let temp = builder.alloc_temp(ty, span);
+                push_assign(builder, span, temp, Rvalue::AddressOf(place));
+                return Operand::Copy(Place { base: temp, projection: Vec::new() });
+            }
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
             if matches!(kind, ConvertKind::RealToComplex | ConvertKind::ComplexToReal) {
@@ -242,6 +267,10 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             }
         }
         HirExprKind::Cast { operand, to } => {
+            if *to == cx.tcx.void {
+                let _ = lower_as_rvalue(builder, cx, *operand);
+                return Operand::Const(Const { kind: ConstKind::ZeroInit, ty: *to });
+            }
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
             let kind = explicit_cast_kind(from_ty, *to, cx.tcx);
@@ -395,6 +424,9 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             let local = cx.locals.lookup(*hir_local);
             Place { base: local, projection: Vec::new() }
         }
+        HirExprKind::DefRef(def) => {
+            Place { base: Local(u32::MAX), projection: vec![Projection::Global(*def)] }
+        }
         HirExprKind::Deref(operand) => {
             // `*p` — evaluate `p` as an rvalue (it is a pointer
             // value), spill into a temp if it is not already a Place,
@@ -419,9 +451,18 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             // already decayed array-to-pointer; we treat it as a
             // pointer here, materialise the index as an Operand, and
             // emit a single Place with a `Projection::Index`.
-            let pointer = lower_as_rvalue(builder, cx, *base);
             let index_op = lower_as_rvalue(builder, cx, *index);
-            let base = operand_to_place(builder, cx, pointer, expr.span);
+            let base = match cx.body.exprs[*base].kind {
+                HirExprKind::Convert { operand, kind: ConvertKind::ArrayToPtr }
+                    if matches!(cx.tcx.get(cx.body.exprs[operand].ty), Ty::Array { .. }) =>
+                {
+                    lower_as_place(builder, cx, operand)
+                }
+                _ => {
+                    let pointer = lower_as_rvalue(builder, cx, *base);
+                    operand_to_place(builder, cx, pointer, expr.span)
+                }
+            };
             let mut projection = base.projection;
             projection.push(Projection::Index(index_op));
             Place { base: base.base, projection }
@@ -538,6 +579,22 @@ fn inc_dec_step(tcx: &TyCtxt, operand_ty: TyId) -> Operand {
 pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtId) {
     let stmt = &cx.body.stmts[stmt_id];
 
+    // `case` / `default` are labels inside the nearest enclosing switch,
+    // not lexical sub-bodies. Switch lowering installs the label->block map
+    // and then lowers the whole switch body in source order so statements
+    // following a label, including sibling `break` statements, stay in the
+    // same case block until another label transfers the cursor.
+    if let HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } = &stmt.kind {
+        if let Some(case_bb) = builder.switch_case_block(stmt_id) {
+            if !builder.is_current_terminated() {
+                builder.goto(case_bb, stmt.span);
+            }
+            builder.switch_to(case_bb);
+            lower_stmt(builder, cx, *body);
+            return;
+        }
+    }
+
     // Labels are always reachable via goto, even if the current block
     // is already terminated.  If we fall through to the label, emit a
     // Goto so the predecessor block is properly terminated.
@@ -611,8 +668,9 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             lower_switch(builder, cx, stmt.span, *cond, *body, cases);
         }
         HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
-            // Reached via `lower_switch` -> `lower_stmt(case.target)`.
-            // Top-level Case/Default outside a switch is invalid HIR.
+            // Top-level Case/Default outside a switch is invalid HIR, but
+            // leave the body lowering tolerant so earlier diagnostics can
+            // keep collecting errors.
             lower_stmt(builder, cx, *body);
         }
         HirStmtKind::Goto(name) => {
@@ -680,7 +738,12 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
             lower_stmt_in_dead_code(builder, cx, *body);
         }
         HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
-            lower_stmt_in_dead_code(builder, cx, *body);
+            if let Some(case_bb) = builder.switch_case_block(stmt_id) {
+                builder.switch_to(case_bb);
+                lower_stmt(builder, cx, *body);
+            } else {
+                lower_stmt_in_dead_code(builder, cx, *body);
+            }
         }
         _ => {}
     }
@@ -694,7 +757,7 @@ fn lower_if(
     then_branch: HirStmtId,
     else_branch: Option<HirStmtId>,
 ) {
-    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let cond_op = lower_condition_operand(builder, cx, span, cond);
     let then_block = builder.new_block();
 
     match else_branch {
@@ -812,7 +875,7 @@ fn lower_short_circuit(
     // Evaluate lhs. The recursion may itself emit blocks (e.g. nested
     // short-circuit / ternary); the cursor afterwards is wherever lhs's
     // evaluation ended, which is the block we terminate with the branch.
-    let lhs_op = lower_as_rvalue(builder, cx, lhs);
+    let lhs_op = lower_condition_operand(builder, cx, span, lhs);
 
     // Allocate the rhs and join blocks (cursor unchanged).
     let rhs_block = builder.new_block();
@@ -880,7 +943,7 @@ fn lower_ternary(
     else_expr: rcc_hir::HirExprId,
 ) -> Operand {
     // Lower the controlling expression in the current block.
-    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let cond_op = lower_condition_operand(builder, cx, span, cond);
 
     // Allocate the result slot and the three new blocks.
     let result_local = builder.alloc_temp(ty, span);
@@ -957,7 +1020,7 @@ fn lower_while(
 
     // Header: evaluate condition and branch.
     builder.switch_to(header);
-    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let cond_op = lower_condition_operand(builder, cx, span, cond);
     let body_bb = builder.new_block();
     builder.terminate(Terminator {
         kind: TerminatorKind::SwitchInt {
@@ -1028,7 +1091,7 @@ fn lower_do_while(
 
     // Condition.
     builder.switch_to(cond_bb);
-    let cond_op = lower_as_rvalue(builder, cx, cond);
+    let cond_op = lower_condition_operand(builder, cx, span, cond);
     builder.terminate(Terminator {
         kind: TerminatorKind::SwitchInt {
             discr: cond_op,
@@ -1109,7 +1172,7 @@ fn lower_for(
     let body_bb = builder.new_block();
     match cond {
         Some(cond_expr) => {
-            let cond_op = lower_as_rvalue(builder, cx, cond_expr);
+            let cond_op = lower_condition_operand(builder, cx, span, cond_expr);
             builder.terminate(Terminator {
                 kind: TerminatorKind::SwitchInt {
                     discr: cond_op,
@@ -1167,15 +1230,9 @@ fn lower_for(
 ///     default:    bb_default,   ; or join if no default
 ///   }
 ///
-/// bb_case_0:
-///   lower(case_body_0)
-///   goto bb_case_1    ; fallthrough (if not terminated)
-///
-/// bb_case_1:
-///   lower(case_body_1)
-///   goto join         ; fallthrough (if not terminated)
-///
-/// ...
+/// body_scan:              ; intentionally unreachable from dispatch
+///   lower(full switch body in source order)
+///   case/default labels switch the cursor to their dispatch blocks
 ///
 /// join:
 ///   ; cursor lands here
@@ -1187,7 +1244,7 @@ fn lower_switch(
     cx: &LowerCx<'_>,
     span: Span,
     cond: HirExprId,
-    _body: HirStmtId,
+    body: HirStmtId,
     cases: &[rcc_hir::SwitchCase],
 ) {
     // Evaluate the discriminant.
@@ -1199,23 +1256,21 @@ fn lower_switch(
 
     builder.switch_to(dispatch);
 
-    if cases.is_empty() {
-        // No cases: unconditional jump to join.
-        let join = builder.new_block();
-        builder.goto(join, span);
-        builder.switch_to(join);
-        return;
+    // Create a block for each case/default label, and remember which HIR
+    // statement id owns each block. Lowering the full switch body then
+    // treats those statements as labels.
+    let case_blocks: Vec<BasicBlockId> = cases.iter().map(|_| builder.new_block()).collect();
+    let mut case_map: FxHashMap<HirStmtId, BasicBlockId> = FxHashMap::default();
+    for (case, &block) in cases.iter().zip(&case_blocks) {
+        case_map.insert(case.target, block);
     }
 
-    // Create a block for each case.
-    let case_blocks: Vec<BasicBlockId> = cases.iter().map(|_| builder.new_block()).collect();
-
-    // Join block (break target) — created after case blocks so IDs are
-    // predictable and tests can assert on them.
+    // Join block (break target).
     let join = builder.new_block();
 
     // Push switch context so `break` targets the join block.
     builder.push_switch(join);
+    builder.push_switch_cases(case_map);
 
     // Build dispatch targets: (value, block) pairs.
     // C99 allows `default:` anywhere; we normalise it to the last
@@ -1234,19 +1289,18 @@ fn lower_switch(
 
     builder.terminate(Terminator { kind: TerminatorKind::SwitchInt { discr, targets }, span });
 
-    // Lower each case body and wire fallthroughs.
-    for (i, case) in cases.iter().enumerate() {
-        let block = case_blocks[i];
-        builder.switch_to(block);
-        lower_stmt(builder, cx, case.target);
-
-        // Fallthrough: if not terminated, go to the next case block or join.
-        if !builder.is_current_terminated() {
-            let fallthrough = if i + 1 < case_blocks.len() { case_blocks[i + 1] } else { join };
-            builder.goto(fallthrough, span);
-        }
+    // Lower the whole switch body in source order from a synthetic
+    // unreachable scanner block. Case/default labels jump the lowering
+    // cursor to their dispatch-selected blocks; all sibling statements after
+    // a label remain in that same block until another label is seen.
+    let body_scan = builder.new_block();
+    builder.switch_to(body_scan);
+    lower_stmt(builder, cx, body);
+    if !builder.is_current_terminated() {
+        builder.goto(join, span);
     }
 
+    builder.pop_switch_cases();
     builder.pop_switch();
     builder.switch_to(join);
 }
@@ -1261,8 +1315,26 @@ fn scalar_zero(tcx: &rcc_hir::TyCtxt, ty: rcc_hir::TyId) -> Operand {
         rcc_hir::Ty::Float(_) | rcc_hir::Ty::Complex(_) => {
             Operand::Const(Const { kind: ConstKind::Float(0.0), ty })
         }
+        rcc_hir::Ty::Ptr(_) => Operand::Const(Const { kind: ConstKind::ZeroInit, ty }),
         _ => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
     }
+}
+
+fn lower_condition_operand(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    expr: HirExprId,
+) -> Operand {
+    let value = lower_as_rvalue(builder, cx, expr);
+    let ty = cx.body.exprs[expr].ty;
+    if matches!(cx.tcx.get(ty), rcc_hir::Ty::Int { .. }) {
+        return value;
+    }
+
+    let result = builder.alloc_temp(cx.tcx.int, span);
+    push_assign(builder, span, result, Rvalue::BinaryOp(BinOp::Ne, value, scalar_zero(cx.tcx, ty)));
+    Operand::Copy(Place { base: result, projection: Vec::new() })
 }
 
 /// Helper: emit `Statement::Assign { place: <local>, rvalue: rv }` in
@@ -1714,8 +1786,11 @@ fn convert_to_cast_kind(
         // because the operand already has a Place.
         ArrayToPtr | FuncToPtr | LvalueToRvalue => None,
 
-        // Pointer-to-pointer (compatible / void*) — bitcast.
-        Pointer => Some(CastKind::PtrToPtr),
+        // Pointer conversions include compatible pointer bitcasts and
+        // null-pointer constants that typeck already wrapped with a pointer
+        // destination type. Pick the concrete CFG cast from source/target
+        // types so `0 -> T *` becomes `IntToPtr`, not `PtrToPtr(0)`.
+        Pointer => Some(explicit_cast_kind(from_ty, to_ty, tcx)),
 
         // Handled directly in `lower_as_rvalue` because these are not
         // casts. They construct/extract complex components and must stay
@@ -4282,6 +4357,58 @@ mod tests {
         assert_assign_const(case2_bb, map.lookup(ha), 5);
         let join_id = goto_target(case2_bb);
         assert_eq!(join_id, crate::BasicBlockId(4), "break must target join");
+    }
+
+    /// Real C parse shape: `case 1: stmt; break; case 2: ...` leaves the
+    /// `break` as a sibling statement after the `Case` node, not inside the
+    /// case label body. Switch lowering must therefore lower the whole switch
+    /// body in source order, treating case/default as labels.
+    #[test]
+    fn switch_sibling_break_stays_in_case_block() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let x = push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+
+        let case1_body = assign_local_stmt(&mut hir_body, int_ty, ha, 10);
+        let case1 = case_stmt(&mut hir_body, 1, case1_body);
+        let break1 = break_stmt(&mut hir_body);
+
+        let case2_body = assign_local_stmt(&mut hir_body, int_ty, hb, 20);
+        let case2 = case_stmt(&mut hir_body, 2, case2_body);
+        let break2 = break_stmt(&mut hir_body);
+
+        let default_body = assign_local_stmt(&mut hir_body, int_ty, hc, 30);
+        let def = default_stmt(&mut hir_body, default_body);
+        let break3 = break_stmt(&mut hir_body);
+
+        let switch_body =
+            block_stmt(&mut hir_body, vec![case1, break1, case2, break2, def, break3]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+            rcc_hir::SwitchCase { value: Some(2), target: case2 },
+            rcc_hir::SwitchCase { value: None, target: def },
+        ];
+        let root = switch_stmt(&mut hir_body, x, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch = &body.blocks[goto_target(entry)];
+        let tgts = switch_targets(dispatch);
+        let case1_bb = &body.blocks[tgts[0].1];
+        let case2_bb = &body.blocks[tgts[1].1];
+        let default_bb = &body.blocks[tgts[2].1];
+
+        assert_assign_const(case1_bb, map.lookup(ha), 10);
+        assert_assign_const(case2_bb, map.lookup(hb), 20);
+        assert_assign_const(default_bb, map.lookup(hc), 30);
+
+        let join = goto_target(default_bb);
+        assert_eq!(goto_target(case1_bb), join, "case 1 break must not fall through");
+        assert_eq!(goto_target(case2_bb), join, "case 2 break must not fall through");
     }
 
     /// Nested switch: inner `break` targets inner join, not outer join.

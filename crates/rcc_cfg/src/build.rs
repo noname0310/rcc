@@ -239,6 +239,14 @@ pub struct BodyBuilder {
     /// Stack of enclosing breakable constructs (loops and switches).
     /// `break` targets the top of this stack, preserving nesting order.
     break_stack: Vec<BreakCtx>,
+    /// Stack of active switch case-label maps.
+    ///
+    /// A C `case` / `default` label is not a scoped sub-body; it is a
+    /// control-flow label inside the enclosing switch body. Lowering
+    /// therefore needs to resolve a `HirStmtId` for the label to the block
+    /// selected by the dispatch terminator while still lowering the switch
+    /// body in source order.
+    switch_case_stack: Vec<FxHashMap<rcc_hir::HirStmtId, BasicBlockId>>,
     /// Label name → metadata map. Populated by a pre-pass so forward
     /// `goto` can be resolved in a single lowering pass while preserving
     /// scope-lifetime information.
@@ -278,6 +286,7 @@ impl BodyBuilder {
             phase: AllocPhase::ReturnSlot,
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
+            switch_case_stack: Vec::new(),
             label_map: FxHashMap::default(),
             scopes: Vec::new(),
         }
@@ -583,6 +592,26 @@ impl BodyBuilder {
     /// Panics if the break stack is empty.
     pub fn pop_switch(&mut self) {
         self.break_stack.pop().expect("pop_switch: no switch context to pop");
+    }
+
+    /// Push the active case/default label map for a switch body.
+    pub fn push_switch_cases(&mut self, cases: FxHashMap<rcc_hir::HirStmtId, BasicBlockId>) {
+        self.switch_case_stack.push(cases);
+    }
+
+    /// Pop the active case/default label map for a switch body.
+    ///
+    /// # Panics
+    /// Panics if no switch case map is active.
+    pub fn pop_switch_cases(&mut self) {
+        self.switch_case_stack.pop().expect("pop_switch_cases: no switch case map to pop");
+    }
+
+    /// Resolve a case/default label statement to the block assigned by the
+    /// innermost active switch dispatch.
+    #[must_use]
+    pub fn switch_case_block(&self, stmt: rcc_hir::HirStmtId) -> Option<BasicBlockId> {
+        self.switch_case_stack.last().and_then(|cases| cases.get(&stmt).copied())
     }
 
     /// Get the current break target (top of stack), or `None` if not
