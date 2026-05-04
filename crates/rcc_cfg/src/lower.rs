@@ -755,7 +755,11 @@ fn lower_compound_assign(
             builder,
             span,
             lhs_temp,
-            Rvalue::Cast { op: lhs_value, to: parts.lhs_value_ty, kind: CastKind::IntToInt },
+            Rvalue::Cast {
+                op: lhs_value,
+                to: parts.lhs_value_ty,
+                kind: arithmetic_cast(dest_ty, parts.lhs_value_ty, cx.tcx),
+            },
         );
         lhs_value = Operand::Copy(Place { base: lhs_temp, projection: Vec::new() });
     }
@@ -771,7 +775,11 @@ fn lower_compound_assign(
             builder,
             span,
             rhs_temp,
-            Rvalue::Cast { op: rhs_value, to: parts.lhs_value_ty, kind: CastKind::IntToInt },
+            Rvalue::Cast {
+                op: rhs_value,
+                to: parts.lhs_value_ty,
+                kind: arithmetic_cast(rhs_ty, parts.lhs_value_ty, cx.tcx),
+            },
         );
         Operand::Copy(Place { base: rhs_temp, projection: Vec::new() })
     } else {

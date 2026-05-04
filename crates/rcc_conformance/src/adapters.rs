@@ -873,7 +873,7 @@ impl TccTests2Adapter {
         }
     }
 
-    fn compile_flags() -> [&'static str; 17] {
+    fn compile_flags() -> [&'static str; 18] {
         [
             "-w",
             "-fgnu-binary-literals",
@@ -892,6 +892,7 @@ impl TccTests2Adapter {
             "-fgnu-lvalue-comma",
             "-fgnu-function-names",
             "-fgnu-builtin-libcalls",
+            "-lm",
         ]
     }
 

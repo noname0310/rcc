@@ -8,7 +8,7 @@ use rcc_cfg::{
     Const, ConstKind, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
-use rcc_hir::{DefId, HirCrate, Local, TyCtxt};
+use rcc_hir::{DefId, HirCrate, Local, Ty, TyCtxt, TyId};
 use rcc_hir_lower::lower;
 use rcc_session::{Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
@@ -486,6 +486,45 @@ fn call_prototype_argument_conversion_reaches_cfg_operand() {
 }
 
 #[test]
+fn float_compound_assignment_uses_float_cast_kinds() {
+    let lowered = lower_snippet(
+        "float_compound_assignment",
+        "float f(void) { float a = 12.34f; a += 56.78; return a; }",
+    );
+    let body = &lowered.bodies[0].1;
+    let mut float_casts = 0usize;
+    let mut bad_casts = Vec::new();
+
+    for block in body.blocks.iter() {
+        for stmt in &block.statements {
+            let StatementKind::Assign { rvalue: Rvalue::Cast { op, to, kind }, .. } = &stmt.kind
+            else {
+                continue;
+            };
+            let from_ty = operand_ty(body, op);
+            if is_float_ty(&lowered.tcx, from_ty) || is_float_ty(&lowered.tcx, *to) {
+                if *kind == CastKind::FloatToFloat {
+                    float_casts += 1;
+                } else {
+                    bad_casts.push((*kind, from_ty, *to));
+                }
+            }
+        }
+    }
+
+    assert!(
+        bad_casts.is_empty(),
+        "float compound assignment must not use integer cast kinds: {bad_casts:?}\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+    assert!(
+        float_casts >= 2,
+        "expected lhs float->double and result double->float casts:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn volatile_local_qualifier_reaches_cfg_metadata() {
     let lowered = lower_snippet(
         "volatile_local_metadata",
@@ -605,6 +644,17 @@ fn first_call_arg_temp(body: &Body) -> Option<Local> {
         },
         _ => None,
     })
+}
+
+fn operand_ty(body: &Body, op: &Operand) -> TyId {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) => body.locals[place.base].ty,
+        Operand::Const(c) => c.ty,
+    }
+}
+
+fn is_float_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Float(_))
 }
 
 fn body_contains_int_const(body: &Body, expected: i128) -> bool {

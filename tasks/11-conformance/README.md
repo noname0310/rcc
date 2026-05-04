@@ -44,6 +44,7 @@ future milestones, or documented policy decisions.
 | 16g | [`16g-tcc-tests2-integer-promotion-bitfield.md`](16g-tcc-tests2-integer-promotion-bitfield.md) | tcc-tests2 integer promotion on narrow/bit-field values. |
 | 16h | [`16h-tcc-tests2-bitfields-layout.md`](16h-tcc-tests2-bitfields-layout.md) | tcc-tests2 bit-field layout mismatches. |
 | 16i | [`16i-tcc-tests2-standard-header-surface.md`](16i-tcc-tests2-standard-header-surface.md) | tcc-tests2 host standard-header surface. |
+| 16j | [`16j-tcc-tests2-binary-floating-literals.md`](16j-tcc-tests2-binary-floating-literals.md) | TinyCC binary floating literal compatibility policy. |
 | 17 | [`17-llvm-test-suite.md`](17-llvm-test-suite.md) | llvm-test-suite @ M7. |
 | 18 | [`18-xfail-shrink.md`](18-xfail-shrink.md) | Continuously shrink xfail lists. |
 
