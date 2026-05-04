@@ -57,7 +57,7 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
             if !audit_sizeof_layout(session, hir_body, &layout) {
                 continue;
             }
-            builder.collect_labels(hir_body, root);
+            builder.collect_labels(hir_body, root, &local_map);
             let cx = LowerCx::with_defs_and_return(hir_body, tcx, &local_map, &hir.defs, ret_ty);
             lower_stmt(&mut builder, &cx, root);
         }
@@ -152,7 +152,7 @@ enum AllocPhase {
 }
 
 /// Metadata recorded for a label during the pre-pass.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelInfo {
     /// Basic block assigned to the label.
     pub block: BasicBlockId,
@@ -167,12 +167,18 @@ pub struct LabelInfo {
     /// variably-modified-type goto constraint and would bypass runtime
     /// allocation metadata.
     pub vla_scope_depth: Option<usize>,
+    /// Ordinary automatic locals whose declarations are in scope before
+    /// this label. A valid goto may enter these scopes, but the label
+    /// block still needs `StorageLive` for the locals that the jump
+    /// bypassed.
+    pub ordinary_locals_to_live: Vec<crate::Local>,
 }
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Default, Clone)]
 struct LabelScopeState {
     has_runtime_entry: bool,
     has_vla: bool,
+    ordinary_locals: Vec<crate::Local>,
 }
 
 /// Loop context for break/continue target resolution.
@@ -723,6 +729,7 @@ impl BodyBuilder {
                 scope_depth: self.scope_depth(),
                 runtime_scope_depth: None,
                 vla_scope_depth: None,
+                ordinary_locals_to_live: Vec::new(),
             },
         );
     }
@@ -746,7 +753,7 @@ impl BodyBuilder {
     /// Panics if the label was not registered by the pre-pass.
     #[must_use]
     pub fn label_info(&self, name: Symbol) -> LabelInfo {
-        self.label_map.get(&name).copied().unwrap_or_else(|| panic!("unknown label: {name:?}"))
+        self.label_map.get(&name).cloned().unwrap_or_else(|| panic!("unknown label: {name:?}"))
     }
 
     /// Emit a goto to a named label while preserving lexical lifetime
@@ -766,32 +773,37 @@ impl BodyBuilder {
                 info.scope_depth
             );
         }
-        if let Some(runtime_depth) = info.runtime_scope_depth {
-            assert!(
-                current_depth >= runtime_depth,
-                "goto into local scope: current depth {current_depth}, label depth {}, required \
-                 runtime depth {runtime_depth}",
-                info.scope_depth
-            );
-        }
         if current_depth > info.scope_depth {
             self.emit_storage_deads_to_depth(info.scope_depth, span);
         }
         self.goto(info.block, span);
     }
 
+    pub fn emit_label_storage_lives(&mut self, name: Symbol, span: Span) {
+        let info = self.label_info(name);
+        for local in info.ordinary_locals_to_live {
+            self.storage_live(local, span);
+        }
+    }
+
     /// Pre-pass: scan the HIR body for `Label` statements and create an
     /// empty block for each one.  This lets forward `goto` resolve to a
     /// [`BasicBlockId`] during the single lowering pass that follows.
-    pub fn collect_labels(&mut self, hir_body: &rcc_hir::Body, stmt_id: rcc_hir::HirStmtId) {
+    pub fn collect_labels(
+        &mut self,
+        hir_body: &rcc_hir::Body,
+        stmt_id: rcc_hir::HirStmtId,
+        local_map: &LocalMap,
+    ) {
         let mut scopes = Vec::new();
-        self.collect_labels_scoped(hir_body, stmt_id, &mut scopes);
+        self.collect_labels_scoped(hir_body, stmt_id, local_map, &mut scopes);
     }
 
     fn collect_labels_scoped(
         &mut self,
         hir_body: &rcc_hir::Body,
         stmt_id: rcc_hir::HirStmtId,
+        local_map: &LocalMap,
         scopes: &mut Vec<LabelScopeState>,
     ) {
         use rcc_hir::HirStmtKind;
@@ -806,45 +818,51 @@ impl BodyBuilder {
                         scope_depth: scopes.len(),
                         runtime_scope_depth: deepest_scope_depth(scopes, |s| s.has_runtime_entry),
                         vla_scope_depth: deepest_scope_depth(scopes, |s| s.has_vla),
+                        ordinary_locals_to_live: scopes
+                            .iter()
+                            .flat_map(|scope| scope.ordinary_locals.iter().copied())
+                            .collect(),
                     },
                 );
-                self.collect_labels_scoped(hir_body, *body, scopes);
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
             HirStmtKind::Block(stmts) => {
                 scopes.push(LabelScopeState::default());
                 for &s in stmts {
-                    self.collect_labels_scoped(hir_body, s, scopes);
+                    self.collect_labels_scoped(hir_body, s, local_map, scopes);
                 }
                 scopes.pop().expect("collect_labels: block scope stack underflow");
             }
             HirStmtKind::If { then_branch, else_branch, .. } => {
-                self.collect_labels_scoped(hir_body, *then_branch, scopes);
+                self.collect_labels_scoped(hir_body, *then_branch, local_map, scopes);
                 if let Some(else_b) = else_branch {
-                    self.collect_labels_scoped(hir_body, *else_b, scopes);
+                    self.collect_labels_scoped(hir_body, *else_b, local_map, scopes);
                 }
             }
             HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
-                self.collect_labels_scoped(hir_body, *body, scopes);
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
             HirStmtKind::For { init, body, .. } => {
                 scopes.push(LabelScopeState::default());
                 if let Some(init_stmt) = init {
-                    self.collect_labels_scoped(hir_body, *init_stmt, scopes);
+                    self.collect_labels_scoped(hir_body, *init_stmt, local_map, scopes);
                 }
-                self.collect_labels_scoped(hir_body, *body, scopes);
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
                 scopes.pop().expect("collect_labels: for scope stack underflow");
             }
             HirStmtKind::Switch { body, .. } => {
-                self.collect_labels_scoped(hir_body, *body, scopes);
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
             HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
-                self.collect_labels_scoped(hir_body, *body, scopes);
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
             HirStmtKind::LocalDecl { local, .. } => {
                 if let Some(scope) = scopes.last_mut() {
                     scope.has_runtime_entry = true;
                     if hir_body.locals[*local].vla_len.is_some() {
                         scope.has_vla = true;
+                    } else {
+                        scope.ordinary_locals.push(local_map.lookup(*local));
                     }
                 }
             }

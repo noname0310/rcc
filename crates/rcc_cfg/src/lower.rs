@@ -620,10 +620,14 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
     // Goto so the predecessor block is properly terminated.
     if let HirStmtKind::Label { name, body } = &stmt.kind {
         let label_bb = builder.label_block(*name);
-        if !builder.is_current_terminated() {
+        let had_fallthrough = !builder.is_current_terminated();
+        if had_fallthrough {
             builder.goto(label_bb, stmt.span);
         }
         builder.switch_to(label_bb);
+        if !had_fallthrough {
+            builder.emit_label_storage_lives(*name, stmt.span);
+        }
         lower_stmt(builder, cx, *body);
         return;
     }
@@ -728,9 +732,11 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
             let label_bb = builder.label_block(*name);
             // In dead code, no predecessor needs a goto to the label.
             builder.switch_to(label_bb);
+            builder.emit_label_storage_lives(*name, stmt.span);
             lower_stmt(builder, cx, *body);
         }
         HirStmtKind::Block(stmts) => {
+            builder.enter_scope();
             for child in stmts {
                 if builder.is_current_terminated() {
                     lower_stmt_in_dead_code(builder, cx, *child);
@@ -738,6 +744,7 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
                     lower_stmt(builder, cx, *child);
                 }
             }
+            builder.exit_scope(stmt.span);
         }
         HirStmtKind::If { then_branch, else_branch, .. } => {
             lower_stmt_in_dead_code(builder, cx, *then_branch);
@@ -4791,7 +4798,7 @@ mod tests {
         let root = block_stmt(&mut hir_body, vec![g, end_label]);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
@@ -4824,7 +4831,7 @@ mod tests {
         let root = block_stmt(&mut hir_body, vec![start_label, g1, mid_label, g2, end_label]);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
@@ -4887,7 +4894,7 @@ mod tests {
         let root = block_stmt(&mut hir_body, vec![switch]);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let _body = finish(builder);
 
@@ -4923,7 +4930,7 @@ mod tests {
         let root = switch_stmt(&mut hir_body, discr, switch_body, cases);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
@@ -4958,7 +4965,7 @@ mod tests {
         let root = block_stmt(&mut hir_body, vec![g, inner_block]);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
@@ -4989,7 +4996,7 @@ mod tests {
         let root = block_stmt(&mut hir_body, vec![g, inner_block]);
 
         let cx = LowerCx::new(&hir_body, &tcx, &map);
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
 
@@ -5025,6 +5032,46 @@ mod tests {
         assert!(
             matches!(&label_bb.terminator.kind, TerminatorKind::Return),
             "label block must terminate with Return"
+        );
+    }
+
+    #[test]
+    fn goto_into_dead_block_with_ordinary_local_emits_storage_live_at_label() {
+        let (mut builder, mut hir_body, tcx, map, [_ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let decl = local_decl_stmt(&mut hir_body, hb);
+        let assign = assign_local_stmt(&mut hir_body, int_ty, hb, 1234);
+        let lbl = label_stmt(&mut hir_body, "L", assign);
+        let inner_block = block_stmt(&mut hir_body, vec![decl, lbl]);
+        let g = goto_stmt(&mut hir_body, "L");
+        let root = block_stmt(&mut hir_body, vec![g, inner_block]);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        builder.collect_labels(&hir_body, root, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let label_id = goto_target(&body.blocks[crate::BasicBlockId(0)]);
+        let label_bb = &body.blocks[label_id];
+        let cfg_b = map.lookup(hb);
+        assert_storage_live(&label_bb.statements[0], cfg_b);
+        match &label_bb.statements[1].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(v), .. })),
+            } => {
+                assert_eq!(*base, cfg_b);
+                assert!(projection.is_empty());
+                assert_eq!(*v, 1234);
+            }
+            other => panic!("expected assignment to ordinary block local, got {other:?}"),
+        }
+        assert!(
+            label_bb.statements.iter().any(
+                |stmt| matches!(stmt.kind, StatementKind::StorageDead(local) if local == cfg_b)
+            ),
+            "label block should close the ordinary local scope"
         );
     }
 
@@ -5806,7 +5853,7 @@ mod tests {
         let label = label_stmt(&mut hir_body, "L", ret);
         let root = block_stmt(&mut hir_body, vec![inner, label]);
 
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         let cx = LowerCx::new(&hir_body, &tcx, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
@@ -5834,7 +5881,7 @@ mod tests {
         let label = label_stmt(&mut hir_body, "L", ret);
         let root = block_stmt(&mut hir_body, vec![outer, label]);
 
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         let cx = LowerCx::new(&hir_body, &tcx, &map);
         lower_stmt(&mut builder, &cx, root);
         let body = finish(builder);
@@ -6043,7 +6090,7 @@ mod tests {
         let inner = block_stmt(&mut hir_body, vec![decl_a, label]);
         let root = block_stmt(&mut hir_body, vec![go_l, inner]);
 
-        builder.collect_labels(&hir_body, root);
+        builder.collect_labels(&hir_body, root, &map);
         let cx = LowerCx::new(&hir_body, &tcx, &map);
         lower_stmt(&mut builder, &cx, root);
     }

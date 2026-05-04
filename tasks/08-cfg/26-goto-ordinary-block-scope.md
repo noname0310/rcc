@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-26: goto into ordinary block scope
 
 **Phase:** 08-cfg    **Depends on:** 08-17    **Milestone:** M6+
@@ -33,6 +35,11 @@ at the label.
 - `c-testsuite::00199` compiles and executes successfully.
 - `c-testsuite::00207` no longer panics; any remaining failure is a normal
   diagnostic or runtime mismatch with a follow-up owner.
+
+## Result
+- `c-testsuite::00199` and `c-testsuite::00207` both compile, execute, and
+  match expected output under WSL LLVM 18.
+- Full c-testsuite moved from 211 pass / 5 fail to 213 pass / 3 fail.
 
 ## References
 - C99 §6.8.6.1
