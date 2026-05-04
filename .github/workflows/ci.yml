@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 19 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -126,3 +129,36 @@ jobs:
         with:
           name: conformance-report
           path: docs/conformance.json
+
+  gcc-torture-smoke:
+    name: gcc-torture smoke (GPL, nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev
+          echo "LLVM_SYS_181_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+      - name: Fetch gcc-torture (GPL gated)
+        run: cargo xtask fetch-testsuites --include-gpl --only gcc-torture
+      - name: Build rcc with LLVM
+        run: cargo build --release -p rcc_driver --features rcc_codegen_llvm/llvm
+      - name: Run gcc-torture smoke subset
+        run: |
+          cargo run --release --package rcc_conformance --bin rcc_conformance_run -- \
+            --rcc target/release/rcc \
+            --include-gpl \
+            --suite gcc-torture \
+            --output docs/gcc-torture-smoke.json
+      - name: Upload gcc-torture smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcc-torture-smoke-report
+          path: docs/gcc-torture-smoke.json

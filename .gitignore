@@ -17,6 +17,7 @@ third_party/testsuites/chibicc/*
 third_party/testsuites/gcc-torture/*
 !third_party/testsuites/gcc-torture/xfail.toml
 !third_party/testsuites/gcc-torture/README.md
+!third_party/testsuites/gcc-torture/smoke-subset.txt
 third_party/testsuites/tcc-tests2/*
 !third_party/testsuites/tcc-tests2/xfail.toml
 !third_party/testsuites/tcc-tests2/README.md

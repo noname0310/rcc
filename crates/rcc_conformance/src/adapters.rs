@@ -3,7 +3,7 @@
 //! follow-up; interfaces are frozen so suites can be added independently.
 
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -636,12 +636,83 @@ impl ChibiccAdapter {
 /// `gcc-torture` adapter (GPL-licensed; gated by `--include-gpl`).
 pub struct GccTortureAdapter;
 
-impl Adapter for GccTortureAdapter {
-    fn discover(&self, _root: &Path) -> anyhow::Result<Vec<TestCase>> {
-        Ok(Vec::new())
+impl GccTortureAdapter {
+    /// Smoke subset list relative to the fetched gcc-torture checkout.
+    pub const SMOKE_SUBSET: &'static str = "smoke-subset.txt";
+
+    fn read_smoke_subset(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        let path = root.join(Self::SMOKE_SUBSET);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| anyhow::anyhow!("cannot read {}: {err}", path.display()))?;
+        let mut files = Vec::new();
+        for (idx, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.contains('\\') || Path::new(line).is_absolute() || line.contains("..") {
+                anyhow::bail!(
+                    "{}:{}: subset entries must be clean relative paths",
+                    path.display(),
+                    idx + 1
+                );
+            }
+            files.push(root.join(line));
+        }
+        anyhow::ensure!(!files.is_empty(), "{} contains no smoke cases", path.display());
+        Ok(files)
     }
-    fn run(&self, _rcc: &Path, _case: &TestCase) -> anyhow::Result<Outcome> {
-        Ok(Outcome::Skip { reason: "gcc-torture adapter not yet implemented".into() })
+}
+
+impl Adapter for GccTortureAdapter {
+    fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+        let mut cases = Vec::new();
+        for path in Self::read_smoke_subset(root)? {
+            anyhow::ensure!(path.is_file(), "gcc-torture smoke case not found: {}", path.display());
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", path.display()))?;
+            cases.push(TestCase { id: format!("gcc-torture::execute::{stem}"), path });
+        }
+        cases.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(cases)
+    }
+
+    fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let tmp = tempfile::tempdir()?;
+        let exe_path =
+            if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
+
+        let mut compile = Command::new(rcc_path);
+        compile.arg("-w").arg("-o").arg(&exe_path).arg(&case.path);
+        match run_with_timeout(&mut compile, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "rcc compile/link failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") });
+            }
+        }
+
+        let mut exec = Command::new(&exe_path);
+        match run_with_timeout(&mut exec, TIMEOUT) {
+            Ok(o) if o.status.success() => Ok(Outcome::Pass),
+            Ok(o) => Ok(Outcome::Fail {
+                reason: format!(
+                    "non-zero exit code: {}",
+                    o.status.code().map_or_else(|| "killed by signal".into(), |c| c.to_string()),
+                ),
+            }),
+            Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
+        }
     }
 }
 

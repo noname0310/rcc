@@ -1,0 +1,40 @@
+# Curated gcc.c-torture/execute smoke subset for task 11-14.
+#
+# Keep this file to relative paths under the fetched gcc-torture checkout.
+# The GPL test sources themselves stay ignored and are fetched only with
+# `cargo xtask fetch-testsuites --include-gpl --only gcc-torture`.
+gcc/testsuite/gcc.c-torture/execute/20000113-1.c
+gcc/testsuite/gcc.c-torture/execute/20000121-1.c
+gcc/testsuite/gcc.c-torture/execute/20000205-1.c
+gcc/testsuite/gcc.c-torture/execute/20000217-1.c
+gcc/testsuite/gcc.c-torture/execute/20000224-1.c
+gcc/testsuite/gcc.c-torture/execute/20000225-1.c
+gcc/testsuite/gcc.c-torture/execute/20000313-1.c
+gcc/testsuite/gcc.c-torture/execute/20000314-1.c
+gcc/testsuite/gcc.c-torture/execute/20000314-2.c
+gcc/testsuite/gcc.c-torture/execute/20000402-1.c
+gcc/testsuite/gcc.c-torture/execute/20000403-1.c
+gcc/testsuite/gcc.c-torture/execute/20000412-1.c
+gcc/testsuite/gcc.c-torture/execute/20000412-2.c
+gcc/testsuite/gcc.c-torture/execute/20000412-4.c
+gcc/testsuite/gcc.c-torture/execute/20000412-5.c
+gcc/testsuite/gcc.c-torture/execute/20000412-6.c
+gcc/testsuite/gcc.c-torture/execute/20000419-1.c
+gcc/testsuite/gcc.c-torture/execute/20000422-1.c
+gcc/testsuite/gcc.c-torture/execute/20000503-1.c
+gcc/testsuite/gcc.c-torture/execute/20000511-1.c
+gcc/testsuite/gcc.c-torture/execute/20000519-2.c
+gcc/testsuite/gcc.c-torture/execute/20000523-1.c
+gcc/testsuite/gcc.c-torture/execute/20000528-1.c
+gcc/testsuite/gcc.c-torture/execute/20000603-1.c
+gcc/testsuite/gcc.c-torture/execute/20000605-1.c
+gcc/testsuite/gcc.c-torture/execute/20000605-2.c
+gcc/testsuite/gcc.c-torture/execute/20000622-1.c
+gcc/testsuite/gcc.c-torture/execute/20000706-1.c
+gcc/testsuite/gcc.c-torture/execute/20000706-2.c
+gcc/testsuite/gcc.c-torture/execute/20000706-3.c
+gcc/testsuite/gcc.c-torture/execute/20000706-4.c
+gcc/testsuite/gcc.c-torture/execute/20000706-5.c
+gcc/testsuite/gcc.c-torture/execute/20000707-1.c
+gcc/testsuite/gcc.c-torture/execute/20000715-1.c
+gcc/testsuite/gcc.c-torture/execute/20000715-2.c
