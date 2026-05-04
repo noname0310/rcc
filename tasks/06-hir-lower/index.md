@@ -39,6 +39,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [29-function-definition-nested-parameter-decls](29-function-definition-nested-parameter-decls.md)
 - [x] [30-file-scope-compound-literal-static-storage](30-file-scope-compound-literal-static-storage.md)
 - [x] [31-aggregate-brace-elision-cursor](31-aggregate-brace-elision-cursor.md)
+- [x] [32-string-literal-subaggregate-initializer](32-string-literal-subaggregate-initializer.md)
 
 ## Downstream
 

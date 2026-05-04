@@ -1342,6 +1342,11 @@ fn complete_initializer_type(
         rcc_ast::Initializer::Expr(e) if is_string_array_initializer(ty, e, tcx) => {
             string_initializer_len(e)
         }
+        rcc_ast::Initializer::List(items)
+            if braced_string_array_initializer_expr(ty, items, tcx).is_some() =>
+        {
+            braced_string_array_initializer_expr(ty, items, tcx).and_then(string_initializer_len)
+        }
         rcc_ast::Initializer::List(items) => {
             Some(array_initializer_list_len(items, elem.ty, tcx, crate_))
         }
@@ -1398,7 +1403,8 @@ fn flat_scalar_initializer_items(
 ) -> bool {
     !items.is_empty()
         && items.iter().all(|(desigs, init)| {
-            desigs.is_empty() && matches!(init, rcc_ast::Initializer::Expr(_))
+            desigs.is_empty()
+                && matches!(init, rcc_ast::Initializer::Expr(expr) if !is_string_literal_expr(expr))
         })
 }
 
@@ -1477,6 +1483,25 @@ fn is_string_array_initializer(ty: TyId, expr: &rcc_ast::Expr, tcx: &TyCtxt) -> 
         | rcc_ast::LiteralEncoding::Utf16
         | rcc_ast::LiteralEncoding::Utf32 => is_integer_array_ty(ty, tcx),
     }
+}
+
+fn braced_string_array_initializer_expr<'a>(
+    ty: TyId,
+    items: &'a [(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    tcx: &TyCtxt,
+) -> Option<&'a rcc_ast::Expr> {
+    let [(desigs, rcc_ast::Initializer::Expr(expr))] = items else {
+        return None;
+    };
+    if desigs.is_empty() && is_string_array_initializer(ty, expr, tcx) {
+        Some(expr)
+    } else {
+        None
+    }
+}
+
+fn is_string_literal_expr(expr: &rcc_ast::Expr) -> bool {
+    matches!(expr.kind, rcc_ast::ExprKind::StringLit(_))
 }
 
 fn is_char_array_ty(ty: TyId, tcx: &TyCtxt) -> bool {
@@ -1571,6 +1596,10 @@ pub fn lower_initializer(
             emit_assign_stmt(target, rhs, span, body, out);
         }
         rcc_ast::Initializer::List(items) => {
+            if let Some(expr) = braced_string_array_initializer_expr(target_ty, items, tcx) {
+                lower_string_array_initializer(target, target_ty, expr, span, body, tcx, out);
+                return;
+            }
             lower_initializer_list(
                 target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
             );
@@ -1740,6 +1769,10 @@ fn lower_global_initializer_into(
             });
         }
         rcc_ast::Initializer::List(items) => {
+            if let Some(expr) = braced_string_array_initializer_expr(target_ty, items, tcx) {
+                lower_global_string_array_initializer(target_ty, expr, span, path, tcx, out);
+                return;
+            }
             if lower_global_flat_brace_elision_initializer(
                 target_ty,
                 items,
@@ -2116,6 +2149,11 @@ fn lower_initializer_list(
     session: &mut Session,
     out: &mut Vec<HirStmtId>,
 ) {
+    if let Some(expr) = braced_string_array_initializer_expr(target_ty, items, tcx) {
+        lower_string_array_initializer(target, target_ty, expr, span, body, tcx, out);
+        return;
+    }
+
     // Scalar target with a `{ v }` wrapper: unwrap and assign. Empty
     // `{}` on a scalar is malformed C but we emit nothing here; typeck
     // will diagnose.

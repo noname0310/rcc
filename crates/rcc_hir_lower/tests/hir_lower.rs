@@ -2242,6 +2242,40 @@ fn snippet_char_array_string_initializer_completes_length_and_writes_chars() {
 }
 
 #[test]
+fn snippet_braced_char_array_string_initializer_completes_length() {
+    let (hir, tcx) = lower_snippet("void f(void) { char s[] = { \"hi\" }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    match tcx.get(body.locals[Local(0)].ty) {
+        Ty::Array { elem, len: Some(3), is_vla: false } => assert_eq!(elem.ty, tcx.char_),
+        other => panic!("expected completed char[3], got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_local_struct_char_array_string_initializer_writes_subobject_chars() {
+    let (hir, _tcx) =
+        lower_snippet("void f(void) { struct S { char x[3]; }; struct S s = { \"abc\" }; }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let mut elems = Vec::new();
+    for stmt in body.stmts.iter() {
+        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
+        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
+        let HirExprKind::Field { base: field_base, field_index: 0 } = body.exprs[base].kind else {
+            continue;
+        };
+        if !matches!(body.exprs[field_base].kind, HirExprKind::LocalRef(Local(0))) {
+            continue;
+        }
+        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
+        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        elems.push((i, v));
+    }
+    elems.sort();
+    assert_eq!(elems, vec![(0, 97), (1, 98), (2, 99)]);
+}
+
+#[test]
 fn snippet_wide_string_initializer_completes_wchar_array_by_codepoint() {
     let (hir, tcx) = lower_snippet("typedef int wchar_t; void f(void) { wchar_t s[] = L\"A世\"; }");
     let body = hir.bodies.values().next().expect("missing function body");
@@ -2419,6 +2453,31 @@ fn snippet_global_char_array_string_initializer_has_static_payload() {
         })
         .collect();
     assert_eq!(values, vec![104, 105, 0]);
+}
+
+#[test]
+fn snippet_global_struct_char_array_string_initializer_has_subobject_payload() {
+    let (hir, _tcx) = lower_snippet("struct S { char x[3]; }; struct S s = { \"abc\" };");
+    let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();
+    let DefKind::Global { init: Some(init), .. } = &def.kind else {
+        panic!("expected global with initializer, got {:?}", def.kind);
+    };
+    let values: Vec<_> = init
+        .entries
+        .iter()
+        .map(|entry| {
+            let [GlobalInitDesignator::Field(0), GlobalInitDesignator::Index(i)] =
+                entry.path.as_slice()
+            else {
+                panic!("expected .x[index] path, got {:?}", entry.path);
+            };
+            let GlobalInitValue::Int(v) = entry.value else {
+                panic!("expected int byte, got {:?}", entry.value);
+            };
+            (*i, v)
+        })
+        .collect();
+    assert_eq!(values, vec![(0, 97), (1, 98), (2, 99)]);
 }
 
 #[test]
