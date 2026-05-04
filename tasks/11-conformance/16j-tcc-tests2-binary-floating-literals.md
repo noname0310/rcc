@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-16j: tcc-tests2 binary floating literals
 
 **Phase:** 11-conformance    **Depends on:** 11-16a    **Milestone:** M7

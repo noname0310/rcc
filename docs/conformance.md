@@ -102,8 +102,9 @@ reference output. The task-16 baseline is:
 
 The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
 TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
-GNU empty-struct/initializer forms, TinyCC binary floating constants, GNU
-flexible-array-member initializers, and C11 `_Generic`.
+GNU empty-struct/initializer forms, TinyCC binary floating constants
+([policy](tcc-binary-floating-literals.md)), GNU flexible-array-member
+initializers, and C11 `_Generic`.
 `38_multiple_array_index` is a suite-data whitespace drift case:
 GCC and rcc both print a trailing space on every row, while the vendored
 `.expect` kept it only on the final row. `71_macro_empty_arg` is also a

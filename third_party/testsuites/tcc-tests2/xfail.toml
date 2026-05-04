@@ -11,7 +11,7 @@ reason = "TinyCC -dt diagnostic test mode expects TCC-formatted compiler diagnos
 
 [[xfail]]
 id = "tcc-tests2::70_floating_point_literals"
-reason = "fixture expected output includes TinyCC binary floating constants under __TINYC__; C99 decimal and hex floating literals pass"
+reason = "TinyCC-only binary floating constants under __TINYC__ are outside rcc's C99 target; C99 decimal and hex floating literals pass (see docs/tcc-binary-floating-literals.md)"
 
 [[xfail]]
 id = "tcc-tests2::76_dollars_in_identifiers"
