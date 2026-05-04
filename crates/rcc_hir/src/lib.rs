@@ -401,6 +401,19 @@ pub enum HirExprKind {
     Unary { op: rcc_hir_binop::UnOp, operand: HirExprId },
     /// Call.
     Call { callee: HirExprId, args: Vec<HirExprId> },
+    /// GNU statement expression `({ ... })`.
+    ///
+    /// `stmts` contains every block item except a final expression statement
+    /// that contributes the expression value. That final expression is stored
+    /// separately in `result` so CFG lowering evaluates it exactly once and
+    /// can keep block-scoped locals live until after the value is materialized.
+    /// `None` means the statement expression has type `void`.
+    StmtExpr {
+        /// Runtime statements that execute before the result expression.
+        stmts: Vec<HirStmtId>,
+        /// Final expression-statement value, if the block ends with one.
+        result: Option<HirExprId>,
+    },
     /// Unresolved source member access (`s.f` / `p->f`) before typeck has
     /// resolved the requested name to a concrete record field index.
     ///

@@ -266,6 +266,7 @@ impl<'a> ConstEval<'a> {
             },
 
             HirExprKind::Call { .. }
+            | HirExprKind::StmtExpr { .. }
             | HirExprKind::UnresolvedField { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }
@@ -594,6 +595,7 @@ impl<'a> ConstEval<'a> {
             // array indexing on a non-constant target). Bail with
             // `None`.
             HirExprKind::Call { .. }
+            | HirExprKind::StmtExpr { .. }
             | HirExprKind::UnresolvedField { .. }
             | HirExprKind::Field { .. }
             | HirExprKind::Index { .. }

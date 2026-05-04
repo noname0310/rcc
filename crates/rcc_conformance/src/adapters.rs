@@ -411,6 +411,7 @@ impl ChibiccAdapter {
         compile_test
             .arg("--emit=obj")
             .arg("-fgnu-binary-literals")
+            .arg("-fgnu-statement-expressions")
             .arg("-I")
             .arg(case_dir)
             .arg("-o")

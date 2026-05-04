@@ -99,6 +99,14 @@ fn gnu_binary_literals_flag_sets_frontend_option() {
 }
 
 #[test]
+fn gnu_statement_expressions_flag_sets_frontend_option() {
+    let cli = parse(&["rcc", "-fgnu-statement-expressions", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_statement_expressions);
+}
+
+#[test]
 fn strict_binary_integer_literal_is_rejected() {
     let input = TempCFile::new("strict-binary", "int x = 0b10;\n");
     let output = input.sibling("ast");

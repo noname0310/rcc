@@ -142,7 +142,10 @@ fn emit_ignored_feature_flag_notes(cli: &Cli) {
 }
 
 fn is_supported_feature_flag(flag: &str) -> bool {
-    matches!(flag, "gnu-binary-literals" | "gnu-binary-integer-literals")
+    matches!(
+        flag,
+        "gnu-binary-literals" | "gnu-binary-integer-literals" | "gnu-statement-expressions"
+    )
 }
 
 fn emit_verbose_trace(cli: &Cli, opts: &Options) {
@@ -319,7 +322,10 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_binary_integer_literals: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-binary-literals" | "gnu-binary-integer-literals")
         }),
-        gnu_statement_expressions: false,
+        gnu_statement_expressions: cli
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "gnu-statement-expressions"),
         gnu_range_designators: false,
         gnu_attributes: false,
         gnu_inline_asm: false,

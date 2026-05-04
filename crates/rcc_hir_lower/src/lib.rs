@@ -219,7 +219,7 @@ pub enum Binding {
 /// Each scope frame is a `HashMap<Symbol, Binding>`. The stack is
 /// pushed when entering a compound statement and popped on exit.
 /// File-scope lookup falls through to the `Resolver::ordinary` table.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ScopeStack {
     /// Stack of scope frames (innermost last).
     frames: Vec<FxHashMap<Symbol, Binding>>,
@@ -496,102 +496,213 @@ fn create_incomplete_tag(
 pub fn resolve_labels(body: &rcc_ast::Block, resolver: &mut Resolver, session: &mut Session) {
     // Pass 1: collect all labels.
     for item in &body.items {
-        collect_labels_in_block_item(item, resolver, session);
+        walk_block_item_labels(item, resolver, session, LabelPass::Collect);
     }
     // Pass 2: check all gotos.
     for item in &body.items {
-        check_gotos_in_block_item(item, resolver, session);
+        walk_block_item_labels(item, resolver, session, LabelPass::Check);
     }
 }
 
-/// Recursively collect labels from a block item.
-fn collect_labels_in_block_item(item: &BlockItem, resolver: &mut Resolver, session: &mut Session) {
+#[derive(Copy, Clone, Debug)]
+enum LabelPass {
+    Collect,
+    Check,
+}
+
+fn walk_block_item_labels(
+    item: &BlockItem,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
     match item {
-        BlockItem::Stmt(stmt) => collect_labels_in_stmt(stmt, resolver, session),
-        BlockItem::Decl(_) => {}
+        BlockItem::Stmt(stmt) => walk_stmt_labels(stmt, resolver, session, pass),
+        BlockItem::Decl(decl) => walk_decl_labels(decl, resolver, session, pass),
     }
 }
 
-/// Recursively collect labels from a statement.
-fn collect_labels_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Session) {
+fn walk_decl_labels(
+    decl: &rcc_ast::Decl,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    walk_decl_specs_labels(&decl.specs, resolver, session, pass);
+    for init in &decl.inits {
+        walk_declarator_labels(&init.declarator, resolver, session, pass);
+        if let Some(init) = &init.init {
+            walk_initializer_labels(init, resolver, session, pass);
+        }
+    }
+}
+
+fn walk_decl_specs_labels(
+    specs: &rcc_ast::DeclSpecs,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    for spec in &specs.type_specs {
+        match spec {
+            TypeSpec::Record(record) => {
+                if let Some(fields) = &record.fields {
+                    for field in fields {
+                        walk_decl_specs_labels(&field.specs, resolver, session, pass);
+                        for declarator in &field.declarators {
+                            if let Some(decl) = &declarator.declarator {
+                                walk_declarator_labels(decl, resolver, session, pass);
+                            }
+                            if let Some(width) = &declarator.bit_width {
+                                walk_expr_labels(width, resolver, session, pass);
+                            }
+                        }
+                    }
+                }
+            }
+            TypeSpec::Enum(en) => {
+                if let Some(enumerators) = &en.enumerators {
+                    for enumerator in enumerators {
+                        if let Some(value) = &enumerator.value {
+                            walk_expr_labels(value, resolver, session, pass);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_declarator_labels(
+    declarator: &Declarator,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    for derived in &declarator.derived {
+        match derived {
+            DerivedDeclarator::Array(array) => {
+                if let Some(size) = &array.size {
+                    walk_expr_labels(size, resolver, session, pass);
+                }
+            }
+            DerivedDeclarator::Pointer(_) | DerivedDeclarator::Function(_) => {}
+        }
+    }
+}
+
+fn walk_initializer_labels(
+    init: &rcc_ast::Initializer,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    match init {
+        rcc_ast::Initializer::Expr(expr) => walk_expr_labels(expr, resolver, session, pass),
+        rcc_ast::Initializer::List(items) => {
+            for (designators, nested) in items {
+                for designator in designators {
+                    match designator {
+                        rcc_ast::Designator::Index(expr) => {
+                            walk_expr_labels(expr, resolver, session, pass);
+                        }
+                        rcc_ast::Designator::Range { lo, hi } => {
+                            walk_expr_labels(lo, resolver, session, pass);
+                            walk_expr_labels(hi, resolver, session, pass);
+                        }
+                        rcc_ast::Designator::Field(_) => {}
+                    }
+                }
+                walk_initializer_labels(nested, resolver, session, pass);
+            }
+        }
+    }
+}
+
+fn walk_stmt_labels(stmt: &Stmt, resolver: &mut Resolver, session: &mut Session, pass: LabelPass) {
     match &stmt.kind {
         StmtKind::Label { name, body } => {
-            // Check for duplicate label.
-            if resolver.labels.contains_key(name) {
-                let name_str = session.interner.get(*name);
-                session
-                    .handler
-                    .struct_err(stmt.span, format!("duplicate label `{name_str}`"))
-                    .code(rcc_errors::codes::E0074)
-                    .emit();
-            } else {
-                // Use HirStmtId(0) as a placeholder; the real id is
-                // assigned later during full statement lowering.
-                resolver.labels.insert(*name, rcc_hir::HirStmtId(0));
+            if matches!(pass, LabelPass::Collect) {
+                // Check for duplicate label.
+                if resolver.labels.contains_key(name) {
+                    let name_str = session.interner.get(*name);
+                    session
+                        .handler
+                        .struct_err(stmt.span, format!("duplicate label `{name_str}`"))
+                        .code(rcc_errors::codes::E0074)
+                        .emit();
+                } else {
+                    // Use HirStmtId(0) as a placeholder; the real id is
+                    // assigned later during full statement lowering.
+                    resolver.labels.insert(*name, rcc_hir::HirStmtId(0));
+                }
             }
-            collect_labels_in_stmt(body, resolver, session);
+            walk_stmt_labels(body, resolver, session, pass);
         }
         StmtKind::Compound(block) => {
             for item in &block.items {
-                collect_labels_in_block_item(item, resolver, session);
+                walk_block_item_labels(item, resolver, session, pass);
             }
         }
-        StmtKind::If { then_branch, else_branch, .. } => {
-            collect_labels_in_stmt(then_branch, resolver, session);
+        StmtKind::If { cond, then_branch, else_branch } => {
+            walk_expr_labels(cond, resolver, session, pass);
+            walk_stmt_labels(then_branch, resolver, session, pass);
             if let Some(else_) = else_branch {
-                collect_labels_in_stmt(else_, resolver, session);
+                walk_stmt_labels(else_, resolver, session, pass);
             }
         }
-        StmtKind::While { body, .. } => {
-            collect_labels_in_stmt(body, resolver, session);
+        StmtKind::While { cond, body } => {
+            walk_expr_labels(cond, resolver, session, pass);
+            walk_stmt_labels(body, resolver, session, pass);
         }
-        StmtKind::DoWhile { body, .. } => {
-            collect_labels_in_stmt(body, resolver, session);
+        StmtKind::DoWhile { body, cond } => {
+            walk_stmt_labels(body, resolver, session, pass);
+            walk_expr_labels(cond, resolver, session, pass);
         }
-        StmtKind::For { init, body, .. } => {
+        StmtKind::For { init, cond, step, body } => {
             if let Some(init) = init {
-                if let BlockItem::Stmt(s) = init.as_ref() {
-                    collect_labels_in_stmt(s, resolver, session);
-                }
+                walk_block_item_labels(init, resolver, session, pass);
             }
-            collect_labels_in_stmt(body, resolver, session);
+            if let Some(cond) = cond {
+                walk_expr_labels(cond, resolver, session, pass);
+            }
+            if let Some(step) = step {
+                walk_expr_labels(step, resolver, session, pass);
+            }
+            walk_stmt_labels(body, resolver, session, pass);
         }
-        StmtKind::Switch { body, .. } => {
-            collect_labels_in_stmt(body, resolver, session);
+        StmtKind::Switch { cond, body } => {
+            walk_expr_labels(cond, resolver, session, pass);
+            walk_stmt_labels(body, resolver, session, pass);
         }
-        StmtKind::Case { body, .. } => {
-            collect_labels_in_stmt(body, resolver, session);
+        StmtKind::Case { value, body } => {
+            walk_expr_labels(value, resolver, session, pass);
+            walk_stmt_labels(body, resolver, session, pass);
         }
         StmtKind::Default { body } => {
-            collect_labels_in_stmt(body, resolver, session);
+            walk_stmt_labels(body, resolver, session, pass);
         }
         StmtKind::Attributed { stmt, .. } => {
-            collect_labels_in_stmt(stmt, resolver, session);
+            walk_stmt_labels(stmt, resolver, session, pass);
         }
-        // Terminal statements — no sub-statements to recurse into.
-        StmtKind::Expr(_)
-        | StmtKind::InlineAsm(_)
-        | StmtKind::Goto(_)
-        | StmtKind::Break
-        | StmtKind::Continue
-        | StmtKind::Return(_)
-        | StmtKind::Null => {}
-    }
-}
-
-/// Recursively check gotos in a block item.
-fn check_gotos_in_block_item(item: &BlockItem, resolver: &mut Resolver, session: &mut Session) {
-    match item {
-        BlockItem::Stmt(stmt) => check_gotos_in_stmt(stmt, resolver, session),
-        BlockItem::Decl(_) => {}
-    }
-}
-
-/// Recursively check that every `goto` references a known label.
-fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Session) {
-    match &stmt.kind {
+        StmtKind::Expr(expr) => {
+            if let Some(expr) = expr {
+                walk_expr_labels(expr, resolver, session, pass);
+            }
+        }
+        StmtKind::InlineAsm(asm) => {
+            for operand in asm.outputs.iter().chain(asm.inputs.iter()) {
+                walk_expr_labels(&operand.expr, resolver, session, pass);
+            }
+        }
+        StmtKind::Return(expr) => {
+            if let Some(expr) = expr {
+                walk_expr_labels(expr, resolver, session, pass);
+            }
+        }
         StmtKind::Goto(name) => {
-            if !resolver.labels.contains_key(name) {
+            if matches!(pass, LabelPass::Check) && !resolver.labels.contains_key(name) {
                 let name_str = session.interner.get(*name);
                 session
                     .handler
@@ -600,53 +711,94 @@ fn check_gotos_in_stmt(stmt: &Stmt, resolver: &mut Resolver, session: &mut Sessi
                     .emit();
             }
         }
-        StmtKind::Label { body, .. } => {
-            check_gotos_in_stmt(body, resolver, session);
+        StmtKind::Break | StmtKind::Continue | StmtKind::Null => {}
+    }
+}
+
+fn walk_type_name_labels(
+    ty: &rcc_ast::TypeName,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    walk_decl_specs_labels(&ty.specs, resolver, session, pass);
+    walk_declarator_labels(&ty.declarator, resolver, session, pass);
+}
+
+fn walk_expr_labels(
+    expr: &rcc_ast::Expr,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    pass: LabelPass,
+) {
+    match &expr.kind {
+        rcc_ast::ExprKind::Binary { lhs, rhs, .. }
+        | rcc_ast::ExprKind::Assign { lhs, rhs, .. }
+        | rcc_ast::ExprKind::Comma { lhs, rhs } => {
+            walk_expr_labels(lhs, resolver, session, pass);
+            walk_expr_labels(rhs, resolver, session, pass);
         }
-        StmtKind::Compound(block) => {
-            for item in &block.items {
-                check_gotos_in_block_item(item, resolver, session);
+        rcc_ast::ExprKind::Unary { operand, .. }
+        | rcc_ast::ExprKind::SizeofExpr(operand)
+        | rcc_ast::ExprKind::Paren(operand) => {
+            walk_expr_labels(operand, resolver, session, pass);
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            walk_expr_labels(cond, resolver, session, pass);
+            walk_expr_labels(then_expr, resolver, session, pass);
+            walk_expr_labels(else_expr, resolver, session, pass);
+        }
+        rcc_ast::ExprKind::Call { callee, args } => {
+            walk_expr_labels(callee, resolver, session, pass);
+            for arg in args {
+                walk_expr_labels(arg, resolver, session, pass);
             }
         }
-        StmtKind::If { then_branch, else_branch, .. } => {
-            check_gotos_in_stmt(then_branch, resolver, session);
-            if let Some(else_) = else_branch {
-                check_gotos_in_stmt(else_, resolver, session);
-            }
-        }
-        StmtKind::While { body, .. } => {
-            check_gotos_in_stmt(body, resolver, session);
-        }
-        StmtKind::DoWhile { body, .. } => {
-            check_gotos_in_stmt(body, resolver, session);
-        }
-        StmtKind::For { init, body, .. } => {
-            if let Some(init) = init {
-                if let BlockItem::Stmt(s) = init.as_ref() {
-                    check_gotos_in_stmt(s, resolver, session);
+        rcc_ast::ExprKind::BuiltinOffsetof { ty, designators } => {
+            walk_type_name_labels(ty, resolver, session, pass);
+            for designator in designators {
+                if let rcc_ast::OffsetofDesignator::Index(idx) = designator {
+                    walk_expr_labels(idx, resolver, session, pass);
                 }
             }
-            check_gotos_in_stmt(body, resolver, session);
         }
-        StmtKind::Switch { body, .. } => {
-            check_gotos_in_stmt(body, resolver, session);
+        rcc_ast::ExprKind::BuiltinTypesCompatible { lhs, rhs } => {
+            walk_type_name_labels(lhs, resolver, session, pass);
+            walk_type_name_labels(rhs, resolver, session, pass);
         }
-        StmtKind::Case { body, .. } => {
-            check_gotos_in_stmt(body, resolver, session);
+        rcc_ast::ExprKind::BuiltinVaArg { ap, ty } => {
+            walk_expr_labels(ap, resolver, session, pass);
+            walk_type_name_labels(ty, resolver, session, pass);
         }
-        StmtKind::Default { body } => {
-            check_gotos_in_stmt(body, resolver, session);
+        rcc_ast::ExprKind::StmtExpr(block) => {
+            for item in &block.items {
+                walk_block_item_labels(item, resolver, session, pass);
+            }
         }
-        StmtKind::Attributed { stmt, .. } => {
-            check_gotos_in_stmt(stmt, resolver, session);
+        rcc_ast::ExprKind::Member { base, .. }
+        | rcc_ast::ExprKind::Arrow { base, .. }
+        | rcc_ast::ExprKind::Index { base, index: _ } => {
+            walk_expr_labels(base, resolver, session, pass);
+            if let rcc_ast::ExprKind::Index { index, .. } = &expr.kind {
+                walk_expr_labels(index, resolver, session, pass);
+            }
         }
-        // Terminal statements — no sub-statements to recurse into.
-        StmtKind::Expr(_)
-        | StmtKind::InlineAsm(_)
-        | StmtKind::Break
-        | StmtKind::Continue
-        | StmtKind::Return(_)
-        | StmtKind::Null => {}
+        rcc_ast::ExprKind::Cast { ty, expr } => {
+            walk_type_name_labels(ty, resolver, session, pass);
+            walk_expr_labels(expr, resolver, session, pass);
+        }
+        rcc_ast::ExprKind::SizeofType(ty) => {
+            walk_type_name_labels(ty, resolver, session, pass);
+        }
+        rcc_ast::ExprKind::CompoundLiteral { ty, init } => {
+            walk_type_name_labels(ty, resolver, session, pass);
+            walk_initializer_labels(init, resolver, session, pass);
+        }
+        rcc_ast::ExprKind::Ident(_)
+        | rcc_ast::ExprKind::IntLit(_)
+        | rcc_ast::ExprKind::FloatLit(_)
+        | rcc_ast::ExprKind::CharLit(_)
+        | rcc_ast::ExprKind::StringLit(_) => {}
     }
 }
 
@@ -970,6 +1122,54 @@ fn lower_block_items(
     resolver.pop_tag_scope();
     scope.pop_scope();
     out
+}
+
+/// Lower a GNU statement-expression block.
+///
+/// The final expression statement, when present, is *not* emitted as a
+/// `HirStmtKind::Expr`; it becomes the `result` expression instead. That is
+/// required for CFG lowering to execute side effects exactly once while
+/// keeping block-scoped locals live until after the result value is read.
+#[allow(clippy::too_many_arguments)]
+fn lower_stmt_expr_block(
+    block: &rcc_ast::Block,
+    body: &mut Body,
+    outer_scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> (Vec<HirStmtId>, Option<HirExprId>) {
+    let mut scope = outer_scope.clone();
+    scope.push_scope();
+    resolver.push_tag_scope();
+
+    let mut out = Vec::with_capacity(block.items.len());
+    let mut result = None;
+    let last_idx = block.items.len().checked_sub(1);
+
+    for (idx, item) in block.items.iter().enumerate() {
+        match item {
+            BlockItem::Stmt(stmt)
+                if Some(idx) == last_idx && matches!(&stmt.kind, StmtKind::Expr(Some(_))) =>
+            {
+                let StmtKind::Expr(Some(expr)) = &stmt.kind else {
+                    unreachable!("guarded by matches! above");
+                };
+                result = Some(lower_expr(expr, body, &scope, crate_, tcx, resolver, session));
+            }
+            BlockItem::Stmt(stmt) => {
+                let id = lower_stmt(stmt, body, &mut scope, crate_, tcx, resolver, session);
+                out.push(id);
+            }
+            BlockItem::Decl(decl) => {
+                lower_block_decl(decl, body, &mut scope, crate_, tcx, resolver, session, &mut out);
+            }
+        }
+    }
+
+    resolver.pop_tag_scope();
+    (out, result)
 }
 
 /// Lower a block-scope declaration, pushing one [`HirStmtKind::LocalDecl`]
@@ -2981,8 +3181,12 @@ pub fn lower_expr(
             HirExprKind::BuiltinVaArg { ap: ap_id, ty: ty_id }
         }
         rcc_ast::ExprKind::BuiltinOffsetof { .. }
-        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. }
-        | rcc_ast::ExprKind::StmtExpr(_) => HirExprKind::IntConst(0),
+        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => HirExprKind::IntConst(0),
+        rcc_ast::ExprKind::StmtExpr(block) => {
+            let (stmts, result) =
+                lower_stmt_expr_block(block, body, scope, crate_, tcx, resolver, session);
+            HirExprKind::StmtExpr { stmts, result }
+        }
         rcc_ast::ExprKind::Member { base, field } => {
             let base_id = lower_expr(base, body, scope, crate_, tcx, resolver, session);
             // Field-index resolution happens in typeck; keep the source
@@ -6086,6 +6290,49 @@ mod tests {
         assert!(diags.is_empty(), "label inside nested block should be visible: {diags:?}");
     }
 
+    #[test]
+    fn labels_inside_statement_expression_are_visible_to_gotos_in_the_same_function() {
+        // void f(){ ({ goto x; x:; }); }
+        let (mut sess, cap) = Session::for_test();
+        let x = sym(&mut sess, "x");
+        let stmt_expr = rcc_ast::Expr {
+            id: NodeId(0),
+            kind: ExprKind::StmtExpr(Box::new(make_block(vec![
+                make_goto(x),
+                make_label(x, make_null()),
+            ]))),
+            span: DUMMY_SP,
+        };
+        let body = make_block(vec![make_stmt(StmtKind::Expr(Some(stmt_expr)))]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert!(diags.is_empty(), "statement-expression labels should resolve: {diags:?}");
+        assert!(resolver.labels.contains_key(&x));
+    }
+
+    #[test]
+    fn missing_label_inside_statement_expression_emits_e0073() {
+        // void f(){ ({ goto missing; }); }
+        let (mut sess, cap) = Session::for_test();
+        let missing = sym(&mut sess, "missing");
+        let stmt_expr = rcc_ast::Expr {
+            id: NodeId(0),
+            kind: ExprKind::StmtExpr(Box::new(make_block(vec![make_goto(missing)]))),
+            span: DUMMY_SP,
+        };
+        let body = make_block(vec![make_stmt(StmtKind::Expr(Some(stmt_expr)))]);
+
+        let mut resolver = Resolver::default();
+        resolve_labels(&body, &mut resolver, &mut sess);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some("E0073"));
+    }
+
     // ── Typedef expansion (task 06-05) tests ────────────────────────────
 
     /// Helper: manually register a typedef in the HirCrate + Resolver.
@@ -8037,6 +8284,85 @@ mod tests {
         let mut resolver = Resolver::default();
         let id = lower_expr(&e, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, sess);
         (body, id, crate_, resolver)
+    }
+
+    #[test]
+    fn stmt_expr_lowers_block_and_splits_final_expr_result() {
+        let (mut sess, _cap) = Session::for_test();
+        let i = sym(&mut sess, "i");
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator {
+                declarator: named_declarator(i),
+                init: Some(rcc_ast::Initializer::Expr(int_lit("2", &mut sess))),
+            }],
+        };
+        let add_assign = Expr {
+            id: NodeId(0),
+            kind: ExprKind::Assign {
+                op: rcc_ast::AssignOp::AddEq,
+                lhs: Box::new(Expr { id: NodeId(0), kind: ExprKind::Ident(i), span: DUMMY_SP }),
+                rhs: Box::new(int_lit("5", &mut sess)),
+            },
+            span: DUMMY_SP,
+        };
+        let final_use = Expr { id: NodeId(0), kind: ExprKind::Ident(i), span: DUMMY_SP };
+        let expr = Expr {
+            id: NodeId(0),
+            kind: ExprKind::StmtExpr(Box::new(Block {
+                id: NodeId(0),
+                items: vec![
+                    BlockItem::Decl(decl),
+                    BlockItem::Stmt(Box::new(stmt(StmtKind::Expr(Some(add_assign))))),
+                    BlockItem::Stmt(Box::new(stmt(StmtKind::Expr(Some(final_use))))),
+                ],
+                span: DUMMY_SP,
+            })),
+            span: DUMMY_SP,
+        };
+
+        let (body, id, _crate, _resolver) = lower_single_expr(&mut sess, expr);
+        let HirExprKind::StmtExpr { stmts, result: Some(result) } = &body.exprs[id].kind else {
+            panic!("expected statement expression with value result");
+        };
+        assert_eq!(stmts.len(), 2, "decl and add-assign remain runtime statements");
+        let HirStmtKind::LocalDecl { local, init: Some(_) } = body.stmts[stmts[0]].kind else {
+            panic!("expected first statement-expression item to be a local decl");
+        };
+        assert!(matches!(body.stmts[stmts[1]].kind, HirStmtKind::Expr(_)));
+        assert!(
+            matches!(body.exprs[*result].kind, HirExprKind::LocalRef(got) if got == local),
+            "final expression should be kept separately as the result"
+        );
+    }
+
+    #[test]
+    fn stmt_expr_without_final_expr_has_void_result_marker() {
+        let (mut sess, _cap) = Session::for_test();
+        let i = sym(&mut sess, "i");
+        let decl = Decl {
+            id: NodeId(0),
+            span: DUMMY_SP,
+            specs: DeclSpecs { type_specs: vec![TypeSpec::Int], ..DeclSpecs::default() },
+            inits: vec![InitDeclarator { declarator: named_declarator(i), init: None }],
+        };
+        let expr = Expr {
+            id: NodeId(0),
+            kind: ExprKind::StmtExpr(Box::new(Block {
+                id: NodeId(0),
+                items: vec![BlockItem::Decl(decl), BlockItem::Stmt(Box::new(stmt(StmtKind::Null)))],
+                span: DUMMY_SP,
+            })),
+            span: DUMMY_SP,
+        };
+
+        let (body, id, _crate, _resolver) = lower_single_expr(&mut sess, expr);
+        let HirExprKind::StmtExpr { stmts, result: None } = &body.exprs[id].kind else {
+            panic!("expected statement expression without value result");
+        };
+        assert_eq!(stmts.len(), 2);
     }
 
     /// Helper: build a `StringLit` expression from the raw source text

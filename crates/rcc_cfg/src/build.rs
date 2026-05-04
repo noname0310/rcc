@@ -833,30 +833,50 @@ impl BodyBuilder {
                 }
                 scopes.pop().expect("collect_labels: block scope stack underflow");
             }
-            HirStmtKind::If { then_branch, else_branch, .. } => {
+            HirStmtKind::Expr(expr) => {
+                self.collect_expr_labels(hir_body, *expr, local_map, scopes);
+            }
+            HirStmtKind::If { cond, then_branch, else_branch } => {
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
                 self.collect_labels_scoped(hir_body, *then_branch, local_map, scopes);
                 if let Some(else_b) = else_branch {
                     self.collect_labels_scoped(hir_body, *else_b, local_map, scopes);
                 }
             }
-            HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
+            HirStmtKind::While { cond, body } => {
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
                 self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
-            HirStmtKind::For { init, body, .. } => {
+            HirStmtKind::DoWhile { body, cond } => {
+                self.collect_labels_scoped(hir_body, *body, local_map, scopes);
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
+            }
+            HirStmtKind::For { init, cond, step, body } => {
                 scopes.push(LabelScopeState::default());
                 if let Some(init_stmt) = init {
                     self.collect_labels_scoped(hir_body, *init_stmt, local_map, scopes);
                 }
+                if let Some(cond) = cond {
+                    self.collect_expr_labels(hir_body, *cond, local_map, scopes);
+                }
+                if let Some(step) = step {
+                    self.collect_expr_labels(hir_body, *step, local_map, scopes);
+                }
                 self.collect_labels_scoped(hir_body, *body, local_map, scopes);
                 scopes.pop().expect("collect_labels: for scope stack underflow");
             }
-            HirStmtKind::Switch { body, .. } => {
+            HirStmtKind::Switch { cond, body, .. } => {
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
                 self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
             HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
                 self.collect_labels_scoped(hir_body, *body, local_map, scopes);
             }
-            HirStmtKind::LocalDecl { local, .. } => {
+            HirStmtKind::Return(Some(expr)) => {
+                self.collect_expr_labels(hir_body, *expr, local_map, scopes);
+            }
+            HirStmtKind::Return(None) => {}
+            HirStmtKind::LocalDecl { local, init } => {
                 if let Some(scope) = scopes.last_mut() {
                     scope.has_runtime_entry = true;
                     if hir_body.locals[*local].vla_len.is_some() {
@@ -865,8 +885,94 @@ impl BodyBuilder {
                         scope.ordinary_locals.push(local_map.lookup(*local));
                     }
                 }
+                if let Some(vla_len) = hir_body.locals[*local].vla_len {
+                    self.collect_expr_labels(hir_body, vla_len, local_map, scopes);
+                }
+                if let Some(init) = init {
+                    self.collect_expr_labels(hir_body, *init, local_map, scopes);
+                }
             }
             _ => {}
+        }
+    }
+
+    fn collect_expr_labels(
+        &mut self,
+        hir_body: &rcc_hir::Body,
+        expr_id: rcc_hir::HirExprId,
+        local_map: &LocalMap,
+        scopes: &mut Vec<LabelScopeState>,
+    ) {
+        use rcc_hir::HirExprKind;
+
+        match &hir_body.exprs[expr_id].kind {
+            HirExprKind::Binary { lhs, rhs, .. }
+            | HirExprKind::Comma { lhs, rhs }
+            | HirExprKind::Assign { lhs, rhs } => {
+                self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *rhs, local_map, scopes);
+            }
+            HirExprKind::Unary { operand, .. }
+            | HirExprKind::Convert { operand, .. }
+            | HirExprKind::Cast { operand, .. }
+            | HirExprKind::SizeofExpr(operand)
+            | HirExprKind::AddressOf(operand)
+            | HirExprKind::Deref(operand) => {
+                self.collect_expr_labels(hir_body, *operand, local_map, scopes);
+            }
+            HirExprKind::Call { callee, args } => {
+                self.collect_expr_labels(hir_body, *callee, local_map, scopes);
+                for arg in args {
+                    self.collect_expr_labels(hir_body, *arg, local_map, scopes);
+                }
+            }
+            HirExprKind::StmtExpr { stmts, result } => {
+                scopes.push(LabelScopeState::default());
+                for &stmt in stmts {
+                    self.collect_labels_scoped(hir_body, stmt, local_map, scopes);
+                }
+                if let Some(result) = result {
+                    self.collect_expr_labels(hir_body, *result, local_map, scopes);
+                }
+                scopes.pop().expect("collect_labels: statement expression scope stack underflow");
+            }
+            HirExprKind::UnresolvedField { base, .. } | HirExprKind::Field { base, .. } => {
+                self.collect_expr_labels(hir_body, *base, local_map, scopes);
+            }
+            HirExprKind::Index { base, index } => {
+                self.collect_expr_labels(hir_body, *base, local_map, scopes);
+                self.collect_expr_labels(hir_body, *index, local_map, scopes);
+            }
+            HirExprKind::CompoundLiteral { init_stmts, .. } => {
+                scopes.push(LabelScopeState::default());
+                for &stmt in init_stmts {
+                    self.collect_labels_scoped(hir_body, stmt, local_map, scopes);
+                }
+                scopes.pop().expect("collect_labels: compound literal scope stack underflow");
+            }
+            HirExprKind::Cond { cond, then_expr, else_expr } => {
+                self.collect_expr_labels(hir_body, *cond, local_map, scopes);
+                self.collect_expr_labels(hir_body, *then_expr, local_map, scopes);
+                self.collect_expr_labels(hir_body, *else_expr, local_map, scopes);
+            }
+            HirExprKind::BuiltinVaArg { ap, .. } | HirExprKind::BuiltinVaEnd { ap } => {
+                self.collect_expr_labels(hir_body, *ap, local_map, scopes);
+            }
+            HirExprKind::BuiltinVaStart { ap, last_param } => {
+                self.collect_expr_labels(hir_body, *ap, local_map, scopes);
+                self.collect_expr_labels(hir_body, *last_param, local_map, scopes);
+            }
+            HirExprKind::BuiltinVaCopy { dst, src } => {
+                self.collect_expr_labels(hir_body, *dst, local_map, scopes);
+                self.collect_expr_labels(hir_body, *src, local_map, scopes);
+            }
+            HirExprKind::IntLiteral { .. }
+            | HirExprKind::IntConst(_)
+            | HirExprKind::FloatConst(_)
+            | HirExprKind::StringRef(_)
+            | HirExprKind::LocalRef(_)
+            | HirExprKind::DefRef(_)
+            | HirExprKind::SizeofType(_) => {}
         }
     }
 

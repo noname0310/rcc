@@ -589,6 +589,27 @@ pub fn visit_expr(
             }
             type_call(expr_id, callee2, new_args, body, tcx, session)
         }
+        HirExprKind::StmtExpr { stmts, result } => {
+            for stmt in &stmts {
+                visit_stmt_with_context(
+                    *stmt,
+                    body,
+                    tcx,
+                    session,
+                    def_info,
+                    BodyCheckContext::default(),
+                );
+            }
+            let result = result.map(|expr| {
+                let expr = visit_expr(expr, body, tcx, session, def_info);
+                rvalue_decayed(expr, body, tcx)
+            });
+            let ty = result.map_or(tcx.void, |expr| body.exprs[expr].ty);
+            body.exprs[expr_id].ty = ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::StmtExpr { stmts, result };
+            expr_id
+        }
         HirExprKind::Convert { operand, kind } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
             // Preserve the convert kind; just rewire the operand id and
@@ -1984,7 +2005,7 @@ pub fn decay_if_needed(
 /// | `Cast { .. }`                                   | rvalue   |
 /// | `SizeofType(_)`                                | rvalue   |
 /// | `CompoundLiteral { .. }`                       | lvalue   |
-/// | `Binary`, `Unary`, `Call`                       | rvalue   |
+/// | `Binary`, `Unary`, `Call`, `StmtExpr`           | rvalue   |
 /// | `AddressOf`                                     | rvalue   |
 /// | `Cond`, `Comma`, `Assign`                       | rvalue   |
 ///
@@ -2008,6 +2029,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Binary { .. }
         | HirExprKind::Unary { .. }
         | HirExprKind::Call { .. }
+        | HirExprKind::StmtExpr { .. }
         | HirExprKind::SizeofExpr(_)
         | HirExprKind::SizeofType(_)
         | HirExprKind::Cast { .. }
@@ -3522,6 +3544,18 @@ mod tests {
         let mut body = Body::default();
         let callee = push_kind(&mut body, tcx.int, HirExprKind::DefRef(DefId(0)));
         let id = push_kind(&mut body, tcx.int, HirExprKind::Call { callee, args: Vec::new() });
+        assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    #[test]
+    fn value_category_stmt_expr_is_rvalue() {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let id = push_kind(
+            &mut body,
+            tcx.int,
+            HirExprKind::StmtExpr { stmts: Vec::new(), result: None },
+        );
         assert_eq!(value_category(&body, id), ValueCat::RValue);
     }
 
@@ -5913,6 +5947,70 @@ mod tests {
 
         assert_eq!(body.exprs[r].ty, tcx.int);
         assert_eq!(body.exprs[r].value_cat, ValueCat::LValue);
+    }
+
+    #[test]
+    fn check_body_statement_expression_types_block_and_value_result() {
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let local = body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: tcx.int,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: false,
+            span: DUMMY_SP,
+        });
+
+        let init = push_kind(&mut body, tcx.error, HirExprKind::IntConst(2));
+        let decl = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::LocalDecl { local, init: Some(init) },
+        });
+        body.stmts[decl].id = decl;
+
+        let lhs = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(local));
+        let rhs = push_kind(&mut body, tcx.error, HirExprKind::IntConst(7));
+        let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+        let assign_stmt = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(assign),
+        });
+        body.stmts[assign_stmt].id = assign_stmt;
+
+        let result_local = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(local));
+        let stmt_expr = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::StmtExpr { stmts: vec![decl, assign_stmt], result: Some(result_local) },
+        );
+        let root = body.stmts.push(HirStmt {
+            id: HirStmtId(0),
+            span: DUMMY_SP,
+            kind: HirStmtKind::Expr(stmt_expr),
+        });
+        body.stmts[root].id = root;
+        body.root = Some(root);
+
+        let (mut session, _cap) = Session::for_test();
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[stmt_expr].ty, tcx.int);
+        assert_eq!(body.exprs[stmt_expr].value_cat, ValueCat::RValue);
+        let HirExprKind::StmtExpr { result: Some(result), .. } = body.exprs[stmt_expr].kind else {
+            panic!("expected statement-expression result");
+        };
+        assert_eq!(body.exprs[result].ty, tcx.int);
+        assert!(matches!(
+            body.exprs[result].kind,
+            HirExprKind::Convert {
+                operand,
+                kind: ConvertKind::LvalueToRvalue
+            } if operand == result_local
+        ));
+        assert!(!session.handler.has_errors());
     }
 
     /// Integer constants always type as `int`.

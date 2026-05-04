@@ -368,6 +368,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             builder.switch_to(successor);
             result
         }
+        HirExprKind::StmtExpr { stmts, result } => {
+            lower_statement_expression(builder, cx, span, ty, stmts, *result)
+        }
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
         }
@@ -1458,6 +1461,36 @@ fn lower_block_stmts(builder: &mut BodyBuilder, cx: &LowerCx<'_>, span: Span, st
     builder.exit_scope(span);
 }
 
+fn lower_statement_expression(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    ty: TyId,
+    stmts: &[HirStmtId],
+    result: Option<HirExprId>,
+) -> Operand {
+    builder.enter_scope();
+    for stmt in stmts {
+        lower_stmt(builder, cx, *stmt);
+    }
+    let value = if let Some(expr) = result {
+        let value = lower_as_rvalue(builder, cx, expr);
+        let temp = builder.alloc_temp(ty, span);
+        builder.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: temp, projection: Vec::new() },
+                rvalue: Rvalue::Use(value),
+            },
+            span,
+        });
+        Operand::Copy(Place { base: temp, projection: Vec::new() })
+    } else {
+        Operand::Const(Const { kind: ConstKind::ZeroInit, ty })
+    };
+    builder.exit_scope(span);
+    value
+}
+
 /// Lower a `HirStmtKind::LocalDecl { local, init }`.
 ///
 /// The CFG local has already been allocated by the body-builder pre-pass;
@@ -2106,6 +2139,62 @@ mod tests {
         let body = finish(builder);
         // No new temps.
         assert_eq!(body.locals.len(), 4);
+    }
+
+    #[test]
+    fn stmt_expr_materializes_value_before_inner_locals_die() {
+        let (mut builder, mut hir_body, tcx, map, [hi, _, _]) = three_int_locals();
+        let init = push_expr(&mut hir_body, tcx.int, ValueCat::RValue, HirExprKind::IntConst(2));
+        let decl = push_stmt(&mut hir_body, HirStmtKind::LocalDecl { local: hi, init: Some(init) });
+        let result = push_expr(&mut hir_body, tcx.int, ValueCat::LValue, HirExprKind::LocalRef(hi));
+        let stmt_expr = push_expr(
+            &mut hir_body,
+            tcx.int,
+            ValueCat::RValue,
+            HirExprKind::StmtExpr { stmts: vec![decl], result: Some(result) },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let op = lower_as_rvalue(&mut builder, &cx, stmt_expr);
+        let Operand::Copy(Place { base: result_temp, projection }) = op else {
+            panic!("statement expression value should be materialized into a temp");
+        };
+        assert!(projection.is_empty());
+
+        let cfg_i = map.lookup(hi);
+        assert_ne!(result_temp, cfg_i, "result must outlive the statement-expression scope");
+        let body = finish(builder);
+        let stmts = &body.blocks[crate::BasicBlockId(0)].statements;
+        assert_eq!(
+            stmts.len(),
+            4,
+            "expected StorageLive, init, result materialization, StorageDead"
+        );
+        assert_storage_live(&stmts[0], cfg_i);
+        match &stmts[1].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(2), .. })),
+            } => {
+                assert_eq!(*base, cfg_i);
+                assert!(projection.is_empty());
+            }
+            other => panic!("expected `i := 2`, got {other:?}"),
+        }
+        match &stmts[2].kind {
+            StatementKind::Assign {
+                place: Place { base, projection },
+                rvalue:
+                    Rvalue::Use(Operand::Copy(Place { base: copied, projection: copied_projection })),
+            } => {
+                assert_eq!(*base, result_temp);
+                assert!(projection.is_empty());
+                assert_eq!(*copied, cfg_i);
+                assert!(copied_projection.is_empty());
+            }
+            other => panic!("expected temp materialization from `i`, got {other:?}"),
+        }
+        assert_storage_dead(&stmts[3], cfg_i);
     }
 
     /// Acceptance: `a + b * c` emits a single temp for `b*c`, then an add.

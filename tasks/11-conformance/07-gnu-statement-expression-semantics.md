@@ -1,5 +1,7 @@
 # 11-07: GNU statement-expression semantics
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-05, 05-36    **Milestone:** M2+
 
 ## Goal
