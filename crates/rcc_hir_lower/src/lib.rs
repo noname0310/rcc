@@ -1592,6 +1592,19 @@ fn lower_block_decl(
             }
             continue;
         }
+        if decl.specs.storage == Some(StorageClass::Extern) {
+            let def_id = lower_block_scope_extern_object_decl(
+                name,
+                decl.span,
+                ty,
+                &decl.specs,
+                &init_decl.declarator,
+                crate_,
+                resolver,
+            );
+            scope.insert(name, Binding::Def(def_id));
+            continue;
+        }
         if let Some(init) = &init_decl.init {
             ty = complete_initializer_type(ty, init, tcx, crate_);
         }
@@ -1690,6 +1703,39 @@ fn lower_block_decl(
             );
         }
     }
+}
+
+fn lower_block_scope_extern_object_decl(
+    name: Symbol,
+    span: Span,
+    ty: TyId,
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &Declarator,
+    crate_: &mut HirCrate,
+    resolver: &Resolver,
+) -> DefId {
+    if let Some(def_id) = resolver
+        .ordinary
+        .get(&name)
+        .copied()
+        .filter(|id| matches!(crate_.defs[*id].kind, DefKind::Global { .. }))
+    {
+        return def_id;
+    }
+
+    let def_id = crate_.defs.push(Def {
+        id: DefId(0),
+        name,
+        span,
+        kind: DefKind::Global {
+            ty,
+            quals: declaration_object_quals(specs, declarator),
+            linkage: Linkage::External,
+            init: None,
+        },
+    });
+    crate_.defs[def_id].id = def_id;
+    def_id
 }
 
 #[allow(clippy::too_many_arguments)]

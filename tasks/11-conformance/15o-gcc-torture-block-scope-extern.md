@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15o: gcc-torture block-scope extern resolution
 
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
@@ -18,6 +20,16 @@ to file-scope objects instead of shadowing block locals.
 ## Acceptance
 - `gcc-torture::execute::scope-1` passes.
 - The reduced fixture in `docs/gcc-torture-signal-clusters.md` passes.
+
+## Result
+- Block-scope `extern` object declarations now bind the current block scope to
+  an existing file-scope `DefKind::Global` when one is visible through the
+  resolver's file-scope ordinary table.
+- If no file-scope global exists, lowering creates an external-linkage global
+  `Def` and binds only the block scope to it, avoiding accidental file-scope
+  visibility.
+- `gcc-torture::execute::scope-1` and a reduced driver e2e fixture pass under
+  WSL LLVM.
 
 ## References
 - `docs/gcc-torture-signal-clusters.md`

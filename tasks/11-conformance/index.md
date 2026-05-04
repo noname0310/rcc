@@ -48,7 +48,7 @@ current numeric milestone already passes.
 - [x] [15m2-gcc-torture-20030916-uchar-index-wrap](15m2-gcc-torture-20030916-uchar-index-wrap.md)
 - [x] [15n-gcc-torture-vla-lifetime-cluster](15n-gcc-torture-vla-lifetime-cluster.md)
 - [x] [15n1-gcc-torture-pr77767-vla-parameter-bound-side-effects](15n1-gcc-torture-pr77767-vla-parameter-bound-side-effects.md)
-- [ ] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)
+- [x] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)
 - [ ] [15p-gcc-torture-varargs-cluster](15p-gcc-torture-varargs-cluster.md)
 - [ ] [15q-gcc-torture-aggregate-memory-cluster](15q-gcc-torture-aggregate-memory-cluster.md)
 - [ ] [15r-gcc-torture-gnu-field-alignment](15r-gcc-torture-gnu-field-alignment.md)

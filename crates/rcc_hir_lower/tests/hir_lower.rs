@@ -3567,6 +3567,32 @@ fn regression_gate_vla_parameter_bound_side_effects_enter_body() {
     assert_post_inc_stmt_targets_local(body, stmts[1], Local(2));
 }
 
+#[test]
+fn regression_gate_block_scope_extern_binds_file_scope_object() {
+    let (hir, _tcx, cap, sess) = lower_and_typeck_snippet(
+        "int v = 3; int f(void) { int v = 4; { extern int v; return v; } }",
+    );
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let global_v = def_named(&hir, &sess, "v");
+    let f = def_named(&hir, &sess, "f");
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    let root = body.root.expect("missing root");
+    let ret = first_return_expr(body, root).expect("missing return expression");
+    assert!(
+        expr_references_def(body, ret, global_v.id),
+        "inner `extern int v` return should load the file-scope object"
+    );
+    assert!(
+        !expr_references_local(body, ret, Local(0)),
+        "inner `extern int v` must not resolve to the block local"
+    );
+}
+
 fn assert_post_inc_stmt_targets_local(body: &Body, stmt: rcc_hir::HirStmtId, expected: Local) {
     let HirStmtKind::Expr(expr) = body.stmts[stmt].kind else {
         panic!("expected parameter-bound expression statement");
@@ -3580,6 +3606,57 @@ fn assert_post_inc_stmt_targets_local(body: &Body, stmt: rcc_hir::HirStmtId, exp
         matches!(body.exprs[operand].kind, HirExprKind::LocalRef(local) if local == expected),
         "post-increment should target {expected:?}"
     );
+}
+
+fn first_return_expr(body: &Body, stmt: rcc_hir::HirStmtId) -> Option<HirExprId> {
+    match &body.stmts[stmt].kind {
+        HirStmtKind::Return(expr) => *expr,
+        HirStmtKind::Block(stmts) => stmts.iter().find_map(|stmt| first_return_expr(body, *stmt)),
+        HirStmtKind::If { then_branch, else_branch, .. } => first_return_expr(body, *then_branch)
+            .or_else(|| else_branch.and_then(|stmt| first_return_expr(body, stmt))),
+        HirStmtKind::Label { body: inner, .. }
+        | HirStmtKind::Case { body: inner, .. }
+        | HirStmtKind::Default { body: inner }
+        | HirStmtKind::While { body: inner, .. }
+        | HirStmtKind::DoWhile { body: inner, .. }
+        | HirStmtKind::Switch { body: inner, .. } => first_return_expr(body, *inner),
+        HirStmtKind::For { init, body: inner, .. } => init
+            .and_then(|stmt| first_return_expr(body, stmt))
+            .or_else(|| first_return_expr(body, *inner)),
+        HirStmtKind::Expr(_)
+        | HirStmtKind::Goto(_)
+        | HirStmtKind::GotoComputed(_)
+        | HirStmtKind::Break
+        | HirStmtKind::Continue
+        | HirStmtKind::LocalDecl { .. }
+        | HirStmtKind::Null => None,
+    }
+}
+
+fn expr_references_def(body: &Body, expr: HirExprId, expected: DefId) -> bool {
+    match &body.exprs[expr].kind {
+        HirExprKind::DefRef(def) => *def == expected,
+        HirExprKind::Convert { operand, .. }
+        | HirExprKind::Cast { operand, .. }
+        | HirExprKind::AddressOf(operand)
+        | HirExprKind::Deref(operand)
+        | HirExprKind::Unary { operand, .. }
+        | HirExprKind::SizeofExpr(operand) => expr_references_def(body, *operand, expected),
+        _ => false,
+    }
+}
+
+fn expr_references_local(body: &Body, expr: HirExprId, expected: Local) -> bool {
+    match &body.exprs[expr].kind {
+        HirExprKind::LocalRef(local) => *local == expected,
+        HirExprKind::Convert { operand, .. }
+        | HirExprKind::Cast { operand, .. }
+        | HirExprKind::AddressOf(operand)
+        | HirExprKind::Deref(operand)
+        | HirExprKind::Unary { operand, .. }
+        | HirExprKind::SizeofExpr(operand) => expr_references_local(body, *operand, expected),
+        _ => false,
+    }
 }
 
 #[test]
