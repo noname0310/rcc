@@ -31,6 +31,8 @@ struct Cli {
     max_source_bytes: usize,
     #[arg(long, default_value_t = 5)]
     timeout_secs: u64,
+    #[arg(long)]
+    max_duration_secs: Option<u64>,
     #[arg(long, default_value = "target/csmith-diff")]
     work_dir: PathBuf,
     #[arg(long, default_value = "target/csmith-diff/report.json")]
@@ -49,6 +51,7 @@ struct Config {
     seed: u64,
     max_source_bytes: usize,
     timeout: Duration,
+    max_duration: Option<Duration>,
     work_dir: PathBuf,
     keep_passing: bool,
 }
@@ -155,6 +158,7 @@ fn run_cli() -> anyhow::Result<Report> {
         seed: cli.seed.unwrap_or_else(default_seed),
         max_source_bytes: cli.max_source_bytes,
         timeout: Duration::from_secs(cli.timeout_secs),
+        max_duration: cli.max_duration_secs.map(Duration::from_secs),
         work_dir: cli.work_dir,
         keep_passing: cli.keep_passing,
     };
@@ -177,7 +181,11 @@ fn run(config: Config) -> anyhow::Result<Report> {
         .with_context(|| format!("creating {}", config.work_dir.display()))?;
 
     let mut cases = Vec::new();
+    let start = Instant::now();
     for id in 0..config.iterations {
+        if config.max_duration.is_some_and(|limit| start.elapsed() >= limit) {
+            break;
+        }
         let seed = config.seed + u64::from(id);
         let case_dir = config.work_dir.join(format!("{seed}"));
         std::fs::create_dir_all(&case_dir)

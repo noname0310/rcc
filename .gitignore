@@ -49,3 +49,4 @@ fuzz/artifacts/
 
 # Conformance reports
 docs/conformance.json
+reports/csmith/

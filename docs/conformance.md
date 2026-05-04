@@ -165,7 +165,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `GccTortureAdapter`          | implemented; smoke runs in push CI, full execute remains manual because it is long-running |
 | `TccTests2Adapter`           | implemented at task 11-16; current WSL baseline is 75 pass, 9 xfail, 0 fail, 4 skip |
 | `LlvmTestSuiteAdapter`       | implemented at task 11-17; manual curated SingleSource subset currently 6 pass, 0 fail |
-| `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
+| `CsmithDifferentialAdapter`  | static adapter remains a placeholder; `rcc_csmith_diff` is the active bounded differential harness |
 
 ## XFail lists
 

@@ -12,7 +12,7 @@ Long-running oracle verification: cargo-fuzz per front-end crate + csmith differ
 - [x] [02-preprocess-fuzz](02-preprocess-fuzz.md)
 - [x] [03-parser-fuzz](03-parser-fuzz.md)
 - [x] [04-csmith-differential-harness](04-csmith-differential-harness.md)
-- [ ] [05-csmith-bounded-differential](05-csmith-bounded-differential.md)
+- [x] [05-csmith-bounded-differential](05-csmith-bounded-differential.md)
 
 ## Downstream
 

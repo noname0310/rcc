@@ -71,8 +71,9 @@ code.
 
 CI budgets:
 - per-commit: 30 s fuzz smoke on `lex` (see `.github/workflows/ci.yml`).
-- extended fuzz: 30 minute lexer gate on lexer/fuzz path changes or manual dispatch,
-  plus bounded csmith differential runs.
+- extended fuzz: 30 minute lexer/parser/preprocessor gates on relevant path
+  changes or manual dispatch, plus bounded csmith differential runs through
+  `.github/workflows/csmith-bounded.yml`.
 
 ## CI gates (see `.github/workflows/ci.yml`)
 
