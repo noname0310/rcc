@@ -111,6 +111,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0019, W0019_DESC),
     (W0020, W0020_DESC),
     (W0021, W0021_DESC),
+    (W0022, W0022_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -855,6 +856,14 @@ const W0020_DESC: &str = "GNU labels-as-values extension";
 /// emits this warning unless `Options::gnu_lvalue_comma` is enabled.
 pub const W0021: &str = "W0021";
 const W0021_DESC: &str = "GNU lvalue comma extension";
+
+/// GNU `__FUNCTION__` predefined function name alias accepted in strict C99 mode.
+///
+/// C99 defines `__func__`, while GNU C also accepts `__FUNCTION__`. HIR
+/// lowering preserves the alias and emits this warning unless
+/// `Options::gnu_function_names` is enabled.
+pub const W0022: &str = "W0022";
+const W0022_DESC: &str = "GNU function name alias";
 
 #[cfg(test)]
 mod tests {

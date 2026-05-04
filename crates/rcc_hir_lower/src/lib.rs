@@ -3146,8 +3146,14 @@ pub fn lower_expr(
             return lower_expr(inner, body, scope, crate_, tcx, resolver, session);
         }
         rcc_ast::ExprKind::Ident(sym) => {
-            resolve_expr_ident(*sym, expr.span, scope, resolver, session)
-                .unwrap_or(HirExprKind::IntConst(0))
+            if let Some(kind) =
+                lower_predefined_function_name(*sym, expr.span, crate_, tcx, resolver, session)
+            {
+                kind
+            } else {
+                resolve_expr_ident(*sym, expr.span, scope, resolver, session)
+                    .unwrap_or(HirExprKind::IntConst(0))
+            }
         }
         rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
             let lhs_id = lower_expr(lhs, body, scope, crate_, tcx, resolver, session);
@@ -3480,6 +3486,42 @@ fn hir_int_suffix(suffix: rcc_ast::IntSuffix) -> IntLiteralSuffix {
         rcc_ast::IntSuffix::LL => IntLiteralSuffix::LL,
         rcc_ast::IntSuffix::ULL => IntLiteralSuffix::ULL,
     }
+}
+
+fn lower_predefined_function_name(
+    ident: Symbol,
+    span: Span,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<HirExprKind> {
+    let spelling = session.interner.get(ident).to_owned();
+    let is_gnu_alias = match spelling.as_str() {
+        "__func__" => false,
+        "__FUNCTION__" => true,
+        _ => return None,
+    };
+    let function = resolver.current_function?;
+
+    if is_gnu_alias && !session.opts.gnu_function_names {
+        session
+            .handler
+            .struct_warn(span, "GNU `__FUNCTION__` is not part of C99")
+            .code(rcc_errors::codes::W0022)
+            .note("lowering it as an alias for C99 `__func__`")
+            .emit();
+    }
+
+    let fn_name = session.interner.get(crate_.defs[function].name).to_owned();
+    let text = session.interner.intern(&format!("\"{fn_name}\""));
+    let lit = rcc_ast::StringLiteral {
+        text,
+        bytes: fn_name.into_bytes(),
+        encoding: rcc_ast::LiteralEncoding::None,
+    };
+    let def_id = intern_string_literal(&lit, span, crate_, tcx, resolver);
+    Some(HirExprKind::StringRef(def_id))
 }
 
 /// Intern a string literal into the global table.

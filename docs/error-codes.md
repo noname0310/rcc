@@ -1312,3 +1312,16 @@ C99 makes every comma expression an rvalue, so `rcc` emits W0021 while
 preserving GNU semantics for recovery and compatibility tests. Enable
 `Options::gnu_lvalue_comma` to accept the construct without this
 compatibility warning.
+
+## W0022 — GNU function name alias
+
+C99 defines `__func__` as an implicit function-scope identifier. GNU C
+also accepts `__FUNCTION__` as an alias for the same string payload:
+
+```c
+char *f(void) { return __FUNCTION__; }  // warning[W0022] in strict C99 mode
+```
+
+HIR lowering preserves `__FUNCTION__` as a function-name string so GNU
+compatibility tests can continue. Enable `Options::gnu_function_names`
+to accept the alias without this compatibility warning.

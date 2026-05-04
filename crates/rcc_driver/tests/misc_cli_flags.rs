@@ -123,6 +123,14 @@ fn gnu_conditional_void_flag_sets_frontend_option() {
 }
 
 #[test]
+fn gnu_function_names_flag_sets_frontend_option() {
+    let cli = parse(&["rcc", "-fgnu-function-names", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_function_names);
+}
+
+#[test]
 fn strict_binary_integer_literal_is_rejected() {
     let input = TempCFile::new("strict-binary", "int x = 0b10;\n");
     let output = input.sibling("ast");

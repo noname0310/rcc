@@ -173,6 +173,7 @@ fn warning_names_for_code(code: &str) -> &'static [&'static str] {
         codes::W0019 => &["gnu-case-ranges", "gnu-case-range"],
         codes::W0020 => &["gnu-labels-as-values", "gnu-computed-goto"],
         codes::W0021 => &["gnu-lvalue-comma"],
+        codes::W0022 => &["gnu-function-names", "gnu-function-name", "gnu-function"],
         _ => &[],
     }
 }

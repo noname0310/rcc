@@ -398,9 +398,13 @@ fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitte
 }
 
 fn checked_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
+    checked_snippet_with_options(src, Options::default())
+}
+
+fn checked_snippet_with_options(src: &str, opts: Options) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut sess = Session::with_handler(Options::default(), handler);
+    let mut sess = Session::with_handler(opts, handler);
     let fid = sess.source_map.write().unwrap().add_file(PathBuf::from("<checked>"), Arc::from(src));
     let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
     let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
@@ -2458,6 +2462,62 @@ fn snippet_block_static_label_address_initializer_is_preserved() {
             .any(|entry| matches!(entry.value, GlobalInitValue::LabelAddress { .. }));
     }
     assert!(found, "block-scope static initializer should preserve LabelAddress");
+}
+
+fn global_init_int_bytes(hir: &HirCrate, def_id: DefId) -> Vec<i128> {
+    let DefKind::Global { init: Some(init), .. } = &hir.defs[def_id].kind else {
+        panic!("expected string global, got {:?}", hir.defs[def_id].kind);
+    };
+    init.entries
+        .iter()
+        .map(|entry| match entry.value {
+            GlobalInitValue::Int(v) => v,
+            ref other => panic!("expected int byte, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn snippet_func_predefined_identifier_lowers_to_function_name_string() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("char *f(void) { return __func__; }");
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let body = hir.bodies.values().next().expect("function body");
+    let def_id = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::StringRef(def_id) => Some(def_id),
+            _ => None,
+        })
+        .expect("__func__ should lower to StringRef");
+    assert_eq!(global_init_int_bytes(&hir, def_id), vec![b'f' as i128, 0]);
+}
+
+#[test]
+fn snippet_function_alias_warns_in_strict_mode() {
+    let (_hir, _tcx, cap) =
+        checked_snippet_with_diagnostics("char *g(void) { return __FUNCTION__; }");
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0022)),
+        "strict mode should warn for __FUNCTION__: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0071)),
+        "__FUNCTION__ must not be reported as undeclared: {diags:?}"
+    );
+}
+
+#[test]
+fn snippet_function_alias_option_suppresses_warning() {
+    let opts = Options { gnu_function_names: true, ..Options::default() };
+    let (_hir, _tcx, cap) =
+        checked_snippet_with_options("char *g(void) { return __FUNCTION__; }", opts);
+    let diags = cap.diagnostics();
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0022)),
+        "GNU option should suppress W0022: {diags:?}"
+    );
 }
 
 #[test]

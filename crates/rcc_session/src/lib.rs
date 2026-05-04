@@ -184,6 +184,13 @@ pub struct Options {
     /// classifies comma expressions as rvalues, so with this option off the
     /// type checker emits W0021 while preserving GNU semantics for recovery.
     pub gnu_lvalue_comma: bool,
+    /// Enable GNU `__FUNCTION__` predefined function name alias without a warning.
+    ///
+    /// C99 defines `__func__` as an implicit function-scope identifier. GNU C
+    /// also accepts `__FUNCTION__` with the same string payload. With this
+    /// option off, HIR lowering emits W0022 while preserving the alias for
+    /// compatibility tests.
+    pub gnu_function_names: bool,
 }
 
 impl Default for Options {
@@ -215,6 +222,7 @@ impl Default for Options {
             gnu_case_ranges: false,
             gnu_labels_as_values: false,
             gnu_lvalue_comma: false,
+            gnu_function_names: false,
         }
     }
 }
