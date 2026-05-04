@@ -21,6 +21,9 @@ cargo run --release --package rcc_conformance --bin rcc_conformance_run -- \
 # chibicc preprocessor-only gate (task 04-18, milestone M5)
 cargo run --release --package rcc_conformance -- \
     --suite chibicc --mode preprocess
+# chibicc early stage-isolated gate (task 11-05)
+cargo run --release --package rcc_conformance -- \
+    --suite chibicc --mode stage-1-3
 # full compile + link + run pipeline (milestone M6)
 cargo run --release --package rcc_conformance -- \
     --suite chibicc --mode compile
@@ -30,6 +33,12 @@ cargo run --release --package rcc_conformance -- \
 checks the exit code; only preprocessor-focused fixtures
 (`macro.c`, `typedef.c`, and `include.c` when vendored) are
 discovered in that mode.
+
+`stage-1-3` discovers exactly `arith.c`, `control.c`, and `function.c`.
+It compiles the selected TU with `rcc`, but links against a generated
+host-compiled `assert` helper instead of compiling upstream
+`test/common` with `rcc`. This keeps failures attributed to the selected
+TU rather than later chibicc runtime/helper features.
 
 ## Suite status
 
@@ -89,6 +98,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `CTestSuiteAdapter`          | implemented; current M4 gate is 70.9 % (151 pass, 5 xfail, 64 fail) |
 | `ChibiccAdapter` (compile)   | interface frozen; implementation M6 |
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
+| `ChibiccAdapter` (stage-1-3) | landed at task 11-05; reports only `arith.c`, `control.c`, `function.c` and uses a host-compiled minimal support helper |
 | `GccTortureAdapter`          | interface frozen; implementation M4 |
 | `TccTests2Adapter`           | interface frozen; implementation M6 |
 | `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |

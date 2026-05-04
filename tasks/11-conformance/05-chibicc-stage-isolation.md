@@ -1,5 +1,7 @@
 # 11-05: chibicc stage isolation
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 01-09, 10-17    **Milestone:** M2
 
 ## Goal

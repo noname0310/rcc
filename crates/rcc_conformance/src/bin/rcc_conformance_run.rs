@@ -15,10 +15,11 @@ use rcc_conformance::Suite;
 /// Per-suite execution mode selected by `--mode`.
 ///
 /// Most suites only have one meaningful pipeline stage to exercise
-/// and simply ignore the mode. `chibicc` is dual-purpose: at M5 we
-/// run the preprocessor-focused subset via `--emit=pp`, at M6 we run
-/// the full compile + link + execute pipeline. A CLI flag is
-/// cheaper than two suite names.
+/// and simply ignore the mode. `chibicc` is multi-purpose: at M5 we
+/// run the preprocessor-focused subset via `--emit=pp`, at M2/M6 we
+/// can run an early stage-isolated subset, and at M6 we run the full
+/// compile + link + execute pipeline. A CLI flag is cheaper than
+/// several suite names.
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum Mode {
     /// Full compile + link + run (default).
@@ -26,6 +27,11 @@ enum Mode {
     /// Preprocessor-only (task 04-18): `rcc --emit=pp` + exit-code
     /// check against the chibicc preprocessor fixtures.
     Preprocess,
+    /// Stage-isolated chibicc slice: `arith.c`, `control.c`, and
+    /// `function.c` only, with a host-compiled minimal support helper
+    /// instead of upstream `test/common`.
+    #[value(name = "stage-1-3")]
+    Stage1To3,
 }
 
 /// Run conformance suites against `rcc` and emit a JSON report.
@@ -51,6 +57,8 @@ struct Cli {
     /// Which pipeline stage each test should exercise. Defaults to
     /// the full compile + link + run path. `preprocess` is the
     /// preprocessor-only gate for task 04-18 / milestone M5.
+    /// `stage-1-3` isolates chibicc's early arith/control/function
+    /// fixtures without compiling upstream `test/common` with `rcc`.
     #[arg(long, value_enum, default_value_t = Mode::Compile)]
     mode: Mode,
 }
@@ -69,6 +77,7 @@ fn build_suite(name: &str, include_gpl: bool, mode: Mode) -> anyhow::Result<Suit
         ("c-testsuite", _) => Box::new(CTestSuiteAdapter),
         ("chibicc", Mode::Compile) => Box::new(ChibiccAdapter::compile()),
         ("chibicc", Mode::Preprocess) => Box::new(ChibiccAdapter::preprocess()),
+        ("chibicc", Mode::Stage1To3) => Box::new(ChibiccAdapter::stages1_to_3()),
         ("gcc-torture", _) => Box::new(GccTortureAdapter),
         ("tcc-tests2", _) => Box::new(TccTests2Adapter),
         ("llvm-test-suite", _) => Box::new(LlvmTestSuiteAdapter),

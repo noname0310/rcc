@@ -114,6 +114,71 @@ fn run_preprocess_mode_fails_with_missing_rcc() {
     assert!(matches!(outcome, Outcome::Fail { .. }), "expected Fail, got {outcome:?}");
 }
 
+// ── stage-1..3 mode ────────────────────────────────────────────────
+
+#[test]
+fn discover_stage_1_to_3_filters_to_stage_fixtures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let test_dir = tmp.path().join("test");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    for name in ["arith.c", "control.c", "function.c", "macro.c", "eval-order.c", "common.c"] {
+        std::fs::write(test_dir.join(name), "int main() { return 0; }\n").unwrap();
+    }
+    std::fs::write(test_dir.join("common"), "// support\n").unwrap();
+    std::fs::write(test_dir.join("test.h"), "#define ASSERT(x, y)\n").unwrap();
+
+    let adapter = ChibiccAdapter::stages1_to_3();
+    let cases = adapter.discover(tmp.path()).unwrap();
+    let ids: Vec<&str> = cases.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["chibicc::arith", "chibicc::control", "chibicc::function"],);
+}
+
+#[test]
+fn discover_real_suite_stage_1_to_3_count() {
+    let suite_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("third_party")
+        .join("testsuites")
+        .join("chibicc");
+    if !suite_root.join("test").is_dir() {
+        eprintln!("skipping: real chibicc tests not vendored");
+        return;
+    }
+    let adapter = ChibiccAdapter::stages1_to_3();
+    let cases = adapter.discover(&suite_root).unwrap();
+    let ids: Vec<&str> = cases.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["chibicc::arith", "chibicc::control", "chibicc::function"],);
+}
+
+#[test]
+fn run_stage_1_to_3_does_not_require_common_helper() {
+    let tmp = tempfile::tempdir().unwrap();
+    let test_dir = tmp.path().join("test");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(
+        test_dir.join("arith.c"),
+        "#include \"test.h\"\nint main() { ASSERT(0, 0); return 0; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("test.h"),
+        "#define ASSERT(x, y) assert(x, y, #y)\nvoid assert(int, int, char *);\n",
+    )
+    .unwrap();
+
+    let adapter = ChibiccAdapter::stages1_to_3();
+    let cases = adapter.discover(tmp.path()).unwrap();
+    assert_eq!(cases.len(), 1);
+    let outcome = adapter.run(Path::new("nonexistent-rcc-binary-xyzzy"), &cases[0]).unwrap();
+    assert!(
+        matches!(outcome, Outcome::Fail { ref reason } if reason.contains("rcc invocation failed")),
+        "expected a real rcc failure instead of common-helper Skip, got {outcome:?}",
+    );
+}
+
 // ── run: failure paths ──────────────────────────────────────────────
 
 #[test]

@@ -233,6 +233,16 @@ pub enum ChibiccMode {
     /// out during discovery so they do not count toward the
     /// pass / fail / skip totals.
     Preprocess,
+    /// Stage-isolated compile + link + run path for the early chibicc
+    /// fixtures (`arith.c`, `control.c`, and `function.c`).
+    ///
+    /// Unlike [`ChibiccMode::Compile`], this mode never compiles upstream
+    /// `test/common` with `rcc`. That helper intentionally uses later-stage
+    /// language/runtime features and would hide whether the selected fixture
+    /// itself failed. Instead, this mode links a generated host-compiled
+    /// support object containing only the `assert` helper declared by
+    /// `test/test.h`.
+    Stages1To3,
 }
 
 /// `chibicc` adapter. Runs the `chibicc/test/*.c` files the same way chibicc's
@@ -258,15 +268,40 @@ impl ChibiccAdapter {
         Self { mode: ChibiccMode::Preprocess }
     }
 
+    /// Adapter restricted to the stage-1..3 chibicc slice. Discovery emits
+    /// only `arith.c`, `control.c`, and `function.c`, and execution links a
+    /// generated host-compiled support object instead of compiling
+    /// `test/common` with `rcc`.
+    pub const fn stages1_to_3() -> Self {
+        Self { mode: ChibiccMode::Stages1To3 }
+    }
+
     /// File stems of the chibicc fixtures that exist to exercise
     /// `#define` / `#include` / conditional compilation without
     /// requiring the downstream parser / codegen. Kept in lock-step
     /// with `tasks/04-preprocess/18-chibicc-preprocess-tests.md`.
     pub const PREPROCESS_FIXTURES: &'static [&'static str] = &["macro", "typedef", "include"];
 
+    /// File stems of the stage-isolated chibicc fixtures.
+    pub const STAGE_1_TO_3_FIXTURES: &'static [&'static str] = &["arith", "control", "function"];
+
     /// Path to the support file compiled alongside every test.
     fn common_path(root: &Path) -> std::path::PathBuf {
         root.join("test").join("common")
+    }
+
+    /// Minimal host-compiled support source used by stage-isolated mode.
+    fn stage_support_source() -> &'static str {
+        r#"#include <stdio.h>
+#include <stdlib.h>
+
+void assert(int expected, int actual, char *code) {
+  if (expected == actual)
+    return;
+  fprintf(stderr, "%s => %d expected but got %d\n", code, expected, actual);
+  exit(1);
+}
+"#
     }
 }
 
@@ -298,6 +333,10 @@ impl Adapter for ChibiccAdapter {
             if self.mode == ChibiccMode::Preprocess && !Self::PREPROCESS_FIXTURES.contains(&stem) {
                 continue;
             }
+            if self.mode == ChibiccMode::Stages1To3 && !Self::STAGE_1_TO_3_FIXTURES.contains(&stem)
+            {
+                continue;
+            }
             cases.push(TestCase { id: format!("chibicc::{stem}"), path });
         }
         cases.sort_by(|a, b| a.id.cmp(&b.id));
@@ -312,6 +351,7 @@ impl Adapter for ChibiccAdapter {
         match self.mode {
             ChibiccMode::Compile => self.run_compile(rcc_path, case),
             ChibiccMode::Preprocess => self.run_preprocess_only(rcc_path, case),
+            ChibiccMode::Stages1To3 => self.run_stage_1_to_3(rcc_path, case),
         }
     }
 }
@@ -344,6 +384,114 @@ impl ChibiccAdapter {
                 ),
             }),
             Err(e) => Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") }),
+        }
+    }
+
+    /// Stage-isolated compile + link + execute path.
+    ///
+    /// The selected fixture is compiled by `rcc`, while the tiny `assert`
+    /// implementation is generated on the fly and compiled with host `cc`.
+    /// This avoids routing upstream `test/common` through `rcc`, because that
+    /// helper depends on later features unrelated to the early chibicc slice.
+    fn run_stage_1_to_3(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let case_dir = case.path.parent().ok_or_else(|| {
+            anyhow::anyhow!("cannot derive directory from {}", case.path.display())
+        })?;
+
+        let tmp = tempfile::tempdir()?;
+        let test_obj = tmp.path().join("test.o");
+        let support_src = tmp.path().join("stage_support.c");
+        let support_obj = tmp.path().join("stage_support.o");
+        let exe_path =
+            if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
+
+        // Step 1: compile the selected test file with rcc. `-I<case_dir>`
+        // makes the dependency on chibicc's `test.h` explicit.
+        let mut compile_test = Command::new(rcc_path);
+        compile_test
+            .arg("--emit=obj")
+            .arg("-I")
+            .arg(case_dir)
+            .arg("-o")
+            .arg(&test_obj)
+            .arg(&case.path);
+        match run_with_timeout(&mut compile_test, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "rcc compilation failed for {}: exit {}; {}",
+                        case.path.display(),
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") });
+            }
+        }
+
+        // Step 2: compile only the generated assert helper with host cc.
+        std::fs::write(&support_src, Self::stage_support_source())?;
+        let mut compile_support = Command::new("cc");
+        compile_support.arg("-std=c99").arg("-c").arg(&support_src).arg("-o").arg(&support_obj);
+        match run_with_timeout(&mut compile_support, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "stage support compilation failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail {
+                    reason: format!("stage support invocation failed: {e}"),
+                });
+            }
+        }
+
+        // Step 3: link both objects with host cc.
+        let mut link_cmd = Command::new("cc");
+        link_cmd.arg("-o").arg(&exe_path).arg(&test_obj).arg(&support_obj);
+        match run_with_timeout(&mut link_cmd, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Ok(Outcome::Fail {
+                    reason: format!(
+                        "link failed (exit {}): {}",
+                        o.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&o.stderr).chars().take(256).collect::<String>(),
+                    ),
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("link invocation failed: {e}") });
+            }
+        }
+
+        // Step 4: execute and check exit code == 0.
+        let mut exec_cmd = Command::new(&exe_path);
+        match run_with_timeout(&mut exec_cmd, TIMEOUT) {
+            Ok(output) => {
+                if output.status.code() == Some(0) {
+                    Ok(Outcome::Pass)
+                } else {
+                    Ok(Outcome::Fail {
+                        reason: format!(
+                            "non-zero exit code: {}",
+                            output
+                                .status
+                                .code()
+                                .map_or_else(|| "killed by signal".into(), |c| c.to_string()),
+                        ),
+                    })
+                }
+            }
+            Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
         }
     }
 
