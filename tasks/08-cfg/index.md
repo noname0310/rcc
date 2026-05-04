@@ -34,7 +34,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [24-pre-codegen-contract-fixtures](24-pre-codegen-contract-fixtures.md)
 - [x] [25-global-object-lvalue-contract](25-global-object-lvalue-contract.md)
 - [x] [26-goto-ordinary-block-scope](26-goto-ordinary-block-scope.md)
-- [ ] [27-aggregate-rvalue-field-lowering](27-aggregate-rvalue-field-lowering.md)
+- [x] [27-aggregate-rvalue-field-lowering](27-aggregate-rvalue-field-lowering.md)
 
 ## Downstream
 

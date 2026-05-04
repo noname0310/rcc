@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 08-27: aggregate rvalue field lowering
 
 **Phase:** 08-cfg    **Depends on:** 07-21, 08-10    **Milestone:** M6+
@@ -27,6 +29,13 @@ Lower field extraction from aggregate rvalues without routing through
 - No `lower_as_place` panic for aggregate rvalue fields.
 - The first `00204` blocker is replaced by either pass or a more specific ABI
   failure.
+
+## Result
+- Implemented in commit `9a2766e` while completing the upstream 07-21 task,
+  because the fix required typeck category validation and CFG lowering together.
+- `struct S f(void); return f().x;` compiles and executes for scalar fields.
+- `c-testsuite::00204` now advances to the 09-codegen aggregate ABI blocker:
+  `unsupported direct ABI class`.
 
 ## References
 - `crates/rcc_cfg/src/lower.rs`
