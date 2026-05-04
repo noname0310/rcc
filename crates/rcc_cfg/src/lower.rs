@@ -6434,6 +6434,7 @@ mod tests {
             kind: rcc_hir::DefKind::Record {
                 kind: rcc_hir::RecordKind::Struct,
                 align_override: None,
+                scalar_storage_order: None,
                 layout: None,
                 fields: vec![
                     rcc_hir::Field {

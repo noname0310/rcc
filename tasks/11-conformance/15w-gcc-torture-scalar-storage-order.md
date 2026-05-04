@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented GNU scalar_storage_order bit-field storage for 20230630-2
+
 # 11-15w: gcc-torture scalar storage order attribute
 
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6

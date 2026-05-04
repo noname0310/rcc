@@ -23,7 +23,7 @@ use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
     HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl,
-    ObjectQuals, RecordKind, SwitchCase, TyCtxt, TyId, ValueCat,
+    ObjectQuals, RecordKind, ScalarStorageOrder, SwitchCase, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -747,12 +747,14 @@ fn create_incomplete_tag(
         TagKind::Struct => DefKind::Record {
             kind: RecordKind::Struct,
             align_override: None,
+            scalar_storage_order: None,
             layout: None,
             fields: Vec::new(),
         },
         TagKind::Union => DefKind::Record {
             kind: RecordKind::Union,
             align_override: None,
+            scalar_storage_order: None,
             layout: None,
             fields: Vec::new(),
         },
@@ -4947,6 +4949,7 @@ fn lower_type_from_parts_in_scope(
         return tcx.error;
     }
     apply_aligned_attr_override_to_record(base, &specs.attrs, tcx, crate_, session);
+    apply_scalar_storage_order_attr_to_record(base, &specs.attrs, tcx, crate_, session);
     let mut ty = apply_declarator_with_base_quals_in_scope(
         base,
         specs.quals,
@@ -4961,6 +4964,7 @@ fn lower_type_from_parts_in_scope(
     ty = apply_vector_size_attrs_to_type(ty, &specs.attrs, tcx, session);
     ty = apply_vector_size_attrs_to_type(ty, &declarator.attrs, tcx, session);
     apply_aligned_attr_override_to_record(ty, &declarator.attrs, tcx, crate_, session);
+    apply_scalar_storage_order_attr_to_record(ty, &declarator.attrs, tcx, crate_, session);
     ty
 }
 
@@ -5003,6 +5007,59 @@ fn aligned_attr_value(attr: &rcc_ast::Attribute, session: &Session) -> Option<u3
     };
     let align = u32::try_from(raw).ok()?;
     (align != 0 && align.is_power_of_two()).then_some(align)
+}
+
+fn apply_scalar_storage_order_attr_to_record(
+    ty: TyId,
+    attrs: &[rcc_ast::Attribute],
+    tcx: &TyCtxt,
+    crate_: &mut HirCrate,
+    session: &Session,
+) {
+    let Some(order) = scalar_storage_order_attr(attrs, session) else {
+        return;
+    };
+    let Ty::Record(def_id) = *tcx.get(ty) else {
+        return;
+    };
+    let DefKind::Record { scalar_storage_order, .. } = &mut crate_.defs[def_id].kind else {
+        return;
+    };
+    *scalar_storage_order = Some(order);
+}
+
+fn scalar_storage_order_attr(
+    attrs: &[rcc_ast::Attribute],
+    session: &Session,
+) -> Option<ScalarStorageOrder> {
+    attrs.iter().filter_map(|attr| scalar_storage_order_attr_value(attr, session)).next_back()
+}
+
+fn scalar_storage_order_attr_value(
+    attr: &rcc_ast::Attribute,
+    session: &Session,
+) -> Option<ScalarStorageOrder> {
+    let name = session.interner.get(attr.name);
+    if !matches!(
+        name,
+        "scalar_storage_order" | "__scalar_storage_order__" | "scalar_storage_order__"
+    ) {
+        return None;
+    }
+    let [arg] = attr.args.as_slice() else {
+        return None;
+    };
+    let [token] = arg.tokens.as_slice() else {
+        return None;
+    };
+    let rcc_ast::AttributeTokenKind::String(bytes) = &token.kind else {
+        return None;
+    };
+    match bytes.as_slice() {
+        b"little-endian" => Some(ScalarStorageOrder::LittleEndian),
+        b"big-endian" => Some(ScalarStorageOrder::BigEndian),
+        _ => None,
+    }
 }
 
 fn apply_vector_size_attrs_to_type(
@@ -5379,6 +5436,7 @@ fn lower_record_spec_to_ty(
             kind: DefKind::Record {
                 kind: hir_kind,
                 align_override: None,
+                scalar_storage_order: None,
                 layout: None,
                 fields: Vec::new(),
             },
@@ -6408,6 +6466,7 @@ pub fn lower_record(
         return DefKind::Record {
             kind,
             align_override: aligned_attr_override(&spec.attrs, session),
+            scalar_storage_order: scalar_storage_order_attr(&spec.attrs, session),
             layout: None,
             fields: Vec::new(),
         };
@@ -6502,6 +6561,7 @@ pub fn lower_record(
     DefKind::Record {
         kind,
         align_override: aligned_attr_override(&spec.attrs, session),
+        scalar_storage_order: scalar_storage_order_attr(&spec.attrs, session),
         layout: None,
         fields: out_fields,
     }
@@ -6863,7 +6923,9 @@ fn materialize_tag_definitions_in_specs(
     for ts in &specs.type_specs {
         match ts {
             TypeSpec::Record(spec) if spec.fields.is_some() => {
-                let _ = lower_record_spec_to_ty(spec, tcx, resolver, crate_, session);
+                let ty = lower_record_spec_to_ty(spec, tcx, resolver, crate_, session);
+                apply_aligned_attr_override_to_record(ty, &specs.attrs, tcx, crate_, session);
+                apply_scalar_storage_order_attr_to_record(ty, &specs.attrs, tcx, crate_, session);
             }
             TypeSpec::Enum(spec) if spec.enumerators.is_some() => {
                 let _ = lower_enum_spec_to_ty(spec, tcx, resolver, crate_, session);

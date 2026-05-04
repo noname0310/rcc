@@ -121,6 +121,8 @@ pub enum DefKind {
         kind: RecordKind,
         /// GNU `aligned(N)` override, when enabled by the frontend.
         align_override: Option<u32>,
+        /// GNU `scalar_storage_order("...")` record attribute, if present.
+        scalar_storage_order: Option<ScalarStorageOrder>,
         /// Resolved layout (filled after type checking).
         layout: Option<Layout>,
         /// Fields in declaration order.
@@ -152,6 +154,15 @@ pub enum RecordKind {
     Struct,
     /// `union`
     Union,
+}
+
+/// GNU scalar storage order requested for a record.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ScalarStorageOrder {
+    /// Least-significant byte first.
+    LittleEndian,
+    /// Most-significant byte first.
+    BigEndian,
 }
 
 /// One field of a struct/union.

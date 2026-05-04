@@ -4,9 +4,12 @@
 //! because CFG lowering needs `sizeof` answers before LLVM codegen runs.
 
 use rcc_data_structures::IndexVec;
-use rcc_target::{FloatLayoutKind, IntRankLayout, TargetInfo, TypeLayout};
+use rcc_target::{Endianness, FloatLayoutKind, IntRankLayout, TargetInfo, TypeLayout};
 
-use crate::{Def, DefId, DefKind, FloatKind, IntRank, Layout, RecordKind, Ty, TyCtxt, TyId};
+use crate::{
+    Def, DefId, DefKind, FloatKind, IntRank, Layout, RecordKind, ScalarStorageOrder, Ty, TyCtxt,
+    TyId,
+};
 
 /// Result type used by layout queries.
 pub type LayoutResult<T> = Result<T, LayoutError>;
@@ -36,6 +39,8 @@ pub struct FieldLayout {
     pub storage_size: u64,
     /// ABI alignment of the field storage in bytes.
     pub storage_align: u32,
+    /// GNU scalar storage order inherited from the enclosing record.
+    pub scalar_storage_order: Option<ScalarStorageOrder>,
 }
 
 /// Layout metadata for an array type.
@@ -254,7 +259,9 @@ impl<'tcx> LayoutCx<'tcx> {
             return Err(LayoutError::Unsupported { ty, feature: "recursive record by value" });
         }
         let def_data = defs.get(def).ok_or(LayoutError::MissingDefinition { def })?;
-        let DefKind::Record { kind, align_override, layout, fields } = &def_data.kind else {
+        let DefKind::Record { kind, align_override, scalar_storage_order, layout, fields } =
+            &def_data.kind
+        else {
             return Err(LayoutError::ExpectedRecord { def });
         };
         if let Some(layout) = layout {
@@ -268,6 +275,7 @@ impl<'tcx> LayoutCx<'tcx> {
                         bit_width: field.bit_width,
                         storage_size: 0,
                         storage_align: 1,
+                        scalar_storage_order: *scalar_storage_order,
                     })
                     .collect(),
             });
@@ -281,12 +289,20 @@ impl<'tcx> LayoutCx<'tcx> {
 
         record_stack.push(def);
         let result = match kind {
-            RecordKind::Struct => {
-                self.struct_layout_details(ty, fields, *align_override, record_stack)
-            }
-            RecordKind::Union => {
-                self.union_layout_details(ty, fields, *align_override, record_stack)
-            }
+            RecordKind::Struct => self.struct_layout_details(
+                ty,
+                fields,
+                *align_override,
+                *scalar_storage_order,
+                record_stack,
+            ),
+            RecordKind::Union => self.union_layout_details(
+                ty,
+                fields,
+                *align_override,
+                *scalar_storage_order,
+                record_stack,
+            ),
         };
         record_stack.pop();
         result
@@ -297,12 +313,14 @@ impl<'tcx> LayoutCx<'tcx> {
         ty: TyId,
         fields: &[crate::Field],
         align_override: Option<u32>,
+        scalar_storage_order: Option<ScalarStorageOrder>,
         record_stack: &mut Vec<DefId>,
     ) -> LayoutResult<RecordLayout> {
         let mut offset = 0_u64;
         let mut max_align = 1_u32;
         let mut layouts = Vec::with_capacity(fields.len());
         let mut bit_unit: Option<BitUnit> = None;
+        let msb_first = self.bitfields_are_msb_first(scalar_storage_order);
         for (idx, field) in fields.iter().enumerate() {
             if let Some(width) = field.bit_width {
                 let storage =
@@ -320,16 +338,17 @@ impl<'tcx> LayoutCx<'tcx> {
                         bit_width: Some(width),
                         storage_size: 0,
                         storage_align: storage.align,
+                        scalar_storage_order,
                     });
                     continue;
                 }
 
                 let needs_new_unit = bit_unit
+                    .as_ref()
                     .map(|unit| {
-                        unit.storage_size != storage.size
-                            || unit.storage_align != storage.align
-                            || u64::from(unit.used_bits) + u64::from(width)
-                                > u64::from(unit.storage_bits)
+                        !bit_unit_can_accept(unit, storage_bits, width)
+                            || (storage.align > unit.storage_align
+                                && unit.offset % u64::from(storage.align) != 0)
                     })
                     .unwrap_or(true);
                 if needs_new_unit {
@@ -342,19 +361,26 @@ impl<'tcx> LayoutCx<'tcx> {
                         storage_align: storage.align,
                         storage_bits,
                         used_bits: 0,
+                        fields: Vec::new(),
                     });
+                } else if let Some(unit) = &mut bit_unit {
+                    expand_bit_unit(unit, storage, storage_bits);
                 }
 
-                let mut unit = bit_unit.expect("bit-field unit exists after allocation");
+                let mut unit = bit_unit.take().expect("bit-field unit exists after allocation");
+                let layout_idx = layouts.len();
                 layouts.push(FieldLayout {
                     offset: unit.offset,
                     bit_offset: Some(unit.used_bits),
                     bit_width: Some(width),
                     storage_size: unit.storage_size,
                     storage_align: unit.storage_align,
+                    scalar_storage_order,
                 });
+                unit.fields.push(layout_idx);
                 unit.used_bits =
                     unit.used_bits.checked_add(width).ok_or(LayoutError::SizeOverflow { ty })?;
+                refresh_bit_unit_offsets(&mut layouts, &unit, msb_first);
                 if unit.used_bits == unit.storage_bits {
                     offset = finish_bit_unit(offset, Some(unit), ty)?;
                     bit_unit = None;
@@ -376,6 +402,7 @@ impl<'tcx> LayoutCx<'tcx> {
                 bit_width: None,
                 storage_size: field_layout.size,
                 storage_align: field_layout.align,
+                scalar_storage_order: None,
             });
             max_align = max_align.max(field_layout.align);
             if !flexible {
@@ -397,6 +424,7 @@ impl<'tcx> LayoutCx<'tcx> {
         ty: TyId,
         fields: &[crate::Field],
         align_override: Option<u32>,
+        scalar_storage_order: Option<ScalarStorageOrder>,
         record_stack: &mut Vec<DefId>,
     ) -> LayoutResult<RecordLayout> {
         let mut size = 0_u64;
@@ -407,14 +435,22 @@ impl<'tcx> LayoutCx<'tcx> {
                 self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
             let layout = apply_field_align(layout, field);
             let storage_size = if field.bit_width == Some(0) || flexible { 0 } else { layout.size };
+            let bit_offset = match field.bit_width {
+                Some(width) if width != 0 && self.bitfields_are_msb_first(scalar_storage_order) => {
+                    Some(storage_size_bits(layout, ty)? - width)
+                }
+                Some(_) => Some(0),
+                None => None,
+            };
             size = size.max(storage_size);
             max_align = max_align.max(layout.align);
             layouts.push(FieldLayout {
                 offset: 0,
-                bit_offset: field.bit_width.map(|_| 0),
+                bit_offset,
                 bit_width: field.bit_width,
                 storage_size,
                 storage_align: layout.align,
+                scalar_storage_order,
             });
         }
         if let Some(align) = align_override {
@@ -457,6 +493,14 @@ impl<'tcx> LayoutCx<'tcx> {
             _ => Ok(type_layout(self.target.int_layout(IntRankLayout::Int))),
         }
     }
+
+    fn bitfields_are_msb_first(&self, scalar_storage_order: Option<ScalarStorageOrder>) -> bool {
+        match scalar_storage_order {
+            Some(ScalarStorageOrder::BigEndian) => true,
+            Some(ScalarStorageOrder::LittleEndian) => false,
+            None => self.target.endianness == Endianness::Big,
+        }
+    }
 }
 
 fn type_layout(layout: TypeLayout) -> Layout {
@@ -493,13 +537,13 @@ fn float_layout_kind(kind: FloatKind) -> FloatLayoutKind {
     }
 }
 
-#[derive(Copy, Clone)]
 struct BitUnit {
     offset: u64,
     storage_size: u64,
     storage_align: u32,
     storage_bits: u32,
     used_bits: u32,
+    fields: Vec<usize>,
 }
 
 fn storage_size_bits(layout: Layout, ty: TyId) -> LayoutResult<u32> {
@@ -520,6 +564,35 @@ fn finish_bit_unit(offset: u64, bit_unit: Option<BitUnit>, ty: TyId) -> LayoutRe
     }
 }
 
+fn bit_unit_can_accept(unit: &BitUnit, storage_bits: u32, width: u32) -> bool {
+    let expanded_bits = unit.storage_bits.max(storage_bits);
+    u64::from(unit.used_bits) + u64::from(width) <= u64::from(expanded_bits)
+}
+
+fn expand_bit_unit(unit: &mut BitUnit, storage: Layout, storage_bits: u32) {
+    if storage.size > unit.storage_size {
+        unit.storage_size = storage.size;
+        unit.storage_bits = storage_bits;
+    }
+    if storage.align > unit.storage_align {
+        unit.storage_align = storage.align;
+    }
+}
+
+fn refresh_bit_unit_offsets(layouts: &mut [FieldLayout], unit: &BitUnit, msb_first: bool) {
+    let mut used = 0_u32;
+    for &idx in &unit.fields {
+        let width = layouts[idx].bit_width.expect("bit unit only tracks bit-fields");
+        layouts[idx].offset = unit.offset;
+        layouts[idx].storage_size = unit.storage_size;
+        layouts[idx].storage_align = unit.storage_align;
+        if msb_first {
+            layouts[idx].bit_offset = Some(unit.storage_bits - used - width);
+        }
+        used += width;
+    }
+}
+
 fn align_to(value: u64, align: u32) -> Option<u64> {
     let align = u64::from(align);
     if align <= 1 {
@@ -537,14 +610,45 @@ mod tests {
     use crate::{Field, RecordKind};
 
     fn record_def(defs: &mut IndexVec<DefId, Def>, kind: RecordKind, fields: Vec<Field>) -> DefId {
+        record_def_with_order(defs, kind, None, fields)
+    }
+
+    fn record_def_with_order(
+        defs: &mut IndexVec<DefId, Def>,
+        kind: RecordKind,
+        scalar_storage_order: Option<ScalarStorageOrder>,
+        fields: Vec<Field>,
+    ) -> DefId {
         let id = defs.push(Def {
             id: DefId(0),
             name: Symbol(1),
             span: DUMMY_SP,
-            kind: DefKind::Record { kind, align_override: None, layout: None, fields },
+            kind: DefKind::Record {
+                kind,
+                align_override: None,
+                scalar_storage_order,
+                layout: None,
+                fields,
+            },
         });
         defs[id].id = id;
         id
+    }
+
+    fn field(ty: TyId) -> Field {
+        Field {
+            name: None,
+            ty,
+            quals: crate::ObjectQuals::none(),
+            align_override: None,
+            offset: None,
+            bit_width: None,
+            span: DUMMY_SP,
+        }
+    }
+
+    fn bitfield(ty: TyId, width: u32) -> Field {
+        Field { bit_width: Some(width), ..field(ty) }
     }
 
     #[test]
@@ -686,6 +790,62 @@ mod tests {
         assert_eq!(record.fields[0].storage_align, 1);
         assert_eq!(record.fields[1].offset, 8);
         assert_eq!(record.fields[1].storage_align, 8);
+    }
+
+    #[test]
+    fn mixed_underlying_bitfields_share_expanded_storage_unit() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![
+                bitfield(tcx.short, 12),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+            ],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(rec_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 2, align: 2 });
+        assert_eq!(layout.fields[0].bit_offset, Some(0));
+        assert_eq!(layout.fields[1].bit_offset, Some(12));
+        assert!(layout.fields.iter().all(|field| field.offset == 0));
+        assert!(layout.fields.iter().all(|field| field.storage_size == 2));
+    }
+
+    #[test]
+    fn scalar_storage_order_big_endian_uses_msb_first_bit_offsets() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def_with_order(
+            &mut defs,
+            RecordKind::Struct,
+            Some(ScalarStorageOrder::BigEndian),
+            vec![
+                bitfield(tcx.short, 12),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+                bitfield(tcx.char_, 1),
+            ],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(rec_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 2, align: 2 });
+        assert_eq!(layout.fields[0].bit_offset, Some(4));
+        assert_eq!(layout.fields[1].bit_offset, Some(3));
+        assert_eq!(layout.fields[2].bit_offset, Some(2));
+        assert_eq!(layout.fields[3].bit_offset, Some(1));
+        assert_eq!(layout.fields[4].bit_offset, Some(0));
+        assert!(layout
+            .fields
+            .iter()
+            .all(|field| field.scalar_storage_order == Some(ScalarStorageOrder::BigEndian)));
     }
 
     #[test]

@@ -340,6 +340,40 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_scalar_storage_order_bitfield_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU scalar_storage_order e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_scalar_storage_order_bitfield",
+            r#"
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define REVERSE_SSO __attribute__((scalar_storage_order("big-endian")))
+#else
+#define REVERSE_SSO __attribute__((scalar_storage_order("little-endian")))
+#endif
+struct S {
+  short int i : 12;
+  char c1 : 1;
+  char c2 : 1;
+  char c3 : 1;
+  char c4 : 1;
+} REVERSE_SSO;
+int main(void) {
+  struct S s = { 341, 1, 1, 1, 1 };
+  unsigned char *p = (unsigned char *)&s;
+  return sizeof(s) == 2 && p[0] == 21 ? 0 : 1;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn gnu_vector_initializer_runtime_probe() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping GNU vector initializer e2e: LLVM backend feature is disabled");

@@ -1800,6 +1800,7 @@ fn init_record_per_field_assign() {
         kind: DefKind::Record {
             kind: RecordKind::Struct,
             align_override: None,
+            scalar_storage_order: None,
             layout: None,
             fields: vec![
                 rcc_hir::Field {
@@ -1969,6 +1970,7 @@ fn expr_member_access_preserves_requested_field_name() {
         kind: DefKind::Record {
             kind: RecordKind::Struct,
             align_override: None,
+            scalar_storage_order: None,
             layout: None,
             fields: vec![rcc_hir::Field {
                 name: Some(a),

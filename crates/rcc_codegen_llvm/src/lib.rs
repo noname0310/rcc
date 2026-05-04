@@ -981,9 +981,10 @@ pub mod backend {
     };
     use rcc_hir::{
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, ObjectQuals, Qual, RecordKind,
-        Ty,
+        ScalarStorageOrder, Ty,
     };
     use rcc_span::{FileId, Span, Symbol};
+    use rcc_target::Endianness;
 
     struct CheckedOverflowArgs<'a> {
         op: BinOp,
@@ -1024,6 +1025,7 @@ pub mod backend {
         bit_offset: u32,
         bit_width: u32,
         storage_bits: u32,
+        scalar_storage_order: Option<ScalarStorageOrder>,
         volatile: bool,
     }
 
@@ -2559,6 +2561,7 @@ pub mod backend {
                 bit_offset,
                 bit_width,
                 storage_bits,
+                scalar_storage_order: field.layout.scalar_storage_order,
                 volatile,
             }))
         }
@@ -2580,12 +2583,14 @@ pub mod backend {
                     access.volatile,
                 )?
                 .into_int_value();
+            let logical_storage =
+                self.apply_scalar_storage_order_load(storage, access.scalar_storage_order)?;
             let shifted = if access.bit_offset == 0 {
-                storage
+                logical_storage
             } else {
                 let amount = access.storage_ty.const_int(u64::from(access.bit_offset), false);
                 self.builder
-                    .build_right_shift(storage, amount, false, "bf.lshr")
+                    .build_right_shift(logical_storage, amount, false, "bf.lshr")
                     .map_err(builder_error)?
             };
             let mask = access.storage_ty.const_int(bit_mask(access.bit_width)?, false);
@@ -2646,21 +2651,86 @@ pub mod backend {
                     access.volatile,
                 )?
                 .into_int_value();
+            let logical_storage =
+                self.apply_scalar_storage_order_load(storage, access.scalar_storage_order)?;
             let field_mask = width_mask.checked_shl(access.bit_offset).ok_or_else(|| {
                 CodegenError::Internal("bit-field mask shift overflowed".to_owned())
             })?;
             let storage_mask = bit_mask(access.storage_bits)?;
             let clear_mask = access.storage_ty.const_int(storage_mask & !field_mask, false);
-            let kept =
-                self.builder.build_and(storage, clear_mask, "bf.keep").map_err(builder_error)?;
+            let kept = self
+                .builder
+                .build_and(logical_storage, clear_mask, "bf.keep")
+                .map_err(builder_error)?;
             let merged =
                 self.builder.build_or(kept, shifted_value, "bf.merge").map_err(builder_error)?;
+            let stored =
+                self.apply_scalar_storage_order_store(merged, access.scalar_storage_order)?;
             self.emit_memory_store(
                 access.storage_addr,
-                merged.as_basic_value_enum(),
+                stored.as_basic_value_enum(),
                 access.volatile,
             )?;
             Ok(true)
+        }
+
+        fn apply_scalar_storage_order_load(
+            &self,
+            storage: IntValue<'ctx>,
+            order: Option<ScalarStorageOrder>,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            if self.scalar_storage_order_needs_byteswap(order) {
+                self.emit_bswap(storage, "sso.load")
+            } else {
+                Ok(storage)
+            }
+        }
+
+        fn apply_scalar_storage_order_store(
+            &self,
+            storage: IntValue<'ctx>,
+            order: Option<ScalarStorageOrder>,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            if self.scalar_storage_order_needs_byteswap(order) {
+                self.emit_bswap(storage, "sso.store")
+            } else {
+                Ok(storage)
+            }
+        }
+
+        fn scalar_storage_order_needs_byteswap(&self, order: Option<ScalarStorageOrder>) -> bool {
+            matches!(
+                (order, self.target_info.endianness),
+                (Some(ScalarStorageOrder::BigEndian), Endianness::Little)
+                    | (Some(ScalarStorageOrder::LittleEndian), Endianness::Big)
+            )
+        }
+
+        fn emit_bswap(
+            &self,
+            value: IntValue<'ctx>,
+            name: &str,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            let int_ty = value.get_type();
+            let bits = int_ty.get_bit_width();
+            if bits == 8 {
+                return Ok(value);
+            }
+            if !matches!(bits, 16 | 32 | 64) {
+                return Err(CodegenError::Internal(format!(
+                    "unsupported {bits}-bit scalar_storage_order bit-field storage"
+                )));
+            }
+            let intrinsic_name = format!("llvm.bswap.i{bits}");
+            let intrinsic = self.module.get_function(&intrinsic_name).unwrap_or_else(|| {
+                let fn_ty = int_ty.fn_type(&[int_ty.into()], false);
+                self.module.add_function(&intrinsic_name, fn_ty, None)
+            });
+            let call =
+                self.builder.build_call(intrinsic, &[value.into()], name).map_err(builder_error)?;
+            call.try_as_basic_value().left().map(BasicValueEnum::into_int_value).ok_or_else(|| {
+                CodegenError::Internal("llvm.bswap did not return a value".to_owned())
+            })
         }
 
         fn cast_int_value(
@@ -6138,6 +6208,35 @@ pub mod backend {
         }
     }
 
+    fn scalar_storage_order_needs_byteswap(
+        order: Option<ScalarStorageOrder>,
+        target: Endianness,
+    ) -> bool {
+        matches!(
+            (order, target),
+            (Some(ScalarStorageOrder::BigEndian), Endianness::Little)
+                | (Some(ScalarStorageOrder::LittleEndian), Endianness::Big)
+        )
+    }
+
+    fn byteswap_packed_bits(value: u64, bits: u32) -> Result<u64, CodegenError> {
+        if bits == 8 {
+            return Ok(value);
+        }
+        if !matches!(bits, 16 | 32 | 64) {
+            return Err(CodegenError::Internal(format!(
+                "unsupported {bits}-bit scalar_storage_order constant"
+            )));
+        }
+        let bytes = bits / 8;
+        let mut out = 0_u64;
+        for idx in 0..bytes {
+            let byte = (value >> (idx * 8)) & 0xff;
+            out |= byte << ((bytes - 1 - idx) * 8);
+        }
+        Ok(out)
+    }
+
     fn builder_error(error: impl std::fmt::Display) -> CodegenError {
         CodegenError::Internal(format!("LLVM builder failed: {error}"))
     }
@@ -6920,6 +7019,20 @@ pub mod backend {
                 })?;
                 packed |= shifted;
             }
+            if scalar_storage_order_needs_byteswap(
+                record_layout
+                    .fields
+                    .iter()
+                    .find(|layout| {
+                        layout.bit_width.is_some()
+                            && layout.offset == unit_offset
+                            && layout.storage_size == unit_size
+                    })
+                    .and_then(|layout| layout.scalar_storage_order),
+                self.target_info.endianness,
+            ) {
+                packed = byteswap_packed_bits(packed, storage_bits)?;
+            }
             Ok(self.context.custom_width_int_type(storage_bits).const_int(packed, false))
         }
 
@@ -7462,6 +7575,7 @@ mod tests {
             kind: rcc_hir::DefKind::Record {
                 kind: RecordKind::Struct,
                 align_override: None,
+                scalar_storage_order: None,
                 layout: None,
                 fields: vec![
                     Field {
@@ -7581,7 +7695,13 @@ mod tests {
             id: DefId(0),
             name: Symbol(3),
             span: DUMMY_SP,
-            kind: DefKind::Record { kind, align_override: None, layout: None, fields },
+            kind: DefKind::Record {
+                kind,
+                align_override: None,
+                scalar_storage_order: None,
+                layout: None,
+                fields,
+            },
         });
         defs[id].id = id;
         id
@@ -7597,7 +7717,13 @@ mod tests {
             id: DefId(0),
             name: Symbol(4),
             span: DUMMY_SP,
-            kind: DefKind::Record { kind, align_override: Some(align), layout: None, fields },
+            kind: DefKind::Record {
+                kind,
+                align_override: Some(align),
+                scalar_storage_order: None,
+                layout: None,
+                fields,
+            },
         });
         defs[id].id = id;
         id

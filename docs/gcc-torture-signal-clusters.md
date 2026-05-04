@@ -10,7 +10,7 @@ Resweep report after `11-15i` and `11-15j`:
 The 15e full gcc-torture run had 61 cases whose reason was
 `non-zero exit code: killed by signal`. After the aligned-record,
 bit-field/aggregate, GNU vector, GNU builtin-libcall, GNU inline-asm,
-instrumentation, and GNU89 K&R lowering work, 34 of those now pass and 27
+instrumentation, GNU89 K&R lowering, and scalar-storage-order work, 35 of those now pass and 26
 remain failing.
 
 Already fixed by follow-up work:
@@ -51,6 +51,7 @@ Already fixed by follow-up work:
 | `eeprof-1` | `11-15u`, `-finstrument-functions` hooks and `no_instrument_function` |
 | `920428-1` | `11-15v`, compatibility policy confirms the already-passing implicit-int case |
 | `931018-1` | `11-15v`, K&R parameter declaration types now drive the function ABI/body local |
+| `20230630-2` | `11-15w`, GNU `scalar_storage_order` bit-field storage order and mixed-type coalescing |
 
 ## Remaining Clusters
 
@@ -63,7 +64,6 @@ Already fixed by follow-up work:
 | Varargs and `va_list` runtime behavior | `pr64979`, `va-arg-21`, `va-arg-5`, `va-arg-6` | Remaining SysV `va_list` materialization and pointer-to-`va_list` cases. | `11-15p` |
 | Aggregate, pointer, and byte-layout runtime bugs | `pr37573`, `pr49390`, `pr65401` | Large aggregate copies, char-byte views of objects, and aggregate ABI/pointer alias interactions still need smaller reductions. | `11-15q` |
 | GNU field attributes and record member alignment | `pr23467` | Field-level `__attribute__((aligned(N)))` should raise member offset/alignment; `11-15i` only handled record-level alignment. | `11-15r` |
-| GNU scalar storage order attribute | `20230630-2` | `scalar_storage_order` changes bit-field byte order; this is a target-specific GNU attribute and not C99. | `11-15w` |
 
 ## Reduced Fixtures Checked During Triage
 
