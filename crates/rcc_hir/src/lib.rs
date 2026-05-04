@@ -545,6 +545,41 @@ pub enum HirExprKind {
         /// Source va_list.
         src: HirExprId,
     },
+    /// `__builtin_add_overflow(a, b, out)` / `__builtin_mul_overflow`.
+    BuiltinOverflow {
+        /// Checked arithmetic operation.
+        op: OverflowOp,
+        /// Left operand.
+        lhs: HirExprId,
+        /// Right operand.
+        rhs: HirExprId,
+        /// Pointer to the destination object receiving the wrapped result.
+        dst: HirExprId,
+        /// Integer type pointed to by `dst`.
+        result_ty: TyId,
+    },
+    /// `__builtin_add_overflow_p(a, b, probe)` / `__builtin_mul_overflow_p`.
+    BuiltinOverflowP {
+        /// Checked arithmetic operation.
+        op: OverflowOp,
+        /// Left operand.
+        lhs: HirExprId,
+        /// Right operand.
+        rhs: HirExprId,
+        /// Unevaluated/type-probe expression that determines the result type.
+        probe: HirExprId,
+        /// Integer result type selected from `probe`.
+        result_ty: TyId,
+    },
+}
+
+/// Arithmetic operation used by GCC checked-overflow builtins.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum OverflowOp {
+    /// Addition.
+    Add,
+    /// Multiplication.
+    Mul,
 }
 
 /// Integer-literal base spelling preserved for C99 §6.4.4.1 type selection.

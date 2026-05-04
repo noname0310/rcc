@@ -853,6 +853,32 @@ fn checked_u32(count: usize, stride: u32, context: &str) -> Result<u32, CodegenE
 }
 
 #[cfg(feature = "llvm")]
+fn checked_overflow_calc_width(
+    op: rcc_cfg::BinOp,
+    lhs_width: u32,
+    rhs_width: u32,
+    result_width: u32,
+) -> Result<u32, CodegenError> {
+    let arithmetic_width = match op {
+        rcc_cfg::BinOp::Add => lhs_width.max(rhs_width).checked_add(2),
+        rcc_cfg::BinOp::Mul => {
+            lhs_width.checked_add(rhs_width).and_then(|width| width.checked_add(1))
+        }
+        _ => {
+            return Err(CodegenError::Internal(format!(
+                "checked overflow only supports add/mul, got {op:?}"
+            )));
+        }
+    }
+    .ok_or_else(|| {
+        CodegenError::Internal("checked overflow integer width overflowed".to_owned())
+    })?;
+    result_width.checked_add(1).map(|width| arithmetic_width.max(width).max(2)).ok_or_else(|| {
+        CodegenError::Internal("checked overflow result width overflowed".to_owned())
+    })
+}
+
+#[cfg(feature = "llvm")]
 fn round_up_to(value: u64, align: u64) -> Option<u64> {
     if align <= 1 {
         return Some(value);
@@ -911,6 +937,14 @@ pub mod backend {
         Ty,
     };
     use rcc_span::{FileId, Span, Symbol};
+
+    struct CheckedOverflowArgs<'a> {
+        op: BinOp,
+        lhs: &'a Operand,
+        rhs: &'a Operand,
+        dst: Option<&'a Operand>,
+        ty: TyId,
+    }
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -1433,13 +1467,14 @@ pub mod backend {
                     let count = if *is_vla { 0 } else { len.unwrap_or(0) };
                     let size = elem_layout.size.saturating_mul(count).saturating_mul(8);
                     let range_end = i64::try_from(count).unwrap_or(i64::MAX);
+                    let ranges = std::iter::once(0..range_end).collect::<Vec<_>>();
                     debug
                         .builder
                         .create_array_type(
                             elem_ty,
                             size,
                             elem_layout.align.saturating_mul(8),
-                            &[0..range_end],
+                            &ranges,
                         )
                         .as_type()
                 }
@@ -2780,7 +2815,98 @@ pub mod backend {
                     self.builder.build_load(len_llvm_ty, len_ptr, "len").map_err(builder_error)
                 }
                 Rvalue::BuiltinVaArg { ap, ty } => self.emit_va_arg(ap, *ty, locals, body),
+                Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => self.emit_checked_overflow(
+                    CheckedOverflowArgs { op: *op, lhs, rhs, dst: dst.as_ref(), ty: *ty },
+                    locals,
+                    body,
+                ),
             }
+        }
+
+        fn emit_checked_overflow(
+            &self,
+            args: CheckedOverflowArgs<'_>,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let BasicValueEnum::IntValue(lhs_value) =
+                self.emit_operand_value(args.lhs, locals, body)?
+            else {
+                return Err(CodegenError::Internal(
+                    "checked overflow lhs must be an integer".to_owned(),
+                ));
+            };
+            let BasicValueEnum::IntValue(rhs_value) =
+                self.emit_operand_value(args.rhs, locals, body)?
+            else {
+                return Err(CodegenError::Internal(
+                    "checked overflow rhs must be an integer".to_owned(),
+                ));
+            };
+            let BasicTypeEnum::IntType(result_ty) = self.type_cx().basic_type_of(args.ty)? else {
+                return Err(type_lowering_error(args.ty, "checked overflow result is not integer"));
+            };
+
+            let lhs_ty = self.operand_ty(args.lhs, body)?;
+            let rhs_ty = self.operand_ty(args.rhs, body)?;
+            let lhs_signed = self.is_signed_integer_ty(lhs_ty)?;
+            let rhs_signed = self.is_signed_integer_ty(rhs_ty)?;
+            let result_signed = self.is_signed_integer_ty(args.ty)?;
+            let calc_width = checked_overflow_calc_width(
+                args.op,
+                lhs_value.get_type().get_bit_width(),
+                rhs_value.get_type().get_bit_width(),
+                result_ty.get_bit_width(),
+            )?;
+            let calc_ty = self.context.custom_width_int_type(calc_width);
+            let lhs_wide =
+                self.cast_int_value(lhs_value, calc_ty, lhs_signed, "overflow.lhs.ext")?;
+            let rhs_wide =
+                self.cast_int_value(rhs_value, calc_ty, rhs_signed, "overflow.rhs.ext")?;
+            let computed = match args.op {
+                BinOp::Add => self
+                    .builder
+                    .build_int_add(lhs_wide, rhs_wide, "overflow.add")
+                    .map_err(builder_error)?,
+                BinOp::Mul => self
+                    .builder
+                    .build_int_mul(lhs_wide, rhs_wide, "overflow.mul")
+                    .map_err(builder_error)?,
+                _ => {
+                    return Err(CodegenError::Internal(format!(
+                        "checked overflow only supports add/mul, got {:?}",
+                        args.op
+                    )));
+                }
+            };
+            let wrapped =
+                self.cast_int_value(computed, result_ty, result_signed, "overflow.wrap")?;
+            let roundtrip =
+                self.cast_int_value(wrapped, calc_ty, result_signed, "overflow.roundtrip")?;
+            let overflow = self
+                .builder
+                .build_int_compare(IntPredicate::NE, computed, roundtrip, "overflow.flag")
+                .map_err(builder_error)?;
+
+            if let Some(dst) = args.dst {
+                let BasicValueEnum::PointerValue(dst_ptr) =
+                    self.emit_operand_value(dst, locals, body)?
+                else {
+                    return Err(CodegenError::Internal(
+                        "checked overflow destination must be a pointer".to_owned(),
+                    ));
+                };
+                self.emit_memory_store(dst_ptr, wrapped.as_basic_value_enum(), false)?;
+            }
+
+            let BasicTypeEnum::IntType(c_int_ty) = self.type_cx().basic_type_of(self.tcx.int)?
+            else {
+                return Err(type_lowering_error(self.tcx.int, "int is not an integer"));
+            };
+            self.builder
+                .build_int_z_extend(overflow, c_int_ty, "overflow.to.int")
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)
         }
 
         fn emit_va_arg(

@@ -681,6 +681,11 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
                 || operand_contains_field_projection(rhs, expected)
         }
         Rvalue::BuiltinVaArg { ap, .. } => operand_contains_field_projection(ap, expected),
+        Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
+            operand_contains_field_projection(lhs, expected)
+                || operand_contains_field_projection(rhs, expected)
+                || dst.as_ref().is_some_and(|dst| operand_contains_field_projection(dst, expected))
+        }
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             place_contains_field_projection(place, expected)
         }
@@ -715,6 +720,11 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
         Rvalue::BuiltinVaArg { ap, .. } => operand_contains_int_const(ap, expected),
+        Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
+            operand_contains_int_const(lhs, expected)
+                || operand_contains_int_const(rhs, expected)
+                || dst.as_ref().is_some_and(|dst| operand_contains_int_const(dst, expected))
+        }
         Rvalue::AddressOf(_)
         | Rvalue::Len(_)
         | Rvalue::LoadGlobal { .. }
@@ -923,6 +933,13 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         }
         Rvalue::BuiltinVaArg { ap, .. } => {
             assert_operand_valid(name, def, body, ap);
+        }
+        Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
+            assert_operand_valid(name, def, body, lhs);
+            assert_operand_valid(name, def, body, rhs);
+            if let Some(dst) = dst {
+                assert_operand_valid(name, def, body, dst);
+            }
         }
         Rvalue::AddressOf(place) | Rvalue::Len(place) => {
             assert_place_valid(name, def, body, place);

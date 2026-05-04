@@ -18,6 +18,7 @@ use rcc_ast::{
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
+use rcc_hir::OverflowOp;
 use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
@@ -1186,6 +1187,16 @@ fn populate_switch_case_tables_in_expr(
         | HirExprKind::BuiltinVaCopy { dst: ap, src: last_param } => {
             populate_switch_case_tables_in_expr(body, ap, switch_depth, session);
             populate_switch_case_tables_in_expr(body, last_param, switch_depth, session);
+        }
+        HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
+            populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, dst, switch_depth, session);
+        }
+        HirExprKind::BuiltinOverflowP { lhs, rhs, probe, .. } => {
+            populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, probe, switch_depth, session);
         }
         HirExprKind::IntLiteral { .. }
         | HirExprKind::IntConst(_)
@@ -3413,6 +3424,97 @@ pub fn lower_expr(
                             return id;
                         }
                         return lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                    }
+                    "__builtin_add_overflow" | "__builtin_mul_overflow"
+                        if session.opts.gnu_builtin_libcalls =>
+                    {
+                        let op = if name == "__builtin_add_overflow" {
+                            OverflowOp::Add
+                        } else {
+                            OverflowOp::Mul
+                        };
+                        if args.len() != 3 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    format!("{name} requires exactly 3 arguments"),
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let lhs = lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let rhs = lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let dst = lower_expr(&args[2], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.int,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinOverflow {
+                                op,
+                                lhs,
+                                rhs,
+                                dst,
+                                result_ty: tcx.error,
+                            },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_add_overflow_p" | "__builtin_mul_overflow_p"
+                        if session.opts.gnu_builtin_libcalls =>
+                    {
+                        let op = if name == "__builtin_add_overflow_p" {
+                            OverflowOp::Add
+                        } else {
+                            OverflowOp::Mul
+                        };
+                        if args.len() != 3 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    format!("{name} requires exactly 3 arguments"),
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let lhs = lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let rhs = lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let probe =
+                            lower_expr(&args[2], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.int,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinOverflowP {
+                                op,
+                                lhs,
+                                rhs,
+                                probe,
+                                result_ty: tcx.error,
+                            },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
                     }
                     _ => {}
                 }

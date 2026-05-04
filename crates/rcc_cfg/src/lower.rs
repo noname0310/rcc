@@ -24,7 +24,7 @@ use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_hir::{
     rcc_hir_binop::{BinOp as HirBinOp, UnOp as HirUnOp},
     Body as HirBody, ConvertKind, Def, DefId, FloatKind, HirExprId, HirExprKind, HirStmtId,
-    HirStmtKind, IntRank, LayoutCx, Local as HirLocal, Ty, TyCtxt, TyId, ValueCat,
+    HirStmtKind, IntRank, LayoutCx, Local as HirLocal, OverflowOp, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_span::Span;
 
@@ -443,6 +443,44 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             builder.switch_to(successor);
             Operand::Const(Const { kind: ConstKind::Int(0), ty })
         }
+        HirExprKind::BuiltinOverflow { op, lhs, rhs, dst, result_ty } => {
+            let lhs_op = lower_as_rvalue(builder, cx, *lhs);
+            let rhs_op = lower_as_rvalue(builder, cx, *rhs);
+            let dst_op = lower_as_rvalue(builder, cx, *dst);
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(
+                builder,
+                span,
+                temp,
+                Rvalue::CheckedOverflow {
+                    op: checked_overflow_op(*op),
+                    lhs: lhs_op,
+                    rhs: rhs_op,
+                    dst: Some(dst_op),
+                    ty: *result_ty,
+                },
+            );
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
+        HirExprKind::BuiltinOverflowP { op, lhs, rhs, probe, result_ty } => {
+            let lhs_op = lower_as_rvalue(builder, cx, *lhs);
+            let rhs_op = lower_as_rvalue(builder, cx, *rhs);
+            let _probe_op = lower_as_rvalue(builder, cx, *probe);
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(
+                builder,
+                span,
+                temp,
+                Rvalue::CheckedOverflow {
+                    op: checked_overflow_op(*op),
+                    lhs: lhs_op,
+                    rhs: rhs_op,
+                    dst: None,
+                    ty: *result_ty,
+                },
+            );
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
     }
 }
 
@@ -457,6 +495,13 @@ fn lower_field_as_rvalue(
     let mut place = operand_to_place(builder, cx, base_op, span);
     place.projection.push(Projection::Field(field_index));
     Operand::Copy(place)
+}
+
+fn checked_overflow_op(op: OverflowOp) -> BinOp {
+    match op {
+        OverflowOp::Add => BinOp::Add,
+        OverflowOp::Mul => BinOp::Mul,
+    }
 }
 
 /// Lower a HIR expression in *lvalue* position. Returns the [`Place`]

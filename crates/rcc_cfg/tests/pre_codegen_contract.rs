@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rcc_cfg::{
     build_bodies,
     verify::{verify_body_with_hir, CfgErrorKind},
-    Body, ConstKind, Operand, Projection, Rvalue, StatementKind,
+    BinOp, Body, ConstKind, Operand, Projection, Rvalue, StatementKind,
 };
 use rcc_errors::{CaptureEmitter, Diagnostic, Handler};
 use rcc_hir::{DefId, DefKind, GlobalInitValue, HirCrate, Local, ObjectQuals, Ty, TyCtxt};
@@ -28,9 +28,13 @@ struct Lowered {
 }
 
 fn check_snippet(name: &str, src: &str) -> Checked {
+    check_snippet_with_options(name, src, Options::default())
+}
+
+fn check_snippet_with_options(name: &str, src: &str, opts: Options) -> Checked {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut session = Session::with_handler(Options::default(), handler);
+    let mut session = Session::with_handler(opts, handler);
     let file = session
         .source_map
         .write()
@@ -47,7 +51,11 @@ fn check_snippet(name: &str, src: &str) -> Checked {
 }
 
 fn lower_checked(name: &str, src: &str) -> Lowered {
-    let mut checked = check_snippet(name, src);
+    lower_checked_with_options(name, src, Options::default())
+}
+
+fn lower_checked_with_options(name: &str, src: &str, opts: Options) -> Lowered {
+    let mut checked = check_snippet_with_options(name, src, opts);
     assert!(
         !checked.session.handler.has_errors(),
         "{name}: unexpected diagnostics: {:?}",
@@ -66,6 +74,40 @@ fn lower_checked(name: &str, src: &str) -> Lowered {
         checked.cap.diagnostics()
     );
     Lowered { tcx: checked.tcx, hir: checked.hir, bodies }
+}
+
+#[test]
+fn overflow_builtins_reach_cfg_as_checked_overflow_rvalues() {
+    let src = r#"
+        int f(unsigned a, int b) {
+            int out;
+            return __builtin_add_overflow(a, b, &out)
+                + __builtin_mul_overflow_p(a, b, 0);
+        }
+    "#;
+    let opts = Options { gnu_builtin_libcalls: true, ..Options::default() };
+    let lowered = lower_checked_with_options("overflow-builtins", src, opts);
+    let body = &lowered.bodies[0].1;
+    let mut saw_add_store = false;
+    let mut saw_mul_predicate = false;
+    for block in body.blocks.iter() {
+        for stmt in &block.statements {
+            let StatementKind::Assign { rvalue, .. } = &stmt.kind else { continue };
+            match rvalue {
+                Rvalue::CheckedOverflow { op: BinOp::Add, dst: Some(_), ty, .. } => {
+                    assert_eq!(*ty, lowered.tcx.int);
+                    saw_add_store = true;
+                }
+                Rvalue::CheckedOverflow { op: BinOp::Mul, dst: None, ty, .. } => {
+                    assert_eq!(*ty, lowered.tcx.int);
+                    saw_mul_predicate = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_add_store, "expected add overflow with result pointer store");
+    assert!(saw_mul_predicate, "expected mul overflow predicate without result pointer");
 }
 
 fn expect_errors(name: &str, src: &str, expected_codes: &[&'static str]) -> Vec<Diagnostic> {

@@ -1,5 +1,7 @@
 # 11-15g: gcc-torture overflow builtin semantics
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15b    **Milestone:** M6
 
 ## Goal
@@ -32,3 +34,15 @@ reducing them to undeclared-name compatibility aliases.
 
 ## References
 - `target/wsl/gcc-torture-full-15f-final.json`
+
+## Result
+- Added dedicated HIR/CFG nodes for GCC checked-overflow builtins instead of
+  treating them as ordinary undeclared calls.
+- Type checking validates integer operands and result-pointer/probe result
+  types while preserving the original signed/unsigned operand types.
+- LLVM lowering evaluates in a widened integer type, stores the wrapped result
+  for the pointer form, and returns the round-trip mismatch as `int`.
+- WSL probes passed:
+  `pr64006`, `pr68381`, `pr71554`, `pr85095`, `pr105984`.
+- Full WSL gcc-torture result:
+  1176 pass / 474 fail / 0 xfail / 0 skip.

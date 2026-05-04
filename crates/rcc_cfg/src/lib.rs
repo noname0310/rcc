@@ -289,6 +289,19 @@ pub enum Rvalue {
         /// Type of the value to extract.
         ty: TyId,
     },
+    /// GCC checked arithmetic builtin.
+    CheckedOverflow {
+        /// Checked operation. Only `Add` and `Mul` are valid here.
+        op: BinOp,
+        /// Left integer operand.
+        lhs: Operand,
+        /// Right integer operand.
+        rhs: Operand,
+        /// Optional destination pointer for the wrapped result.
+        dst: Option<Operand>,
+        /// Integer result type used for wrap/store/compare semantics.
+        ty: TyId,
+    },
     /// chibicc/GNU `__va_area__` — pointer to current function's varargs save area.
     BuiltinVaArea,
 }

@@ -120,6 +120,16 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::BuiltinVaArg { ap, ty } => {
             format!("va_arg({}, {})", fmt_operand(ap), fmt_ty(tcx, *ty))
         }
+        Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => {
+            let dst = dst.as_ref().map(fmt_operand).unwrap_or_else(|| "_".to_owned());
+            format!(
+                "CheckedOverflow::{op:?}({}, {}, {}, {})",
+                fmt_operand(lhs),
+                fmt_operand(rhs),
+                dst,
+                fmt_ty(tcx, *ty)
+            )
+        }
         Rvalue::BuiltinVaArea => "__va_area__".to_owned(),
     }
 }

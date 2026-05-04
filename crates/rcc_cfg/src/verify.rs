@@ -66,6 +66,10 @@ pub enum CfgErrorKind {
     InvalidGlobalAddressType { def: DefId, ty: TyId },
     /// A global-object load referenced a non-object definition or mismatched type.
     InvalidGlobalObjectLoad { def: DefId, ty: TyId },
+    /// A checked-overflow rvalue used an operation other than add/mul.
+    InvalidCheckedOverflowOp { op: crate::BinOp },
+    /// A checked-overflow rvalue received a non-integer operand/result type.
+    NonIntegerOverflowType { ty: TyId },
 }
 
 /// Verifier projection category.
@@ -309,6 +313,42 @@ fn verify_rvalue_typed(
             let _ = verify_operand_typed(body, tcx, hir, ap, at, errors);
             Some(InferredTy::Known(*ty))
         }
+        Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => {
+            if !matches!(op, crate::BinOp::Add | crate::BinOp::Mul) {
+                errors.push(CfgError {
+                    at: at.clone(),
+                    kind: CfgErrorKind::InvalidCheckedOverflowOp { op: *op },
+                });
+            }
+            let lhs_ty = verify_operand_typed(body, tcx, hir, lhs, at.clone(), errors);
+            let rhs_ty = verify_operand_typed(body, tcx, hir, rhs, at.clone(), errors);
+            if !is_integer_ty(tcx, *ty) {
+                errors.push(CfgError {
+                    at: at.clone(),
+                    kind: CfgErrorKind::NonIntegerOverflowType { ty: *ty },
+                });
+            }
+            if let Some(lhs_ty) = lhs_ty {
+                verify_integer_operand(tcx, lhs_ty, at.clone(), errors);
+            }
+            if let Some(rhs_ty) = rhs_ty {
+                verify_integer_operand(tcx, rhs_ty, at.clone(), errors);
+            }
+            if let Some(dst) = dst {
+                let Some(dst_ty) = verify_operand_typed(body, tcx, hir, dst, at.clone(), errors)
+                else {
+                    return Some(InferredTy::Known(tcx.int));
+                };
+                match tcx.get(dst_ty) {
+                    Ty::Ptr(q) if q.ty == *ty => {}
+                    _ => errors.push(CfgError {
+                        at: at.clone(),
+                        kind: CfgErrorKind::TypeMismatch { expected: *ty, actual: dst_ty },
+                    }),
+                }
+            }
+            Some(InferredTy::Known(tcx.int))
+        }
         Rvalue::BuiltinVaArea => Some(InferredTy::VoidPtr),
     }
 }
@@ -335,6 +375,16 @@ fn verify_operand_typed(
             Some(c.ty)
         }
     }
+}
+
+fn verify_integer_operand(tcx: &TyCtxt, ty: TyId, at: CfgLocation, errors: &mut Vec<CfgError>) {
+    if !is_integer_ty(tcx, ty) {
+        errors.push(CfgError { at, kind: CfgErrorKind::NonIntegerOverflowType { ty } });
+    }
+}
+
+fn is_integer_ty(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Enum(_))
 }
 
 fn verify_global_address_type(

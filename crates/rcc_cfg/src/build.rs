@@ -979,6 +979,16 @@ impl BodyBuilder {
                 self.collect_expr_labels(hir_body, *dst, local_map, scopes);
                 self.collect_expr_labels(hir_body, *src, local_map, scopes);
             }
+            HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
+                self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *rhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *dst, local_map, scopes);
+            }
+            HirExprKind::BuiltinOverflowP { lhs, rhs, probe, .. } => {
+                self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *rhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *probe, local_map, scopes);
+            }
             HirExprKind::IntLiteral { .. }
             | HirExprKind::IntConst(_)
             | HirExprKind::FloatConst(_)

@@ -816,7 +816,81 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::BuiltinVaCopy { dst: dst2, src: src2 };
             expr_id
         }
+        HirExprKind::BuiltinOverflow { op, lhs, rhs, dst, .. } => {
+            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+            let dst2 = visit_expr(dst, body, tcx, session, def_info);
+            let lhs2 = check_overflow_operand(lhs2, body, tcx, session);
+            let rhs2 = check_overflow_operand(rhs2, body, tcx, session);
+            let dst2 = rvalue_decayed(dst2, body, tcx);
+            let result_ty = match *tcx.get(body.exprs[dst2].ty) {
+                Ty::Ptr(q) if is_integer(tcx, q.ty) => q.ty,
+                _ => {
+                    session
+                        .handler
+                        .struct_err(
+                            body.exprs[dst2].span,
+                            "overflow builtin result argument must be a pointer to integer type",
+                        )
+                        .code(rcc_errors::codes::E0083)
+                        .emit();
+                    tcx.error
+                }
+            };
+            body.exprs[expr_id].ty = tcx.int;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind =
+                HirExprKind::BuiltinOverflow { op, lhs: lhs2, rhs: rhs2, dst: dst2, result_ty };
+            expr_id
+        }
+        HirExprKind::BuiltinOverflowP { op, lhs, rhs, probe, .. } => {
+            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+            let probe2 = visit_expr(probe, body, tcx, session, def_info);
+            let lhs2 = check_overflow_operand(lhs2, body, tcx, session);
+            let rhs2 = check_overflow_operand(rhs2, body, tcx, session);
+            let probe2 = rvalue_decayed(probe2, body, tcx);
+            let result_ty = body.exprs[probe2].ty;
+            if result_ty != tcx.error && !is_integer(tcx, result_ty) {
+                session
+                    .handler
+                    .struct_err(
+                        body.exprs[probe2].span,
+                        "overflow predicate type argument must have integer type",
+                    )
+                    .code(rcc_errors::codes::E0083)
+                    .emit();
+            }
+            body.exprs[expr_id].ty = tcx.int;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinOverflowP {
+                op,
+                lhs: lhs2,
+                rhs: rhs2,
+                probe: probe2,
+                result_ty,
+            };
+            expr_id
+        }
     }
+}
+
+fn check_overflow_operand(
+    expr: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    let expr = rvalue_decayed(expr, body, tcx);
+    let ty = body.exprs[expr].ty;
+    if ty != tcx.error && !is_integer(tcx, ty) {
+        session
+            .handler
+            .struct_err(body.exprs[expr].span, "overflow builtin operands must have integer type")
+            .code(rcc_errors::codes::E0083)
+            .emit();
+    }
+    expr
 }
 
 /// Apply lvalue-to-rvalue + array/function decay to `expr`. Returns the
@@ -2131,7 +2205,9 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinVaArg { .. }
         | HirExprKind::BuiltinVaStart { .. }
         | HirExprKind::BuiltinVaEnd { .. }
-        | HirExprKind::BuiltinVaCopy { .. } => ValueCat::RValue,
+        | HirExprKind::BuiltinVaCopy { .. }
+        | HirExprKind::BuiltinOverflow { .. }
+        | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
         HirExprKind::Comma { .. } => body.exprs[expr].value_cat,
 

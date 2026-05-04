@@ -22,7 +22,8 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId, HirExprKind,
-    HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, RecordKind, TyCtxt, TyId, ValueCat,
+    HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp, RecordKind, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -132,6 +133,47 @@ fn gnu_builtin_libcalls_injects_external_libc_declarations() {
             assert!(matches!(tcx.get(ty), Ty::Func { ret, .. } if *ret == tcx.ulong));
         }
     }
+}
+
+#[test]
+fn gnu_overflow_builtins_lower_to_typed_hir_nodes() {
+    let src = r#"
+        int f(unsigned a, int b) {
+            int out;
+            return __builtin_add_overflow(a, b, &out)
+                + __builtin_mul_overflow_p(a, b, 0);
+        }
+    "#;
+    let opts = Options { gnu_builtin_libcalls: true, ..Options::default() };
+    let (hir, tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let body = hir.bodies.values().next().expect("function body");
+
+    let add = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::BuiltinOverflow { op: OverflowOp::Add, lhs, rhs, result_ty, .. } => {
+                Some((lhs, rhs, result_ty))
+            }
+            _ => None,
+        })
+        .expect("add overflow builtin");
+    assert_eq!(add.2, tcx.int);
+    assert_eq!(body.exprs[add.0].ty, tcx.uint, "lhs keeps its original unsigned type");
+    assert_eq!(body.exprs[add.1].ty, tcx.int, "rhs keeps its original signed type");
+
+    assert!(
+        body.exprs.iter().any(|expr| matches!(
+            expr.kind,
+            HirExprKind::BuiltinOverflowP {
+                op: OverflowOp::Mul,
+                result_ty,
+                ..
+            } if result_ty == tcx.int
+        )),
+        "mul overflow predicate should use the probe expression type"
+    );
 }
 
 #[test]
