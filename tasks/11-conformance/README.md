@@ -35,6 +35,15 @@ future milestones, or documented policy decisions.
 | 14 | [`14-gcc-torture-smoke.md`](14-gcc-torture-smoke.md) | gcc-torture smoke @ M4. |
 | 15 | [`15-gcc-torture-60pct.md`](15-gcc-torture-60pct.md) | gcc-torture @ M6 ≥ 60 %. |
 | 16 | [`16-tcc-tests2.md`](16-tcc-tests2.md) | tcc-tests2 @ M6. |
+| 16a | [`16a-tcc-tests2-float-codegen.md`](16a-tcc-tests2-float-codegen.md) | tcc-tests2 float codegen failures. |
+| 16b | [`16b-tcc-tests2-multidimensional-array-index.md`](16b-tcc-tests2-multidimensional-array-index.md) | tcc-tests2 multidimensional array indexing. |
+| 16c | [`16c-tcc-tests2-typedef-function-declarator.md`](16c-tcc-tests2-typedef-function-declarator.md) | tcc-tests2 typedef/function declarator parse bug. |
+| 16d | [`16d-tcc-tests2-macro-empty-args.md`](16d-tcc-tests2-macro-empty-args.md) | tcc-tests2 empty macro arguments. |
+| 16e | [`16e-tcc-tests2-flexarray-init.md`](16e-tcc-tests2-flexarray-init.md) | tcc-tests2 flexible-array initializer/typeck gap. |
+| 16f | [`16f-tcc-tests2-dead-code-cfg-panic.md`](16f-tcc-tests2-dead-code-cfg-panic.md) | tcc-tests2 dead-code CFG panic. |
+| 16g | [`16g-tcc-tests2-integer-promotion-bitfield.md`](16g-tcc-tests2-integer-promotion-bitfield.md) | tcc-tests2 integer promotion on narrow/bit-field values. |
+| 16h | [`16h-tcc-tests2-bitfields-layout.md`](16h-tcc-tests2-bitfields-layout.md) | tcc-tests2 bit-field layout mismatches. |
+| 16i | [`16i-tcc-tests2-standard-header-surface.md`](16i-tcc-tests2-standard-header-surface.md) | tcc-tests2 host standard-header surface. |
 | 17 | [`17-llvm-test-suite.md`](17-llvm-test-suite.md) | llvm-test-suite @ M7. |
 | 18 | [`18-xfail-shrink.md`](18-xfail-shrink.md) | Continuously shrink xfail lists. |
 

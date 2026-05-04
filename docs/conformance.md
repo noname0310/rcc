@@ -91,6 +91,21 @@ Current stage-isolated status:
 | `control.c`  | Fails on GNU control-flow/declarator syntax; owned by tasks 11-09/11-10. |
 | `function.c` | Fails on variadic builtins / `__va_area__` prerequisites; owned by tasks 11-11/11-12. |
 
+### tcc-tests2 (task 11-16)
+
+The WSL adapter run uses TinyCC's `tests/tests2/*.expect` files as the
+reference output. The task-16 baseline is:
+
+| Suite | Discovered | Pass | XFail | Fail | Skip | % |
+|-------|------------|------|-------|------|------|---|
+| tcc-tests2 | 88 | 64 | 7 | 13 | 4 | 80.7 |
+
+The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
+TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
+GNU empty-struct/initializer forms, and C11 `_Generic`. Remaining failures
+are compiler-bug follow-up tasks `11-16a` through `11-16i`; they are not
+hidden by the pass-rate gate.
+
 ## Interpreting the columns
 
 - **Discovered** — number of test cases the adapter enumerated.
@@ -116,7 +131,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; reports only `arith.c`, `control.c`, `function.c` and uses a host-compiled minimal support helper |
 | `GccTortureAdapter`          | interface frozen; implementation M4 |
-| `TccTests2Adapter`           | interface frozen; implementation M6 |
+| `TccTests2Adapter`           | implemented at task 11-16; WSL baseline is 64 pass, 7 xfail, 13 fail, 4 skip |
 | `LlvmTestSuiteAdapter`       | interface frozen; implementation M7 |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |
 

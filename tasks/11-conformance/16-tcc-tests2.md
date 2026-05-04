@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04 — implemented tcc-tests2 adapter and split remaining failures into owned follow-up tasks
+
 # 11-16: tcc-tests2
 
 **Phase:** 11-conformance    **Depends on:** 01-04    **Milestone:** M6

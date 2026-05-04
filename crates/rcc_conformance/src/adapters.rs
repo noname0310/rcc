@@ -798,12 +798,195 @@ fn gcc_torture_case_requests_flag(path: &Path, flag: &str) -> bool {
 /// `tcc-tests2` adapter (LGPL).
 pub struct TccTests2Adapter;
 
-impl Adapter for TccTests2Adapter {
-    fn discover(&self, _root: &Path) -> anyhow::Result<Vec<TestCase>> {
-        Ok(Vec::new())
+impl TccTests2Adapter {
+    fn tests2_dir(root: &Path) -> PathBuf {
+        root.join("tests").join("tests2")
     }
-    fn run(&self, _rcc: &Path, _case: &TestCase) -> anyhow::Result<Outcome> {
-        Ok(Outcome::Skip { reason: "tcc-tests2 adapter not yet implemented".into() })
+
+    /// Pure comparison logic for tests2 `.expect` files.
+    pub fn compare_outcome(actual_output: &[u8], expected_path: &Path) -> Outcome {
+        let expected = match std::fs::read(expected_path) {
+            Ok(e) => e,
+            Err(e) => {
+                return Outcome::Skip {
+                    reason: format!("cannot read {}: {e}", expected_path.display()),
+                };
+            }
+        };
+        if normalize_stdout_newlines(actual_output) == normalize_stdout_newlines(&expected) {
+            Outcome::Pass
+        } else {
+            Outcome::Fail { reason: "output mismatch".into() }
+        }
+    }
+
+    fn expected_path(case: &TestCase) -> PathBuf {
+        case.path.with_extension("expect")
+    }
+
+    fn stem(case: &TestCase) -> anyhow::Result<String> {
+        case.path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", case.path.display()))
+    }
+
+    fn platform_skip_reason(stem: &str) -> Option<&'static str> {
+        match stem {
+            "34_array_assignment" => Some("array assignment is not C"),
+            "73_arm64" if cfg!(target_arch = "x86_64") => Some("arm64-specific ABI fixture"),
+            "98_al_ax_extend" | "99_fastcall" if !cfg!(target_arch = "x86") => {
+                Some("i386-specific assembly/calling-convention fixture")
+            }
+            _ => None,
+        }
+    }
+
+    fn unsupported_extension_reason(stem: &str) -> Option<&'static str> {
+        match stem {
+            "60_errors_and_warnings" | "96_nodata_wanted" => {
+                Some("tcc -dt diagnostic/data-section test mode is not an rcc feature")
+            }
+            "76_dollars_in_identifiers" => {
+                Some("TinyCC/GNU dollar identifiers are not supported by rcc")
+            }
+            _ => None,
+        }
+    }
+
+    fn runtime_args(stem: &str, case: &TestCase) -> Vec<String> {
+        match stem {
+            "31_args" => {
+                ["arg1", "arg2", "arg3", "arg4", "arg5"].into_iter().map(str::to_owned).collect()
+            }
+            "46_grep" => {
+                let file = case
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("46_grep.c")
+                    .to_owned();
+                vec![r"[^* ]*[:a:d: ]+\:\*-/: $".to_owned(), file]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn compile_flags() -> [&'static str; 17] {
+        [
+            "-w",
+            "-fgnu-binary-literals",
+            "-fgnu-statement-expressions",
+            "-fgnu-omitted-conditional-operand",
+            "-fgnu-conditional-void-operand",
+            "-fgnu-permissive-redefinition",
+            "-fgnu-named-variadic",
+            "-fgnu-permissive-paste",
+            "-fgnu-va-args-elision",
+            "-fgnu-range-designators",
+            "-fgnu-attributes",
+            "-fgnu-inline-asm",
+            "-fgnu-case-ranges",
+            "-fgnu-labels-as-values",
+            "-fgnu-lvalue-comma",
+            "-fgnu-function-names",
+            "-fgnu-builtin-libcalls",
+        ]
+    }
+
+    fn combined_output(output: &std::process::Output) -> Vec<u8> {
+        let mut bytes = output.stdout.clone();
+        bytes.extend_from_slice(&output.stderr);
+        bytes
+    }
+}
+
+impl Adapter for TccTests2Adapter {
+    fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+        let dir = Self::tests2_dir(root);
+        anyhow::ensure!(dir.is_dir(), "tcc tests2 directory not found: {}", dir.display());
+
+        let mut cases = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("c") {
+                continue;
+            }
+            let expected = path.with_extension("expect");
+            if !expected.exists() {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", path.display()))?;
+            cases.push(TestCase { id: format!("tcc-tests2::{stem}"), path });
+        }
+        cases.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(cases)
+    }
+
+    fn run(&self, rcc_path: &Path, case: &TestCase) -> anyhow::Result<Outcome> {
+        let stem = Self::stem(case)?;
+        if let Some(reason) = Self::platform_skip_reason(&stem) {
+            return Ok(Outcome::Skip { reason: reason.to_owned() });
+        }
+        if let Some(reason) = Self::unsupported_extension_reason(&stem) {
+            return Ok(Outcome::Fail { reason: reason.to_owned() });
+        }
+
+        let expected_path = Self::expected_path(case);
+        let tmp = tempfile::tempdir()?;
+        let exe_path =
+            if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
+
+        let mut compile = Command::new(rcc_path);
+        compile.args(Self::compile_flags()).arg("-o").arg(&exe_path).arg(&case.path);
+        match run_with_timeout(&mut compile, TIMEOUT) {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                let actual = Self::combined_output(&o);
+                let compared = Self::compare_outcome(&actual, &expected_path);
+                return Ok(match compared {
+                    Outcome::Pass => Outcome::Pass,
+                    _ => Outcome::Fail {
+                        reason: format!(
+                            "rcc compile/link failed (exit {}): {}",
+                            o.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&actual).chars().take(256).collect::<String>(),
+                        ),
+                    },
+                });
+            }
+            Err(e) => {
+                return Ok(Outcome::Fail { reason: format!("rcc invocation failed: {e}") });
+            }
+        }
+
+        let mut exec = Command::new(&exe_path);
+        if let Some(dir) = case.path.parent() {
+            exec.current_dir(dir);
+        }
+        exec.args(Self::runtime_args(&stem, case));
+        let outcome = match run_with_timeout(&mut exec, TIMEOUT) {
+            Ok(o) if o.status.success() => {
+                let actual = Self::combined_output(&o);
+                Self::compare_outcome(&actual, &expected_path)
+            }
+            Ok(o) => Outcome::Fail {
+                reason: format!(
+                    "non-zero exit code: {}",
+                    o.status.code().map_or_else(|| "killed by signal".into(), |c| c.to_string()),
+                ),
+            },
+            Err(e) => Outcome::Fail { reason: format!("execution failed: {e}") },
+        };
+        if let Some(dir) = case.path.parent() {
+            let _ = std::fs::remove_file(dir.join("fred.txt"));
+        }
+        Ok(outcome)
     }
 }
 
