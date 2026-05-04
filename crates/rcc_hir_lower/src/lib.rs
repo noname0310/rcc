@@ -22,7 +22,7 @@ use rcc_hir::OverflowOp;
 use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, Linkage, Local, LocalDecl,
+    HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl,
     ObjectQuals, RecordKind, SwitchCase, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
@@ -1746,7 +1746,17 @@ fn lower_top_level_vla_len(
         return None;
     };
     let size_expr = arr_decl.size.as_ref()?;
-    if eval_const_expr_as_u64(size_expr).is_some() {
+    if eval_array_bound_as_u64(
+        size_expr,
+        DeclScope::Block,
+        Some(scope),
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )
+    .is_some()
+    {
         return None;
     }
 
@@ -4624,7 +4634,15 @@ fn apply_declarator_with_base_quals_in_scope(
                     (None, true)
                 } else if let Some(ref size_expr) = arr_decl.size {
                     // Try to evaluate as a constant integer.
-                    match eval_const_expr_as_u64(size_expr) {
+                    match eval_array_bound_as_u64(
+                        size_expr,
+                        scope,
+                        typedef_scope,
+                        tcx,
+                        resolver,
+                        crate_,
+                        session,
+                    ) {
                         Some(n) => (Some(n), false),
                         None => (None, scope != DeclScope::File),
                     }
@@ -4941,6 +4959,165 @@ fn eval_const_expr_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
                 Some(c)
             } else {
                 eval_const_expr_as_i128(else_expr)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Constant-evaluate an array bound while HIR lowering declarators.
+///
+/// This intentionally stays narrower than full HIR `ConstEval`: it covers the
+/// AST expression shapes that can appear after preprocessing in C99 array
+/// bounds before type checking, plus `sizeof(type-name)` because that is a
+/// first-class integer constant expression in C99. Expressions that need
+/// ordinary identifier lookup still return `None`, making block-scope arrays
+/// true VLAs.
+#[allow(clippy::too_many_arguments)]
+fn eval_array_bound_as_u64(
+    expr: &rcc_ast::Expr,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> Option<u64> {
+    let value =
+        eval_array_bound_as_i128(expr, scope, typedef_scope, tcx, resolver, crate_, session)?;
+    u64::try_from(value).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_array_bound_as_i128(
+    expr: &rcc_ast::Expr,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> Option<i128> {
+    match &expr.kind {
+        rcc_ast::ExprKind::SizeofType(type_name) => {
+            let ty = lower_type_name_in_scope(
+                type_name,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
+            Some(i128::from(layout.size))
+        }
+        rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::Paren(inner) => {
+            eval_array_bound_as_i128(inner, scope, typedef_scope, tcx, resolver, crate_, session)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
+            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
+            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
+                .and_then(i128::checked_neg)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::BitNot, operand } => {
+            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
+                .map(|v| !v)
+        }
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::LogNot, operand } => {
+            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
+                .map(|v| i128::from(v == 0))
+        }
+        rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_array_bound_as_i128(
+                lhs,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )?;
+            let r = eval_array_bound_as_i128(
+                rhs,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )?;
+            match op {
+                rcc_ast::BinOp::Add => l.checked_add(r),
+                rcc_ast::BinOp::Sub => l.checked_sub(r),
+                rcc_ast::BinOp::Mul => l.checked_mul(r),
+                rcc_ast::BinOp::Div => (r != 0).then(|| l.checked_div(r)).flatten(),
+                rcc_ast::BinOp::Rem => (r != 0).then(|| l.checked_rem(r)).flatten(),
+                rcc_ast::BinOp::Shl => u32::try_from(r).ok().and_then(|shift| l.checked_shl(shift)),
+                rcc_ast::BinOp::Shr => u32::try_from(r).ok().and_then(|shift| l.checked_shr(shift)),
+                rcc_ast::BinOp::Lt => Some(i128::from(l < r)),
+                rcc_ast::BinOp::Le => Some(i128::from(l <= r)),
+                rcc_ast::BinOp::Gt => Some(i128::from(l > r)),
+                rcc_ast::BinOp::Ge => Some(i128::from(l >= r)),
+                rcc_ast::BinOp::Eq => Some(i128::from(l == r)),
+                rcc_ast::BinOp::Ne => Some(i128::from(l != r)),
+                rcc_ast::BinOp::BitAnd => Some(l & r),
+                rcc_ast::BinOp::BitXor => Some(l ^ r),
+                rcc_ast::BinOp::BitOr => Some(l | r),
+                rcc_ast::BinOp::LogAnd => Some(i128::from(l != 0 && r != 0)),
+                rcc_ast::BinOp::LogOr => Some(i128::from(l != 0 || r != 0)),
+            }
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            if eval_array_bound_as_i128(cond, scope, typedef_scope, tcx, resolver, crate_, session)?
+                != 0
+            {
+                eval_array_bound_as_i128(
+                    then_expr,
+                    scope,
+                    typedef_scope,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                )
+            } else {
+                eval_array_bound_as_i128(
+                    else_expr,
+                    scope,
+                    typedef_scope,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                )
+            }
+        }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            let c = eval_array_bound_as_i128(
+                cond,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )?;
+            if c != 0 {
+                Some(c)
+            } else {
+                eval_array_bound_as_i128(
+                    else_expr,
+                    scope,
+                    typedef_scope,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                )
             }
         }
         _ => None,

@@ -22,8 +22,8 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId, HirExprKind,
-    HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp, RecordKind, TyCtxt, TyId,
-    ValueCat,
+    HirStmtKind, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp, RecordKind, TyCtxt,
+    TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -770,6 +770,37 @@ fn s6_7_5_block_runtime_array_bound_is_vla() {
     let ty = apply_declarator(tcx.int, &d, DeclScope::Block, &mut tcx, &mut sess);
     let expected = tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: None, is_vla: true });
     assert_eq!(ty, expected);
+}
+
+#[test]
+fn s6_7_5_sizeof_type_array_bound_is_fixed() {
+    let src = r#"
+        int foo(void) {
+            union {
+                char a[sizeof(unsigned)];
+                unsigned b;
+            } u;
+            return 0;
+        }
+    "#;
+    let (hir, tcx) = lower_snippet(src);
+    let array_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Record { kind: RecordKind::Union, fields, .. } if fields.len() == 2 => {
+                Some(fields[0].ty)
+            }
+            _ => None,
+        })
+        .expect("anonymous union fields should be lowered");
+
+    match tcx.get(array_ty) {
+        Ty::Array { len: Some(4), is_vla: false, .. } => {}
+        other => panic!("sizeof(unsigned) bound should be fixed Array[4], got {other:?}"),
+    }
+    let layout = LayoutCx::with_defs(&tcx, &hir.defs).layout_of(array_ty).unwrap();
+    assert_eq!(layout.size, 4);
 }
 
 #[test]
