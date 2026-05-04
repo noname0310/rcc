@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11d: function.c ABI runtime smoke
 
 **Phase:** 11-conformance    **Depends on:** 11a, 11b, 11c    **Milestone:** M6
@@ -33,6 +35,24 @@ surfaces it exercises so failures point at one owner instead of a 350-line TU.
   slices.
 - `12-chibicc-function-green.md` can focus on the full TU rather than unknown
   prerequisites.
+
+## Result Matrix
+
+| Slice | Result | Coverage |
+| --- | --- | --- |
+| small integer return narrowing | pass | `char`, `short`, `_Bool` returns |
+| fixed and variadic integer calls | pass | 6/10 fixed integer args plus libc `sprintf` varargs |
+| C99 builtin varargs | pass | `__builtin_va_start`, `__builtin_va_arg`, `__builtin_va_end` |
+| float and double calls | pass | scalar FP returns, many SSE args, libc float varargs |
+| mixed register/stack args | pass | interleaved int/double arguments crossing GP/SSE register limits |
+| small and large struct args | pass | direct aggregate args plus byval memory aggregate args |
+| small and large struct returns | pass | direct aggregate returns plus hidden sret returns |
+| `long double` | pass | cast, compare, return, and libc `%Lf` vararg |
+
+## Notes (agent)
+- The reduced ABI matrix is green under WSL/LLVM.
+- Full `function.c` still has a separate `inline_fn` link semantics blocker,
+  so 12 can focus on full-TU behavior instead of unknown ABI prerequisites.
 
 ## References
 - chibicc `test/function.c`.

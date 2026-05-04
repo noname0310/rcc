@@ -30,6 +30,28 @@ mod linux {
         }
     }
 
+    struct TempSourceDir {
+        path: PathBuf,
+    }
+
+    impl TempSourceDir {
+        fn new(name: &str) -> Self {
+            let safe_name = name.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_");
+            let path = std::env::temp_dir()
+                .join(format!("rcc-driver-e2e-src-{}-{safe_name}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path)
+                .unwrap_or_else(|err| panic!("create {}: {err}", path.display()));
+            Self { path }
+        }
+    }
+
+    impl Drop for TempSourceDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
     impl Drop for TempExe {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.path);
@@ -144,6 +166,15 @@ mod linux {
         );
     }
 
+    fn assert_source(name: &str, source: &str, stdout: &[u8], status: i32) {
+        let dir = TempSourceDir::new(name);
+        let c_path = dir.path.join(format!("{name}.c"));
+        fs::write(&c_path, source)
+            .unwrap_or_else(|err| panic!("write {}: {err}", c_path.display()));
+        let fixture = Fixture { name: name.to_owned(), c_path, stdout: stdout.to_vec(), status };
+        assert_fixture(&fixture);
+    }
+
     fn host_cc_available() -> bool {
         Command::new("cc")
             .arg("--version")
@@ -255,6 +286,168 @@ int main(void) {
         };
         assert_fixture(&fixture);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chibicc_function_abi_runtime_smoke() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");
+            return;
+        }
+
+        let cases: &[(&str, &str)] = &[
+            (
+                "abi_narrow_returns",
+                r#"
+char ret_char(int x) { return x; }
+short ret_short(int x) { return x; }
+_Bool bool_add(_Bool x) { return x + 1; }
+_Bool bool_sub(_Bool x) { return x - 1; }
+int main(void) {
+  return !(ret_char(261) == 5
+           && ret_short(65531) == -5
+           && bool_add(3) == 1
+           && bool_sub(3) == 0);
+}
+"#,
+            ),
+            (
+                "abi_fixed_and_variadic_int_calls",
+                r#"
+int sprintf(char *, const char *, ...);
+int strcmp(const char *, const char *);
+int add6(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }
+int add10(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j) {
+  return a + b + c + d + e + f + g + h + i + j;
+}
+int main(void) {
+  char buf[32];
+  sprintf(buf, "%d %d", 1, 2);
+  return !(add6(1, 2, 3, 4, 5, 6) == 21
+           && add10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55
+           && strcmp(buf, "1 2") == 0);
+}
+"#,
+            ),
+            (
+                "abi_builtin_va_arg_ints",
+                r#"
+typedef __builtin_va_list va_list;
+int add_all(int n, ...) {
+  va_list ap;
+  __builtin_va_start(ap, n);
+  int sum = 0;
+  for (int i = 0; i < n; i = i + 1)
+    sum = sum + __builtin_va_arg(ap, int);
+  __builtin_va_end(ap);
+  return sum;
+}
+int main(void) {
+  return !(add_all(3, 1, 2, 3) == 6 && add_all(4, 1, 2, 3, -1) == 5);
+}
+"#,
+            ),
+            (
+                "abi_float_double_calls",
+                r#"
+int sprintf(char *, const char *, ...);
+int strcmp(const char *, const char *);
+float add_float3(float x, float y, float z) { return x + y + z; }
+double add_double3(double x, double y, double z) { return x + y + z; }
+double many_double(double a, double b, double c, double d, double e,
+                   double f, double g, double h, double i, double j) {
+  return i / j;
+}
+int main(void) {
+  char buf[32];
+  sprintf(buf, "%.1f", (float)3.5);
+  return !((int)add_float3(2.5, 2.5, 2.5) == 7
+           && (int)add_double3(2.5, 2.5, 2.5) == 7
+           && (int)many_double(1, 2, 3, 4, 5, 6, 7, 8, 40, 10) == 4
+           && strcmp(buf, "3.5") == 0);
+}
+"#,
+            ),
+            (
+                "abi_mixed_register_stack_args",
+                r#"
+int many_args3(int a, double b, int c, int d, double e, int f,
+               double g, int h, double i, double j, double k,
+               double l, double m, int n, int o, double p) {
+  return o / p;
+}
+int main(void) {
+  return many_args3(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 80, 10) == 8
+             ? 0
+             : 1;
+}
+"#,
+            ),
+            (
+                "abi_struct_args",
+                r#"
+typedef struct { int a, b; short c; char d; } Ty4;
+typedef struct { int a; float b; double c; } Ty5;
+typedef struct { unsigned char a[3]; } Ty6;
+typedef struct { long a, b, c; } Ty7;
+int st4(Ty4 x, int n) { if (n == 0) return x.a; if (n == 1) return x.b; if (n == 2) return x.c; return x.d; }
+int st5(Ty5 x, int n) { if (n == 0) return x.a; if (n == 1) return x.b; return x.c; }
+int st6(Ty6 x, int n) { return x.a[n]; }
+int st7(Ty7 x, int n) { if (n == 0) return x.a; if (n == 1) return x.b; return x.c; }
+int main(void) {
+  Ty4 a = {10, 20, 30, 40};
+  Ty5 b = {10, 20, 30};
+  Ty6 c = {10, 20, 30};
+  Ty7 d = {10, 20, 30};
+  return !(st4(a, 3) == 40 && st5(b, 2) == 30 && st6(c, 1) == 20 && st7(d, 2) == 30);
+}
+"#,
+            ),
+            (
+                "abi_struct_returns",
+                r#"
+typedef struct { int a, b; short c; char d; } Ty4;
+typedef struct { int a; float b; double c; } Ty5;
+typedef struct { unsigned char a[3]; } Ty6;
+typedef struct { unsigned char a[10]; } Ty20;
+typedef struct { unsigned char a[20]; } Ty21;
+Ty4 ret4(void) { return (Ty4){10, 20, 30, 40}; }
+Ty5 ret5(void) { return (Ty5){10, 20, 30}; }
+Ty6 ret6(void) { return (Ty6){10, 20, 30}; }
+Ty20 ret20(void) { return (Ty20){10, 20, 30, 40, 50, 60, 70, 80, 90, 100}; }
+Ty21 ret21(void) { return (Ty21){1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                                  11, 12, 13, 14, 15, 16, 17, 18, 19, 20}; }
+int main(void) {
+  return !(ret4().d == 40
+           && (int)ret5().c == 30
+           && ret6().a[2] == 30
+           && ret20().a[9] == 100
+           && ret21().a[19] == 20);
+}
+"#,
+            ),
+            (
+                "abi_long_double",
+                r#"
+int sprintf(char *, const char *, ...);
+int strncmp(const char *, const char *, unsigned long);
+double to_double(long double x) { return x; }
+long double to_ldouble(int x) { return x; }
+int main(void) {
+  char buf[64];
+  sprintf(buf, "%Lf", (long double)12.3);
+  return !(to_double(3.5) == 3.5
+           && (long double)5.0 == (long double)5.0
+           && to_ldouble(5.0) == 5.0
+           && strncmp(buf, "12.3", 4) == 0);
+}
+"#,
+            ),
+        ];
+
+        for (name, source) in cases {
+            assert_source(name, source, b"", 0);
+        }
     }
 
     #[test]
