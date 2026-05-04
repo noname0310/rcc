@@ -630,11 +630,12 @@ pub fn visit_expr(
                     index_ty,
                     index_precision.map(|precision| precision.width),
                 );
-                if promoted != index_ty {
+                let index2 = if promoted != index_ty {
                     push_int_promote(body, index2, promoted)
                 } else {
                     index2
-                }
+                };
+                apply_bitfield_precision(body, tcx, index2, promoted, index_precision)
             } else {
                 index2
             };
@@ -817,10 +818,19 @@ pub fn visit_expr(
                 scalar_control_rvalue(cond2, body, tcx, session, "conditional operator condition");
             let then2 = visit_expr(then_expr, body, tcx, session, def_info);
             let else2 = visit_expr(else_expr, body, tcx, session, def_info);
+            let then_precision = expr_bit_precision(then2, body, tcx, def_info);
+            let else_precision = expr_bit_precision(else2, body, tcx, def_info);
             let then2 = rvalue_decayed(then2, body, tcx);
             let else2 = rvalue_decayed(else2, body, tcx);
-            let (result_ty, then2, else2) =
-                unify_conditional_arms(then2, else2, body, tcx, session);
+            let (result_ty, then2, else2) = unify_conditional_arms(
+                then2,
+                then_precision,
+                else2,
+                else_precision,
+                body,
+                tcx,
+                session,
+            );
             body.exprs[expr_id].ty = result_ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind =
@@ -829,12 +839,21 @@ pub fn visit_expr(
         }
         HirExprKind::OmittedCond { cond, else_expr } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
+            let cond_precision = expr_bit_precision(cond2, body, tcx, def_info);
             let cond2 =
                 scalar_control_rvalue(cond2, body, tcx, session, "conditional operator condition");
             let else2 = visit_expr(else_expr, body, tcx, session, def_info);
+            let else_precision = expr_bit_precision(else2, body, tcx, def_info);
             let else2 = rvalue_decayed(else2, body, tcx);
-            let (result_ty, cond2, else2) =
-                unify_conditional_arms(cond2, else2, body, tcx, session);
+            let (result_ty, cond2, else2) = unify_conditional_arms(
+                cond2,
+                cond_precision,
+                else2,
+                else_precision,
+                body,
+                tcx,
+                session,
+            );
             body.exprs[expr_id].ty = result_ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::OmittedCond { cond: cond2, else_expr: else2 };
@@ -1116,7 +1135,9 @@ fn emit_invalid_vector_cast(session: &mut Session, span: rcc_span::Span) {
 
 fn unify_conditional_arms(
     then_expr: HirExprId,
+    then_precision: Option<BitfieldPrecision>,
     else_expr: HirExprId,
+    else_precision: Option<BitfieldPrecision>,
     body: &mut Body,
     tcx: &mut TyCtxt,
     session: &mut Session,
@@ -1129,9 +1150,17 @@ fn unify_conditional_arms(
     }
 
     if is_arithmetic(tcx, then_ty) && is_arithmetic(tcx, else_ty) {
-        let common = usual_arithmetic(tcx, then_ty, else_ty);
+        let common = usual_arithmetic_with_bitfields(
+            tcx,
+            then_ty,
+            then_precision.map(|precision| precision.width),
+            else_ty,
+            else_precision.map(|precision| precision.width),
+        );
         let then_expr = push_arithmetic_convert(body, session, tcx, then_expr, common);
         let else_expr = push_arithmetic_convert(body, session, tcx, else_expr, common);
+        let then_expr = apply_bitfield_precision(body, tcx, then_expr, common, then_precision);
+        let else_expr = apply_bitfield_precision(body, tcx, else_expr, common, else_precision);
         return (common, then_expr, else_expr);
     }
 
@@ -1444,7 +1473,7 @@ fn type_binary(
         return type_vector_binary(expr_id, op, lhs, rhs, lhs_ty, rhs_ty, span, body, tcx, session);
     }
 
-    let (result_ty, lhs_final, rhs_final, result_precision) = match op {
+    let (result_ty, lhs_final, rhs_final) = match op {
         // Arithmetic: usual arithmetic conversions, integer-only for `%`.
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
             // `+`/`-` accept pointer arithmetic, but the result differs:
@@ -1458,30 +1487,33 @@ fn type_binary(
                         let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                         let rhs =
                             if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
-                        (lhs_ty, lhs, rhs, None)
+                        let rhs = apply_bitfield_precision(body, tcx, rhs, rhs_p, rhs_precision);
+                        (lhs_ty, lhs, rhs)
                     }
                     (BinOp::Add, false, true) if is_integer(tcx, lhs_ty) => {
                         let lhs_p = integer_promotion(tcx, lhs_ty, lhs_bit_width);
                         let lhs =
                             if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
-                        (rhs_ty, lhs, rhs, None)
+                        let lhs = apply_bitfield_precision(body, tcx, lhs, lhs_p, lhs_precision);
+                        (rhs_ty, lhs, rhs)
                     }
                     (BinOp::Sub, true, false) if is_integer(tcx, rhs_ty) => {
                         let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                         let rhs =
                             if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
-                        (lhs_ty, lhs, rhs, None)
+                        let rhs = apply_bitfield_precision(body, tcx, rhs, rhs_p, rhs_precision);
+                        (lhs_ty, lhs, rhs)
                     }
-                    (BinOp::Sub, true, true) => (tcx.long, lhs, rhs, None),
+                    (BinOp::Sub, true, true) => (tcx.long, lhs, rhs),
                     _ => {
                         invalid_operands(session, span, binop_symbol(op));
-                        (tcx.error, lhs, rhs, None)
+                        (tcx.error, lhs, rhs)
                     }
                 }
             } else if op == BinOp::Rem {
                 if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
                     invalid_operands(session, span, "%");
-                    (tcx.error, lhs, rhs, None)
+                    (tcx.error, lhs, rhs)
                 } else {
                     let common = usual_arithmetic_with_bitfields(
                         tcx,
@@ -1494,11 +1526,13 @@ fn type_binary(
                         if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
                     let r =
                         if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
-                    (common, l, r, combine_bitfield_precision(lhs_precision, rhs_precision))
+                    let l = apply_bitfield_precision(body, tcx, l, common, lhs_precision);
+                    let r = apply_bitfield_precision(body, tcx, r, common, rhs_precision);
+                    (common, l, r)
                 }
             } else if !is_arithmetic(tcx, lhs_ty) || !is_arithmetic(tcx, rhs_ty) {
                 invalid_operands(session, span, binop_symbol(op));
-                (tcx.error, lhs, rhs, None)
+                (tcx.error, lhs, rhs)
             } else {
                 // `+`/`-`/`*`/`/` may have complex operands; route the
                 // operand wrappers through `push_arithmetic_convert` so a
@@ -1514,7 +1548,9 @@ fn type_binary(
                 );
                 let l = push_arithmetic_convert(body, session, tcx, lhs, common);
                 let r = push_arithmetic_convert(body, session, tcx, rhs, common);
-                (common, l, r, combine_bitfield_precision(lhs_precision, rhs_precision))
+                let l = apply_bitfield_precision(body, tcx, l, common, lhs_precision);
+                let r = apply_bitfield_precision(body, tcx, r, common, rhs_precision);
+                (common, l, r)
             }
         }
         // Bitwise & shift: integer-only operands. Shifts apply integer
@@ -1523,19 +1559,21 @@ fn type_binary(
         BinOp::Shl | BinOp::Shr => {
             if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
                 invalid_operands(session, span, binop_symbol(op));
-                (tcx.error, lhs, rhs, None)
+                (tcx.error, lhs, rhs)
             } else {
                 let lhs_p = integer_promotion(tcx, lhs_ty, lhs_bit_width);
                 let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                 let l = if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
                 let r = if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
-                (lhs_p, l, r, lhs_precision)
+                let l = apply_bitfield_precision(body, tcx, l, lhs_p, lhs_precision);
+                let r = apply_bitfield_precision(body, tcx, r, rhs_p, rhs_precision);
+                (lhs_p, l, r)
             }
         }
         BinOp::BitAnd | BinOp::BitXor | BinOp::BitOr => {
             if !is_integer(tcx, lhs_ty) || !is_integer(tcx, rhs_ty) {
                 invalid_operands(session, span, binop_symbol(op));
-                (tcx.error, lhs, rhs, None)
+                (tcx.error, lhs, rhs)
             } else {
                 let common = usual_arithmetic_with_bitfields(
                     tcx,
@@ -1546,7 +1584,9 @@ fn type_binary(
                 );
                 let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
                 let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
-                (common, l, r, combine_bitfield_precision(lhs_precision, rhs_precision))
+                let l = apply_bitfield_precision(body, tcx, l, common, lhs_precision);
+                let r = apply_bitfield_precision(body, tcx, r, common, rhs_precision);
+                (common, l, r)
             }
         }
         // Comparisons: result is `int` (0 or 1). Apply usual arithmetic
@@ -1569,29 +1609,25 @@ fn type_binary(
                 // `push_arithmetic_convert` to handle real ↔ complex.
                 let l = push_arithmetic_convert(body, session, tcx, lhs, common);
                 let r = push_arithmetic_convert(body, session, tcx, rhs, common);
-                (tcx.int, l, r, None)
+                let l = apply_bitfield_precision(body, tcx, l, common, lhs_precision);
+                let r = apply_bitfield_precision(body, tcx, r, common, rhs_precision);
+                (tcx.int, l, r)
             } else {
-                (tcx.int, lhs, rhs, None)
+                (tcx.int, lhs, rhs)
             }
         }
         // Logical && / ||: scalar operands, result is `int`.
         BinOp::LogAnd | BinOp::LogOr => {
             check_scalar_operand(lhs, body, tcx, session, "left operand of logical operator");
             check_scalar_operand(rhs, body, tcx, session, "right operand of logical operator");
-            (tcx.int, lhs, rhs, None)
+            (tcx.int, lhs, rhs)
         }
     };
 
     body.exprs[expr_id].ty = result_ty;
     body.exprs[expr_id].value_cat = ValueCat::RValue;
     body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs: lhs_final, rhs: rhs_final };
-    if let Some(precision) = result_precision
-        .filter(|precision| should_apply_bitfield_precision(tcx, result_ty, *precision))
-    {
-        push_bitfield_precision(body, expr_id, result_ty, precision)
-    } else {
-        expr_id
-    }
+    expr_id
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1863,22 +1899,27 @@ fn expr_bit_precision(
     }
 }
 
-fn combine_bitfield_precision(
-    a: Option<BitfieldPrecision>,
-    b: Option<BitfieldPrecision>,
-) -> Option<BitfieldPrecision> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(if a.width >= b.width { a } else { b }),
-        (Some(precision), None) | (None, Some(precision)) => Some(precision),
-        (None, None) => None,
-    }
-}
-
 fn should_apply_bitfield_precision(tcx: &TyCtxt, ty: TyId, precision: BitfieldPrecision) -> bool {
     let Ty::Int { rank, .. } = *tcx.get(ty) else {
         return false;
     };
     precision.width > INT_BITS && int_rank_bits(rank) > INT_BITS
+}
+
+fn apply_bitfield_precision(
+    body: &mut Body,
+    tcx: &TyCtxt,
+    expr: HirExprId,
+    ty: TyId,
+    precision: Option<BitfieldPrecision>,
+) -> HirExprId {
+    if let Some(precision) =
+        precision.filter(|precision| should_apply_bitfield_precision(tcx, ty, *precision))
+    {
+        push_bitfield_precision(body, expr, ty, precision)
+    } else {
+        expr
+    }
 }
 
 fn is_signed_integer(tcx: &TyCtxt, ty: TyId) -> bool {
@@ -1976,16 +2017,11 @@ fn type_unary(
             } else {
                 operand
             };
+            let operand = apply_bitfield_precision(body, tcx, operand, promoted, precision);
             body.exprs[expr_id].ty = promoted;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Unary { op, operand };
-            if let Some(precision) = precision
-                .filter(|precision| should_apply_bitfield_precision(tcx, promoted, *precision))
-            {
-                push_bitfield_precision(body, expr_id, promoted, precision)
-            } else {
-                expr_id
-            }
+            expr_id
         }
         UnOp::LogNot => {
             let operand = rvalue_decayed(operand, body, tcx);
@@ -2214,9 +2250,12 @@ fn unsigned_integer_max(bits: u32) -> u128 {
 ///     integer type holds `[-2^(n-1), 2^(n-1) - 1]`; one declared with an
 ///     unsigned integer type holds `[0, 2^n - 1]`.
 ///   - If `int` can represent every value of the bitfield → `int`,
-///     otherwise → `unsigned int`. By the time a bitfield with rank greater
-///     than `int` matters, `n` has already exceeded `INT_BITS`, so the rule
-///     "every value representable" still produces the right answer.
+///     otherwise → `unsigned int` for standard `int`/`unsigned int`
+///     bitfields.
+///   - GNU/TinyCC-style bitfields based on wider integer types keep the wider
+///     rank. An unsigned wide bitfield whose range fits in the signed
+///     counterpart promotes to that signed counterpart; a full-width unsigned
+///     wide bitfield remains unsigned.
 ///
 /// Non-integer types pass through unchanged so callers can chain this with
 /// the usual arithmetic conversions blindly.
@@ -2276,6 +2315,16 @@ fn promote_bitfield(tcx: &TyCtxt, ty: TyId, signed: bool, rank: IntRank, width: 
     }
 
     if int_rank_bits(rank) > INT_BITS && width > INT_BITS {
+        // ISO C leaves the promoted type of wider-than-int bit-fields
+        // implementation-defined. TinyCC/GCC classify `unsigned long long:35`
+        // as signed `long long` because every value fits there, while a
+        // full-width `:64` field remains `unsigned long long`.
+        if signed {
+            return ty;
+        }
+        if width < int_rank_bits(rank) {
+            return signed_counterpart(tcx, rank);
+        }
         return ty;
     }
 
@@ -2340,6 +2389,19 @@ fn unsigned_counterpart(tcx: &TyCtxt, rank: IntRank) -> TyId {
         IntRank::Int => tcx.uint,
         IntRank::Long => tcx.ulong,
         IntRank::LongLong => tcx.ulong_long,
+    }
+}
+
+/// Signed counterpart of an `IntRank`, used for implementation-defined wide
+/// bitfield promotions on extended integer bitfield base types.
+fn signed_counterpart(tcx: &TyCtxt, rank: IntRank) -> TyId {
+    match rank {
+        IntRank::Bool => tcx.int,
+        IntRank::Char => tcx.char_,
+        IntRank::Short => tcx.short,
+        IntRank::Int => tcx.int,
+        IntRank::Long => tcx.long,
+        IntRank::LongLong => tcx.long_long,
     }
 }
 
@@ -3554,6 +3616,16 @@ mod tests {
         // 32-bit unsigned bitfield exceeds signed int range -> unsigned int.
         let got = integer_promotion(&tcx, tcx.uint, Some(32));
         assert_eq!(got, tcx.uint);
+    }
+
+    #[test]
+    fn integer_promotion_wide_unsigned_bitfield_uses_signed_counterpart_when_it_fits() {
+        let tcx = TyCtxt::new();
+
+        assert_eq!(integer_promotion(&tcx, tcx.ulong_long, Some(35)), tcx.long_long);
+        assert_eq!(integer_promotion(&tcx, tcx.ulong_long, Some(64)), tcx.ulong_long);
+        assert_eq!(integer_promotion(&tcx, tcx.ulong, Some(35)), tcx.long);
+        assert_eq!(integer_promotion(&tcx, tcx.ulong, Some(64)), tcx.ulong);
     }
 
     #[test]
@@ -5670,7 +5742,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_expression_wraps_wide_unsigned_bitfield_precision() {
+    fn binary_expression_wraps_wide_unsigned_bitfield_operand_precision() {
         let mut tcx = TyCtxt::new();
         let (mut session, _cap) = Session::for_test();
         let u40 = session.interner.intern("u40");
@@ -5721,20 +5793,26 @@ mod tests {
 
         assert!(!session.handler.has_errors());
         assert_eq!(body.exprs[member].ty, tcx.ulong_long);
-        let wrapper = body
-            .exprs
-            .iter()
-            .find(|expr| {
-                matches!(
-                    expr.kind,
-                    HirExprKind::Convert {
-                        operand,
-                        kind: ConvertKind::BitfieldPrecision { width: 40, signed: false }
-                    } if operand == bin
-                )
-            })
-            .expect("wide bit-field operation should be precision-wrapped");
-        assert_eq!(wrapper.ty, tcx.ulong_long);
+        assert_eq!(body.exprs[bin].ty, tcx.ulong_long);
+        let HirExprKind::Binary { lhs, rhs: got_rhs, .. } = body.exprs[bin].kind else {
+            panic!("expected binary expression");
+        };
+        assert_eq!(got_rhs, rhs);
+        let HirExprKind::Convert {
+            operand,
+            kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+        } = body.exprs[lhs].kind
+        else {
+            panic!("expected lhs bit-field precision wrapper, got {:?}", body.exprs[lhs].kind);
+        };
+        assert_eq!(body.exprs[lhs].ty, tcx.ulong_long);
+        assert!(matches!(
+            body.exprs[operand].kind,
+            HirExprKind::Convert {
+                operand: got_member,
+                kind: ConvertKind::LvalueToRvalue
+            } if got_member == member
+        ));
     }
 
     #[test]

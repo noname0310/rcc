@@ -1,5 +1,7 @@
 # 11-16g: tcc-tests2 integer promotion and bit-fields
 
+> ✓ done — 2026-05-05 — `93_integer_promotion` now passes; WSL tcc-tests2 is 71 pass / 9 xfail / 4 fail / 4 skip.
+
 **Phase:** 11-conformance    **Depends on:** 11-16    **Milestone:** M6
 
 ## Goal

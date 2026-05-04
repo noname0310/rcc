@@ -71,7 +71,7 @@ current numeric milestone already passes.
 - [x] [16d-tcc-tests2-macro-empty-args](16d-tcc-tests2-macro-empty-args.md)
 - [x] [16e-tcc-tests2-flexarray-init](16e-tcc-tests2-flexarray-init.md)
 - [x] [16f-tcc-tests2-dead-code-cfg-panic](16f-tcc-tests2-dead-code-cfg-panic.md)
-- [ ] [16g-tcc-tests2-integer-promotion-bitfield](16g-tcc-tests2-integer-promotion-bitfield.md)
+- [x] [16g-tcc-tests2-integer-promotion-bitfield](16g-tcc-tests2-integer-promotion-bitfield.md)
 - [ ] [16h-tcc-tests2-bitfields-layout](16h-tcc-tests2-bitfields-layout.md)
 - [ ] [16i-tcc-tests2-standard-header-surface](16i-tcc-tests2-standard-header-surface.md)
 - [ ] [16j-tcc-tests2-binary-floating-literals](16j-tcc-tests2-binary-floating-literals.md)

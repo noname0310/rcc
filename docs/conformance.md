@@ -98,7 +98,7 @@ reference output. The task-16 baseline is:
 
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| tcc-tests2 | 88 | 70 | 9 | 5 | 4 | 89.8 |
+| tcc-tests2 | 88 | 71 | 9 | 4 | 4 | 90.9 |
 
 The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
 TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
@@ -109,7 +109,7 @@ GCC and rcc both print a trailing space on every row, while the vendored
 `.expect` kept it only on the final row. `71_macro_empty_arg` is also a
 suite-data newline drift case: the source prints no newline, and GCC/TCC/rcc
 all emit `17` while the vendored `.expect` contains a final CRLF. Remaining
-failures are compiler-bug follow-up tasks `11-16g` through `11-16j`; they are
+failures are compiler-bug follow-up tasks `11-16h` through `11-16j`; they are
 not hidden by the pass-rate gate.
 
 ## Interpreting the columns
