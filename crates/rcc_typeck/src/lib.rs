@@ -10,8 +10,8 @@
 use rcc_hir::{
     rcc_hir_binop::{BinOp, UnOp},
     Body, ConvertKind, DefId, DefKind, FloatKind, GlobalInit, GlobalInitValue, HirCrate, HirExpr,
-    HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntRank, ObjectQuals, Qual, Ty, TyCtxt, TyId,
-    ValueCat,
+    HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, IntRank,
+    ObjectQuals, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::Symbol;
@@ -439,8 +439,24 @@ pub fn visit_expr(
 
     match kind {
         // ---- Leaves --------------------------------------------------
+        HirExprKind::IntLiteral { value, base, suffix } => {
+            body.exprs[expr_id].ty =
+                integer_literal_type(tcx, value, base, suffix).unwrap_or_else(|| {
+                    session
+                        .handler
+                        .struct_err(span, "integer literal is too large for any C99 integer type")
+                        .code(rcc_errors::codes::E0040)
+                        .emit();
+                    tcx.ulong_long
+                });
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::IntConst(value);
+            expr_id
+        }
         HirExprKind::IntConst(_) => {
-            body.exprs[expr_id].ty = tcx.int;
+            if body.exprs[expr_id].ty == tcx.error {
+                body.exprs[expr_id].ty = tcx.int;
+            }
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             expr_id
         }
@@ -1526,6 +1542,67 @@ fn default_arg_promote(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> Hi
     expr
 }
 
+fn integer_literal_type(
+    tcx: &TyCtxt,
+    value: i128,
+    base: IntLiteralBase,
+    suffix: IntLiteralSuffix,
+) -> Option<TyId> {
+    let value = u128::try_from(value).ok()?;
+    integer_literal_candidates(tcx, base, suffix)
+        .into_iter()
+        .find(|&ty| integer_literal_fits(tcx, value, ty))
+}
+
+fn integer_literal_candidates(
+    tcx: &TyCtxt,
+    base: IntLiteralBase,
+    suffix: IntLiteralSuffix,
+) -> Vec<TyId> {
+    let decimal = base == IntLiteralBase::Decimal;
+    match suffix {
+        IntLiteralSuffix::None if decimal => vec![tcx.int, tcx.long, tcx.long_long],
+        IntLiteralSuffix::None => {
+            vec![tcx.int, tcx.uint, tcx.long, tcx.ulong, tcx.long_long, tcx.ulong_long]
+        }
+        IntLiteralSuffix::U => vec![tcx.uint, tcx.ulong, tcx.ulong_long],
+        IntLiteralSuffix::L if decimal => vec![tcx.long, tcx.long_long],
+        IntLiteralSuffix::L => vec![tcx.long, tcx.ulong, tcx.long_long, tcx.ulong_long],
+        IntLiteralSuffix::UL => vec![tcx.ulong, tcx.ulong_long],
+        IntLiteralSuffix::LL if decimal => vec![tcx.long_long],
+        IntLiteralSuffix::LL => vec![tcx.long_long, tcx.ulong_long],
+        IntLiteralSuffix::ULL => vec![tcx.ulong_long],
+    }
+}
+
+fn integer_literal_fits(tcx: &TyCtxt, value: u128, ty: TyId) -> bool {
+    let Ty::Int { signed, rank } = *tcx.get(ty) else {
+        return false;
+    };
+    let bits = int_rank_bits(rank);
+    if signed {
+        value <= signed_integer_max(bits)
+    } else {
+        value <= unsigned_integer_max(bits)
+    }
+}
+
+fn signed_integer_max(bits: u32) -> u128 {
+    if bits >= 128 {
+        i128::MAX as u128
+    } else {
+        (1_u128 << (bits - 1)) - 1
+    }
+}
+
+fn unsigned_integer_max(bits: u32) -> u128 {
+    if bits >= 128 {
+        u128::MAX
+    } else {
+        (1_u128 << bits) - 1
+    }
+}
+
 /// Integer promotion (C99 §6.3.1.1).
 ///
 /// Applied to a value of integer type. The return value is the type the
@@ -1925,7 +2002,8 @@ pub fn decay_if_needed(
 pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
     match body.exprs[expr].kind {
         // Constants and arithmetic / pointer-producing operators.
-        HirExprKind::IntConst(_)
+        HirExprKind::IntLiteral { .. }
+        | HirExprKind::IntConst(_)
         | HirExprKind::FloatConst(_)
         | HirExprKind::Binary { .. }
         | HirExprKind::Unary { .. }
@@ -2154,7 +2232,7 @@ pub enum AssignError {
 /// "An integer constant expression with the value 0, or such an
 /// expression cast to type `void *`".
 ///
-/// In HIR a literal `0` lowers to [`HirExprKind::IntConst(0)`]; an
+/// Typeck rewrites integer literal `0` to [`HirExprKind::IntConst(0)`];
 /// explicit `(void *)0` lowers to a [`HirExprKind::Cast`] over the
 /// same; the type-checker's own [`ConvertKind::Pointer`] /
 /// [`ConvertKind::IntegerPromotion`] / [`ConvertKind::UsualArithmetic`]
@@ -2719,6 +2797,78 @@ fn push_arithmetic_convert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_literal_type_c99_base_sensitive_candidates() {
+        let tcx = TyCtxt::new();
+
+        assert_eq!(
+            integer_literal_type(&tcx, 0xabcd_0000, IntLiteralBase::Hex, IntLiteralSuffix::None),
+            Some(tcx.uint),
+            "unsuffixed hex crossing INT_MAX should choose unsigned int"
+        );
+        assert_eq!(
+            integer_literal_type(
+                &tcx,
+                0xabcd_0000,
+                IntLiteralBase::Decimal,
+                IntLiteralSuffix::None
+            ),
+            Some(tcx.long),
+            "decimal constants do not try unsigned int before long"
+        );
+        assert_eq!(
+            integer_literal_type(&tcx, 0xffff_ffff, IntLiteralBase::Octal, IntLiteralSuffix::None),
+            Some(tcx.uint),
+            "octal constants use the same signed/unsigned candidate list as hex"
+        );
+        assert_eq!(
+            integer_literal_type(&tcx, 0x1_0000_0000, IntLiteralBase::Hex, IntLiteralSuffix::U),
+            Some(tcx.ulong),
+            "U suffix moves from unsigned int to unsigned long when needed"
+        );
+    }
+
+    #[test]
+    fn typeck_hex_literal_argument_zero_extends_to_unsigned_long_long_context() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.int,
+            params: vec![tcx.ulong_long],
+            variadic: false,
+            proto: true,
+        });
+        let fn_ptr = tcx.intern(Ty::Ptr(Qual::plain(fn_ty)));
+        let mut body = Body::default();
+        let f = push_local(&mut body, Some(session.interner.intern("f")), fn_ptr, false);
+        let callee = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(f));
+        let arg = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::IntLiteral {
+                value: 0xabcd_0000,
+                base: IntLiteralBase::Hex,
+                suffix: IntLiteralSuffix::None,
+            },
+        );
+        let call = push_kind(&mut body, tcx.error, HirExprKind::Call { callee, args: vec![arg] });
+        set_root_expr(&mut body, call);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[arg].ty, tcx.uint);
+        assert!(matches!(body.exprs[arg].kind, HirExprKind::IntConst(0xabcd_0000)));
+        let HirExprKind::Call { args, .. } = &body.exprs[call].kind else {
+            panic!("expected call");
+        };
+        let converted = args[0];
+        assert_eq!(body.exprs[converted].ty, tcx.ulong_long);
+        assert!(matches!(
+            body.exprs[converted].kind,
+            HirExprKind::Convert { operand, kind: ConvertKind::UsualArithmetic } if operand == arg
+        ));
+    }
 
     /// Truth table for non-bitfield integer promotion.
     /// (input alias getter, expected output alias getter)

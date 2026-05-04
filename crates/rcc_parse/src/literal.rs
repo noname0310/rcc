@@ -17,7 +17,7 @@
 use rcc_errors::{codes, Diagnostic, Level};
 use rcc_lexer::StringEncoding;
 
-use crate::token::{CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix};
+use crate::token::{CharLiteral, FloatLiteral, FloatSuffix, IntBase, IntLiteral, IntSuffix};
 
 /// Decode a `PpNumberKind::Integer` source slice into an [`IntLiteral`].
 ///
@@ -66,6 +66,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
     }
 
     let (base, digit_start) = classify_base(bytes);
+    let radix = base.radix();
 
     // Walk digits. Base-matching characters advance `value`; the first
     // suffix letter (u/U/l/L) breaks the loop cleanly; anything else is
@@ -74,7 +75,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
     // For the octal family the leading `0` itself is a valid digit, so
     // `"0"` alone has `saw_any_digit == true`. Decimal and hex start
     // `false` because their digit run has not begun yet.
-    let mut saw_any_digit = base == 8;
+    let mut saw_any_digit = radix == 8;
     let mut i = digit_start;
     while i < bytes.len() {
         let b = bytes[i];
@@ -90,7 +91,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
                 )));
             }
         };
-        if digit_val >= base {
+        if digit_val >= radix {
             // Only reachable for base=8 with '8' or '9', or for a hex
             // digit 'a'..='f' in a decimal literal. The former is the
             // spec-cited "invalid octal digit" case; the latter is a
@@ -98,7 +99,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
             // have tagged as PpNumberKind::Float — if we see it here
             // the pp-tokeniser is out of sync and we treat it as a
             // general malformed integer.
-            if base == 8 {
+            if radix == 8 {
                 return Err(coded_err(
                     codes::E0011,
                     format!("invalid digit `{}` in octal literal", b as char),
@@ -111,7 +112,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
             }
         }
         value = value
-            .checked_mul(u128::from(base))
+            .checked_mul(u128::from(radix))
             .and_then(|v| v.checked_add(u128::from(digit_val)))
             .ok_or_else(|| coded_err(codes::E0040, "integer literal too large"))?;
         saw_any_digit = true;
@@ -126,7 +127,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
     }
 
     let suffix = parse_suffix(&bytes[i..])?;
-    Ok(IntLiteral { value, suffix })
+    Ok(IntLiteral { value, base, suffix })
 }
 
 /// Determine the radix and the starting index of the digit run.
@@ -135,17 +136,27 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
 /// `0` (not followed by `x`/`X`) is octal; the `0` itself is the first
 /// digit, so the caller consumes it as value 0. Everything else is
 /// decimal starting at index 0.
-fn classify_base(bytes: &[u8]) -> (u32, usize) {
+fn classify_base(bytes: &[u8]) -> (IntBase, usize) {
     if bytes.first() == Some(&b'0') {
         if matches!(bytes.get(1), Some(b'x') | Some(b'X')) {
-            (16, 2)
+            (IntBase::Hex, 2)
         } else {
             // `"0"` alone and `"0777"` both enter here; the leading
             // zero is the first octal digit (value 0).
-            (8, 1)
+            (IntBase::Octal, 1)
         }
     } else {
-        (10, 0)
+        (IntBase::Decimal, 0)
+    }
+}
+
+impl IntBase {
+    fn radix(self) -> u32 {
+        match self {
+            IntBase::Decimal => 10,
+            IntBase::Octal => 8,
+            IntBase::Hex => 16,
+        }
     }
 }
 
@@ -791,6 +802,7 @@ mod tests {
     fn decimal_zero_has_value_zero_and_no_suffix() {
         let lit = ok("0");
         assert_eq!(lit.value, 0);
+        assert_eq!(lit.base, IntBase::Octal);
         assert_eq!(lit.suffix, IntSuffix::None);
     }
 
@@ -798,6 +810,7 @@ mod tests {
     fn decimal_small() {
         let lit = ok("42");
         assert_eq!(lit.value, 42);
+        assert_eq!(lit.base, IntBase::Decimal);
         assert_eq!(lit.suffix, IntSuffix::None);
     }
 
@@ -814,18 +827,21 @@ mod tests {
     fn hex_lowercase() {
         let lit = ok("0xff");
         assert_eq!(lit.value, 0xff);
+        assert_eq!(lit.base, IntBase::Hex);
     }
 
     #[test]
     fn hex_mixed_case_prefix_and_digits() {
         let lit = ok("0XDeAdBeEf");
         assert_eq!(lit.value, 0xdead_beef);
+        assert_eq!(lit.base, IntBase::Hex);
     }
 
     #[test]
     fn octal_three_digits() {
         let lit = ok("0777");
         assert_eq!(lit.value, 0o777);
+        assert_eq!(lit.base, IntBase::Octal);
     }
 
     #[test]

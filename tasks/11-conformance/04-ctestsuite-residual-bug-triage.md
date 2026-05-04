@@ -73,7 +73,7 @@ Source: `docs/conformance.json` generated after task `11-03`
 | `00150` | C99 compiler bug: same file-scope compound-literal issue, plus nested designated global initializer coverage. | `06-30` |
 | `00152` | C99 compiler bug hidden as xfail: `#line` operands must be macro-expanded. | `04-21` |
 | `00199` | C99 compiler bug: CFG panics on valid goto into ordinary block scope. | `08-26` |
-| `00204` | C99 compiler bug: aggregate-rvalue member access lowering is fixed; SysV direct aggregate ABI lowering is fixed by `09-28`; aggregate `va_arg` runtime materialization is fixed by `09-29`; remaining mismatch is hex integer constant signedness. | `07-21`, `08-27`, `09-28`, `09-29`, `07-22` |
+| `00204` | Fixed C99 compiler bug: aggregate-rvalue member access, SysV direct aggregate ABI, aggregate `va_arg`, and hex integer constant signedness are all green as of `07-22`. | `07-21`, `08-27`, `09-28`, `09-29`, `07-22` |
 | `00205` | C99 compiler bug: brace elision for nested aggregate initializers missing. | `06-31` |
 | `00207` | C99 compiler bug: CFG panic on goto into ordinary block scope; VLA legality remains guarded by the same task. | `08-26` |
 | `00213` | GNU extension semantics bug: parsed statement expressions are not semantically lowered, causing missing output. | `11-07` |

@@ -530,8 +530,21 @@ pub struct IntLiteral {
     pub text: Symbol,
     /// Numeric value decoded during parser phase 7.
     pub value: u128,
+    /// Literal base spelling.
+    pub base: IntBase,
     /// Literal suffix.
     pub suffix: IntSuffix,
+}
+
+/// Integer-literal base spelling.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IntBase {
+    /// Decimal constant.
+    Decimal,
+    /// Octal constant.
+    Octal,
+    /// Hexadecimal constant.
+    Hex,
 }
 
 /// Integer-literal suffix.

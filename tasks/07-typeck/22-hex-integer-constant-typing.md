@@ -1,5 +1,7 @@
 # 07-22: hex integer constant typing
 
+> ✓ done — 2026-05-04
+
 **Phase:** 07-typeck    **Depends on:** 07-08, 07-14, 09-29    **Milestone:** M6+
 
 ## Goal
@@ -31,11 +33,17 @@ constants so unsigned-valued literals do not get sign-extended through calls.
 - Updated conformance dashboard if `00204` becomes fully green.
 
 ## Acceptance
-- `0xabcd0000` is typed as `unsigned int` on LP64.
-- Passing `0xabcd0000` to `unsigned long long` zero-extends to
+- [x] `0xabcd0000` is typed as `unsigned int` on LP64.
+- [x] Passing `0xabcd0000` to `unsigned long long` zero-extends to
   `0x00000000abcd0000`.
-- Existing decimal integer literal behavior remains unchanged.
-- `c-testsuite::00204` advances past the `MOVI` mismatch or passes fully.
+- [x] Existing decimal integer literal behavior remains unchanged.
+- [x] `c-testsuite::00204` passes fully.
+
+## Result
+- Parser phase 7 now preserves decimal/octal/hex base metadata.
+- HIR keeps integer literals as pre-typeck `IntLiteral` nodes until typeck
+  applies the C99 §6.4.4.1 candidate lists.
+- Latest c-testsuite report: 215 pass, 1 fail, 4 xfail, 0 skip.
 
 ## References
 - C99 §6.4.4.1 integer constants

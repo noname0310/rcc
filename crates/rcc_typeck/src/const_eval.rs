@@ -151,7 +151,9 @@ impl<'a> ConstEval<'a> {
             // Integer constants are also arithmetic constants — promote
             // to f64 in the floating context.
             #[allow(clippy::cast_precision_loss)]
-            HirExprKind::IntConst(v) => Some(v as f64),
+            HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => {
+                Some(value as f64)
+            }
 
             HirExprKind::DefRef(def_id) => {
                 let defs = self.defs?;
@@ -483,7 +485,7 @@ impl<'a> ConstEval<'a> {
         let span = e.span;
         match e.kind.clone() {
             // ---- Leaves ---------------------------------------------------
-            HirExprKind::IntConst(v) => Some(v),
+            HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => Some(value),
 
             // C99 §6.6p6: floats may participate in an ICE only when
             // they are the operand of a cast to an integer type — that

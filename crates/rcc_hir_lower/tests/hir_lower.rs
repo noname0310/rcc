@@ -21,7 +21,7 @@ use rcc_ast::{
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
-    Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprKind,
+    Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId, HirExprKind,
     HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
@@ -447,6 +447,7 @@ fn int_lit(text: &str, sess: &mut Session) -> Expr {
         kind: ExprKind::IntLit(rcc_ast::IntLiteral {
             text: s,
             value: text.parse::<u128>().unwrap(),
+            base: rcc_ast::IntBase::Decimal,
             suffix: rcc_ast::IntSuffix::None,
         }),
         span: DUMMY_SP,
@@ -1181,6 +1182,13 @@ fn composite_enum_duplicate_emits_e0078() {
 // Section D — Initializer lowering
 // ═══════════════════════════════════════════════════════════════════════
 
+fn hir_int_value(body: &Body, id: HirExprId) -> Option<i128> {
+    match body.exprs[id].kind {
+        HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => Some(value),
+        _ => None,
+    }
+}
+
 fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
     let mut writes = Vec::new();
     for stmt in body.stmts.iter() {
@@ -1194,13 +1202,13 @@ fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
         if !matches!(&body.exprs[*base].kind, HirExprKind::LocalRef(l) if *l == local) {
             continue;
         }
-        let HirExprKind::IntConst(i) = &body.exprs[*index].kind else {
+        let Some(i) = hir_int_value(body, *index) else {
             continue;
         };
-        let HirExprKind::IntConst(v) = &body.exprs[*rhs].kind else {
+        let Some(v) = hir_int_value(body, *rhs) else {
             continue;
         };
-        writes.push((*i, *v));
+        writes.push((i, v));
     }
     writes
 }
@@ -1225,13 +1233,13 @@ fn local_field_array_int_writes(body: &Body, local: Local, field_index: u32) -> 
         if !matches!(&body.exprs[*field_base].kind, HirExprKind::LocalRef(l) if *l == local) {
             continue;
         }
-        let HirExprKind::IntConst(i) = &body.exprs[*index].kind else {
+        let Some(i) = hir_int_value(body, *index) else {
             continue;
         };
-        let HirExprKind::IntConst(v) = &body.exprs[*rhs].kind else {
+        let Some(v) = hir_int_value(body, *rhs) else {
             continue;
         };
-        writes.push((*i, *v));
+        writes.push((i, v));
     }
     writes
 }
@@ -1280,7 +1288,7 @@ fn init_scalar_assigns_rhs_to_target() {
     let HirExprKind::Assign { rhs, .. } = body.exprs[assign_expr].kind else {
         panic!("expected Assign, got {:?}", body.exprs[assign_expr].kind);
     };
-    assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(7)));
+    assert_eq!(hir_int_value(&body, rhs), Some(7));
 }
 
 #[test]
@@ -1319,8 +1327,8 @@ fn init_array_partial_zero_fills_tail() {
         let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
         let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
         let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
-        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
-        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        let Some(i) = hir_int_value(&body, index) else { continue };
+        let Some(v) = hir_int_value(&body, rhs) else { continue };
         idx_value.push((i, v));
     }
     idx_value.sort();
@@ -1365,8 +1373,8 @@ fn init_array_designator_resets_cursor() {
         let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
         let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
         let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
-        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
-        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        let Some(i) = hir_int_value(&body, index) else { continue };
+        let Some(v) = hir_int_value(&body, rhs) else { continue };
         idx_value.push((i, v));
     }
     idx_value.sort();
@@ -1477,7 +1485,7 @@ fn init_record_per_field_assign() {
     for sid in &out {
         let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
         let HirExprKind::Assign { rhs, .. } = body.exprs[eid].kind else { continue };
-        if let HirExprKind::IntConst(v) = body.exprs[rhs].kind {
+        if let Some(v) = hir_int_value(&body, rhs) {
             field_values.push(v);
         }
     }
@@ -1555,7 +1563,7 @@ fn stmt_return_value_lowers_to_return_some() {
     let HirStmtKind::Return(Some(eid)) = body.stmts[id].kind else {
         panic!("expected Return(Some)");
     };
-    assert!(matches!(body.exprs[eid].kind, HirExprKind::IntConst(42)));
+    assert_eq!(hir_int_value(&body, eid), Some(42));
 }
 
 #[test]
@@ -1576,9 +1584,9 @@ fn expr_ternary_creates_cond_node() {
     let HirExprKind::Cond { cond, then_expr, else_expr } = body.exprs[id].kind else {
         panic!("expected Cond");
     };
-    assert!(matches!(body.exprs[cond].kind, HirExprKind::IntConst(1)));
-    assert!(matches!(body.exprs[then_expr].kind, HirExprKind::IntConst(2)));
-    assert!(matches!(body.exprs[else_expr].kind, HirExprKind::IntConst(3)));
+    assert_eq!(hir_int_value(&body, cond), Some(1));
+    assert_eq!(hir_int_value(&body, then_expr), Some(2));
+    assert_eq!(hir_int_value(&body, else_expr), Some(3));
 }
 
 #[test]
@@ -1673,7 +1681,7 @@ fn expr_paren_does_not_create_extra_node() {
     let before = body.exprs.len();
     let id = lower_expr(&paren, &mut body, &scope, &mut crate_, &mut tcx, &mut resolver, &mut sess);
     assert_eq!(body.exprs.len() - before, 1, "paren should not add nodes");
-    assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+    assert_eq!(hir_int_value(&body, id), Some(42));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2025,7 +2033,9 @@ fn snippet_sizeof_type_preserves_type_name() {
         .iter()
         .find_map(|expr| match expr.kind {
             HirExprKind::SizeofType(ty) => Some(ty),
-            HirExprKind::IntConst(0) => panic!("sizeof(type) must not lower to zero placeholder"),
+            HirExprKind::IntLiteral { value: 0, .. } | HirExprKind::IntConst(0) => {
+                panic!("sizeof(type) must not lower to zero placeholder")
+            }
             _ => None,
         })
         .expect("missing sizeof(type)");
@@ -2120,7 +2130,7 @@ fn snippet_compound_literal_preserves_type_part() {
         panic!("compound literal init statement must assign");
     };
     assert!(matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(l) if l == literal_local));
-    assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(1)));
+    assert_eq!(hir_int_value(body, rhs), Some(1));
 }
 
 #[test]
@@ -2180,7 +2190,7 @@ fn snippet_compound_literal_record_initializer_reuses_initializer_walker() {
             };
             matches!(body.exprs[lhs].kind, HirExprKind::Field { base, field_index: 0 }
                 if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local))
-                && matches!(body.exprs[rhs].kind, HirExprKind::IntConst(1))
+                && hir_int_value(body, rhs) == Some(1)
         }),
         "record compound literal should initialise field x via lower_initializer"
     );
@@ -2210,8 +2220,8 @@ fn snippet_compound_literal_array_initializer_is_indexable() {
             };
             matches!(body.exprs[lhs].kind, HirExprKind::Index { base, index }
                 if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local)
-                    && matches!(body.exprs[index].kind, HirExprKind::IntConst(1)))
-                && matches!(body.exprs[rhs].kind, HirExprKind::IntConst(2))
+                    && hir_int_value(body, index) == Some(1))
+                && hir_int_value(body, rhs) == Some(2)
         }),
         "array compound literal should initialise element [1]"
     );
@@ -2233,8 +2243,8 @@ fn snippet_char_array_string_initializer_completes_length_and_writes_chars() {
         if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
             continue;
         }
-        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
-        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        let Some(i) = hir_int_value(body, index) else { continue };
+        let Some(v) = hir_int_value(body, rhs) else { continue };
         elems.push((i, v));
     }
     elems.sort();
@@ -2267,8 +2277,8 @@ fn snippet_local_struct_char_array_string_initializer_writes_subobject_chars() {
         if !matches!(body.exprs[field_base].kind, HirExprKind::LocalRef(Local(0))) {
             continue;
         }
-        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
-        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        let Some(i) = hir_int_value(body, index) else { continue };
+        let Some(v) = hir_int_value(body, rhs) else { continue };
         elems.push((i, v));
     }
     elems.sort();
@@ -2291,8 +2301,8 @@ fn snippet_wide_string_initializer_completes_wchar_array_by_codepoint() {
         if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
             continue;
         }
-        let HirExprKind::IntConst(i) = body.exprs[index].kind else { continue };
-        let HirExprKind::IntConst(v) = body.exprs[rhs].kind else { continue };
+        let Some(i) = hir_int_value(body, index) else { continue };
+        let Some(v) = hir_int_value(body, rhs) else { continue };
         elems.push((i, v));
     }
     elems.sort();
@@ -3307,7 +3317,7 @@ fn regression_gate_sizeof_type_and_compound_literal_keep_type_names() {
         .iter()
         .find_map(|expr| match expr.kind {
             HirExprKind::SizeofType(ty) => Some(ty),
-            HirExprKind::IntConst(0) => {
+            HirExprKind::IntLiteral { value: 0, .. } | HirExprKind::IntConst(0) => {
                 panic!("sizeof(type-name) must not lower to IntConst(0) placeholder")
             }
             _ => None,

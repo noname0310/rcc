@@ -22,7 +22,8 @@ use rcc_lexer::StringEncoding;
 use crate::keywords::classify_ident;
 use crate::literal::{decode_char_full, decode_float, decode_integer, decode_string};
 use crate::token::{
-    CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, Token, TokenKind,
+    CharLiteral, FloatLiteral, FloatSuffix, IntBase, IntLiteral, IntSuffix, StringLiteral, Token,
+    TokenKind,
 };
 
 /// Convert a slice of pp-tokens into a fresh `Vec<Token>`.
@@ -85,7 +86,11 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
                         primary: true,
                     });
                     session.handler.emit(&diag);
-                    TokenKind::IntLit(IntLiteral { value: 0, suffix: IntSuffix::None })
+                    TokenKind::IntLit(IntLiteral {
+                        value: 0,
+                        base: IntBase::Decimal,
+                        suffix: IntSuffix::None,
+                    })
                 }
             }
         }
@@ -468,6 +473,7 @@ mod tests {
         match t.kind {
             TokenKind::IntLit(lit) => {
                 assert_eq!(lit.value, 42);
+                assert_eq!(lit.base, IntBase::Decimal);
                 assert_eq!(lit.suffix, IntSuffix::ULL);
             }
             other => panic!("expected IntLit, got {other:?}"),
@@ -486,7 +492,11 @@ mod tests {
         let t = pp_to_token(&mut sess, pp).expect("int converts even on error");
         assert!(matches!(
             t.kind,
-            TokenKind::IntLit(IntLiteral { value: 0, suffix: IntSuffix::None })
+            TokenKind::IntLit(IntLiteral {
+                value: 0,
+                base: IntBase::Decimal,
+                suffix: IntSuffix::None,
+            })
         ));
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);

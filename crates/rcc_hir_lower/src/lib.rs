@@ -21,8 +21,8 @@ use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::{
     Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, Linkage, Local, LocalDecl, ObjectQuals, RecordKind, SwitchCase, TyCtxt,
-    TyId, ValueCat,
+    HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, Linkage, Local, LocalDecl,
+    ObjectQuals, RecordKind, SwitchCase, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -2718,7 +2718,7 @@ fn lower_for_init_decl(
 ///
 /// | AST shape                         | HIR shape                                            |
 /// |-----------------------------------|------------------------------------------------------|
-/// | `IntLit`                          | `IntConst`                                           |
+/// | `IntLit`                          | `IntLiteral`                                         |
 /// | `FloatLit`                        | `FloatConst`                                         |
 /// | `CharLit`                         | `IntConst` (first character's code point)            |
 /// | `StringLit "s"`                   | `StringRef(def_id)` pointing at a synthesised global |
@@ -2764,9 +2764,11 @@ pub fn lower_expr(
     session: &mut Session,
 ) -> HirExprId {
     let kind: HirExprKind = match &expr.kind {
-        rcc_ast::ExprKind::IntLit(lit) => {
-            HirExprKind::IntConst(i128::try_from(lit.value).unwrap_or(i128::MAX))
-        }
+        rcc_ast::ExprKind::IntLit(lit) => HirExprKind::IntLiteral {
+            value: i128::try_from(lit.value).unwrap_or(i128::MAX),
+            base: hir_int_base(lit.base),
+            suffix: hir_int_suffix(lit.suffix),
+        },
         rcc_ast::ExprKind::FloatLit(lit) => HirExprKind::FloatConst(lit.value),
         rcc_ast::ExprKind::CharLit(lit) => HirExprKind::IntConst(i128::from(lit.value)),
         rcc_ast::ExprKind::StringLit(lit) => {
@@ -3084,6 +3086,25 @@ pub fn lower_expr(
     });
     body.exprs[expr_id].id = expr_id;
     expr_id
+}
+
+fn hir_int_base(base: rcc_ast::IntBase) -> IntLiteralBase {
+    match base {
+        rcc_ast::IntBase::Decimal => IntLiteralBase::Decimal,
+        rcc_ast::IntBase::Octal => IntLiteralBase::Octal,
+        rcc_ast::IntBase::Hex => IntLiteralBase::Hex,
+    }
+}
+
+fn hir_int_suffix(suffix: rcc_ast::IntSuffix) -> IntLiteralSuffix {
+    match suffix {
+        rcc_ast::IntSuffix::None => IntLiteralSuffix::None,
+        rcc_ast::IntSuffix::U => IntLiteralSuffix::U,
+        rcc_ast::IntSuffix::L => IntLiteralSuffix::L,
+        rcc_ast::IntSuffix::UL => IntLiteralSuffix::UL,
+        rcc_ast::IntSuffix::LL => IntLiteralSuffix::LL,
+        rcc_ast::IntSuffix::ULL => IntLiteralSuffix::ULL,
+    }
 }
 
 /// Intern a string literal into the global table.
@@ -6844,6 +6865,7 @@ mod tests {
             kind: ExprKind::IntLit(rcc_ast::IntLiteral {
                 text: s,
                 value,
+                base: parse_int_lit_base(text),
                 suffix: rcc_ast::IntSuffix::None,
             }),
             span: DUMMY_SP,
@@ -6858,6 +6880,17 @@ mod tests {
             u128::from_str_radix(s, 8).unwrap()
         } else {
             s.parse::<u128>().unwrap()
+        }
+    }
+
+    fn parse_int_lit_base(text: &str) -> rcc_ast::IntBase {
+        let s = text.trim_end_matches(['u', 'U', 'l', 'L']);
+        if s.starts_with("0x") || s.starts_with("0X") {
+            rcc_ast::IntBase::Hex
+        } else if s.starts_with('0') {
+            rcc_ast::IntBase::Octal
+        } else {
+            rcc_ast::IntBase::Decimal
         }
     }
 
@@ -7431,6 +7464,13 @@ mod tests {
 
     use rcc_hir::{Body, HirExprKind, HirStmtKind, LocalDecl};
 
+    fn hir_int_value(body: &Body, id: HirExprId) -> Option<i128> {
+        match body.exprs[id].kind {
+            HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Helper: wrap a statement kind into an `rcc_ast::Stmt`.
     fn stmt(kind: StmtKind) -> Stmt {
         Stmt { id: NodeId(0), kind, span: DUMMY_SP }
@@ -7483,7 +7523,7 @@ mod tests {
         let (body, id) = lower_single_stmt(&mut sess, s);
         match &body.stmts[id].kind {
             HirStmtKind::Expr(eid) => {
-                assert!(matches!(body.exprs[*eid].kind, HirExprKind::IntConst(42)));
+                assert_eq!(hir_int_value(&body, *eid), Some(42));
             }
             other => panic!("expected Expr, got {other:?}"),
         }
@@ -7524,7 +7564,7 @@ mod tests {
         let (b2, id2) = lower_single_stmt(&mut sess, stmt(StmtKind::Return(Some(val))));
         match &b2.stmts[id2].kind {
             HirStmtKind::Return(Some(eid)) => {
-                assert!(matches!(b2.exprs[*eid].kind, HirExprKind::IntConst(7)));
+                assert_eq!(hir_int_value(&b2, *eid), Some(7));
             }
             other => panic!("expected Return(Some), got {other:?}"),
         }
@@ -7544,7 +7584,7 @@ mod tests {
         let (body, id) = lower_single_stmt(&mut sess, s);
         match &body.stmts[id].kind {
             HirStmtKind::If { cond, then_branch, else_branch } => {
-                assert!(matches!(body.exprs[*cond].kind, HirExprKind::IntConst(1)));
+                assert_eq!(hir_int_value(&body, *cond), Some(1));
                 assert!(matches!(body.stmts[*then_branch].kind, HirStmtKind::Expr(_)));
                 let else_id = else_branch.expect("expected else branch");
                 assert!(matches!(body.stmts[else_id].kind, HirStmtKind::Expr(_)));
@@ -7653,7 +7693,7 @@ mod tests {
             HirStmtKind::Block(ids) => match &body.stmts[ids[0]].kind {
                 HirStmtKind::LocalDecl { local, init } => {
                     let init_id = init.expect("expected init expr");
-                    assert!(matches!(body.exprs[init_id].kind, HirExprKind::IntConst(5)));
+                    assert_eq!(hir_int_value(&body, init_id), Some(5));
                     assert_eq!(body.locals[*local].name, Some(x));
                 }
                 other => panic!("expected LocalDecl, got {other:?}"),
@@ -7732,7 +7772,7 @@ mod tests {
         let (body, id) = lower_single_stmt(&mut sess, s);
         match &body.stmts[id].kind {
             HirStmtKind::Switch { cond, body: body_id, cases } => {
-                assert!(matches!(body.exprs[*cond].kind, HirExprKind::IntConst(1)));
+                assert_eq!(hir_int_value(&body, *cond), Some(1));
                 assert!(matches!(body.stmts[*body_id].kind, HirStmtKind::Break));
                 assert!(cases.is_empty(), "cases collected in a later pass");
             }
@@ -7825,8 +7865,8 @@ mod tests {
                         assert_eq!(body.locals[*local].name, Some(i), "local's name should be `i`");
                         let init_expr_id = init_expr.expect("init expr present");
                         assert!(
-                            matches!(body.exprs[init_expr_id].kind, HirExprKind::IntConst(0)),
-                            "init expr should be IntConst(0), got {:?}",
+                            hir_int_value(&body, init_expr_id) == Some(0),
+                            "init expr should be integer 0, got {:?}",
                             body.exprs[init_expr_id].kind
                         );
                     }
@@ -8047,11 +8087,19 @@ mod tests {
     }
 
     #[test]
-    fn expr_int_literal_lowers_to_int_const() {
+    fn expr_int_literal_lowers_with_base_and_suffix_metadata() {
         let (mut sess, _cap) = Session::for_test();
         let e = int_lit("42", &mut sess);
         let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+        assert_eq!(hir_int_value(&body, id), Some(42));
+        assert!(matches!(
+            body.exprs[id].kind,
+            HirExprKind::IntLiteral {
+                value: 42,
+                base: IntLiteralBase::Decimal,
+                suffix: IntLiteralSuffix::None
+            }
+        ));
     }
 
     #[test]
@@ -8063,12 +8111,13 @@ mod tests {
             kind: ExprKind::IntLit(rcc_ast::IntLiteral {
                 text: misleading_text,
                 value: 42,
+                base: rcc_ast::IntBase::Decimal,
                 suffix: rcc_ast::IntSuffix::None,
             }),
             span: DUMMY_SP,
         };
         let (body, id, _crate, _res) = lower_single_expr(&mut sess, e);
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(42)));
+        assert_eq!(hir_int_value(&body, id), Some(42));
     }
 
     #[test]
@@ -8254,7 +8303,7 @@ mod tests {
         let paren = Expr { id: NodeId(0), kind: ExprKind::Paren(Box::new(inner)), span: DUMMY_SP };
         let (body, id, _crate, _res) = lower_single_expr(&mut sess, paren);
         // Paren doesn't add a wrapper — the id is the inner int-const node.
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(7)));
+        assert_eq!(hir_int_value(&body, id), Some(7));
         // Exactly one HIR expression node was created, not two.
         assert_eq!(body.exprs.len(), 1);
     }
@@ -8369,9 +8418,9 @@ mod tests {
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
             HirExprKind::Cond { cond, then_expr, else_expr } => {
-                assert!(matches!(body.exprs[cond].kind, HirExprKind::IntConst(1)));
-                assert!(matches!(body.exprs[then_expr].kind, HirExprKind::IntConst(2)));
-                assert!(matches!(body.exprs[else_expr].kind, HirExprKind::IntConst(3)));
+                assert_eq!(hir_int_value(&body, cond), Some(1));
+                assert_eq!(hir_int_value(&body, then_expr), Some(2));
+                assert_eq!(hir_int_value(&body, else_expr), Some(3));
             }
             ref other => panic!("expected Cond, got {other:?}"),
         }
@@ -8391,8 +8440,8 @@ mod tests {
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
             HirExprKind::Comma { lhs, rhs } => {
-                assert!(matches!(body.exprs[lhs].kind, HirExprKind::IntConst(10)));
-                assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(20)));
+                assert_eq!(hir_int_value(&body, lhs), Some(10));
+                assert_eq!(hir_int_value(&body, rhs), Some(20));
             }
             ref other => panic!("expected Comma, got {other:?}"),
         }
@@ -8432,7 +8481,7 @@ mod tests {
         match body.exprs[id].kind {
             HirExprKind::Assign { lhs, rhs } => {
                 assert!(matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(_)));
-                assert!(matches!(body.exprs[rhs].kind, HirExprKind::IntConst(5)));
+                assert_eq!(hir_int_value(&body, rhs), Some(5));
             }
             ref other => panic!("expected Assign, got {other:?}"),
         }
@@ -8477,7 +8526,7 @@ mod tests {
                     HirExprKind::Binary { op, lhs: bl, rhs: br } => {
                         assert_eq!(*op, rcc_hir::rcc_hir_binop::BinOp::Add);
                         assert!(matches!(body.exprs[*bl].kind, HirExprKind::LocalRef(_)));
-                        assert!(matches!(body.exprs[*br].kind, HirExprKind::IntConst(1)));
+                        assert_eq!(hir_int_value(&body, *br), Some(1));
                     }
                     other => panic!("expected Binary inside Assign rhs, got {other:?}"),
                 }
@@ -8529,8 +8578,8 @@ mod tests {
             HirExprKind::Call { callee, args } => {
                 assert!(matches!(body.exprs[*callee].kind, HirExprKind::DefRef(_)));
                 assert_eq!(args.len(), 2);
-                assert!(matches!(body.exprs[args[0]].kind, HirExprKind::IntConst(1)));
-                assert!(matches!(body.exprs[args[1]].kind, HirExprKind::IntConst(2)));
+                assert_eq!(hir_int_value(&body, args[0]), Some(1));
+                assert_eq!(hir_int_value(&body, args[1]), Some(2));
             }
             other => panic!("expected Call, got {other:?}"),
         }
@@ -8550,7 +8599,7 @@ mod tests {
 
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
 
-        assert!(matches!(body.exprs[id].kind, HirExprKind::IntConst(7)));
+        assert_eq!(hir_int_value(&body, id), Some(7));
     }
 
     #[test]
@@ -8567,7 +8616,7 @@ mod tests {
             HirExprKind::UnresolvedField { base, field: member, field_span } => {
                 assert_eq!(member, field);
                 assert_eq!(field_span, DUMMY_SP);
-                assert!(matches!(body.exprs[base].kind, HirExprKind::IntConst(0)));
+                assert_eq!(hir_int_value(&body, base), Some(0));
             }
             ref other => panic!("expected UnresolvedField, got {other:?}"),
         }
@@ -8591,7 +8640,7 @@ mod tests {
                 // The base should itself be a Deref node.
                 match body.exprs[base].kind {
                     HirExprKind::Deref(inner) => {
-                        assert!(matches!(body.exprs[inner].kind, HirExprKind::IntConst(0)));
+                        assert_eq!(hir_int_value(&body, inner), Some(0));
                     }
                     ref other => panic!("expected Deref under Field, got {other:?}"),
                 }
@@ -8614,8 +8663,8 @@ mod tests {
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
             HirExprKind::Index { base, index } => {
-                assert!(matches!(body.exprs[base].kind, HirExprKind::IntConst(100)));
-                assert!(matches!(body.exprs[index].kind, HirExprKind::IntConst(2)));
+                assert_eq!(hir_int_value(&body, base), Some(100));
+                assert_eq!(hir_int_value(&body, index), Some(2));
             }
             ref other => panic!("expected Index, got {other:?}"),
         }
@@ -8642,7 +8691,7 @@ mod tests {
         let (body, id, _c, _r) = lower_single_expr(&mut sess, e);
         match body.exprs[id].kind {
             HirExprKind::Cast { operand, to } => {
-                assert!(matches!(body.exprs[operand].kind, HirExprKind::IntConst(1)));
+                assert_eq!(hir_int_value(&body, operand), Some(1));
                 assert_ne!(to, TyCtxt::new().error);
             }
             ref other => panic!("expected Cast, got {other:?}"),
@@ -8661,7 +8710,7 @@ mod tests {
         let (body, id, _c, _r) = lower_single_expr(&mut sess, se);
         match body.exprs[id].kind {
             HirExprKind::SizeofExpr(inner) => {
-                assert!(matches!(body.exprs[inner].kind, HirExprKind::IntConst(1)));
+                assert_eq!(hir_int_value(&body, inner), Some(1));
             }
             ref other => panic!("expected SizeofExpr, got {other:?}"),
         }
@@ -8878,16 +8927,12 @@ mod tests {
             .iter()
             .map(|(lid, rid)| {
                 let i = match &body.exprs[*lid].kind {
-                    HirExprKind::Index { index, .. } => match body.exprs[*index].kind {
-                        HirExprKind::IntConst(n) => n,
-                        _ => panic!("non-IntConst index"),
-                    },
+                    HirExprKind::Index { index, .. } => {
+                        hir_int_value(&body, *index).expect("non-integer index")
+                    }
                     other => panic!("expected Index lhs, got {other:?}"),
                 };
-                let v = match body.exprs[*rid].kind {
-                    HirExprKind::IntConst(n) => n,
-                    _ => panic!("non-IntConst rhs"),
-                };
+                let v = hir_int_value(&body, *rid).expect("non-integer rhs");
                 (i, v)
             })
             .collect();
@@ -8933,16 +8978,12 @@ mod tests {
             .iter()
             .map(|(lid, rid)| {
                 let i = match &body.exprs[*lid].kind {
-                    HirExprKind::Index { index, .. } => match body.exprs[*index].kind {
-                        HirExprKind::IntConst(n) => n,
-                        _ => panic!(),
-                    },
+                    HirExprKind::Index { index, .. } => {
+                        hir_int_value(&body, *index).expect("non-integer index")
+                    }
                     _ => panic!(),
                 };
-                let v = match body.exprs[*rid].kind {
-                    HirExprKind::IntConst(n) => n,
-                    _ => panic!(),
-                };
+                let v = hir_int_value(&body, *rid).expect("non-integer rhs");
                 (i, v)
             })
             .collect();
@@ -8972,7 +9013,7 @@ mod tests {
         let (body, root) = lower_single_stmt(&mut sess, s);
         let (_local, assigns) = collect_init_assigns(&body, root);
         assert_eq!(assigns.len(), 1);
-        assert!(matches!(body.exprs[assigns[0].1].kind, HirExprKind::IntConst(5)));
+        assert_eq!(hir_int_value(&body, assigns[0].1), Some(5));
     }
 
     #[test]
@@ -8990,10 +9031,7 @@ mod tests {
         assert_eq!(assigns.len(), 3);
         let mut values: Vec<i128> = assigns
             .iter()
-            .map(|(_, rid)| match body.exprs[*rid].kind {
-                HirExprKind::IntConst(n) => n,
-                _ => panic!(),
-            })
+            .map(|(_, rid)| hir_int_value(&body, *rid).expect("non-integer rhs"))
             .collect();
         values.sort();
         assert_eq!(values, vec![10, 20, 30]);

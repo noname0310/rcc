@@ -140,8 +140,8 @@
 //!
 use rcc_ast::{
     AssignOp, BinOp, CharLiteral as AstCharLiteral, Expr, ExprKind,
-    FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, IntLiteral as AstIntLiteral,
-    IntSuffix as AstIntSuffix, LiteralEncoding, OffsetofDesignator,
+    FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, IntBase as AstIntBase,
+    IntLiteral as AstIntLiteral, IntSuffix as AstIntSuffix, LiteralEncoding, OffsetofDesignator,
     StringLiteral as AstStringLiteral, UnOp,
 };
 use rcc_errors::codes;
@@ -152,7 +152,8 @@ use crate::decl::parse_type_name;
 use crate::init::parse_initializer;
 use crate::keywords::Keyword;
 use crate::token::{
-    CharLiteral, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, StringLiteral, TokenKind,
+    CharLiteral, FloatLiteral, FloatSuffix, IntBase, IntLiteral, IntSuffix, StringLiteral,
+    TokenKind,
 };
 use crate::Parser;
 
@@ -1442,6 +1443,11 @@ fn ast_int_literal(p: &mut Parser<'_>, span: Span, lit: IntLiteral) -> AstIntLit
     AstIntLiteral {
         text: intern_span_text(p, span),
         value: lit.value,
+        base: match lit.base {
+            IntBase::Decimal => AstIntBase::Decimal,
+            IntBase::Octal => AstIntBase::Octal,
+            IntBase::Hex => AstIntBase::Hex,
+        },
         suffix: match lit.suffix {
             IntSuffix::None => AstIntSuffix::None,
             IntSuffix::U => AstIntSuffix::U,
@@ -1534,7 +1540,10 @@ mod tests {
         let pps = [pp(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, 2)];
         let tokens = convert(&mut sess, &pps);
         match &tokens[0].kind {
-            TokenKind::IntLit(lit) => assert_eq!(lit.value, 42),
+            TokenKind::IntLit(lit) => {
+                assert_eq!(lit.value, 42);
+                assert_eq!(lit.base, IntBase::Decimal);
+            }
             other => panic!("expected IntLit, got {other:?}"),
         }
         let mut parser = Parser::new(&mut sess, tokens);
@@ -1543,6 +1552,7 @@ mod tests {
             ExprKind::IntLit(lit) => {
                 assert_eq!(parser.session.interner.get(lit.text), "42");
                 assert_eq!(lit.value, 42);
+                assert_eq!(lit.base, AstIntBase::Decimal);
                 assert_eq!(lit.suffix, AstIntSuffix::None);
             }
             other => panic!("expected IntLit, got {other:?}"),
@@ -1565,6 +1575,7 @@ mod tests {
             ExprKind::IntLit(lit) => {
                 assert_eq!(parser.session.interner.get(lit.text), "42UL");
                 assert_eq!(lit.value, 42);
+                assert_eq!(lit.base, AstIntBase::Decimal);
                 assert_eq!(lit.suffix, AstIntSuffix::UL);
             }
             other => panic!("expected IntLit, got {other:?}"),

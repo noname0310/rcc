@@ -42,8 +42,21 @@ pub enum TokenKind {
 pub struct IntLiteral {
     /// Numeric value as u128 (sign handled by parse).
     pub value: u128,
+    /// Literal base spelling.
+    pub base: IntBase,
     /// Declared / deduced type category.
     pub suffix: IntSuffix,
+}
+
+/// Integer-literal base spelling.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IntBase {
+    /// Decimal constant.
+    Decimal,
+    /// Octal constant.
+    Octal,
+    /// Hexadecimal constant.
+    Hex,
 }
 
 /// Integer-literal suffix / deduced type.

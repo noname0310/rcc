@@ -383,6 +383,8 @@ pub enum ValueCat {
 /// HIR expression kinds.
 #[derive(Debug, Clone)]
 pub enum HirExprKind {
+    /// Integer literal before typeck applies C99 §6.4.4.1 type selection.
+    IntLiteral { value: i128, base: IntLiteralBase, suffix: IntLiteralSuffix },
     /// Integer constant.
     IntConst(i128),
     /// Float constant.
@@ -498,6 +500,35 @@ pub enum HirExprKind {
         /// Source va_list.
         src: HirExprId,
     },
+}
+
+/// Integer-literal base spelling preserved for C99 §6.4.4.1 type selection.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IntLiteralBase {
+    /// Decimal constant.
+    Decimal,
+    /// Octal constant.
+    Octal,
+    /// Hexadecimal constant.
+    Hex,
+}
+
+/// Integer-literal suffix preserved for C99 §6.4.4.1 type selection.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IntLiteralSuffix {
+    /// No suffix.
+    None,
+    /// `u`/`U`.
+    U,
+    /// `l`/`L`.
+    L,
+    /// `ul`/`uL`/...
+    UL,
+    /// `ll`/`LL`.
+    LL,
+    /// `ull`/`uLL`.
+    ULL,
 }
 
 /// Kinds of implicit conversion inserted during type checking.

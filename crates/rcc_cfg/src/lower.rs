@@ -146,7 +146,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
     let ty = expr.ty;
 
     match &expr.kind {
-        HirExprKind::IntConst(n) => Operand::Const(Const { kind: ConstKind::Int(*n), ty }),
+        HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => {
+            Operand::Const(Const { kind: ConstKind::Int(*value), ty })
+        }
         HirExprKind::FloatConst(f) => Operand::Const(Const { kind: ConstKind::Float(*f), ty }),
         HirExprKind::StringRef(def) | HirExprKind::DefRef(def) => {
             // Both refer to a global symbol. The CFG `Const::Global`
