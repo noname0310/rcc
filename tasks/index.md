@@ -17,7 +17,7 @@ phase's `index.md` next.
 - [x] [08-cfg](08-cfg/index.md) — HIR → MIR-style CFG
 - [x] [09-codegen-llvm](09-codegen-llvm/index.md) — CFG → LLVM IR
 - [x] [10-driver](10-driver/index.md) — `rcc` binary + test harness
-- [~] [11-conformance](11-conformance/index.md) — KPI cells per milestone
+- [x] [11-conformance](11-conformance/index.md) — KPI cells per milestone
 - [ ] [12-fuzz-differential](12-fuzz-differential/index.md) — fuzz + csmith
 - [ ] [13-quality](13-quality/index.md) — opt levels, benches, release
 - [ ] [14-lang-extensions](14-lang-extensions/index.md) — preprocessor/parser extensions (pragmas, attributes, asm)

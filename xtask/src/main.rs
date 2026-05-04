@@ -30,6 +30,11 @@ enum Cmd {
     /// Verify every error code in codes.rs has a docs/error-codes.md
     /// entry and vice-versa. CI should run this gate.
     CheckErrorCodes,
+    /// Compare xfail.toml entries between two git revisions.
+    XfailReport {
+        /// Git range in the form OLD..NEW.
+        range: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -49,6 +54,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::CheckErrorCodes => xtask::check_error_codes::run(&project_root()),
+        Cmd::XfailReport { range } => xtask::xfail_report::run(&project_root(), &range),
     }
 }
 

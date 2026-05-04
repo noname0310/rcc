@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-18: Continuously shrink xfail lists
 
 **Phase:** 11-conformance    **Depends on:** all feature phases    **Milestone:** M2 → M7

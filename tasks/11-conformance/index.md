@@ -76,7 +76,7 @@ current numeric milestone already passes.
 - [x] [16i-tcc-tests2-standard-header-surface](16i-tcc-tests2-standard-header-surface.md)
 - [x] [16j-tcc-tests2-binary-floating-literals](16j-tcc-tests2-binary-floating-literals.md)
 - [x] [17-llvm-test-suite](17-llvm-test-suite.md)
-- [ ] [18-xfail-shrink](18-xfail-shrink.md)
+- [x] [18-xfail-shrink](18-xfail-shrink.md)
 
 ## Downstream
 
