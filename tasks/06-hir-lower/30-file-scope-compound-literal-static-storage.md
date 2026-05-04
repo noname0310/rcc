@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 06-30: file-scope compound literal static storage
 
 **Phase:** 06-hir-lower    **Depends on:** 06-21, 07-16, 09-11    **Milestone:** M6+

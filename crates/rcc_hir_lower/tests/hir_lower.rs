@@ -247,6 +247,62 @@ fn function_pointer_return_definition_lowers_body_parameters_from_final_declarat
     assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
 }
 
+#[test]
+fn file_scope_compound_literal_address_materializes_internal_global() {
+    let src = r#"
+        struct S { int a; int b; };
+        struct S *s = &(struct S) { 1, 2 };
+    "#;
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let literal_def = hir
+        .defs
+        .iter()
+        .filter_map(|def| match &def.kind {
+            DefKind::Global { init: Some(init), .. } => {
+                init.entries.iter().find_map(|entry| match entry.value {
+                    GlobalInitValue::Address { def: Some(base), offset: 0 } => Some(base),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .next()
+        .expect("pointer initializer should address a synthetic compound-literal global");
+
+    match &hir.defs[literal_def].kind {
+        DefKind::Global { linkage: Linkage::Internal, init: Some(init), .. } => {
+            let values: Vec<_> = init
+                .entries
+                .iter()
+                .filter_map(|entry| match entry.value {
+                    GlobalInitValue::Int(v) => Some(v),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(values, vec![1, 2]);
+        }
+        other => panic!("expected internal synthetic global, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_file_scope_compound_literal_address_initializer_is_constant() {
+    let src = r#"
+        struct S1 { int a; int b; };
+        struct S2 { struct S1 s1; struct S1 *ps1; int arr[2]; };
+        struct S1 gs1 = { .a = 1, 2 };
+        struct S2 *s = &(struct S2) {
+            {.b = 2, .a = 1},
+            &gs1,
+            {[0] = 1, 1 + 1}
+        };
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
 fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));

@@ -1633,6 +1633,12 @@ fn lower_global_initializer_into(
             lower_global_string_array_initializer(target_ty, e, span, path, tcx, out);
         }
         rcc_ast::Initializer::Expr(e) => {
+            if let Some(value) =
+                lower_file_scope_compound_literal_address(e, crate_, tcx, resolver, session)
+            {
+                out.push(GlobalInitEntry { path, ty: target_ty, expr: None, value, span: e.span });
+                return;
+            }
             let expr = lower_expr(e, body, scope, crate_, tcx, resolver, session);
             let value = lower_global_init_expr(e, crate_, tcx, resolver);
             out.push(GlobalInitEntry {
@@ -1804,6 +1810,85 @@ fn lower_global_initializer_list(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_file_scope_compound_literal_address(
+    expr: &rcc_ast::Expr,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<GlobalInitValue> {
+    let rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::AddrOf, operand } = &expr.kind else {
+        return None;
+    };
+    let rcc_ast::ExprKind::CompoundLiteral { ty, init } = &operand.kind else {
+        return None;
+    };
+
+    let object_ty =
+        lower_type_name_in_scope(ty, DeclScope::File, None, tcx, resolver, crate_, session);
+    let literal_def = materialize_file_scope_compound_literal(
+        object_ty,
+        init,
+        operand.span,
+        crate_,
+        tcx,
+        resolver,
+        session,
+    );
+    Some(GlobalInitValue::Address { def: Some(literal_def), offset: 0 })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_file_scope_compound_literal(
+    ty: TyId,
+    init: &rcc_ast::Initializer,
+    span: Span,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> DefId {
+    let name = compound_literal_symbol(crate_, session);
+    let def_id = crate_.defs.push(Def {
+        id: DefId(0),
+        name,
+        span,
+        kind: DefKind::Global {
+            ty,
+            quals: ObjectQuals::none(),
+            linkage: Linkage::Internal,
+            init: None,
+        },
+    });
+    crate_.defs[def_id].id = def_id;
+
+    let mut init_body = Body::default();
+    let scope = ScopeStack::new();
+    let global_init = lower_global_initializer(
+        ty,
+        init,
+        span,
+        &mut init_body,
+        &scope,
+        crate_,
+        tcx,
+        resolver,
+        session,
+    );
+    if let DefKind::Global { init, .. } = &mut crate_.defs[def_id].kind {
+        *init = Some(global_init);
+    }
+    if !init_body.exprs.is_empty() {
+        crate_.global_init_bodies.insert(def_id, init_body);
+    }
+    def_id
+}
+
+fn compound_literal_symbol(crate_: &HirCrate, session: &mut Session) -> Symbol {
+    session.interner.intern(&format!("__rcc_compound_literal_{}", crate_.defs.len()))
 }
 
 fn lower_global_string_array_initializer(
