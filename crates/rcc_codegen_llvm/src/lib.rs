@@ -2819,6 +2819,9 @@ pub mod backend {
                     self.emit_bitfield_precision(op, *to, *width, *signed, locals, body)
                 }
                 Rvalue::VectorInit { ty, lanes } => self.emit_vector_init(*ty, lanes, locals, body),
+                Rvalue::VectorSplat { ty, value } => {
+                    self.emit_vector_splat(*ty, value, locals, body)
+                }
                 Rvalue::AddressOf(place) => {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
@@ -2965,6 +2968,36 @@ pub mod backend {
                         lane_value,
                         index_ty.const_int(idx, false),
                         "vec.init",
+                    )
+                    .map_err(builder_error)?;
+            }
+            Ok(vector.as_basic_value_enum())
+        }
+
+        fn emit_vector_splat(
+            &self,
+            ty: TyId,
+            value: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let BasicTypeEnum::VectorType(vector_ty) = self.type_cx().basic_type_of(ty)? else {
+                return Err(type_lowering_error(ty, "vector splat target is not a vector"));
+            };
+            let Ty::Vector { lanes, .. } = self.tcx.get(ty) else {
+                return Err(type_lowering_error(ty, "vector splat target is not a vector"));
+            };
+            let scalar = self.emit_operand_value(value, locals, body)?;
+            let mut vector = vector_ty.const_zero();
+            let index_ty = self.context.i32_type();
+            for idx in 0..*lanes {
+                vector = self
+                    .builder
+                    .build_insert_element(
+                        vector,
+                        scalar,
+                        index_ty.const_int(u64::from(idx), false),
+                        "vec.splat",
                     )
                     .map_err(builder_error)?;
             }
@@ -3967,6 +4000,9 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            if matches!(self.tcx.get(self.operand_ty(lhs, body)?), Ty::Vector { .. }) {
+                return self.emit_vector_binop(op, lhs, rhs, locals, body);
+            }
             match op {
                 BinOp::Add => self.emit_int_binop(op, lhs, rhs, locals, body),
                 BinOp::Sub => self.emit_int_binop(op, lhs, rhs, locals, body),
@@ -4138,6 +4174,67 @@ pub mod backend {
             }
             .map_err(builder_error)?;
             Ok(value.as_basic_value_enum())
+        }
+
+        fn emit_vector_binop(
+            &self,
+            op: BinOp,
+            lhs: &Operand,
+            rhs: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let lhs_value = self.emit_operand_value(lhs, locals, body)?.into_vector_value();
+            let rhs_value = self.emit_operand_value(rhs, locals, body)?.into_vector_value();
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let elem = self.vector_elem_ty(lhs_ty)?;
+            let value = match self.tcx.get(elem) {
+                Ty::Int { .. } => match op {
+                    BinOp::Add => self.builder.build_int_add(lhs_value, rhs_value, "vadd"),
+                    BinOp::Sub => self.builder.build_int_sub(lhs_value, rhs_value, "vsub"),
+                    BinOp::Mul => self.builder.build_int_mul(lhs_value, rhs_value, "vmul"),
+                    BinOp::SDiv => self.builder.build_int_signed_div(lhs_value, rhs_value, "vsdiv"),
+                    BinOp::UDiv => {
+                        self.builder.build_int_unsigned_div(lhs_value, rhs_value, "vudiv")
+                    }
+                    BinOp::SRem => self.builder.build_int_signed_rem(lhs_value, rhs_value, "vsrem"),
+                    BinOp::URem => {
+                        self.builder.build_int_unsigned_rem(lhs_value, rhs_value, "vurem")
+                    }
+                    BinOp::Shl => self.builder.build_left_shift(lhs_value, rhs_value, "vshl"),
+                    BinOp::AShr => {
+                        self.builder.build_right_shift(lhs_value, rhs_value, true, "vashr")
+                    }
+                    BinOp::LShr => {
+                        self.builder.build_right_shift(lhs_value, rhs_value, false, "vlshr")
+                    }
+                    BinOp::BitAnd => self.builder.build_and(lhs_value, rhs_value, "vand"),
+                    BinOp::BitXor => self.builder.build_xor(lhs_value, rhs_value, "vxor"),
+                    BinOp::BitOr => self.builder.build_or(lhs_value, rhs_value, "vor"),
+                    _ => {
+                        return Err(CodegenError::Internal(format!(
+                            "unsupported integer vector binop {op:?}"
+                        )));
+                    }
+                }
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)?,
+                Ty::Float(_) => match op {
+                    BinOp::FAdd => self.builder.build_float_add(lhs_value, rhs_value, "vfadd"),
+                    BinOp::FSub => self.builder.build_float_sub(lhs_value, rhs_value, "vfsub"),
+                    BinOp::FMul => self.builder.build_float_mul(lhs_value, rhs_value, "vfmul"),
+                    BinOp::FDiv => self.builder.build_float_div(lhs_value, rhs_value, "vfdiv"),
+                    _ => {
+                        return Err(CodegenError::Internal(format!(
+                            "unsupported floating vector binop {op:?}"
+                        )));
+                    }
+                }
+                .map(|value| value.as_basic_value_enum())
+                .map_err(builder_error)?,
+                _ => return Err(type_lowering_error(elem, "unsupported vector element type")),
+            };
+            Ok(value)
         }
 
         fn emit_float_binop(

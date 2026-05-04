@@ -328,6 +328,27 @@ fn verify_rvalue_typed(
             }
             Some(InferredTy::Known(*ty))
         }
+        Rvalue::VectorSplat { ty, value } => {
+            let elem_ty = match tcx.get(*ty) {
+                Ty::Vector { elem, .. } => *elem,
+                _ => {
+                    errors.push(CfgError {
+                        at: at.clone(),
+                        kind: CfgErrorKind::TypeMismatch { expected: *ty, actual: *ty },
+                    });
+                    return Some(InferredTy::Known(*ty));
+                }
+            };
+            if let Some(actual) = verify_operand_typed(body, tcx, hir, value, at.clone(), errors) {
+                if actual != elem_ty {
+                    errors.push(CfgError {
+                        at: at.clone(),
+                        kind: CfgErrorKind::TypeMismatch { expected: elem_ty, actual },
+                    });
+                }
+            }
+            Some(InferredTy::Known(*ty))
+        }
         Rvalue::BinaryOp(op, lhs, rhs) => {
             let lhs_ty = verify_operand_typed(body, tcx, hir, lhs, at.clone(), errors)?;
             let rhs_ty = verify_operand_typed(body, tcx, hir, rhs, at, errors)?;

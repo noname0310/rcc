@@ -286,6 +286,13 @@ pub enum Rvalue {
         /// Lane operands in lane order.
         lanes: Vec<Operand>,
     },
+    /// Construct a GNU vector by splatting one scalar operand into every lane.
+    VectorSplat {
+        /// Result vector type.
+        ty: TyId,
+        /// Scalar operand, already converted to the vector element type.
+        value: Operand,
+    },
     /// Take the address of a place.
     AddressOf(Place),
     /// Load the current value of a file-scope global object.

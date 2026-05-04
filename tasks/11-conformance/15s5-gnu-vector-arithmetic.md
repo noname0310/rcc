@@ -1,5 +1,7 @@
 # 11-15s5: GNU vector arithmetic and scalar splats
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15s4    **Milestone:** M6
 
 ## Goal

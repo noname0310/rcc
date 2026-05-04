@@ -122,6 +122,9 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
             let lanes = lanes.iter().map(fmt_operand).collect::<Vec<_>>().join(", ");
             format!("VectorInit({}, [{}])", fmt_ty(tcx, *ty), lanes)
         }
+        Rvalue::VectorSplat { ty, value } => {
+            format!("VectorSplat({}, {})", fmt_ty(tcx, *ty), fmt_operand(value))
+        }
         Rvalue::AddressOf(place) => format!("&{}", fmt_place(place)),
         Rvalue::LoadGlobal { def, .. } => format!("load global#{}", def.0),
         Rvalue::Len(place) => format!("Len({})", fmt_place(place)),

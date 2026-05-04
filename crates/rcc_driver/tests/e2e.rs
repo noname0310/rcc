@@ -515,6 +515,73 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_integer_arithmetic_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!(
+                "skipping GNU vector integer arithmetic e2e: LLVM backend feature is disabled"
+            );
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_integer_arithmetic",
+            r#"
+typedef short v8hi __attribute__((vector_size(16)));
+short two(void) { return 2; }
+int main(void) {
+  v8hi a = { 1, 2, 3, 4, 5, 6, 7, 8 };
+  v8hi b = two() + a;
+  short *p = (short *)&b;
+  if (p[0] != 3) return 1;
+  if (p[7] != 10) return 2;
+  b = a * 2;
+  if (p[0] != 2) return 3;
+  if (p[7] != 16) return 4;
+  b = (a << 1) ^ 3;
+  if (p[0] != 1) return 5;
+  if (p[1] != 7) return 6;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_float_arithmetic_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector float arithmetic e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_float_arithmetic",
+            r#"
+typedef float v4sf __attribute__((vector_size(16)));
+int main(void) {
+  v4sf a = { 1.0, 2.0, 3.0, 4.0 };
+  v4sf b = 2 + a;
+  float *p = (float *)&b;
+  if (p[0] != 3.0) return 1;
+  if (p[3] != 6.0) return 2;
+  b = a * 2.0;
+  if (p[0] != 2.0) return 3;
+  if (p[3] != 8.0) return 4;
+  b = 12.0 / a;
+  if (p[0] != 12.0) return 5;
+  if (p[3] != 3.0) return 6;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");

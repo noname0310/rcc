@@ -1429,6 +1429,10 @@ fn type_binary(
     let lhs_ty = body.exprs[lhs].ty;
     let rhs_ty = body.exprs[rhs].ty;
 
+    if is_vector(tcx, lhs_ty) || is_vector(tcx, rhs_ty) {
+        return type_vector_binary(expr_id, op, lhs, rhs, lhs_ty, rhs_ty, span, body, tcx, session);
+    }
+
     let (result_ty, lhs_final, rhs_final, result_precision) = match op {
         // Arithmetic: usual arithmetic conversions, integer-only for `%`.
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -1577,6 +1581,92 @@ fn type_binary(
     } else {
         expr_id
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn type_vector_binary(
+    expr_id: HirExprId,
+    op: BinOp,
+    lhs: HirExprId,
+    rhs: HirExprId,
+    lhs_ty: TyId,
+    rhs_ty: TyId,
+    span: rcc_span::Span,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    let Some((vector_ty, lhs_final, rhs_final)) =
+        vector_binary_operands(op, lhs, rhs, lhs_ty, rhs_ty, body, tcx, session)
+    else {
+        invalid_operands(session, span, binop_symbol(op));
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+        body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs, rhs };
+        return expr_id;
+    };
+
+    body.exprs[expr_id].ty = vector_ty;
+    body.exprs[expr_id].value_cat = ValueCat::RValue;
+    body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs: lhs_final, rhs: rhs_final };
+    expr_id
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vector_binary_operands(
+    op: BinOp,
+    lhs: HirExprId,
+    rhs: HirExprId,
+    lhs_ty: TyId,
+    rhs_ty: TyId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> Option<(TyId, HirExprId, HirExprId)> {
+    match (vector_elem_ty(tcx, lhs_ty), vector_elem_ty(tcx, rhs_ty)) {
+        (Some(elem), Some(_)) if lhs_ty == rhs_ty && vector_binop_allowed(tcx, op, elem) => {
+            Some((lhs_ty, lhs, rhs))
+        }
+        (Some(elem), None) if vector_binop_allowed(tcx, op, elem) && is_arithmetic(tcx, rhs_ty) => {
+            let rhs = coerce_to(rhs, elem, body, tcx, session).expr();
+            Some((lhs_ty, lhs, rhs))
+        }
+        (None, Some(elem)) if vector_binop_allowed(tcx, op, elem) && is_arithmetic(tcx, lhs_ty) => {
+            let lhs = coerce_to(lhs, elem, body, tcx, session).expr();
+            Some((rhs_ty, lhs, rhs))
+        }
+        _ => None,
+    }
+}
+
+fn vector_binop_allowed(tcx: &TyCtxt, op: BinOp, elem: TyId) -> bool {
+    match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+            is_integer(tcx, elem) || is_real_float(tcx, elem)
+        }
+        BinOp::Rem | BinOp::BitAnd | BinOp::BitXor | BinOp::BitOr | BinOp::Shl | BinOp::Shr => {
+            is_integer(tcx, elem)
+        }
+        BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::Eq
+        | BinOp::Ne
+        | BinOp::LogAnd
+        | BinOp::LogOr => false,
+    }
+}
+
+fn vector_elem_ty(tcx: &TyCtxt, ty: TyId) -> Option<TyId> {
+    match tcx.get(ty) {
+        Ty::Vector { elem, .. } => Some(*elem),
+        _ => None,
+    }
+}
+
+fn is_real_float(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Float(_))
 }
 
 /// Diagnostic for E0083: invalid operands to a binary operator. The

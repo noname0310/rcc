@@ -57,7 +57,7 @@ current numeric milestone already passes.
 - [x] [15s2-gnu-vector-initializers](15s2-gnu-vector-initializers.md)
 - [x] [15s3-gnu-vector-memory](15s3-gnu-vector-memory.md)
 - [x] [15s4-gnu-vector-casts](15s4-gnu-vector-casts.md)
-- [ ] [15s5-gnu-vector-arithmetic](15s5-gnu-vector-arithmetic.md)
+- [x] [15s5-gnu-vector-arithmetic](15s5-gnu-vector-arithmetic.md)
 - [ ] [15s6-gnu-vector-abi](15s6-gnu-vector-abi.md)
 - [ ] [15s7-gnu-vector-cluster-gate](15s7-gnu-vector-cluster-gate.md)
 - [ ] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)

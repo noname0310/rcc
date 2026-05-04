@@ -680,6 +680,7 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
         Rvalue::VectorInit { lanes, .. } => {
             lanes.iter().any(|lane| operand_contains_field_projection(lane, expected))
         }
+        Rvalue::VectorSplat { value, .. } => operand_contains_field_projection(value, expected),
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_field_projection(lhs, expected)
                 || operand_contains_field_projection(rhs, expected)
@@ -724,6 +725,7 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
         Rvalue::VectorInit { lanes, .. } => {
             lanes.iter().any(|lane| operand_contains_int_const(lane, expected))
         }
+        Rvalue::VectorSplat { value, .. } => operand_contains_int_const(value, expected),
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
@@ -942,6 +944,9 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
             for lane in lanes {
                 assert_operand_valid(name, def, body, lane);
             }
+        }
+        Rvalue::VectorSplat { value, .. } => {
+            assert_operand_valid(name, def, body, value);
         }
         Rvalue::BinaryOp(_, lhs, rhs) => {
             assert_operand_valid(name, def, body, lhs);

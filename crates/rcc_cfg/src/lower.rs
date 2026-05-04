@@ -188,19 +188,23 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let lhs_ty = cx.body.exprs[*lhs].ty;
             let rhs_ty = cx.body.exprs[*rhs].ty;
             let cfg_op = pick_binop(*op, lhs_ty, rhs_ty, cx.tcx);
-            let rhs_op =
-                if matches!(cfg_op, BinOp::Shl | BinOp::AShr | BinOp::LShr) && rhs_ty != lhs_ty {
-                    let rhs_temp = builder.alloc_temp(lhs_ty, span);
-                    push_assign(
-                        builder,
-                        span,
-                        rhs_temp,
-                        Rvalue::Cast { op: rhs_op, to: lhs_ty, kind: CastKind::IntToInt },
-                    );
-                    Operand::Copy(Place { base: rhs_temp, projection: Vec::new() })
-                } else {
-                    rhs_op
-                };
+            let rhs_op = if matches!(cfg_op, BinOp::Shl | BinOp::AShr | BinOp::LShr)
+                && rhs_ty != lhs_ty
+                && !matches!(cx.tcx.get(ty), Ty::Vector { .. })
+            {
+                let rhs_temp = builder.alloc_temp(lhs_ty, span);
+                push_assign(
+                    builder,
+                    span,
+                    rhs_temp,
+                    Rvalue::Cast { op: rhs_op, to: lhs_ty, kind: CastKind::IntToInt },
+                );
+                Operand::Copy(Place { base: rhs_temp, projection: Vec::new() })
+            } else {
+                rhs_op
+            };
+            let lhs_op = splat_vector_operand_if_needed(builder, cx, span, ty, lhs_ty, lhs_op);
+            let rhs_op = splat_vector_operand_if_needed(builder, cx, span, ty, rhs_ty, rhs_op);
             let temp = builder.alloc_temp(ty, span);
             push_assign(builder, span, temp, Rvalue::BinaryOp(cfg_op, lhs_op, rhs_op));
             Operand::Copy(Place { base: temp, projection: Vec::new() })
@@ -1702,6 +1706,24 @@ fn push_assign(builder: &mut BodyBuilder, span: Span, local: Local, rvalue: Rval
     });
 }
 
+fn splat_vector_operand_if_needed(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    result_ty: TyId,
+    operand_ty: TyId,
+    operand: Operand,
+) -> Operand {
+    if !matches!(cx.tcx.get(result_ty), Ty::Vector { .. })
+        || matches!(cx.tcx.get(operand_ty), Ty::Vector { .. })
+    {
+        return operand;
+    }
+    let temp = builder.alloc_temp(result_ty, span);
+    push_assign(builder, span, temp, Rvalue::VectorSplat { ty: result_ty, value: operand });
+    Operand::Copy(Place { base: temp, projection: Vec::new() })
+}
+
 fn lower_complex_coercion_if_needed(
     builder: &mut BodyBuilder,
     cx: &LowerCx<'_>,
@@ -2050,8 +2072,8 @@ fn direct_global_ref(cx: &LowerCx<'_>, expr_id: HirExprId) -> Option<DefId> {
 /// for the arithmetic and comparison cases) to choose between
 /// signed / unsigned / float / pointer variants.
 fn pick_binop(op: HirBinOp, lhs_ty: TyId, rhs_ty: TyId, tcx: &TyCtxt) -> BinOp {
-    let lhs_class = classify(lhs_ty, tcx);
-    let rhs_class = classify(rhs_ty, tcx);
+    let lhs_class = classify_binop_operand(lhs_ty, tcx);
+    let rhs_class = classify_binop_operand(rhs_ty, tcx);
     match (op, lhs_class, rhs_class) {
         // Pointer arithmetic.
         (HirBinOp::Add, TyClass::Ptr, _) | (HirBinOp::Add, _, TyClass::Ptr) => BinOp::PtrAdd,
@@ -2106,6 +2128,13 @@ fn pick_binop(op: HirBinOp, lhs_ty: TyId, rhs_ty: TyId, tcx: &TyCtxt) -> BinOp {
                  expression lowering — see tasks/08-cfg/05-short-circuit-lowering.md"
             )
         }
+    }
+}
+
+fn classify_binop_operand(id: TyId, tcx: &TyCtxt) -> TyClass {
+    match tcx.get(id) {
+        Ty::Vector { elem, .. } => classify(*elem, tcx),
+        _ => classify(id, tcx),
     }
 }
 
