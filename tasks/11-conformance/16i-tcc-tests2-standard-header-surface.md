@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-16i: tcc-tests2 standard header surface
 
 **Phase:** 11-conformance    **Depends on:** 11-16    **Milestone:** M6

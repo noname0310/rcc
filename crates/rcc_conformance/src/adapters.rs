@@ -1005,7 +1005,22 @@ impl Adapter for TccTests2Adapter {
         }
 
         let mut exec = Command::new(&exe_path);
-        if let Some(dir) = case.path.parent() {
+        if stem == "46_grep" {
+            // The vendored file is CRLF-normalized in our checkout, while
+            // the upstream expected output assumes LF input for its `$`
+            // pattern. GCC and rcc agree on both inputs; run the fixture
+            // under the upstream line-ending condition instead of treating
+            // this as a compiler failure.
+            let file_name = case
+                .path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("missing filename: {}", case.path.display()))?;
+            let input_path = tmp.path().join(file_name);
+            let input = std::fs::read(&case.path)?;
+            let input = String::from_utf8_lossy(&input).replace("\r\n", "\n");
+            std::fs::write(&input_path, input.as_bytes())?;
+            exec.current_dir(tmp.path());
+        } else if let Some(dir) = case.path.parent() {
             exec.current_dir(dir);
         }
         exec.args(Self::runtime_args(&stem, case));

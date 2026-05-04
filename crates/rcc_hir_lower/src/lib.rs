@@ -6189,6 +6189,7 @@ fn eval_const_expr_as_u64(expr: &rcc_ast::Expr) -> Option<u64> {
 fn eval_const_expr_as_i128(expr: &rcc_ast::Expr) -> Option<i128> {
     match &expr.kind {
         rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::CharLit(lit) => Some(i128::from(lit.value)),
         rcc_ast::ExprKind::Paren(inner) => eval_const_expr_as_i128(inner),
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
             eval_const_expr_as_i128(operand)
@@ -6477,6 +6478,7 @@ fn eval_enum_value_as_i128(
 ) -> Option<i128> {
     match &expr.kind {
         rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::CharLit(lit) => Some(i128::from(lit.value)),
         rcc_ast::ExprKind::Ident(name) => {
             let def_id = *resolver.ordinary.get(name)?;
             match &crate_.defs.get(def_id)?.kind {
@@ -10128,6 +10130,24 @@ mod tests {
                 assert!(matches!(body.stmts[*inner].kind, HirStmtKind::Break));
             }
             other => panic!("expected Default, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stmt_case_char_literal_folds_to_integer_value() {
+        let (mut sess, _cap) = Session::for_test();
+        let case_body = stmt(StmtKind::Break);
+        let c = stmt(StmtKind::Case {
+            value: char_lit(&mut sess, "'^'"),
+            range_end: None,
+            body: Box::new(case_body),
+        });
+        let (body, id) = lower_single_stmt(&mut sess, c);
+        match &body.stmts[id].kind {
+            HirStmtKind::Case { value, .. } => {
+                assert_eq!(*value, Some(i128::from(b'^')));
+            }
+            other => panic!("expected Case, got {other:?}"),
         }
     }
 

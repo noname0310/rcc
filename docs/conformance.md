@@ -98,7 +98,7 @@ reference output. The task-16 baseline is:
 
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| tcc-tests2 | 88 | 73 | 9 | 2 | 4 | 93.2 |
+| tcc-tests2 | 88 | 75 | 9 | 0 | 4 | 95.5 |
 
 The xfail list is limited to explicit non-C99/TinyCC-specific fixtures:
 TCC diagnostic modes, dollar/raw UTF-8 identifiers, file-scope GNU asm,
@@ -108,11 +108,12 @@ flexible-array-member initializers, and C11 `_Generic`.
 GCC and rcc both print a trailing space on every row, while the vendored
 `.expect` kept it only on the final row. `71_macro_empty_arg` is also a
 suite-data newline drift case: the source prints no newline, and GCC/TCC/rcc
-all emit `17` while the vendored `.expect` contains a final CRLF. Remaining
-failures are compiler-bug follow-up tasks `11-16i` and `11-16j`; they are not
-hidden by the pass-rate gate. Task `11-16h` moved both `95_bitfields` fixtures
-to pass by fixing computed includes, GNU `__alignof__`, `#pragma pack`, SysV/MS
-bit-field layout, and LLVM alloca alignment.
+all emit `17` while the vendored `.expect` contains a final CRLF. `46_grep`
+is run against an LF-normalized copy of its source because the vendored CRLF
+line ending prevents the fixture's own `$` pattern from matching; GCC and rcc
+agree on both the CRLF and LF inputs. There are currently no non-xfailed
+tcc-tests2 failures. Task `11-16j` remains as the policy task for the explicit
+TinyCC-only binary floating literal xfail.
 
 ## Interpreting the columns
 

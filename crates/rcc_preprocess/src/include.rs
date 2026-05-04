@@ -508,15 +508,22 @@ mod tests {
         let src_dir = TempDir::new().unwrap();
         let (mut sess, main_id, cap) = seed_session(src_dir.path(), Vec::new());
         let span = dummy_span(main_id);
-        let tokens = Preprocessor::new(&mut sess).process_include("<stdio.h>", true, span, main_id);
+        {
+            let mut pp = Preprocessor::new(&mut sess);
+            for header in ["stdio.h", "math.h", "ctype.h"] {
+                let tokens = pp.process_include(&format!("<{header}>"), true, span, main_id);
+                assert!(!tokens.is_empty(), "builtin {header} must contribute tokens");
+            }
+        }
 
-        assert!(!tokens.is_empty(), "builtin stdio.h must contribute tokens");
         assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
         let deps = sess.source_dependencies();
-        assert!(
-            deps.iter().any(|dep| dep.path.ends_with(Path::new("stdio.h")) && dep.system),
-            "stdio.h must be recorded as a system dependency: {deps:?}"
-        );
+        for header in ["stdio.h", "math.h", "ctype.h"] {
+            assert!(
+                deps.iter().any(|dep| dep.path.ends_with(Path::new(header)) && dep.system),
+                "{header} must be recorded as a system dependency: {deps:?}"
+            );
+        }
     }
 
     #[test]
