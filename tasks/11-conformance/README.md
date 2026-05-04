@@ -47,6 +47,7 @@ future milestones, or documented policy decisions.
 | 16j | [`16j-tcc-tests2-binary-floating-literals.md`](16j-tcc-tests2-binary-floating-literals.md) | TinyCC binary floating literal compatibility policy. |
 | 17 | [`17-llvm-test-suite.md`](17-llvm-test-suite.md) | llvm-test-suite @ M7. |
 | 18 | [`18-xfail-shrink.md`](18-xfail-shrink.md) | Continuously shrink xfail lists. |
+| 19 | [`19-refresh-conformance-dashboard.md`](19-refresh-conformance-dashboard.md) | Refresh stale dashboard fail rows. |
 
 ## Exit criteria per task
 

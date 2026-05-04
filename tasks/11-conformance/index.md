@@ -77,6 +77,7 @@ current numeric milestone already passes.
 - [x] [16j-tcc-tests2-binary-floating-literals](16j-tcc-tests2-binary-floating-literals.md)
 - [x] [17-llvm-test-suite](17-llvm-test-suite.md)
 - [x] [18-xfail-shrink](18-xfail-shrink.md)
+- [x] [19-refresh-conformance-dashboard](19-refresh-conformance-dashboard.md)
 
 ## Downstream
 
