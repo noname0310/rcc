@@ -188,6 +188,8 @@ pub struct FieldSnapshot {
     pub name: Option<Symbol>,
     /// Lowered field type.
     pub ty: TyId,
+    /// Bit-field width, if this field is a bit-field.
+    pub bit_width: Option<u32>,
     /// Object qualifiers attached to this field declaration.
     pub quals: ObjectQuals,
 }
@@ -242,6 +244,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
                     .map(|field| FieldSnapshot {
                         name: field.name,
                         ty: field.ty,
+                        bit_width: field.bit_width,
                         quals: field.quals,
                     })
                     .collect(),
@@ -538,7 +541,7 @@ pub fn visit_expr(
         HirExprKind::Binary { op, lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
-            type_binary(expr_id, op, lhs2, rhs2, span, body, tcx, session)
+            type_binary(expr_id, op, lhs2, rhs2, span, body, tcx, session, def_info)
         }
         HirExprKind::Unary { op, operand } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
@@ -610,13 +613,13 @@ pub fn visit_expr(
             let mut new_args = Vec::with_capacity(args.len());
             for a in args {
                 let a2 = visit_expr(a, body, tcx, session, def_info);
-                let a2 = rvalue_decayed(a2, body, tcx);
-                // Argument promotion is handled per-parameter when we
-                // know the prototype below; for unprototyped / variadic
-                // arguments we apply default argument promotions.
+                // Argument rvalue conversion and promotion are handled
+                // per-parameter below. Keeping the original expression id
+                // here preserves bit-field width metadata for default
+                // argument promotions.
                 new_args.push(a2);
             }
-            type_call(expr_id, callee2, new_args, body, tcx, session)
+            type_call(expr_id, callee2, new_args, body, tcx, session, def_info)
         }
         HirExprKind::StmtExpr { stmts, result } => {
             for stmt in &stmts {
@@ -1259,9 +1262,12 @@ fn type_binary(
     body: &mut Body,
     tcx: &mut TyCtxt,
     session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
 ) -> HirExprId {
     // Both operands undergo lvalue-to-rvalue + decay before any further
     // typing (C99 §6.3.2.1 + §6.5.* operand rules).
+    let lhs_bit_width = expr_bit_width(lhs, body, tcx, def_info);
+    let rhs_bit_width = expr_bit_width(rhs, body, tcx, def_info);
     let lhs = rvalue_decayed(lhs, body, tcx);
     let rhs = rvalue_decayed(rhs, body, tcx);
     let lhs_ty = body.exprs[lhs].ty;
@@ -1278,19 +1284,19 @@ fn type_binary(
             {
                 match (op, is_pointer(tcx, lhs_ty), is_pointer(tcx, rhs_ty)) {
                     (BinOp::Add, true, false) if is_integer(tcx, rhs_ty) => {
-                        let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                        let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                         let rhs =
                             if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
                         (lhs_ty, lhs, rhs)
                     }
                     (BinOp::Add, false, true) if is_integer(tcx, lhs_ty) => {
-                        let lhs_p = integer_promotion(tcx, lhs_ty, None);
+                        let lhs_p = integer_promotion(tcx, lhs_ty, lhs_bit_width);
                         let lhs =
                             if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
                         (rhs_ty, lhs, rhs)
                     }
                     (BinOp::Sub, true, false) if is_integer(tcx, rhs_ty) => {
-                        let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                        let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                         let rhs =
                             if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
                         (lhs_ty, lhs, rhs)
@@ -1306,7 +1312,13 @@ fn type_binary(
                     invalid_operands(session, span, "%");
                     (tcx.error, lhs, rhs)
                 } else {
-                    let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                    let common = usual_arithmetic_with_bitfields(
+                        tcx,
+                        lhs_ty,
+                        lhs_bit_width,
+                        rhs_ty,
+                        rhs_bit_width,
+                    );
                     let l =
                         if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
                     let r =
@@ -1322,7 +1334,13 @@ fn type_binary(
                 // real operand paired with a complex one is wrapped in
                 // `RealToComplex` rather than the generic
                 // `UsualArithmetic`. Same flow for pure-real cases.
-                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let common = usual_arithmetic_with_bitfields(
+                    tcx,
+                    lhs_ty,
+                    lhs_bit_width,
+                    rhs_ty,
+                    rhs_bit_width,
+                );
                 let l = push_arithmetic_convert(body, session, tcx, lhs, common);
                 let r = push_arithmetic_convert(body, session, tcx, rhs, common);
                 (common, l, r)
@@ -1336,8 +1354,8 @@ fn type_binary(
                 invalid_operands(session, span, binop_symbol(op));
                 (tcx.error, lhs, rhs)
             } else {
-                let lhs_p = integer_promotion(tcx, lhs_ty, None);
-                let rhs_p = integer_promotion(tcx, rhs_ty, None);
+                let lhs_p = integer_promotion(tcx, lhs_ty, lhs_bit_width);
+                let rhs_p = integer_promotion(tcx, rhs_ty, rhs_bit_width);
                 let l = if lhs_ty != lhs_p { push_int_promote(body, lhs, lhs_p) } else { lhs };
                 let r = if rhs_ty != rhs_p { push_int_promote(body, rhs, rhs_p) } else { rhs };
                 (lhs_p, l, r)
@@ -1348,7 +1366,13 @@ fn type_binary(
                 invalid_operands(session, span, binop_symbol(op));
                 (tcx.error, lhs, rhs)
             } else {
-                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let common = usual_arithmetic_with_bitfields(
+                    tcx,
+                    lhs_ty,
+                    lhs_bit_width,
+                    rhs_ty,
+                    rhs_bit_width,
+                );
                 let l = if lhs_ty != common { push_arith_convert(body, lhs, common) } else { lhs };
                 let r = if rhs_ty != common { push_arith_convert(body, rhs, common) } else { rhs };
                 (common, l, r)
@@ -1360,7 +1384,13 @@ fn type_binary(
         // additional Converts at this stage).
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
             if is_arithmetic(tcx, lhs_ty) && is_arithmetic(tcx, rhs_ty) {
-                let common = usual_arithmetic(tcx, lhs_ty, rhs_ty);
+                let common = usual_arithmetic_with_bitfields(
+                    tcx,
+                    lhs_ty,
+                    lhs_bit_width,
+                    rhs_ty,
+                    rhs_bit_width,
+                );
                 // Equality on complex operands is well-formed; relational
                 // (`<` / `<=` / `>` / `>=`) on complex operands is not, but
                 // diagnostic enforcement of the §6.5.8 constraint is task
@@ -1464,7 +1494,7 @@ fn type_unresolved_field(
     match member_base_record(body, tcx, base) {
         Some(record) => match resolve_field(record, request.name, def_info) {
             Some((field_index, field)) => {
-                body.exprs[expr_id].ty = field.ty;
+                body.exprs[expr_id].ty = typed_field_expr_ty(tcx, field);
                 body.exprs[expr_id].value_cat = cat;
                 body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
             }
@@ -1521,7 +1551,7 @@ fn type_resolved_field(
             .and_then(|snapshot| snapshot.record_fields.as_ref())
             .and_then(|fields| fields.get(field_index as usize))
         {
-            body.exprs[expr_id].ty = field.ty;
+            body.exprs[expr_id].ty = typed_field_expr_ty(tcx, *field);
         } else if def_info
             .get(&record)
             .and_then(|snapshot| snapshot.record_fields.as_ref())
@@ -1538,6 +1568,37 @@ fn type_resolved_field(
     body.exprs[expr_id].value_cat = cat;
     body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
     expr_id
+}
+
+fn typed_field_expr_ty(_tcx: &TyCtxt, field: FieldSnapshot) -> TyId {
+    field.ty
+}
+
+fn expr_bit_width(
+    expr: HirExprId,
+    body: &Body,
+    tcx: &TyCtxt,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> Option<u32> {
+    match body.exprs[expr].kind {
+        HirExprKind::Field { base, field_index } => {
+            let record = member_base_record(body, tcx, base)?;
+            def_info.get(&record)?.record_fields.as_ref()?.get(field_index as usize)?.bit_width
+        }
+        _ => None,
+    }
+}
+
+fn usual_arithmetic_with_bitfields(
+    tcx: &TyCtxt,
+    a: TyId,
+    a_bit_width: Option<u32>,
+    b: TyId,
+    b_bit_width: Option<u32>,
+) -> TyId {
+    let a = integer_promotion(tcx, a, a_bit_width);
+    let b = integer_promotion(tcx, b, b_bit_width);
+    usual_arithmetic(tcx, a, b)
 }
 
 fn member_base_record(body: &Body, tcx: &TyCtxt, base: HirExprId) -> Option<rcc_hir::DefId> {
@@ -1605,10 +1666,14 @@ fn type_unary(
 ) -> HirExprId {
     match op {
         UnOp::Plus | UnOp::Neg | UnOp::BitNot => {
+            let bit_width = expr_bit_width(operand, body, tcx, def_info);
             let operand = rvalue_decayed(operand, body, tcx);
             let op_ty = body.exprs[operand].ty;
-            let promoted =
-                if is_integer(tcx, op_ty) { integer_promotion(tcx, op_ty, None) } else { op_ty };
+            let promoted = if is_integer(tcx, op_ty) {
+                integer_promotion(tcx, op_ty, bit_width)
+            } else {
+                op_ty
+            };
             let operand = if op_ty != promoted && is_integer(tcx, op_ty) {
                 push_int_promote(body, operand, promoted)
             } else {
@@ -1654,6 +1719,7 @@ fn type_call(
     body: &mut Body,
     tcx: &mut TyCtxt,
     session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
 ) -> HirExprId {
     // After `rvalue_decayed`, `callee` should have type `Ptr(Func {..})`.
     let callee_ty = body.exprs[callee].ty;
@@ -1682,6 +1748,7 @@ fn type_call(
         // still default-promote them so downstream HIR never contains raw
         // pre-promotion argument types.
         for (i, arg) in args.iter_mut().enumerate() {
+            let bit_width = expr_bit_width(*arg, body, tcx, def_info);
             *arg = rvalue_decayed(*arg, body, tcx);
             if let Some(param_ty) = params.get(i) {
                 *arg = match coerce_to(*arg, *param_ty, body, tcx, session) {
@@ -1690,15 +1757,16 @@ fn type_call(
                     | CoerceResult::Error(expr) => expr,
                 };
             } else {
-                *arg = default_arg_promote(*arg, body, tcx);
+                *arg = default_arg_promote(*arg, body, tcx, bit_width);
             }
         }
     } else {
         // K&R-style prototype-less function: every argument goes through
         // default argument promotions (C99 §6.5.2.2p6).
         for arg in args.iter_mut() {
+            let bit_width = expr_bit_width(*arg, body, tcx, def_info);
             *arg = rvalue_decayed(*arg, body, tcx);
-            *arg = default_arg_promote(*arg, body, tcx);
+            *arg = default_arg_promote(*arg, body, tcx, bit_width);
         }
     }
 
@@ -1735,10 +1803,15 @@ fn invalid_call(session: &mut Session, span: rcc_span::Span, msg: impl Into<Stri
 /// Apply default argument promotions to `expr` (C99 §6.5.2.2p6 +
 /// §6.3.1.1p2): integers go through integer promotion, and `float`
 /// promotes to `double`.
-fn default_arg_promote(expr: HirExprId, body: &mut Body, tcx: &mut TyCtxt) -> HirExprId {
+fn default_arg_promote(
+    expr: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    bit_width: Option<u32>,
+) -> HirExprId {
     let ty = body.exprs[expr].ty;
     if is_integer(tcx, ty) {
-        let promoted = integer_promotion(tcx, ty, None);
+        let promoted = integer_promotion(tcx, ty, bit_width);
         if promoted != ty {
             return push_int_promote(body, expr, promoted);
         }
@@ -5082,7 +5155,12 @@ mod tests {
                 record_fields: Some(
                     fields
                         .into_iter()
-                        .map(|(name, ty)| FieldSnapshot { name, ty, quals: ObjectQuals::none() })
+                        .map(|(name, ty)| FieldSnapshot {
+                            name,
+                            ty,
+                            bit_width: None,
+                            quals: ObjectQuals::none(),
+                        })
                         .collect(),
                 ),
             },
@@ -5118,6 +5196,111 @@ mod tests {
         assert!(
             matches!(body.exprs[member].kind, HirExprKind::Field { base: got_base, field_index: 1 } if got_base == base)
         );
+    }
+
+    #[test]
+    fn member_access_preserves_bitfield_storage_type() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let u3 = session.interner.intern("u3");
+        let record = DefId(70);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        def_info.insert(
+            record,
+            DefSnapshot {
+                ty: None,
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+                object_quals: ObjectQuals::none(),
+                record_fields: Some(vec![FieldSnapshot {
+                    name: Some(u3),
+                    ty: tcx.uint,
+                    bit_width: Some(3),
+                    quals: ObjectQuals::none(),
+                }]),
+            },
+        );
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: u3, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[member].ty, tcx.uint);
+        assert!(matches!(body.exprs[member].kind, HirExprKind::Field { field_index: 0, .. }));
+    }
+
+    #[test]
+    fn binary_expression_promotes_narrow_unsigned_bitfield_to_int() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let u3 = session.interner.intern("u3");
+        let record = DefId(71);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        def_info.insert(
+            record,
+            DefSnapshot {
+                ty: None,
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+                object_quals: ObjectQuals::none(),
+                record_fields: Some(vec![FieldSnapshot {
+                    name: Some(u3),
+                    ty: tcx.uint,
+                    bit_width: Some(3),
+                    quals: ObjectQuals::none(),
+                }]),
+            },
+        );
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: u3, field_span: DUMMY_SP },
+        );
+        let two = push_kind(&mut body, tcx.error, HirExprKind::IntConst(2));
+        let bin = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::Binary { op: BinOp::Sub, lhs: member, rhs: two },
+        );
+        set_root_expr(&mut body, bin);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[member].ty, tcx.uint);
+        assert_eq!(body.exprs[bin].ty, tcx.int);
+        let HirExprKind::Binary { lhs, rhs, .. } = body.exprs[bin].kind else {
+            panic!("expected binary expression");
+        };
+        assert_eq!(rhs, two);
+        match body.exprs[lhs].kind {
+            HirExprKind::Convert { operand, kind: ConvertKind::UsualArithmetic } => {
+                assert_eq!(body.exprs[lhs].ty, tcx.int);
+                assert!(matches!(
+                    body.exprs[operand].kind,
+                    HirExprKind::Convert {
+                        operand: got_member,
+                        kind: ConvertKind::LvalueToRvalue
+                    } if got_member == member
+                ));
+            }
+            ref other => panic!("expected usual arithmetic conversion, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5690,7 +5873,17 @@ mod tests {
         let bin = push_kind(&mut body, tcx.error, HirExprKind::Binary { op: BinOp::Sub, lhs, rhs });
         let (mut session, _cap) = Session::for_test();
 
-        type_binary(bin, BinOp::Sub, lhs, rhs, DUMMY_SP, &mut body, &mut tcx, &mut session);
+        type_binary(
+            bin,
+            BinOp::Sub,
+            lhs,
+            rhs,
+            DUMMY_SP,
+            &mut body,
+            &mut tcx,
+            &mut session,
+            &rcc_data_structures::FxHashMap::default(),
+        );
 
         assert_eq!(body.exprs[bin].ty, tcx.long);
         let HirExprKind::Binary { lhs: new_lhs, rhs: new_rhs, .. } = body.exprs[bin].kind else {

@@ -831,6 +831,29 @@ fn gnu_aligned_attribute_sets_record_layout_override() {
 }
 
 #[test]
+fn aggregate_initializers_skip_unnamed_bitfields() {
+    let src = r#"
+        struct S { int a:4; int :4; int b:4; int c:4; } x = { 2, 3, 4 };
+    "#;
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let init = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Global { init: Some(init), .. } => Some(init),
+            _ => None,
+        })
+        .expect("global initializer");
+    let paths = init.entries.iter().map(|entry| entry.path.as_slice()).collect::<Vec<_>>();
+
+    assert!(matches!(paths[0], [GlobalInitDesignator::Field(0)]));
+    assert!(matches!(paths[1], [GlobalInitDesignator::Field(2)]));
+    assert!(matches!(paths[2], [GlobalInitDesignator::Field(3)]));
+}
+
+#[test]
 fn s6_7_5_array_of_pointers() {
     // int *x[10]; — array of 10 pointers to int.
     // Right-left: x → [10] (innermost) → * → int.

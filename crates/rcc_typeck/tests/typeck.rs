@@ -836,6 +836,7 @@ fn assignment_to_const_field_emits_e0080() {
             record_fields: Some(vec![FieldSnapshot {
                 name: Some(Symbol(1)),
                 ty: tcx.int,
+                bit_width: None,
                 quals: rcc_hir::ObjectQuals {
                     is_const: true,
                     is_volatile: false,
@@ -876,6 +877,7 @@ fn member_access_on_aggregate_rvalue_is_typed_as_rvalue_field() {
             record_fields: Some(vec![FieldSnapshot {
                 name: Some(Symbol(1)),
                 ty: tcx.int,
+                bit_width: None,
                 quals: rcc_hir::ObjectQuals::none(),
             }]),
         },

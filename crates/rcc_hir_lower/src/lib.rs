@@ -1876,15 +1876,29 @@ fn aggregate_leaf_count(ty: TyId, tcx: &TyCtxt, crate_: &HirCrate) -> u64 {
             let DefKind::Record { fields, kind, .. } = &crate_.defs[def_id].kind else {
                 return 1;
             };
-            let fields: Box<dyn Iterator<Item = &Field>> = if matches!(kind, RecordKind::Union) {
-                Box::new(fields.iter().take(1))
-            } else {
-                Box::new(fields.iter())
-            };
-            fields.map(|field| aggregate_leaf_count(field.ty, tcx, crate_).max(1)).sum::<u64>()
+            let mut count = 0_u64;
+            for field in fields.iter().filter(|field| is_initializable_record_field(field)) {
+                count = count.saturating_add(aggregate_leaf_count(field.ty, tcx, crate_).max(1));
+                if matches!(kind, RecordKind::Union) {
+                    break;
+                }
+            }
+            count
         }
         _ => 1,
     }
+}
+
+fn is_initializable_record_field(field: &Field) -> bool {
+    field.name.is_some()
+}
+
+fn next_initializable_field(fields: &[(Option<Symbol>, TyId)], start: u32) -> Option<u32> {
+    fields
+        .iter()
+        .enumerate()
+        .skip(start as usize)
+        .find_map(|(idx, (name, _))| name.is_some().then_some(idx as u32))
 }
 
 fn aggregate_leaf_paths(
@@ -1918,12 +1932,18 @@ fn collect_aggregate_leaf_paths(
                 out.push((path.clone(), ty));
                 return;
             };
-            let field_limit =
-                if matches!(kind, RecordKind::Union) { fields.len().min(1) } else { fields.len() };
-            for (field_idx, field) in fields.iter().enumerate().take(field_limit) {
+            let mut emitted = 0_u32;
+            for (field_idx, field) in fields.iter().enumerate() {
+                if !is_initializable_record_field(field) {
+                    continue;
+                }
                 path.push(GlobalInitDesignator::Field(field_idx as u32));
                 collect_aggregate_leaf_paths(field.ty, tcx, crate_, path, out);
                 path.pop();
+                emitted += 1;
+                if matches!(kind, RecordKind::Union) && emitted == 1 {
+                    break;
+                }
             }
         }
         _ => out.push((path.clone(), ty)),
@@ -2416,7 +2436,17 @@ fn lower_global_initializer_list(
                         );
                         continue;
                     }
-                    None => (cursor, &[][..]),
+                    None => {
+                        let Some(next_idx) = next_initializable_field(&fields, cursor) else {
+                            emit_invalid_initializer_designator(
+                                span,
+                                "record initializer has more elements than fields",
+                                session,
+                            );
+                            continue;
+                        };
+                        (next_idx, &[][..])
+                    }
                 };
                 if field_idx as usize >= fields.len() {
                     emit_invalid_initializer_designator(
@@ -2899,7 +2929,17 @@ fn lower_record_initializer(
                 );
                 continue;
             }
-            None => (cursor, &[][..]),
+            None => {
+                let Some(next_idx) = next_initializable_field(&fields, cursor) else {
+                    emit_invalid_initializer_designator(
+                        span,
+                        "record initializer has more elements than fields",
+                        session,
+                    );
+                    continue;
+                };
+                (next_idx, &[][..])
+            }
         };
 
         if field_idx as usize >= fields.len() {
@@ -2946,7 +2986,10 @@ fn lower_record_initializer(
     // Zero-fill any un-initialised struct fields (not for unions — the
     // member selection already picks exactly one member to live).
     if !is_union {
-        for (i, (_, field_ty)) in fields.iter().enumerate() {
+        for (i, (name, field_ty)) in fields.iter().enumerate() {
+            if name.is_none() {
+                continue;
+            }
             let i = i as u32;
             if written.contains(&i) {
                 continue;
