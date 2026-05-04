@@ -901,7 +901,7 @@ pub mod backend {
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, ObjectQuals, Qual, RecordKind,
         Ty,
     };
-    use rcc_span::{FileId, Span};
+    use rcc_span::{FileId, Span, Symbol};
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
@@ -1003,6 +1003,7 @@ pub mod backend {
         bodies: &'a FxHashMap<DefId, Body>,
         functions: FxHashMap<DefId, FunctionValue<'ctx>>,
         globals: FxHashMap<DefId, GlobalValue<'ctx>>,
+        label_blocks: RefCell<FxHashMap<(DefId, Symbol), LlvmBasicBlock<'ctx>>>,
         debug: Option<DebugInfoCx<'ctx>>,
     }
 
@@ -1041,6 +1042,7 @@ pub mod backend {
                 bodies,
                 functions: FxHashMap::default(),
                 globals: FxHashMap::default(),
+                label_blocks: RefCell::new(FxHashMap::default()),
                 debug,
             }
         }
@@ -4467,6 +4469,9 @@ pub mod backend {
                         )))
                     }
                 }
+                ConstKind::BlockAddress(bb) => Err(CodegenError::Internal(format!(
+                    "block address {bb:?} requires function-local codegen context"
+                ))),
                 ConstKind::ZeroInit => {
                     let ty = self.type_cx().basic_type_of(c.ty)?;
                     Ok(ty.const_zero())
@@ -4597,6 +4602,18 @@ pub mod backend {
                 let inserted = blocks.push(llvm_block);
                 debug_assert_eq!(inserted, bb);
             }
+            if let Some(def) = body.def {
+                let mut label_blocks = cx.label_blocks.borrow_mut();
+                for (label, bb) in &body.labels {
+                    let llvm_block = blocks.get(*bb).copied().ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "label {:?} references missing CFG block {:?}",
+                            label, bb
+                        ))
+                    })?;
+                    label_blocks.insert((def, *label), llvm_block);
+                }
+            }
 
             let entry = *blocks
                 .get(BasicBlockId(0))
@@ -4644,7 +4661,7 @@ pub mod backend {
                     if self.cx.try_emit_aggregate_assign(place, rvalue, &self.locals, self.body)? {
                         return Ok(());
                     }
-                    let value = self.cx.emit_rvalue_value(rvalue, &self.locals, self.body)?;
+                    let value = self.emit_rvalue_value(rvalue)?;
                     self.cx.emit_store_place(place, value, &self.locals, self.body)
                 }
                 StatementKind::StorageLive(local) => self.cx.emit_storage_live(
@@ -4671,6 +4688,9 @@ pub mod backend {
 
             match &terminator.kind {
                 TerminatorKind::Goto(target) => self.emit_goto(*target),
+                TerminatorKind::IndirectGoto { target, targets } => {
+                    self.emit_indirect_goto(target, targets)
+                }
                 TerminatorKind::SwitchInt { discr, targets } => {
                     self.emit_switch_int(discr, targets.as_slice())
                 }
@@ -4699,6 +4719,62 @@ pub mod backend {
         fn emit_goto(&self, target: BasicBlockId) -> Result<(), CodegenError> {
             let target = self.llvm_block(target)?;
             self.cx.builder.build_unconditional_branch(target).map(|_| ()).map_err(builder_error)
+        }
+
+        fn emit_indirect_goto(
+            &self,
+            target: &Operand,
+            targets: &[BasicBlockId],
+        ) -> Result<(), CodegenError> {
+            let target = self.emit_operand_value(target)?;
+            let destinations = targets
+                .iter()
+                .copied()
+                .map(|bb| self.llvm_block(bb))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.cx
+                .builder
+                .build_indirect_branch(target, &destinations)
+                .map(|_| ())
+                .map_err(builder_error)
+        }
+
+        fn emit_operand_value(
+            &self,
+            operand: &Operand,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match operand {
+                Operand::Const(rcc_cfg::Const { kind: ConstKind::BlockAddress(bb), .. }) => {
+                    self.emit_block_address(*bb)
+                }
+                _ => self.cx.emit_operand_value(operand, &self.locals, self.body),
+            }
+        }
+
+        fn emit_rvalue_value(&self, rvalue: &Rvalue) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            match rvalue {
+                Rvalue::Use(operand) => self.emit_operand_value(operand),
+                _ => self.cx.emit_rvalue_value(rvalue, &self.locals, self.body),
+            }
+        }
+
+        #[allow(unsafe_code)]
+        fn emit_block_address(
+            &self,
+            bb: BasicBlockId,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let block = self.llvm_block(bb)?;
+            // SAFETY: CFG label collection allocates a distinct non-entry LLVM
+            // basic block for every address-taken C label. The block belongs to
+            // `self.function`, and LLVM permits `blockaddress(@fn, %bb)` for
+            // such labels. Inkwell returns `None` for invalid blocks; keep that
+            // as a regular codegen error instead of assuming success.
+            let Some(address) = (unsafe { block.get_address() }) else {
+                return Err(CodegenError::Internal(format!(
+                    "LLVM refused to form blockaddress for {bb:?}"
+                )));
+            };
+            Ok(address.as_basic_value_enum())
         }
 
         fn emit_switch_int(
@@ -5562,6 +5638,7 @@ pub mod backend {
         type_cx: TypeCx<'a, 'ctx>,
         globals: FxHashMap<DefId, GlobalValue<'ctx>>,
         functions: FxHashMap<DefId, FunctionValue<'ctx>>,
+        label_blocks: FxHashMap<(DefId, Symbol), LlvmBasicBlock<'ctx>>,
         string_literals: FxHashMap<DefId, GlobalValue<'ctx>>,
     }
 
@@ -5576,6 +5653,7 @@ pub mod backend {
                 type_cx: cx.type_cx(),
                 globals: cx.global_decls().clone(),
                 functions: cx.function_decls().clone(),
+                label_blocks: cx.label_blocks.borrow().clone(),
                 string_literals: FxHashMap::default(),
             }
         }
@@ -5775,6 +5853,7 @@ pub mod backend {
             }
         }
 
+        #[allow(unsafe_code)]
         fn global_init_value_to_llvm(
             &mut self,
             value: &GlobalInitValue,
@@ -5827,6 +5906,27 @@ pub mod backend {
                     }
 
                     Ok(base.into())
+                }
+                GlobalInitValue::LabelAddress { function, label } => {
+                    let block = self
+                        .label_blocks
+                        .get(&(*function, *label))
+                        .copied()
+                        .ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "label address initializer references unknown label {:?} in function {:?}",
+                                label, function
+                            ))
+                        })?;
+                    // SAFETY: Function codegen registered `label_blocks` from the
+                    // verified CFG body. The LLVM block belongs to the owning
+                    // function and is therefore a valid blockaddress operand.
+                    let Some(address) = (unsafe { block.get_address() }) else {
+                        return Err(CodegenError::Internal(
+                            "LLVM refused to form blockaddress for label initializer".to_owned(),
+                        ));
+                    };
+                    Ok(address.as_basic_value_enum())
                 }
                 GlobalInitValue::StringLiteral(def_id) => {
                     let global = self.get_or_create_string_literal(*def_id)?;
@@ -6125,8 +6225,8 @@ pub mod backend {
         let context = Context::create();
         let mut cx = CodegenCx::new(&context, session, tcx, hir, bodies);
         cx.declare_all()?;
-        GlobalCx::new(&cx).materialize_all_globals()?;
         cx.codegen_all_bodies()?;
+        GlobalCx::new(&cx).materialize_all_globals()?;
         cx.finalize_debug_info();
         cx.verify_module()?;
         let ir_text = cx.ir_text();

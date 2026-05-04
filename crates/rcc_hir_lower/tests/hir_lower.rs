@@ -2444,6 +2444,23 @@ fn snippet_global_array_range_initializer_has_static_payload() {
 }
 
 #[test]
+fn snippet_block_static_label_address_initializer_is_preserved() {
+    let (hir, _tcx) =
+        lower_snippet("void f(void) { static void *p[] = { &&L }; goto *p[0]; L: ; }");
+    let mut found = false;
+    for def in hir.defs.iter() {
+        let DefKind::Global { init: Some(init), .. } = &def.kind else {
+            continue;
+        };
+        found |= init
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.value, GlobalInitValue::LabelAddress { .. }));
+    }
+    assert!(found, "block-scope static initializer should preserve LabelAddress");
+}
+
+#[test]
 fn snippet_global_char_array_string_initializer_has_static_payload() {
     let (hir, tcx) = lower_snippet("char s[] = \"hi\";");
     let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();

@@ -184,6 +184,12 @@ fn verify_blocks(
         let at = CfgLocation::Terminator(bb);
         match &block.terminator.kind {
             TerminatorKind::Goto(target) => verify_block_target(body, *target, at, errors),
+            TerminatorKind::IndirectGoto { target, targets } => {
+                let _ = verify_operand_typed(body, tcx, hir, target, at.clone(), errors);
+                for target in targets {
+                    verify_block_target(body, *target, at.clone(), errors);
+                }
+            }
             TerminatorKind::SwitchInt { discr, targets } => {
                 let _ = verify_operand_typed(body, tcx, hir, discr, at.clone(), errors);
                 if targets.is_empty() {
@@ -319,7 +325,10 @@ fn verify_operand_typed(
         }
         Operand::Const(c) => {
             if let ConstKind::Global(def) = c.kind {
-                verify_global_address_type(tcx, def, c.ty, at, errors);
+                verify_global_address_type(tcx, def, c.ty, at.clone(), errors);
+            }
+            if let ConstKind::BlockAddress(target) = c.kind {
+                verify_block_target(body, target, at, errors);
             }
             Some(c.ty)
         }
@@ -669,6 +678,7 @@ fn reachable_blocks(body: &Body, errors: &mut Vec<CfgError>) -> Vec<bool> {
 fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
     match term {
         TerminatorKind::Goto(target) => vec![*target],
+        TerminatorKind::IndirectGoto { targets, .. } => targets.clone(),
         TerminatorKind::SwitchInt { targets, .. } => {
             targets.iter().map(|(_, target)| *target).collect()
         }
@@ -771,7 +781,13 @@ mod tests {
             statements: Vec::new(),
             terminator: Terminator { kind: TerminatorKind::Return, span: DUMMY_SP },
         });
-        Body { def: None, locals, blocks, ret_ty: Some(ret_ty) }
+        Body {
+            def: None,
+            locals,
+            blocks,
+            labels: rcc_data_structures::FxHashMap::default(),
+            ret_ty: Some(ret_ty),
+        }
     }
 
     fn record_hir(record: DefId, fields: Vec<TyId>) -> HirCrate {

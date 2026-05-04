@@ -490,8 +490,8 @@ pub enum StmtKind {
     },
     /// `switch (cond) body`
     Switch { cond: Expr, body: Box<Stmt> },
-    /// `case expr: stmt`
-    Case { value: Expr, body: Box<Stmt> },
+    /// `case expr: stmt`, or GNU `case lo ... hi: stmt`.
+    Case { value: Expr, range_end: Option<Expr>, body: Box<Stmt> },
     /// `default: stmt`
     Default { body: Box<Stmt> },
     /// GNU attributes attached to a following statement.
@@ -502,6 +502,8 @@ pub enum StmtKind {
     Label { name: Symbol, body: Box<Stmt> },
     /// `goto label;`
     Goto(Symbol),
+    /// GNU computed goto: `goto *expr;`
+    GotoComputed(Expr),
     /// `break;`
     Break,
     /// `continue;`
@@ -649,6 +651,8 @@ pub enum ExprKind {
     Cond { cond: Box<Expr>, then_expr: Box<Expr>, else_expr: Box<Expr> },
     /// GNU `a ?: b` omitted-middle conditional.
     OmittedCond { cond: Box<Expr>, else_expr: Box<Expr> },
+    /// GNU label address expression: `&&label`.
+    LabelAddr(Symbol),
     /// `a = b`, `a += b`, ...
     Assign { op: AssignOp, lhs: Box<Expr>, rhs: Box<Expr> },
     /// `,` operator.

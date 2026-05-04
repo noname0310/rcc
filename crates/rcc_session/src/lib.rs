@@ -165,6 +165,25 @@ pub struct Options {
     /// false, syntax still parses but emits W0016 as a strict-C99
     /// compatibility warning.
     pub gnu_inline_asm: bool,
+    /// Enable GNU case ranges `case lo ... hi:` without a warning.
+    ///
+    /// The parser accepts the syntax in all modes so switch lowering can
+    /// preserve the range. With this option off, each range emits W0019 as
+    /// a strict-C99 compatibility warning.
+    pub gnu_case_ranges: bool,
+    /// Enable GNU labels-as-values (`&&label`) and computed goto (`goto *expr`)
+    /// without a warning.
+    ///
+    /// The parser accepts the syntax in all modes and HIR/CFG/codegen lower it
+    /// through LLVM `blockaddress` / `indirectbr`. With this option off, uses
+    /// emit W0020 as strict-C99 compatibility warnings.
+    pub gnu_labels_as_values: bool,
+    /// Enable GNU lvalue comma expressions without a warning.
+    ///
+    /// GNU C treats `a, b` as an lvalue when `b` is an lvalue. C99 always
+    /// classifies comma expressions as rvalues, so with this option off the
+    /// type checker emits W0021 while preserving GNU semantics for recovery.
+    pub gnu_lvalue_comma: bool,
 }
 
 impl Default for Options {
@@ -193,6 +212,9 @@ impl Default for Options {
             gnu_range_designators: false,
             gnu_attributes: false,
             gnu_inline_asm: false,
+            gnu_case_ranges: false,
+            gnu_labels_as_values: false,
+            gnu_lvalue_comma: false,
         }
     }
 }

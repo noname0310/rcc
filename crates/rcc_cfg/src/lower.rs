@@ -156,6 +156,10 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             // the pointer-to-... type computed by typeck.
             Operand::Const(Const { kind: ConstKind::Global(*def), ty })
         }
+        HirExprKind::LabelAddr(name) => {
+            let target = builder.label_block(*name);
+            Operand::Const(Const { kind: ConstKind::BlockAddress(target), ty })
+        }
         HirExprKind::LocalRef(hir_local) => {
             let local = cx.locals.lookup(*hir_local);
             Operand::Copy(Place { base: local, projection: Vec::new() })
@@ -504,6 +508,10 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
         HirExprKind::CompoundLiteral { local, init_stmts, .. } => {
             lower_compound_literal_place(builder, cx, expr.span, *local, init_stmts)
         }
+        HirExprKind::Comma { lhs, rhs } => {
+            let _ = lower_as_rvalue(builder, cx, *lhs);
+            lower_as_place(builder, cx, *rhs)
+        }
         _ => panic!(
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
             std::mem::discriminant(&expr.kind),
@@ -707,6 +715,15 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         }
         HirStmtKind::Goto(name) => {
             builder.goto_label(*name, stmt.span);
+        }
+        HirStmtKind::GotoComputed(expr) => {
+            let target = lower_as_rvalue(builder, cx, *expr);
+            let targets = builder.label_targets();
+            builder.emit_storage_deads_to_depth(0, stmt.span);
+            builder.terminate(Terminator {
+                kind: TerminatorKind::IndirectGoto { target, targets },
+                span: stmt.span,
+            });
         }
         HirStmtKind::Label { .. } => {
             unreachable!("Label is handled before the match")
@@ -1379,10 +1396,9 @@ fn lower_switch(
     // Create a block for each case/default label, and remember which HIR
     // statement id owns each block. Lowering the full switch body then
     // treats those statements as labels.
-    let case_blocks: Vec<BasicBlockId> = cases.iter().map(|_| builder.new_block()).collect();
     let mut case_map: FxHashMap<HirStmtId, BasicBlockId> = FxHashMap::default();
-    for (case, &block) in cases.iter().zip(&case_blocks) {
-        case_map.insert(case.target, block);
+    for case in cases {
+        case_map.entry(case.target).or_insert_with(|| builder.new_block());
     }
 
     // Join block (break target).
@@ -1390,7 +1406,7 @@ fn lower_switch(
 
     // Push switch context so `break` targets the join block.
     builder.push_switch(join);
-    builder.push_switch_cases(case_map);
+    builder.push_switch_cases(case_map.clone());
 
     // Build dispatch targets: (value, block) pairs.
     // C99 allows `default:` anywhere; we normalise it to the last
@@ -1399,7 +1415,8 @@ fn lower_switch(
     // guarantees this).
     let mut targets: Vec<(Option<i128>, BasicBlockId)> = Vec::with_capacity(cases.len() + 1);
     let mut default_block: Option<BasicBlockId> = None;
-    for (case, &block) in cases.iter().zip(&case_blocks) {
+    for case in cases {
+        let block = case_map[&case.target];
         match case.value {
             Some(v) => targets.push((Some(v), block)),
             None => default_block = Some(block), // multiple defaults rejected by typeck
@@ -4460,7 +4477,7 @@ mod tests {
 
     /// Helper: push a `Case { value, body }` statement.
     fn case_stmt(body: &mut HirBody, value: i128, case_body: HirStmtId) -> HirStmtId {
-        push_stmt(body, HirStmtKind::Case { value: Some(value), body: case_body })
+        push_stmt(body, HirStmtKind::Case { value: Some(value), range_end: None, body: case_body })
     }
 
     /// Helper: push a `Default { body }` statement.

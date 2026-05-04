@@ -58,6 +58,10 @@ fn fmt_stmt(tcx: &TyCtxt, stmt: &Statement) -> String {
 fn fmt_term(term: &TerminatorKind) -> String {
     match term {
         TerminatorKind::Goto(target) => format!("goto -> {};", fmt_bb(*target)),
+        TerminatorKind::IndirectGoto { target, targets } => {
+            let targets = targets.iter().map(|bb| fmt_bb(*bb)).collect::<Vec<_>>().join(", ");
+            format!("indirect_goto {} -> [{targets}];", fmt_operand(target))
+        }
         TerminatorKind::SwitchInt { discr, targets } => {
             let rendered = targets
                 .iter()
@@ -132,6 +136,7 @@ fn fmt_const(c: &Const) -> String {
         ConstKind::Int(v) => v.to_string(),
         ConstKind::Float(v) => v.to_string(),
         ConstKind::Global(def) => format!("global#{}", def.0),
+        ConstKind::BlockAddress(bb) => format!("blockaddress({})", fmt_bb(*bb)),
         ConstKind::ZeroInit => "ZeroInit".to_string(),
     }
 }

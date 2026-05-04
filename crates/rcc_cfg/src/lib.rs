@@ -8,9 +8,10 @@
 // Variants carry docs at the enum level; per-field docs would be noise.
 #![allow(missing_docs)]
 
+use rcc_data_structures::FxHashMap;
 use rcc_data_structures::IndexVec;
 use rcc_hir::{DefId, Local, ObjectQuals, TyId};
-use rcc_span::Span;
+use rcc_span::{Span, Symbol};
 
 pub mod build;
 pub mod lower;
@@ -34,6 +35,8 @@ pub struct Body {
     pub locals: IndexVec<Local, LocalDecl>,
     /// Basic blocks. `blocks[0]` is always the entry block.
     pub blocks: IndexVec<BasicBlockId, BasicBlock>,
+    /// C label name to target basic block, preserved for GNU blockaddress.
+    pub labels: FxHashMap<Symbol, BasicBlockId>,
     /// Return type.
     pub ret_ty: Option<TyId>,
 }
@@ -118,6 +121,13 @@ pub enum TerminatorKind {
     },
     /// Return.
     Return,
+    /// GNU computed goto through a label-address pointer.
+    IndirectGoto {
+        /// Pointer produced by `&&label` or compatible expression.
+        target: Operand,
+        /// Conservative destination set required by LLVM `indirectbr`.
+        targets: Vec<BasicBlockId>,
+    },
     /// `callee(args...)`, writing to `destination`, continuing at `target`.
     Call {
         /// Function operand (pointer).
@@ -213,6 +223,8 @@ pub enum ConstKind {
     Float(f64),
     /// Address of a global / string literal.
     Global(DefId),
+    /// Address of a function-local label block.
+    BlockAddress(BasicBlockId),
     /// Zero-initialised aggregate sentinel.
     ZeroInit,
 }

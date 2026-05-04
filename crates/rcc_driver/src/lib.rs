@@ -151,6 +151,11 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-omitted-conditional"
             | "gnu-conditional-void-operand"
             | "gnu-conditional-void"
+            | "gnu-case-ranges"
+            | "gnu-case-range"
+            | "gnu-labels-as-values"
+            | "gnu-computed-goto"
+            | "gnu-lvalue-comma"
     )
 }
 
@@ -341,6 +346,15 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_range_designators: false,
         gnu_attributes: false,
         gnu_inline_asm: false,
+        gnu_case_ranges: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-case-ranges" | "gnu-case-range")),
+        gnu_labels_as_values: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-labels-as-values" | "gnu-computed-goto")),
+        gnu_lvalue_comma: cli.feature_flags.iter().any(|flag| flag == "gnu-lvalue-comma"),
     }
 }
 

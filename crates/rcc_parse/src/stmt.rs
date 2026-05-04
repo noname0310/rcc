@@ -691,11 +691,24 @@ fn parse_case_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
     let case_span = p.cur_span();
     p.bump(); // `case`
     let value = parse_assignment_expression(p)?;
+    let range_end = if eat_punct(p, Punct::Ellipsis) {
+        if !p.session.opts.gnu_case_ranges {
+            p.session
+                .handler
+                .struct_warn(case_span, "GNU case range is not part of C99")
+                .code(rcc_errors::codes::W0019)
+                .note("parsing it as an extension for GNU-compatible switch lowering")
+                .emit();
+        }
+        Some(parse_assignment_expression(p)?)
+    } else {
+        None
+    };
     expect_punct(p, Punct::Colon, "expected `:` after `case` value")?;
     let body = Box::new(parse_stmt(p)?);
     let end_span = body.span;
     let id = p.fresh_id();
-    Some(Stmt { id, kind: StmtKind::Case { value, body }, span: case_span.to(end_span) })
+    Some(Stmt { id, kind: StmtKind::Case { value, range_end, body }, span: case_span.to(end_span) })
 }
 
 /// Parse a C99 §6.8.1 labeled statement of the `default` kind:
@@ -786,6 +799,21 @@ fn parse_return_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
 fn parse_goto_stmt(p: &mut Parser<'_>) -> Option<Stmt> {
     let kw_span = p.cur_span();
     p.bump(); // `goto`
+    if eat_punct(p, Punct::Star) {
+        if !p.session.opts.gnu_labels_as_values {
+            p.session
+                .handler
+                .struct_warn(kw_span, "GNU computed goto is not part of C99")
+                .code(rcc_errors::codes::W0020)
+                .note("parsing it as an extension for labels-as-values lowering")
+                .emit();
+        }
+        let target = parse_expression(p)?;
+        let target_span = target.span;
+        let end_span = expect_semi(p, target_span, "expected `;` after computed `goto` target");
+        let id = p.fresh_id();
+        return Some(Stmt { id, kind: StmtKind::GotoComputed(target), span: kw_span.to(end_span) });
+    }
     let name: Symbol = match p.peek() {
         Some(t) => match t.kind {
             TokenKind::Ident(sym) => {
@@ -904,6 +932,14 @@ pub fn parse_block(p: &mut Parser<'_>) -> Option<Block> {
 /// first; if the cursor is not at the start of a declaration, it
 /// falls through to the statement path.
 pub fn parse_block_item(p: &mut Parser<'_>) -> Option<BlockItem> {
+    // Labels live in their own namespace and can reuse a typedef-name.
+    // At block-item dispatch, prefer `ident:` as a statement before the
+    // typedef-name declaration heuristic. This is required for
+    // `{ typedef int foo; goto foo; foo:; }`.
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Ident(_))) && peek_is_label(p) {
+        let stmt = parse_stmt(p)?;
+        return Some(BlockItem::Stmt(Box::new(stmt)));
+    }
     if looks_like_decl(p) || crate::attr::peek_attribute(p) {
         let before = p.cursor;
         if let Some(decl) = crate::decl::parse_declaration(p) {
@@ -963,7 +999,7 @@ mod tests {
     use crate::phase7::convert;
     use rcc_ast::ExprKind;
     use rcc_lexer::{PpToken, PpTokenKind, Punct as LexPunct, Tokenizer};
-    use rcc_session::Session;
+    use rcc_session::{Options, Session};
     use rcc_span::{BytePos, FileId, Span};
     use std::sync::Arc;
 
@@ -1034,6 +1070,32 @@ mod tests {
         assert_eq!(s.span.lo.0, 0);
         assert_eq!(s.span.hi.0, 2);
         assert_eq!(parser.cursor, 2);
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn gnu_case_range_parses_and_warns_in_strict_mode() {
+        let src = "case 0 ... 5: ;";
+        let (mut sess, fid, cap) = mk_session(src);
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let s = parse_stmt(&mut parser).expect("case range parses");
+        match s.kind {
+            StmtKind::Case { range_end: Some(_), .. } => {}
+            other => panic!("expected case range, got {other:?}"),
+        }
+        assert!(cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::W0019)));
+    }
+
+    #[test]
+    fn gnu_computed_goto_parses_with_option() {
+        let src = "goto *p;";
+        let (mut sess, fid, cap) = mk_session(src);
+        sess.opts = Options { gnu_labels_as_values: true, ..Options::default() };
+        let tokens = tokens_from_src(&mut sess, fid, src);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let s = parse_stmt(&mut parser).expect("computed goto parses");
+        assert!(matches!(s.kind, StmtKind::GotoComputed(_)));
         assert!(cap.diagnostics().is_empty());
     }
 

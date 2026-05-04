@@ -170,6 +170,9 @@ fn warning_names_for_code(code: &str) -> &'static [&'static str] {
         codes::W0016 => &["gnu-inline-asm"],
         codes::W0017 => &["gnu-omitted-conditional-operand", "gnu-omitted-conditional"],
         codes::W0018 => &["gnu-conditional-void-operand", "gnu-conditional-void"],
+        codes::W0019 => &["gnu-case-ranges", "gnu-case-range"],
+        codes::W0020 => &["gnu-labels-as-values", "gnu-computed-goto"],
+        codes::W0021 => &["gnu-lvalue-comma"],
         _ => &[],
     }
 }

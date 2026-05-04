@@ -1,5 +1,7 @@
 # 11-09: GNU control-flow extensions
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-07    **Milestone:** M3+
 
 ## Goal

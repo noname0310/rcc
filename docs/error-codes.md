@@ -1266,3 +1266,49 @@ The type checker preserves this GNU-compatible void result so
 statement-position uses can continue through CFG/codegen. Enable
 `Options::gnu_conditional_void_operand` to accept the construct without
 this compatibility warning.
+
+## W0019 — GNU case range extension
+
+`case lo ... hi:` is a GNU C extension that matches every integer case
+value in the inclusive range:
+
+```c
+switch (x) {
+case 0 ... 5: return 1;  // warning[W0019] in strict C99 mode
+}
+```
+
+The parser preserves the range as an explicit switch label so HIR can
+expand and validate it before CFG lowering. Enable
+`Options::gnu_case_ranges` to accept the construct without this
+compatibility warning.
+
+## W0020 — GNU labels-as-values extension
+
+GNU C lets a program take the address of a local label and jump through
+that value:
+
+```c
+void *p = &&target;  // warning[W0020] in strict C99 mode
+goto *p;             // warning[W0020] in strict C99 mode
+target: ;
+```
+
+The extension lowers to LLVM `blockaddress` and `indirectbr` inside the
+owning function. Enable `Options::gnu_labels_as_values` to accept
+`&&label` and `goto *expr` without this compatibility warning.
+
+## W0021 — GNU lvalue comma extension
+
+GNU C treats a comma expression as an lvalue when its right operand is
+an lvalue:
+
+```c
+int i, j;
+(i = 5, j) = 6;  // warning[W0021] in strict C99 mode
+```
+
+C99 makes every comma expression an rvalue, so `rcc` emits W0021 while
+preserving GNU semantics for recovery and compatibility tests. Enable
+`Options::gnu_lvalue_comma` to accept the construct without this
+compatibility warning.

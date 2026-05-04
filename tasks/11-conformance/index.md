@@ -19,7 +19,7 @@ current numeric milestone already passes.
 - [x] [06-gnu-binary-integer-literals](06-gnu-binary-integer-literals.md)
 - [x] [07-gnu-statement-expression-semantics](07-gnu-statement-expression-semantics.md)
 - [x] [08-chibicc-arith-green](08-chibicc-arith-green.md)
-- [ ] [09-gnu-control-flow-extensions](09-gnu-control-flow-extensions.md)
+- [x] [09-gnu-control-flow-extensions](09-gnu-control-flow-extensions.md)
 - [ ] [10-chibicc-control-green](10-chibicc-control-green.md)
 - [ ] [11-chibicc-function-prereq-triage](11-chibicc-function-prereq-triage.md)
 - [ ] [12-chibicc-function-green](12-chibicc-function-green.md)

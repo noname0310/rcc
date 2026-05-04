@@ -208,6 +208,7 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             let id = p.fresh_id();
             Some(Expr { id, kind: ExprKind::StringLit(lit), span })
         }
+        TokenKind::Punct(Punct::AmpAmp) => parse_gnu_label_addr(p, span),
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
             p.bump();
@@ -248,6 +249,28 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             None
         }
     }
+}
+
+fn parse_gnu_label_addr(p: &mut Parser<'_>, ampamp_span: Span) -> Option<Expr> {
+    p.bump(); // `&&`
+    if !p.session.opts.gnu_labels_as_values {
+        p.session
+            .handler
+            .struct_warn(ampamp_span, "GNU labels-as-values expression is not part of C99")
+            .code(codes::W0020)
+            .note("parsing it as an extension for computed goto lowering")
+            .emit();
+    }
+    let Some(tok) = p.bump() else {
+        p.session.handler.struct_err(ampamp_span, "expected label identifier after `&&`").emit();
+        return None;
+    };
+    let TokenKind::Ident(label) = tok.kind else {
+        p.session.handler.struct_err(tok.span, "expected label identifier after `&&`").emit();
+        return None;
+    };
+    let id = p.fresh_id();
+    Some(Expr { id, kind: ExprKind::LabelAddr(label), span: ampamp_span.to(tok.span) })
 }
 
 fn parse_gnu_statement_expr(p: &mut Parser<'_>, lparen_span: Span) -> Option<Expr> {
@@ -2025,6 +2048,31 @@ mod tests {
     fn parse_expr_str_with_opts(src: &str, opts: Options) -> (Expr, rcc_errors::CaptureEmitter) {
         let (mut sess, fid, cap) = mk_session_with_opts(src, opts);
         parse_expr_with_session(src, &mut sess, fid, cap)
+    }
+
+    fn parse_expr_real_tokens_with_opts(
+        src: &str,
+        opts: Options,
+    ) -> (Expr, rcc_errors::CaptureEmitter) {
+        let (mut sess, fid, cap) = mk_session_with_opts(src, opts);
+        let pps: Vec<PpToken> = Tokenizer::new(fid, src).collect();
+        let tokens = convert(&mut sess, &pps);
+        let mut parser = Parser::new(&mut sess, tokens);
+        let e = parse_expression(&mut parser).expect("expression parses");
+        assert_eq!(
+            parser.cursor,
+            parser.tokens.len(),
+            "Pratt parser must consume every token of {src:?}",
+        );
+        (e, cap)
+    }
+
+    #[test]
+    fn gnu_label_address_parses_with_option() {
+        let opts = Options { gnu_labels_as_values: true, ..Options::default() };
+        let (expr, cap) = parse_expr_real_tokens_with_opts("&&target", opts);
+        assert!(matches!(expr.kind, ExprKind::LabelAddr(_)));
+        assert!(cap.diagnostics().is_empty());
     }
 
     fn parse_expr_with_session(

@@ -241,6 +241,13 @@ pub enum GlobalInitValue {
     },
     /// String literal global.
     StringLiteral(DefId),
+    /// GNU labels-as-values block address for a function-local label.
+    LabelAddress {
+        /// Function containing the label.
+        function: DefId,
+        /// Label symbol within the function.
+        label: rcc_span::Symbol,
+    },
     /// Zero-fill marker for a scalar leaf.
     Zero,
     /// Malformed or not-yet-foldable initializer leaf.
@@ -327,14 +334,17 @@ pub enum HirStmtKind {
     Switch { cond: HirExprId, body: HirStmtId, cases: Vec<SwitchCase> },
     /// Unresolved label; target resolution in `rcc_cfg`.
     Label { name: Symbol, body: HirStmtId },
-    /// `case expr: stmt` inside a switch. The case value is a folded
-    /// integer constant; HIR lowering's switch-collection pass rewrites
-    /// these into the enclosing `Switch::cases` table.
-    Case { value: Option<i128>, body: HirStmtId },
+    /// `case expr: stmt` or GNU `case lo ... hi: stmt` inside a switch.
+    /// The values are folded integer constants; HIR lowering's switch-
+    /// collection pass rewrites these into the enclosing `Switch::cases`
+    /// table, expanding small ranges to individual switch targets.
+    Case { value: Option<i128>, range_end: Option<i128>, body: HirStmtId },
     /// `default: stmt` inside a switch. Same rewrite as `Case`.
     Default { body: HirStmtId },
     /// `goto label;`
     Goto(Symbol),
+    /// GNU computed goto: `goto *expr;`.
+    GotoComputed(HirExprId),
     /// `break;`
     Break,
     /// `continue;`
@@ -484,6 +494,11 @@ pub enum HirExprKind {
         /// Value when `cond` is zero.
         else_expr: HirExprId,
     },
+    /// GNU label address expression: `&&label`.
+    ///
+    /// Type checking assigns this expression type `void *`. CFG lowering
+    /// resolves the label name to a function-local basic block.
+    LabelAddr(Symbol),
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).

@@ -660,6 +660,9 @@ fn terminator_contains_field_projection(term: &TerminatorKind, expected: u32) ->
             operand_contains_field_projection(dst, expected)
                 || operand_contains_field_projection(src, expected)
         }
+        TerminatorKind::IndirectGoto { target, .. } => {
+            operand_contains_field_projection(target, expected)
+        }
         TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => false,
     }
 }
@@ -890,6 +893,12 @@ fn assert_terminator_valid(
             assert_operand_valid(name, def, body, src);
             assert_block_valid(name, def, body, *target);
         }
+        TerminatorKind::IndirectGoto { target, targets } => {
+            assert_operand_valid(name, def, body, target);
+            for target in targets {
+                assert_block_valid(name, def, body, *target);
+            }
+        }
         TerminatorKind::Return | TerminatorKind::Unreachable => {}
     }
 }
@@ -970,5 +979,6 @@ fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
         TerminatorKind::BuiltinVaStart { target, .. }
         | TerminatorKind::BuiltinVaEnd { target, .. }
         | TerminatorKind::BuiltinVaCopy { target, .. } => vec![*target],
+        TerminatorKind::IndirectGoto { targets, .. } => targets.clone(),
     }
 }

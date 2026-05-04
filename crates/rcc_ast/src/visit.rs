@@ -157,8 +157,11 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, s: &Stmt) {
             }
             v.visit_stmt(body);
         }
-        StmtKind::Case { value, body } => {
+        StmtKind::Case { value, range_end, body } => {
             v.visit_expr(value);
+            if let Some(end) = range_end {
+                v.visit_expr(end);
+            }
             v.visit_stmt(body);
         }
         StmtKind::Default { body }
@@ -170,6 +173,7 @@ pub fn walk_stmt<V: Visitor>(v: &mut V, s: &Stmt) {
                 v.visit_expr(e);
             }
         }
+        StmtKind::GotoComputed(expr) => v.visit_expr(expr),
         StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Null => {}
     }
 }
@@ -239,7 +243,8 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             v.visit_type_name(ty);
             v.visit_initializer(init.as_ref());
         }
-        ExprKind::Ident(_)
+        ExprKind::LabelAddr(_)
+        | ExprKind::Ident(_)
         | ExprKind::IntLit(_)
         | ExprKind::FloatLit(_)
         | ExprKind::CharLit(_)

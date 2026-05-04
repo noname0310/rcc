@@ -756,6 +756,12 @@ impl BodyBuilder {
         self.label_map.get(&name).cloned().unwrap_or_else(|| panic!("unknown label: {name:?}"))
     }
 
+    /// Conservative destination list for a computed goto in this function.
+    #[must_use]
+    pub fn label_targets(&self) -> Vec<BasicBlockId> {
+        self.label_map.values().map(|info| info.block).collect()
+    }
+
     /// Emit a goto to a named label while preserving lexical lifetime
     /// markers for scopes exited by the jump.
     ///
@@ -834,6 +840,9 @@ impl BodyBuilder {
                 scopes.pop().expect("collect_labels: block scope stack underflow");
             }
             HirStmtKind::Expr(expr) => {
+                self.collect_expr_labels(hir_body, *expr, local_map, scopes);
+            }
+            HirStmtKind::GotoComputed(expr) => {
                 self.collect_expr_labels(hir_body, *expr, local_map, scopes);
             }
             HirStmtKind::If { cond, then_branch, else_branch } => {
@@ -976,6 +985,7 @@ impl BodyBuilder {
             | HirExprKind::StringRef(_)
             | HirExprKind::LocalRef(_)
             | HirExprKind::DefRef(_)
+            | HirExprKind::LabelAddr(_)
             | HirExprKind::SizeofType(_) => {}
         }
     }
@@ -997,7 +1007,14 @@ impl BodyBuilder {
             "BodyBuilder::finish: reachable block {:?} has no terminator",
             unterminated_reachable(&self.states, &self.blocks).unwrap()
         );
-        Body { def: self.def, locals: self.locals, blocks: self.blocks, ret_ty: self.ret_ty }
+        let labels = self.label_map.iter().map(|(name, info)| (*name, info.block)).collect();
+        Body {
+            def: self.def,
+            locals: self.locals,
+            blocks: self.blocks,
+            labels,
+            ret_ty: self.ret_ty,
+        }
     }
 }
 
@@ -1045,6 +1062,7 @@ fn unterminated_reachable(
 fn successors(kind: &TerminatorKind) -> Vec<BasicBlockId> {
     match kind {
         TerminatorKind::Goto(t) => vec![*t],
+        TerminatorKind::IndirectGoto { targets, .. } => targets.clone(),
         TerminatorKind::SwitchInt { targets, .. } => targets.iter().map(|(_, t)| *t).collect(),
         TerminatorKind::Call { target: Some(t), .. } => vec![*t],
         TerminatorKind::Call { target: None, .. }

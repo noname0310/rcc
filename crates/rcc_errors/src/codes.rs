@@ -108,6 +108,9 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0016, W0016_DESC),
     (W0017, W0017_DESC),
     (W0018, W0018_DESC),
+    (W0019, W0019_DESC),
+    (W0020, W0020_DESC),
+    (W0021, W0021_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -828,6 +831,30 @@ const W0017_DESC: &str = "GNU omitted conditional operand extension";
 /// `Options::gnu_conditional_void_operand` is enabled.
 pub const W0018: &str = "W0018";
 const W0018_DESC: &str = "GNU conditional expression with one void operand";
+
+/// GNU case range accepted in strict C99 mode.
+///
+/// `case lo ... hi:` is a GNU C extension. The parser accepts it as an
+/// explicit range node and emits this warning unless
+/// `Options::gnu_case_ranges` is enabled.
+pub const W0019: &str = "W0019";
+const W0019_DESC: &str = "GNU case range extension";
+
+/// GNU labels-as-values / computed goto accepted in strict C99 mode.
+///
+/// `&&label` and `goto *expr` are GNU C extensions. The parser accepts them
+/// as explicit nodes and emits this warning unless
+/// `Options::gnu_labels_as_values` is enabled.
+pub const W0020: &str = "W0020";
+const W0020_DESC: &str = "GNU labels-as-values extension";
+
+/// GNU lvalue comma expression accepted in strict C99 mode.
+///
+/// GNU C treats a comma expression as an lvalue when its right operand is an
+/// lvalue. C99 makes every comma expression an rvalue, so the type checker
+/// emits this warning unless `Options::gnu_lvalue_comma` is enabled.
+pub const W0021: &str = "W0021";
+const W0021_DESC: &str = "GNU lvalue comma extension";
 
 #[cfg(test)]
 mod tests {

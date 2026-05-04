@@ -85,7 +85,17 @@ fn check_global_initializers(
         };
         if let Some(body) = hir.global_init_bodies.get_mut(&def_id) {
             type_global_initializer_body(body, &mut init, tcx, session, def_info);
-            let init_exprs: Vec<_> = init.entries.iter().filter_map(|entry| entry.expr).collect();
+            let init_exprs: Vec<_> = init
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    if matches!(entry.value, GlobalInitValue::LabelAddress { .. }) {
+                        None
+                    } else {
+                        entry.expr
+                    }
+                })
+                .collect();
             check_init_const(body, &init_exprs, Some(&hir.defs), tcx, session);
             fold_global_initializer_values(body, &mut init, &hir.defs, tcx, session);
         }
@@ -138,6 +148,9 @@ fn fold_global_initializer_values(
             Some(ConstScalar::Address { def, offset }) => GlobalInitValue::Address { def, offset },
             None => match entry.value {
                 GlobalInitValue::StringLiteral(def_id) => GlobalInitValue::StringLiteral(def_id),
+                GlobalInitValue::LabelAddress { function, label } => {
+                    GlobalInitValue::LabelAddress { function, label }
+                }
                 _ => GlobalInitValue::Error,
             },
         };
@@ -381,9 +394,9 @@ fn visit_stmt_with_context(
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Label { name, body: b }
         }
-        HirStmtKind::Case { value, body: b } => {
+        HirStmtKind::Case { value, range_end, body: b } => {
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
-            HirStmtKind::Case { value, body: b }
+            HirStmtKind::Case { value, range_end, body: b }
         }
         HirStmtKind::Default { body: b } => {
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
@@ -412,6 +425,22 @@ fn visit_stmt_with_context(
                 }
             });
             HirStmtKind::LocalDecl { local, init: init2 }
+        }
+        HirStmtKind::GotoComputed(expr) => {
+            let expr2 = visit_expr(expr, body, tcx, session, def_info);
+            let expr2 = rvalue_decayed(expr2, body, tcx);
+            let ty = body.exprs[expr2].ty;
+            if ty != tcx.error && !is_pointer(tcx, ty) {
+                session
+                    .handler
+                    .struct_err(
+                        body.exprs[expr2].span,
+                        "computed goto target must have pointer type",
+                    )
+                    .code(rcc_errors::codes::E0083)
+                    .emit();
+            }
+            HirStmtKind::GotoComputed(expr2)
         }
         HirStmtKind::Goto(_) | HirStmtKind::Break | HirStmtKind::Continue | HirStmtKind::Null => {
             kind
@@ -715,15 +744,38 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::OmittedCond { cond: cond2, else_expr: else2 };
             expr_id
         }
+        HirExprKind::LabelAddr(name) => {
+            let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+            body.exprs[expr_id].ty = void_ptr;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::LabelAddr(name);
+            expr_id
+        }
         HirExprKind::Comma { lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             // LHS is evaluated for side effects and discarded — apply
             // lvalue-to-rvalue + decay so the discard is on the value.
             let lhs2 = rvalue_decayed(lhs2, body, tcx);
             let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
-            let rhs2 = rvalue_decayed(rhs2, body, tcx);
+            let rhs_is_lvalue = value_category(body, rhs2) == ValueCat::LValue;
+            let (rhs2, value_cat) = if rhs_is_lvalue {
+                if !session.opts.gnu_lvalue_comma {
+                    session
+                        .handler
+                        .struct_warn(
+                            body.exprs[expr_id].span,
+                            "GNU lvalue comma expression is not part of C99",
+                        )
+                        .code(rcc_errors::codes::W0021)
+                        .note("treating the comma expression as an lvalue for GNU compatibility")
+                        .emit();
+                }
+                (rhs2, ValueCat::LValue)
+            } else {
+                (rvalue_decayed(rhs2, body, tcx), ValueCat::RValue)
+            };
             body.exprs[expr_id].ty = body.exprs[rhs2].ty;
-            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].value_cat = value_cat;
             body.exprs[expr_id].kind = HirExprKind::Comma { lhs: lhs2, rhs: rhs2 };
             expr_id
         }
@@ -2035,7 +2087,8 @@ pub fn decay_if_needed(
 /// | `CompoundLiteral { .. }`                       | lvalue   |
 /// | `Binary`, `Unary`, `Call`, `StmtExpr`           | rvalue   |
 /// | `AddressOf`                                     | rvalue   |
-/// | `Cond`, `Comma`, `Assign`                       | rvalue   |
+/// | `Cond`, `Assign`                                | rvalue   |
+/// | `Comma`                                         | rvalue in C99; RHS lvalue in GNU mode |
 ///
 /// Notes:
 /// - `Field` follows the base because C99 §6.5.2.3p3 says `s.f` is an
@@ -2062,15 +2115,17 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::SizeofType(_)
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
+        | HirExprKind::LabelAddr(_)
         | HirExprKind::Cond { .. }
         | HirExprKind::OmittedCond { .. }
-        | HirExprKind::Comma { .. }
         | HirExprKind::Assign { .. }
         | HirExprKind::Convert { .. }
         | HirExprKind::BuiltinVaArg { .. }
         | HirExprKind::BuiltinVaStart { .. }
         | HirExprKind::BuiltinVaEnd { .. }
         | HirExprKind::BuiltinVaCopy { .. } => ValueCat::RValue,
+
+        HirExprKind::Comma { .. } => body.exprs[expr].value_cat,
 
         // Identifier-style designators are lvalues. String literals are
         // arrays of `char` (with static storage duration) and §6.4.5p6
@@ -2210,6 +2265,7 @@ fn lvalue_object_quals(
 ) -> ObjectQuals {
     match &body.exprs[expr].kind {
         HirExprKind::LocalRef(local) => body.locals[*local].quals,
+        HirExprKind::Comma { rhs, .. } => lvalue_object_quals(body, tcx, def_info, *rhs),
         HirExprKind::DefRef(def_id) => {
             def_info.get(def_id).map_or(ObjectQuals::none(), |snap| snap.object_quals)
         }
