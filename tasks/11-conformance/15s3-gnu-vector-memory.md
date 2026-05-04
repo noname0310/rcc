@@ -1,5 +1,7 @@
 # 11-15s3: GNU vector memory loads, stores, and byte views
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15s2    **Milestone:** M6
 
 ## Goal

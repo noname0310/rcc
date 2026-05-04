@@ -372,6 +372,58 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_memcmp_byte_view_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector byte-view e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_memcmp_byte_view",
+            r#"
+typedef int v4si __attribute__((vector_size(16)));
+int memcmp(const void *, const void *, unsigned long);
+int main(void) {
+  v4si x = { 1, 2, 3, 4 };
+  int expect[4] = { 1, 2, 3, 4 };
+  return memcmp(&x, expect, sizeof(x));
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_pointer_store_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector pointer-store e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_pointer_store",
+            r#"
+typedef unsigned char v16qi __attribute__((vector_size(16)));
+int main(void) {
+  unsigned char b[16] = { 0 };
+  v16qi c = { 1, 2, 3, 4, 5, 6, 7, 8,
+              9, 10, 11, 12, 13, 14, 15, 16 };
+  *(v16qi *)&b[0] = c;
+  for (int i = 0; i < 16; i = i + 1)
+    if (b[i] != i + 1)
+      return i + 1;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");

@@ -9676,6 +9676,31 @@ mod tests {
         assert!(ir.contains("i64 24"), "IR:\n{ir}");
     }
 
+    /// Vector object copies are first-class load/store operations, not
+    /// aggregate memcpy transfers.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn vector_object_copy_uses_vector_load_store_not_memcpy() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let vector_ty = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let defs = IndexVec::new();
+        let body =
+            aggregate_body_with_assign(tcx.void, vector_ty, Rvalue::Use(local_copy(Local(2))));
+
+        let ir = codegen_aggregate_fixture(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__vector_copy_first_class",
+            body,
+        );
+
+        assert!(ir.contains("load <4 x i32>"), "vector load expected:\n{ir}");
+        assert!(ir.contains("store <4 x i32>"), "vector store expected:\n{ir}");
+        assert!(!ir.contains("@llvm.memcpy"), "vector copy must not use memcpy:\n{ir}");
+    }
+
     /// Forward declarations are callable before any callee body is emitted.
     #[cfg(feature = "llvm")]
     #[test]
