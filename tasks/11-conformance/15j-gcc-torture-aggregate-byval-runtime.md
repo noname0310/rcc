@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15j: gcc-torture aggregate by-value runtime
 
 **Phase:** 11-conformance    **Depends on:** 11-15e    **Milestone:** M6
@@ -25,6 +27,25 @@ Reduce and fix the aggregate copy / by-value calling bug exposed by
   checked tasks with each remaining abort tied to a concrete root cause.
 - The reduction includes a clang comparison, not only an rcc pass/fail result.
 - No xfail, skip, or result masking is added.
+
+## Result
+- Root cause was not the `U` by-value ABI path itself. `U` was correctly
+  passed as `ptr byval(%rcc.record.28) align 8`.
+- The abort came from a physical layout mismatch for `struct t`: LLVM lowered
+  adjacent bit-fields as separate `i32` fields in the global type, while CFG
+  member access used the shared HIR layout service and read `d` at byte offset
+  8.
+- Fixed LLVM record type lowering so structs containing bit-fields use explicit
+  packed layout and coalesce adjacent bit-fields that share one storage unit.
+- Fixed global aggregate constants so bit-field initializers are packed into
+  that storage unit before following non-bitfield members are emitted.
+- Added a reduced C99 e2e fixture,
+  `crates/rcc_driver/tests/e2e/aggregate_bitfield_byval.c`, covering bit-field
+  global layout, `memcpy`, struct assignment, and by-value aggregate calls.
+- Verified the reduced fixture with host `cc -std=c99` and rcc; both exit 0.
+- Verified WSL LLVM 18 conformance:
+  `gcc-torture::execute::20011113-1` passes.
+- Used no xfail, skip, or result masking.
 
 ## References
 - `target/wsl/gcc-torture-15e-probe-after.json`

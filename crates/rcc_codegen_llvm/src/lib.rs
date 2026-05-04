@@ -5809,6 +5809,7 @@ pub mod backend {
                 return false;
             };
             align_override.is_some()
+                || fields.iter().any(|field| field.bit_width.is_some())
                 || fields.iter().any(|field| self.type_needs_explicit_layout(field.ty))
         }
 
@@ -5833,8 +5834,29 @@ pub mod backend {
             let mut offset = 0_u64;
             for (field_ty, field_layout) in field_tys.iter().zip(record_layout.fields.iter()) {
                 if field_layout.bit_width.is_some() {
-                    return self
-                        .type_error(ty, "explicit LLVM bit-field record layout is deferred");
+                    if field_layout.storage_size == 0 {
+                        continue;
+                    }
+                    let unit_end = field_layout
+                        .offset
+                        .checked_add(field_layout.storage_size)
+                        .ok_or_else(|| type_error(ty, "explicit bit-field unit overflow"))?;
+                    if unit_end <= offset {
+                        continue;
+                    }
+                    if field_layout.offset < offset {
+                        return self.type_error(
+                            ty,
+                            "explicit bit-field storage overlaps previous LLVM field",
+                        );
+                    }
+                    if field_layout.offset > offset {
+                        out.push(self.padding_type(field_layout.offset - offset, ty)?);
+                    }
+                    let storage_bits = storage_bits_for_bitfield(field_layout.storage_size)?;
+                    out.push(self.context.custom_width_int_type(storage_bits).into());
+                    offset = unit_end;
+                    continue;
                 }
                 if field_layout.offset > offset {
                     out.push(self.padding_type(field_layout.offset - offset, ty)?);
@@ -6159,9 +6181,42 @@ pub mod backend {
             for (i, field) in fields.iter().enumerate() {
                 let field_layout = record_layout.fields[i];
                 if field_layout.bit_width.is_some() {
-                    return Err(CodegenError::Internal(
-                        "explicit LLVM bit-field record constants are deferred".to_owned(),
-                    ));
+                    if field_layout.storage_size == 0 {
+                        continue;
+                    }
+                    let unit_end = field_layout
+                        .offset
+                        .checked_add(field_layout.storage_size)
+                        .ok_or_else(|| {
+                            CodegenError::Internal(
+                                "explicit bit-field constant unit overflow".to_owned(),
+                            )
+                        })?;
+                    if unit_end <= offset {
+                        continue;
+                    }
+                    if field_layout.offset < offset {
+                        return Err(CodegenError::Internal(
+                            "explicit bit-field storage overlaps previous constant field"
+                                .to_owned(),
+                        ));
+                    }
+                    if field_layout.offset > offset {
+                        values.push(self.padding_const(field_layout.offset - offset, ty)?.into());
+                    }
+                    values.push(
+                        self.build_bitfield_storage_const(
+                            fields,
+                            entries,
+                            &record_layout,
+                            field_layout.offset,
+                            field_layout.storage_size,
+                            ty,
+                        )?
+                        .into(),
+                    );
+                    offset = unit_end;
+                    continue;
                 }
                 if field_layout.offset > offset {
                     values.push(self.padding_const(field_layout.offset - offset, ty)?.into());
@@ -6194,6 +6249,71 @@ pub mod backend {
             }
             let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
             Ok(struct_ty.const_named_struct(&values).into())
+        }
+
+        fn build_bitfield_storage_const(
+            &mut self,
+            fields: &[rcc_hir::Field],
+            entries: &[GlobalInitEntry],
+            record_layout: &rcc_hir::layout::RecordLayout,
+            unit_offset: u64,
+            unit_size: u64,
+            _ty: TyId,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            let storage_bits = storage_bits_for_bitfield(unit_size)?;
+            let mut packed = 0_u64;
+            for (i, field) in fields.iter().enumerate() {
+                let field_layout = record_layout.fields[i];
+                let Some(width) = field_layout.bit_width else {
+                    continue;
+                };
+                if width == 0
+                    || field_layout.offset != unit_offset
+                    || field_layout.storage_size != unit_size
+                {
+                    continue;
+                }
+                let bit_offset = field_layout.bit_offset.ok_or_else(|| {
+                    CodegenError::Internal(
+                        "bit-field constant layout is missing bit offset".to_owned(),
+                    )
+                })?;
+                let sub_entries: Vec<GlobalInitEntry> = entries
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e.path.first(),
+                            Some(GlobalInitDesignator::Field(idx)) if *idx as usize == i
+                        )
+                    })
+                    .cloned()
+                    .map(|mut e| {
+                        e.path = e.path.into_iter().skip(1).collect();
+                        e
+                    })
+                    .collect();
+                if sub_entries.is_empty() {
+                    continue;
+                }
+                let value = self.build_const_value(field.ty, &sub_entries)?;
+                let BasicValueEnum::IntValue(value) = value else {
+                    return Err(CodegenError::Internal(format!(
+                        "bit-field initializer expected integer constant, got {:?}",
+                        value.get_type()
+                    )));
+                };
+                let raw = value.get_zero_extended_constant().ok_or_else(|| {
+                    CodegenError::Internal(
+                        "bit-field initializer integer constant is too wide".to_owned(),
+                    )
+                })?;
+                let mask = bit_mask(width)?;
+                let shifted = (raw & mask).checked_shl(bit_offset).ok_or_else(|| {
+                    CodegenError::Internal("bit-field initializer shift overflowed".to_owned())
+                })?;
+                packed |= shifted;
+            }
+            Ok(self.context.custom_width_int_type(storage_bits).const_int(packed, false))
         }
 
         fn padding_const(
@@ -7589,6 +7709,36 @@ mod tests {
         assert_eq!(
             lowered.print_to_string().to_string(),
             "%rcc.record.0 = type <{ i32, i32, [24 x i8] }>"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_coalesces_bitfield_storage_units() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let long_array =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.long), len: Some(4), is_vla: false });
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![
+                bitfield(tcx.uint, 16),
+                bitfield(tcx.uint, 8),
+                bitfield(tcx.uint, 8),
+                field(long_array),
+            ],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let hir = hir_with_defs(defs);
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(rec_ty).unwrap();
+
+        assert_eq!(
+            lowered.print_to_string().to_string(),
+            "%rcc.record.0 = type <{ i32, [4 x i8], [4 x i64] }>"
         );
     }
 
