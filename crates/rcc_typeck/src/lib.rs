@@ -386,7 +386,7 @@ fn visit_stmt_with_context(
         }
         HirStmtKind::Switch { cond, body: b, cases } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
-            let cond2 = scalar_control_rvalue(cond2, body, tcx, session, "switch condition");
+            let cond2 = switch_control_rvalue(cond2, body, tcx, session);
             visit_stmt_with_context(b, body, tcx, session, def_info, context);
             HirStmtKind::Switch { cond: cond2, body: b, cases }
         }
@@ -919,6 +919,32 @@ fn scalar_control_rvalue(
     let expr = scalar_rvalue(expr, body, tcx);
     check_scalar_operand(expr, body, tcx, session, context);
     expr
+}
+
+fn switch_control_rvalue(
+    expr: HirExprId,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> HirExprId {
+    let expr = scalar_control_rvalue(expr, body, tcx, session, "switch condition");
+    let ty = body.exprs[expr].ty;
+    if !is_integer(tcx, ty) {
+        if ty != tcx.error {
+            session
+                .handler
+                .struct_err(body.exprs[expr].span, "switch condition must have integer type")
+                .code(rcc_errors::codes::E0083)
+                .emit();
+        }
+        return expr;
+    }
+    let promoted = integer_promotion(tcx, ty, None);
+    if promoted != ty {
+        push_int_promote(body, expr, promoted)
+    } else {
+        expr
+    }
 }
 
 fn check_scalar_operand(

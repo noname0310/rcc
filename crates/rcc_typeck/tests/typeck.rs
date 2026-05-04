@@ -477,6 +477,41 @@ fn null_pointer_constant_recognises_zero_through_wrappers() {
     assert!(!is_null_pointer_constant(&body, one));
 }
 
+#[test]
+fn switch_condition_undergoes_integer_promotion() {
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+
+    let cond = push_kind(&mut body, tcx.schar, HirExprKind::IntConst(-1));
+    let case_body = push_null_stmt(&mut body);
+    let switch_stmt = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::Switch {
+            cond,
+            body: case_body,
+            cases: vec![rcc_hir::SwitchCase { value: Some(255), target: case_body }],
+        },
+    });
+    body.stmts[switch_stmt].id = switch_stmt;
+    body.root = Some(switch_stmt);
+
+    check_body(&mut body, &mut tcx, &mut sess);
+
+    let HirStmtKind::Switch { cond: promoted, cases, .. } = &body.stmts[switch_stmt].kind else {
+        panic!("expected switch root");
+    };
+    assert_eq!(body.exprs[*promoted].ty, tcx.int);
+    assert_eq!(cases[0].value, Some(255), "case value remains in promoted int domain");
+    match body.exprs[*promoted].kind {
+        HirExprKind::Convert { operand, kind: ConvertKind::IntegerPromotion } => {
+            assert_eq!(operand, cond);
+        }
+        ref other => panic!("expected IntegerPromotion wrapper, got {other:?}"),
+    }
+}
+
 // ─── 6. pointer_convert — C99 §6.3.2.3 ───────────────────────────────────
 
 #[test]
