@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 06-31: aggregate initializer brace elision cursor
 
 **Phase:** 06-hir-lower    **Depends on:** 06-21    **Milestone:** M6+

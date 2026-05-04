@@ -38,7 +38,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [28-block-scope-tag-shadowing](28-block-scope-tag-shadowing.md)
 - [x] [29-function-definition-nested-parameter-decls](29-function-definition-nested-parameter-decls.md)
 - [x] [30-file-scope-compound-literal-static-storage](30-file-scope-compound-literal-static-storage.md)
-- [ ] [31-aggregate-brace-elision-cursor](31-aggregate-brace-elision-cursor.md)
+- [x] [31-aggregate-brace-elision-cursor](31-aggregate-brace-elision-cursor.md)
 
 ## Downstream
 

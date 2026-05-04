@@ -1059,7 +1059,7 @@ fn lower_block_decl(
             continue;
         }
         if let Some(init) = &init_decl.init {
-            ty = complete_initializer_type(ty, init, tcx);
+            ty = complete_initializer_type(ty, init, tcx, crate_);
         }
         if is_incomplete_array_ty(ty, tcx) {
             emit_incomplete_array_at_block_scope(init_decl.declarator.span, session);
@@ -1328,7 +1328,12 @@ fn push_local_ref(local: Local, ty: TyId, span: Span, body: &mut Body) -> HirExp
     id
 }
 
-fn complete_initializer_type(ty: TyId, init: &rcc_ast::Initializer, tcx: &mut TyCtxt) -> TyId {
+fn complete_initializer_type(
+    ty: TyId,
+    init: &rcc_ast::Initializer,
+    tcx: &mut TyCtxt,
+    crate_: &HirCrate,
+) -> TyId {
     let Ty::Array { elem, len: None, is_vla: false } = tcx.get(ty).clone() else {
         return ty;
     };
@@ -1337,7 +1342,9 @@ fn complete_initializer_type(ty: TyId, init: &rcc_ast::Initializer, tcx: &mut Ty
         rcc_ast::Initializer::Expr(e) if is_string_array_initializer(ty, e, tcx) => {
             string_initializer_len(e)
         }
-        rcc_ast::Initializer::List(items) => Some(array_initializer_list_len(items)),
+        rcc_ast::Initializer::List(items) => {
+            Some(array_initializer_list_len(items, elem.ty, tcx, crate_))
+        }
         _ => None,
     };
 
@@ -1358,7 +1365,18 @@ fn emit_incomplete_array_at_block_scope(span: Span, session: &mut Session) {
         .emit();
 }
 
-fn array_initializer_list_len(items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)]) -> u64 {
+fn array_initializer_list_len(
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    elem_ty: TyId,
+    tcx: &TyCtxt,
+    crate_: &HirCrate,
+) -> u64 {
+    if flat_scalar_initializer_items(items) {
+        let leaves_per_elem = aggregate_leaf_count(elem_ty, tcx, crate_).max(1);
+        let item_count = items.len() as u64;
+        return item_count.saturating_add(leaves_per_elem - 1) / leaves_per_elem;
+    }
+
     let mut cursor = 0u64;
     let mut max_len = 0u64;
     for (desigs, _) in items {
@@ -1373,6 +1391,78 @@ fn array_initializer_list_len(items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initi
         cursor = idx.saturating_add(1);
     }
     max_len
+}
+
+fn flat_scalar_initializer_items(
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+) -> bool {
+    !items.is_empty()
+        && items.iter().all(|(desigs, init)| {
+            desigs.is_empty() && matches!(init, rcc_ast::Initializer::Expr(_))
+        })
+}
+
+fn aggregate_leaf_count(ty: TyId, tcx: &TyCtxt, crate_: &HirCrate) -> u64 {
+    match tcx.get(ty).clone() {
+        Ty::Array { elem, len: Some(len), .. } => {
+            len.saturating_mul(aggregate_leaf_count(elem.ty, tcx, crate_).max(1))
+        }
+        Ty::Record(def_id) => {
+            let DefKind::Record { fields, kind, .. } = &crate_.defs[def_id].kind else {
+                return 1;
+            };
+            let fields: Box<dyn Iterator<Item = &Field>> = if matches!(kind, RecordKind::Union) {
+                Box::new(fields.iter().take(1))
+            } else {
+                Box::new(fields.iter())
+            };
+            fields.map(|field| aggregate_leaf_count(field.ty, tcx, crate_).max(1)).sum::<u64>()
+        }
+        _ => 1,
+    }
+}
+
+fn aggregate_leaf_paths(
+    ty: TyId,
+    tcx: &TyCtxt,
+    crate_: &HirCrate,
+) -> Vec<(Vec<GlobalInitDesignator>, TyId)> {
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    collect_aggregate_leaf_paths(ty, tcx, crate_, &mut path, &mut out);
+    out
+}
+
+fn collect_aggregate_leaf_paths(
+    ty: TyId,
+    tcx: &TyCtxt,
+    crate_: &HirCrate,
+    path: &mut Vec<GlobalInitDesignator>,
+    out: &mut Vec<(Vec<GlobalInitDesignator>, TyId)>,
+) {
+    match tcx.get(ty).clone() {
+        Ty::Array { elem, len: Some(len), .. } => {
+            for idx in 0..len {
+                path.push(GlobalInitDesignator::Index(idx));
+                collect_aggregate_leaf_paths(elem.ty, tcx, crate_, path, out);
+                path.pop();
+            }
+        }
+        Ty::Record(def_id) => {
+            let DefKind::Record { fields, kind, .. } = &crate_.defs[def_id].kind else {
+                out.push((path.clone(), ty));
+                return;
+            };
+            let field_limit =
+                if matches!(kind, RecordKind::Union) { fields.len().min(1) } else { fields.len() };
+            for (field_idx, field) in fields.iter().enumerate().take(field_limit) {
+                path.push(GlobalInitDesignator::Field(field_idx as u32));
+                collect_aggregate_leaf_paths(field.ty, tcx, crate_, path, out);
+                path.pop();
+            }
+        }
+        _ => out.push((path.clone(), ty)),
+    }
 }
 
 fn is_string_array_initializer(ty: TyId, expr: &rcc_ast::Expr, tcx: &TyCtxt) -> bool {
@@ -1650,11 +1740,81 @@ fn lower_global_initializer_into(
             });
         }
         rcc_ast::Initializer::List(items) => {
+            if lower_global_flat_brace_elision_initializer(
+                target_ty,
+                items,
+                span,
+                path.clone(),
+                body,
+                scope,
+                crate_,
+                tcx,
+                resolver,
+                session,
+                out,
+            ) {
+                return;
+            }
             lower_global_initializer_list(
                 target_ty, items, span, path, body, scope, crate_, tcx, resolver, session, out,
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_flat_brace_elision_initializer(
+    target_ty: TyId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    base_path: Vec<GlobalInitDesignator>,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<GlobalInitEntry>,
+) -> bool {
+    if !flat_scalar_initializer_items(items) {
+        return false;
+    }
+    let leaves = aggregate_leaf_paths(target_ty, tcx, crate_);
+    if leaves.is_empty() {
+        return false;
+    }
+
+    for (idx, (_, sub_init)) in items.iter().enumerate() {
+        let Some((leaf_path, leaf_ty)) = leaves.get(idx) else {
+            emit_invalid_initializer_designator(
+                span,
+                "initializer has more scalar leaves than the target aggregate",
+                session,
+            );
+            break;
+        };
+        let rcc_ast::Initializer::Expr(expr) = sub_init else {
+            unreachable!("flat_scalar_initializer_items only accepts expression leaves")
+        };
+        let mut path = base_path.clone();
+        path.extend(leaf_path.iter().copied());
+        if let Some(value) =
+            lower_file_scope_compound_literal_address(expr, crate_, tcx, resolver, session)
+        {
+            out.push(GlobalInitEntry { path, ty: *leaf_ty, expr: None, value, span: expr.span });
+            continue;
+        }
+        let expr_id = lower_expr(expr, body, scope, crate_, tcx, resolver, session);
+        let value = lower_global_init_expr(expr, crate_, tcx, resolver);
+        out.push(GlobalInitEntry {
+            path,
+            ty: *leaf_ty,
+            expr: Some(expr_id),
+            value,
+            span: expr.span,
+        });
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1980,17 +2140,97 @@ fn lower_initializer_list(
 
     match target_ty_kind {
         Ty::Array { elem, len, .. } => {
+            if lower_flat_brace_elision_initializer(
+                target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
+            ) {
+                return;
+            }
             lower_array_initializer(
                 target, elem.ty, len, items, span, body, scope, crate_, tcx, resolver, session, out,
             );
         }
         Ty::Record(def_id) => {
+            if lower_flat_brace_elision_initializer(
+                target, target_ty, items, span, body, scope, crate_, tcx, resolver, session, out,
+            ) {
+                return;
+            }
             lower_record_initializer(
                 target, def_id, items, span, body, scope, crate_, tcx, resolver, session, out,
             );
         }
         _ => unreachable!("scalar case handled above"),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_flat_brace_elision_initializer(
+    target: HirExprId,
+    target_ty: TyId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    span: Span,
+    body: &mut Body,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+    out: &mut Vec<HirStmtId>,
+) -> bool {
+    if !flat_scalar_initializer_items(items) {
+        return false;
+    }
+    let leaves = aggregate_leaf_paths(target_ty, tcx, crate_);
+    if leaves.is_empty() {
+        return false;
+    }
+
+    let mut written = FxHashSet::default();
+    for (idx, (_, sub_init)) in items.iter().enumerate() {
+        let Some((path, leaf_ty)) = leaves.get(idx) else {
+            emit_invalid_initializer_designator(
+                span,
+                "initializer has more scalar leaves than the target aggregate",
+                session,
+            );
+            break;
+        };
+        let leaf_target = push_lvalue_path(target, target_ty, path, span, body, tcx, crate_);
+        lower_initializer(
+            leaf_target,
+            *leaf_ty,
+            sub_init,
+            span,
+            body,
+            scope,
+            crate_,
+            tcx,
+            resolver,
+            session,
+            out,
+        );
+        written.insert(path.clone());
+    }
+
+    for (path, leaf_ty) in leaves {
+        if written.contains(&path) {
+            continue;
+        }
+        let leaf_target = push_lvalue_path(target, target_ty, &path, span, body, tcx, crate_);
+        emit_zero_init(
+            leaf_target,
+            leaf_ty,
+            span,
+            body,
+            scope,
+            crate_,
+            tcx,
+            resolver,
+            session,
+            out,
+        );
+    }
+    true
 }
 
 /// Walker for array initialiser lists.
@@ -2268,6 +2508,44 @@ fn emit_zero_init(
             emit_assign_stmt(target, zero, span, body, out);
         }
     }
+}
+
+fn push_lvalue_path(
+    root: HirExprId,
+    root_ty: TyId,
+    path: &[GlobalInitDesignator],
+    span: Span,
+    body: &mut Body,
+    tcx: &TyCtxt,
+    crate_: &HirCrate,
+) -> HirExprId {
+    let mut current = root;
+    let mut current_ty = root_ty;
+    for component in path {
+        match *component {
+            GlobalInitDesignator::Index(idx) => {
+                let Ty::Array { elem, .. } = tcx.get(current_ty).clone() else {
+                    break;
+                };
+                current = push_index_expr(current, idx, elem.ty, span, body, tcx);
+                current_ty = elem.ty;
+            }
+            GlobalInitDesignator::Field(field_idx) => {
+                let Ty::Record(def_id) = tcx.get(current_ty).clone() else {
+                    break;
+                };
+                let field_ty = match &crate_.defs[def_id].kind {
+                    DefKind::Record { fields, .. } => {
+                        fields.get(field_idx as usize).map(|field| field.ty).unwrap_or(current_ty)
+                    }
+                    _ => current_ty,
+                };
+                current = push_field_expr(current, field_idx, field_ty, span, body);
+                current_ty = field_ty;
+            }
+        }
+    }
+    current
 }
 
 /// Build a `target[idx]` lvalue expression and push it into `body.exprs`.
@@ -4684,7 +4962,7 @@ fn finalize_file_scope_def_types(
                 session,
             );
             if let Some(init) = &init_decl.init {
-                ty = complete_initializer_type(ty, init, tcx);
+                ty = complete_initializer_type(ty, init, tcx, crate_);
             }
             let has_explicit_init = init_decl.init.is_some();
             let global_init = if let Some(init) = &init_decl.init {

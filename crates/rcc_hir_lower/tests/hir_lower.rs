@@ -303,6 +303,87 @@ fn nested_file_scope_compound_literal_address_initializer_is_constant() {
     assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
 }
 
+#[test]
+fn local_flat_initializer_descends_into_nested_array_field() {
+    let src = r#"
+        struct PT { long c[4]; long b, e, k; };
+        int main(void) {
+            struct PT p = { 1, 2, 3, 4, 5, 6, 7 };
+            return p.c[0] == 1 && p.c[3] == 4 && p.b == 5 && p.k == 7 ? 0 : 1;
+        }
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
+#[test]
+fn global_flat_initializer_completes_outer_array_by_aggregate_leaf_count() {
+    let src = r#"
+        typedef long I;
+        typedef struct { I c[4]; I b, e, k; } PT;
+        PT cases[] = { 1,2,3,4,5,6,7, 8,9,10,11,12,13,14 };
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let def = hir
+        .defs
+        .iter()
+        .find(|def| matches!(def.kind, DefKind::Global { init: Some(_), .. }))
+        .expect("expected initialized global cases");
+    let DefKind::Global { ty, init: Some(init), .. } = &def.kind else {
+        panic!("expected initialized global cases, got {:?}", def.kind);
+    };
+    match tcx.get(*ty) {
+        Ty::Array { len: Some(2), .. } => {}
+        other => panic!("expected cases[2], got {other:?}"),
+    }
+
+    let leaves: Vec<_> = init
+        .entries
+        .iter()
+        .take(7)
+        .map(|entry| {
+            let value = match entry.value {
+                GlobalInitValue::Int(v) => v,
+                ref other => panic!("expected integer leaf, got {other:?}"),
+            };
+            (entry.path.clone(), value)
+        })
+        .collect();
+    assert_eq!(
+        leaves,
+        vec![
+            vec![
+                GlobalInitDesignator::Index(0),
+                GlobalInitDesignator::Field(0),
+                GlobalInitDesignator::Index(0)
+            ],
+            vec![
+                GlobalInitDesignator::Index(0),
+                GlobalInitDesignator::Field(0),
+                GlobalInitDesignator::Index(1)
+            ],
+            vec![
+                GlobalInitDesignator::Index(0),
+                GlobalInitDesignator::Field(0),
+                GlobalInitDesignator::Index(2)
+            ],
+            vec![
+                GlobalInitDesignator::Index(0),
+                GlobalInitDesignator::Field(0),
+                GlobalInitDesignator::Index(3)
+            ],
+            vec![GlobalInitDesignator::Index(0), GlobalInitDesignator::Field(1)],
+            vec![GlobalInitDesignator::Index(0), GlobalInitDesignator::Field(2)],
+            vec![GlobalInitDesignator::Index(0), GlobalInitDesignator::Field(3)],
+        ]
+        .into_iter()
+        .zip(1..=7)
+        .collect::<Vec<_>>()
+    );
+}
+
 fn lower_snippet_with_diagnostics(src: &str) -> (HirCrate, TyCtxt, CaptureEmitter) {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
