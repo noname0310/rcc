@@ -20,7 +20,7 @@ use rcc_span::Span;
 use rcc_lexer::StringEncoding;
 
 use crate::keywords::classify_ident;
-use crate::literal::{decode_char_full, decode_float, decode_integer, decode_string};
+use crate::literal::{decode_char_full, decode_float, decode_integer_with_options, decode_string};
 use crate::token::{
     CharLiteral, FloatLiteral, FloatSuffix, IntBase, IntLiteral, IntSuffix, StringLiteral, Token,
     TokenKind,
@@ -77,7 +77,7 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
             // parser invariants ("every pp-number becomes an IntLit or
             // a FloatLit") hold even when recovery kicks in.
             let text = span_text(session, pp.span);
-            match decode_integer(&text) {
+            match decode_integer_with_options(&text, session.opts.gnu_binary_integer_literals) {
                 Ok(lit) => TokenKind::IntLit(lit),
                 Err(mut diag) => {
                     diag.labels.push(Label {
@@ -369,8 +369,9 @@ fn span_text(session: &Session, span: Span) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcc_errors::Handler;
     use rcc_lexer::{Punct, StringEncoding};
-    use rcc_session::Session;
+    use rcc_session::{Options, Session};
     use rcc_span::{BytePos, FileId, Span};
     use std::sync::Arc;
 
@@ -478,6 +479,30 @@ mod tests {
             }
             other => panic!("expected IntLit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn binary_integer_pp_number_respects_gnu_option() {
+        let src = "0b10011";
+        let cap = rcc_errors::CaptureEmitter::new();
+        let handler = Handler::with_emitter(Box::new(cap.clone()));
+        let mut sess = Session::with_handler(
+            Options { gnu_binary_integer_literals: true, ..Options::default() },
+            handler,
+        );
+        let fid =
+            sess.source_map.write().unwrap().add_file("t.c".into(), Arc::from(src.to_owned()));
+        let pp = tok(PpTokenKind::PpNumber(PpNumberKind::Integer), fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("binary int converts");
+        match t.kind {
+            TokenKind::IntLit(lit) => {
+                assert_eq!(lit.value, 19);
+                assert_eq!(lit.base, IntBase::Binary);
+                assert_eq!(lit.suffix, IntSuffix::None);
+            }
+            other => panic!("expected IntLit, got {other:?}"),
+        }
+        assert!(cap.diagnostics().is_empty());
     }
 
     #[test]

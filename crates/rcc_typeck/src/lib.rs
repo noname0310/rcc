@@ -2823,6 +2823,11 @@ mod tests {
             "octal constants use the same signed/unsigned candidate list as hex"
         );
         assert_eq!(
+            integer_literal_type(&tcx, 0xffff_ffff, IntLiteralBase::Binary, IntLiteralSuffix::None),
+            Some(tcx.uint),
+            "GNU binary constants use the same signed/unsigned candidate list as hex and octal"
+        );
+        assert_eq!(
             integer_literal_type(&tcx, 0x1_0000_0000, IntLiteralBase::Hex, IntLiteralSuffix::U),
             Some(tcx.ulong),
             "U suffix moves from unsigned int to unsigned long when needed"

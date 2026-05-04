@@ -37,7 +37,9 @@ pub use expr::{
 };
 pub use init::parse_initializer;
 pub use keywords::{classify_ident, Keyword, KEYWORDS};
-pub use literal::{decode_char, decode_float, decode_integer, decode_string};
+pub use literal::{
+    decode_char, decode_float, decode_integer, decode_integer_with_options, decode_string,
+};
 pub use phase7::{convert as pp_stream_to_tokens, merge_adjacent_strings, pp_to_token};
 pub use scope::{NameKind, Scope, ScopeStack};
 pub use stmt::{parse_block, parse_block_item, parse_stmt};

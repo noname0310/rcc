@@ -40,6 +40,11 @@ host-compiled `assert` helper instead of compiling upstream
 `test/common` with `rcc`. This keeps failures attributed to the selected
 TU rather than later chibicc runtime/helper features.
 
+Stage mode passes `-fgnu-binary-literals` to `rcc` so chibicc's GNU
+`0b...` constants are not misreported as strict-C99 octal errors. Later
+GNU constructs, such as statement expressions and omitted conditional
+operands, remain real failures until their owning tasks land.
+
 ## Suite status
 
 <!-- BEGIN autogen -->

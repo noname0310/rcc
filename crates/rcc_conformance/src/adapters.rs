@@ -410,6 +410,7 @@ impl ChibiccAdapter {
         let mut compile_test = Command::new(rcc_path);
         compile_test
             .arg("--emit=obj")
+            .arg("-fgnu-binary-literals")
             .arg("-I")
             .arg(case_dir)
             .arg("-o")

@@ -1,5 +1,7 @@
 # 11-06: GNU binary integer literals
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-05    **Milestone:** M2+
 
 ## Goal

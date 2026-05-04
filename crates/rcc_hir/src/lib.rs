@@ -511,6 +511,8 @@ pub enum IntLiteralBase {
     Octal,
     /// Hexadecimal constant.
     Hex,
+    /// GNU binary constant (`0b...` / `0B...`).
+    Binary,
 }
 
 /// Integer-literal suffix preserved for C99 §6.4.4.1 type selection.

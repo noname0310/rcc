@@ -1447,6 +1447,7 @@ fn ast_int_literal(p: &mut Parser<'_>, span: Span, lit: IntLiteral) -> AstIntLit
             IntBase::Decimal => AstIntBase::Decimal,
             IntBase::Octal => AstIntBase::Octal,
             IntBase::Hex => AstIntBase::Hex,
+            IntBase::Binary => AstIntBase::Binary,
         },
         suffix: match lit.suffix {
             IntSuffix::None => AstIntSuffix::None,

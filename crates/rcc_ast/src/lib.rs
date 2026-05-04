@@ -545,6 +545,8 @@ pub enum IntBase {
     Octal,
     /// Hexadecimal constant.
     Hex,
+    /// GNU binary constant (`0b...` / `0B...`).
+    Binary,
 }
 
 /// Integer-literal suffix.

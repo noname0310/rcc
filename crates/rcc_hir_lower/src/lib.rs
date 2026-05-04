@@ -3093,6 +3093,7 @@ fn hir_int_base(base: rcc_ast::IntBase) -> IntLiteralBase {
         rcc_ast::IntBase::Decimal => IntLiteralBase::Decimal,
         rcc_ast::IntBase::Octal => IntLiteralBase::Octal,
         rcc_ast::IntBase::Hex => IntLiteralBase::Hex,
+        rcc_ast::IntBase::Binary => IntLiteralBase::Binary,
     }
 }
 
@@ -6876,6 +6877,8 @@ mod tests {
         let s = text.trim_end_matches(['u', 'U', 'l', 'L']);
         if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             u128::from_str_radix(hex, 16).unwrap()
+        } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+            u128::from_str_radix(bin, 2).unwrap()
         } else if s.starts_with('0') && s.len() > 1 {
             u128::from_str_radix(s, 8).unwrap()
         } else {
@@ -6887,6 +6890,8 @@ mod tests {
         let s = text.trim_end_matches(['u', 'U', 'l', 'L']);
         if s.starts_with("0x") || s.starts_with("0X") {
             rcc_ast::IntBase::Hex
+        } else if s.starts_with("0b") || s.starts_with("0B") {
+            rcc_ast::IntBase::Binary
         } else if s.starts_with('0') {
             rcc_ast::IntBase::Octal
         } else {

@@ -52,6 +52,19 @@ use crate::token::{CharLiteral, FloatLiteral, FloatSuffix, IntBase, IntLiteral, 
 /// The caller (`phase7::pp_to_token`) attaches the pp-token span as the
 /// primary label before emitting the diagnostic via `Session::handler`.
 pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
+    decode_integer_with_options(text, false)
+}
+
+/// Decode an integer literal, optionally accepting GNU binary constants.
+///
+/// When `gnu_binary_integer_literals` is `false`, `0b10` remains a strict
+/// C99 error and is treated as a leading-zero octal spelling with invalid
+/// digit `b`. When it is `true`, `0b` / `0B` select radix 2 and preserve
+/// [`IntBase::Binary`] so type selection can use the non-decimal ladder.
+pub fn decode_integer_with_options(
+    text: &str,
+    gnu_binary_integer_literals: bool,
+) -> Result<IntLiteral, Diagnostic> {
     let bytes = text.as_bytes();
     if bytes.is_empty() {
         return Err(plain_err("empty integer literal"));
@@ -65,7 +78,7 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
         return Err(plain_err("digit separators in integer literals are a C++14 feature, not C99"));
     }
 
-    let (base, digit_start) = classify_base(bytes);
+    let (base, digit_start) = classify_base(bytes, gnu_binary_integer_literals);
     let radix = base.radix();
 
     // Walk digits. Base-matching characters advance `value`; the first
@@ -136,10 +149,12 @@ pub fn decode_integer(text: &str) -> Result<IntLiteral, Diagnostic> {
 /// `0` (not followed by `x`/`X`) is octal; the `0` itself is the first
 /// digit, so the caller consumes it as value 0. Everything else is
 /// decimal starting at index 0.
-fn classify_base(bytes: &[u8]) -> (IntBase, usize) {
+fn classify_base(bytes: &[u8], gnu_binary_integer_literals: bool) -> (IntBase, usize) {
     if bytes.first() == Some(&b'0') {
         if matches!(bytes.get(1), Some(b'x') | Some(b'X')) {
             (IntBase::Hex, 2)
+        } else if gnu_binary_integer_literals && matches!(bytes.get(1), Some(b'b') | Some(b'B')) {
+            (IntBase::Binary, 2)
         } else {
             // `"0"` alone and `"0777"` both enter here; the leading
             // zero is the first octal digit (value 0).
@@ -156,6 +171,7 @@ impl IntBase {
             IntBase::Decimal => 10,
             IntBase::Octal => 8,
             IntBase::Hex => 16,
+            IntBase::Binary => 2,
         }
     }
 }
@@ -848,6 +864,31 @@ mod tests {
     fn octal_leading_zero_with_no_further_digits_is_zero() {
         // A bare `0` is octal by the grammar but the value is the same.
         assert_eq!(ok("0").value, 0);
+    }
+
+    #[test]
+    fn binary_integer_rejected_in_strict_c99_mode() {
+        let e = err("0b1010");
+        assert_eq!(e.code, Some(codes::E0011));
+        assert!(e.message.contains("octal"), "got: {}", e.message);
+    }
+
+    #[test]
+    fn binary_integer_accepted_with_gnu_option() {
+        let lit = decode_integer_with_options("0b1010", true)
+            .unwrap_or_else(|e| panic!("decode binary literal: {:?}", e.message));
+        assert_eq!(lit.value, 10);
+        assert_eq!(lit.base, IntBase::Binary);
+        assert_eq!(lit.suffix, IntSuffix::None);
+    }
+
+    #[test]
+    fn binary_integer_accepts_uppercase_prefix_and_suffix() {
+        let lit = decode_integer_with_options("0B10011ULL", true)
+            .unwrap_or_else(|e| panic!("decode binary literal: {:?}", e.message));
+        assert_eq!(lit.value, 19);
+        assert_eq!(lit.base, IntBase::Binary);
+        assert_eq!(lit.suffix, IntSuffix::ULL);
     }
 
     // ── Suffixes ────────────────────────────────────────────────────

@@ -129,6 +129,9 @@ fn validate_driver_cli(cli: &Cli) -> Result<(), String> {
 
 fn emit_ignored_feature_flag_notes(cli: &Cli) {
     for flag in &cli.feature_flags {
+        if is_supported_feature_flag(flag) {
+            continue;
+        }
         let spelling = format!("-f{flag}");
         if is_known_ignored_feature_flag(flag) {
             eprintln!("rcc: note: ignoring compatibility flag {spelling}");
@@ -136,6 +139,10 @@ fn emit_ignored_feature_flag_notes(cli: &Cli) {
             eprintln!("rcc: warning: ignoring unknown compatibility flag {spelling}");
         }
     }
+}
+
+fn is_supported_feature_flag(flag: &str) -> bool {
+    matches!(flag, "gnu-binary-literals" | "gnu-binary-integer-literals")
 }
 
 fn emit_verbose_trace(cli: &Cli, opts: &Options) {
@@ -309,6 +316,9 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_permissive_redefinition: false,
         gnu_named_variadic: false,
         gnu_permissive_paste: false,
+        gnu_binary_integer_literals: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-binary-literals" | "gnu-binary-integer-literals")
+        }),
         gnu_statement_expressions: false,
         gnu_range_designators: false,
         gnu_attributes: false,

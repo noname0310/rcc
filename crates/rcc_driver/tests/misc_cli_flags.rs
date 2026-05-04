@@ -91,6 +91,52 @@ fn known_f_flags_parse_and_do_not_change_options() {
 }
 
 #[test]
+fn gnu_binary_literals_flag_sets_frontend_option() {
+    let cli = parse(&["rcc", "-fgnu-binary-literals", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_binary_integer_literals);
+}
+
+#[test]
+fn strict_binary_integer_literal_is_rejected() {
+    let input = TempCFile::new("strict-binary", "int x = 0b10;\n");
+    let output = input.sibling("ast");
+    let result = Command::new(rcc_bin())
+        .arg("--emit=ast")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(!result.status.success(), "strict mode accepted GNU binary literal");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("E0011") || stderr.contains("octal"), "{stderr}");
+}
+
+#[test]
+fn gnu_binary_integer_literal_frontend_accepts_and_preserves_value() {
+    let input = TempCFile::new("gnu-binary", "int x = 0b10011;\n");
+    let output = input.sibling("ast");
+    let result = Command::new(rcc_bin())
+        .arg("-fgnu-binary-literals")
+        .arg("--emit=ast")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stderr.contains("ignoring compatibility flag -fgnu-binary-literals"), "{stderr}");
+    let ast = fs::read_to_string(&output).expect("read ast output");
+    assert!(ast.contains("value: 19"), "{ast}");
+    assert!(ast.contains("base: Binary"), "{ast}");
+}
+
+#[test]
 fn fpic_frontend_compile_succeeds_and_reports_ignored_note() {
     let input = TempCFile::new("fpic", "int main(void) { return 0; }\n");
     let output = input.sibling("ast");

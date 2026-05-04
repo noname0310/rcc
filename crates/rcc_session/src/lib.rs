@@ -117,6 +117,12 @@ pub struct Options {
     /// succeeds as a single pp-number token instead of emitting
     /// E0025. Off by default.
     pub gnu_permissive_paste: bool,
+    /// Enable GNU binary integer constants (`0b1010` / `0B1010`).
+    ///
+    /// C99 has decimal, octal, and hexadecimal integer constants only.
+    /// GCC/Clang accept a `0b` prefix as an extension. With this option
+    /// off, `0b10` is diagnosed as the strict C99 malformed-octal case.
+    pub gnu_binary_integer_literals: bool,
     /// Enable GNU statement expressions `({ ... })` without a warning.
     ///
     /// The parser accepts the extension in all modes so GNU-flavoured
@@ -166,6 +172,7 @@ impl Default for Options {
             gnu_permissive_redefinition: false,
             gnu_named_variadic: false,
             gnu_permissive_paste: false,
+            gnu_binary_integer_literals: false,
             gnu_statement_expressions: false,
             gnu_range_designators: false,
             gnu_attributes: false,

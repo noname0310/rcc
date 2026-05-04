@@ -16,7 +16,7 @@ current numeric milestone already passes.
 - [x] [03-ctestsuite-m6-95pct](03-ctestsuite-m6-95pct.md)
 - [x] [04-ctestsuite-residual-bug-triage](04-ctestsuite-residual-bug-triage.md)
 - [x] [05-chibicc-stage-isolation](05-chibicc-stage-isolation.md)
-- [ ] [06-gnu-binary-integer-literals](06-gnu-binary-integer-literals.md)
+- [x] [06-gnu-binary-integer-literals](06-gnu-binary-integer-literals.md)
 - [ ] [07-gnu-statement-expression-semantics](07-gnu-statement-expression-semantics.md)
 - [ ] [08-chibicc-arith-green](08-chibicc-arith-green.md)
 - [ ] [09-gnu-control-flow-extensions](09-gnu-control-flow-extensions.md)
