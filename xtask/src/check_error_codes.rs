@@ -1,5 +1,5 @@
-//! `check-error-codes`: verify every `E\d{4}` code used in source has
-//! a matching `## EXXXX` entry in `docs/error-codes.md`, and vice-versa.
+//! `check-error-codes`: verify every `E\d{4}` / `W\d{4}` code used in source
+//! has a matching docs entry in `docs/error-codes.md`, and vice-versa.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub fn run(root: &Path) -> Result<()> {
         }
     }
 
-    // Every E-code used in workspace source must be registered.
+    // Every diagnostic code used in workspace source must be registered.
     for code in &source_codes {
         if !registry_codes.contains(code) {
             eprintln!("error: {code} is used in source but not in the registry (codes.rs)");
@@ -53,16 +53,16 @@ pub fn run(root: &Path) -> Result<()> {
     }
 }
 
-/// Collect `## EXXXX` headings from the docs file.
+/// Collect `## EXXXX` / `## WXXXX` headings from the docs file.
 fn collect_doc_codes(path: &Path) -> Result<BTreeSet<String>> {
     let content = std::fs::read_to_string(path)?;
     let mut codes = BTreeSet::new();
     for line in content.lines() {
-        // Match lines like "## E0001 — unexpected character"
+        // Match lines like "## E0001 — unexpected character".
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("## ") {
             if let Some(code) = rest.split(|c: char| !c.is_ascii_alphanumeric()).next() {
-                if is_error_code(code) {
+                if is_diagnostic_code(code) {
                     codes.insert(code.to_string());
                 }
             }
@@ -80,7 +80,7 @@ fn collect_registry_codes(path: &Path) -> Result<BTreeSet<String>> {
         if let Some(rest) = trimmed.strip_prefix("pub const ") {
             if let Some(name) = rest.split(':').next() {
                 let name = name.trim();
-                if is_error_code(name) {
+                if is_diagnostic_code(name) {
                     codes.insert(name.to_string());
                 }
             }
@@ -123,14 +123,14 @@ fn walk_rs_files(dir: &Path, cb: &mut dyn FnMut(&Path) -> Result<()>) -> Result<
     Ok(())
 }
 
-/// Find substrings matching `"E\d{4}"` (quoted error codes in source).
+/// Find substrings matching `"E\d{4}"` or `"W\d{4}"` (quoted diagnostic codes in source).
 fn extract_error_codes_from_text(text: &str, out: &mut BTreeSet<String>) {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i + 6 < bytes.len() {
-        if bytes[i] == b'"' && bytes[i + 1] == b'E' && bytes[i + 6] == b'"' {
+        if bytes[i] == b'"' && matches!(bytes[i + 1], b'E' | b'W') && bytes[i + 6] == b'"' {
             let candidate = &text[i + 1..i + 6];
-            if is_error_code(candidate) {
+            if is_diagnostic_code(candidate) {
                 out.insert(candidate.to_string());
             }
         }
@@ -138,8 +138,10 @@ fn extract_error_codes_from_text(text: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-fn is_error_code(s: &str) -> bool {
-    s.len() == 5 && s.starts_with('E') && s[1..].chars().all(|c| c.is_ascii_digit())
+fn is_diagnostic_code(s: &str) -> bool {
+    s.len() == 5
+        && matches!(s.as_bytes().first(), Some(b'E' | b'W'))
+        && s[1..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Programmatic helper: returns the list of registered codes from disk.

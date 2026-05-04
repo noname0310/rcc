@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 13-02: Diagnostic quality sweep
 
 **Phase:** 13-quality    **Depends on:** 02-02    **Milestone:** M7

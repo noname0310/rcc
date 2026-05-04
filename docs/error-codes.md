@@ -1021,6 +1021,35 @@ W0001 does **not** count as an error for `Handler::has_errors`, so a
 translation unit with only unknown-pragma warnings still compiles
 cleanly.
 
+## W0002 — float literal overflow
+
+A floating constant decoded by phase 7 is outside the representable
+range of its semantic type. `rcc` follows the common IEEE-754 host
+parser behavior by producing positive or negative infinity and warning
+instead of silently accepting the source spelling.
+
+```c
+double x = 1e9999;  // warning[W0002]: float literal overflow
+```
+
+The literal remains usable as a floating constant. The warning is a
+quality diagnostic so users notice that the source value cannot be
+represented as written.
+
+## W0003 — multi-character character constant
+
+C99 §6.4.4.4p10 makes the value of a character constant containing
+more than one character implementation-defined. `rcc` packs the bytes
+big-endian and warns because code that depends on this value is not
+portable.
+
+```c
+int x = 'ab';  // warning[W0003]: multi-character character constant
+```
+
+The literal still has type `int`; the warning does not count as an
+error.
+
 ## W0004 — duplicate type qualifier or function specifier
 
 C99 §6.7.3p4 explicitly permits repeating the same type qualifier in
@@ -1180,6 +1209,22 @@ int y = 1 << -1;               // warning[W0011]: negative shift count
 As with W0009 / W0010 the fold returns `None`; the operator stays
 in HIR for codegen to emit (where LLVM in turn picks a target-
 specific behaviour).
+
+---
+
+## W0012 — imaginary part discarded in complex-to-real conversion
+
+C99 §6.3.1.7 allows conversion from a complex type to a real type by
+discarding the imaginary component. The conversion is well-formed, but
+the information loss is easy to miss, so `rcc` warns whenever type
+checking inserts the conversion.
+
+```c
+double x = 1.0 + 2.0i;  // warning[W0012]: imaginary part discarded
+```
+
+The warning covers both explicit casts and implicit conversions in
+assignments, initializers, return statements, and call arguments.
 
 ---
 
