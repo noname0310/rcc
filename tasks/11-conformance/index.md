@@ -14,7 +14,7 @@ current numeric milestone already passes.
 - [x] [01-ctestsuite-m3-40pct](01-ctestsuite-m3-40pct.md)
 - [x] [02-ctestsuite-m4-70pct](02-ctestsuite-m4-70pct.md)
 - [x] [03-ctestsuite-m6-95pct](03-ctestsuite-m6-95pct.md)
-- [ ] [04-ctestsuite-residual-bug-triage](04-ctestsuite-residual-bug-triage.md)
+- [x] [04-ctestsuite-residual-bug-triage](04-ctestsuite-residual-bug-triage.md)
 - [ ] [05-chibicc-stage-isolation](05-chibicc-stage-isolation.md)
 - [ ] [06-gnu-binary-integer-literals](06-gnu-binary-integer-literals.md)
 - [ ] [07-gnu-statement-expression-semantics](07-gnu-statement-expression-semantics.md)

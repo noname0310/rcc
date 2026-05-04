@@ -28,6 +28,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [x] [18-call-prototype-and-varargs-constraints](18-call-prototype-and-varargs-constraints.md)
 - [x] [19-no-error-type-pre-codegen-gate](19-no-error-type-pre-codegen-gate.md)
 - [x] [20-object-qualifier-constraints](20-object-qualifier-constraints.md)
+- [ ] [21-aggregate-rvalue-member-access](21-aggregate-rvalue-member-access.md)
 
 ## Downstream
 

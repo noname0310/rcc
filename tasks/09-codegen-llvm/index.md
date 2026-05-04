@@ -34,6 +34,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [24-windows-llvm-c-linking](24-windows-llvm-c-linking.md)
 - [x] [25-filecheck-tests](25-filecheck-tests.md)
 - [x] [26-debug-ir-metadata](26-debug-ir-metadata.md)
+- [ ] [27-enum-bitfield-unsignedness-policy](27-enum-bitfield-unsignedness-policy.md)
 
 ## Downstream
 

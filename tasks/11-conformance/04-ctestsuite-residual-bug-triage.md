@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-04: c-testsuite residual bug triage
 
 **Phase:** 11-conformance    **Depends on:** 11-03    **Milestone:** M6+
@@ -59,6 +61,27 @@ Source: `docs/conformance.json` generated after task `11-03`
 - Follow-up task files for every C99 compiler bug.
 - Clean xfail policy: no C99 compiler bug remains xfailed without an owning
   fix task.
+
+## Classification result
+
+| TU | Classification | Owner task |
+|---|---|---|
+| `00044` | C99 compiler bug: tag namespace is not block-scoped. | `06-28` |
+| `00053` | C99 compiler bug: inner block tag shadowing cascades into field lookup errors. | `06-28` |
+| `00124` | C99 compiler bug: function-definition parameters are collected from the wrong declarator level for function-pointer returns. | `06-29` |
+| `00149` | C99 compiler bug: file-scope compound literal static storage/address constant missing. | `06-30` |
+| `00150` | C99 compiler bug: same file-scope compound-literal issue, plus nested designated global initializer coverage. | `06-30` |
+| `00152` | C99 compiler bug hidden as xfail: `#line` operands must be macro-expanded. | `04-21` |
+| `00199` | C99 compiler bug: CFG panics on valid goto into ordinary block scope. | `08-26` |
+| `00204` | C99 compiler bug: aggregate-rvalue member access reaches CFG as an lvalue place panic. | `07-21`, `08-27` |
+| `00205` | C99 compiler bug: brace elision for nested aggregate initializers missing. | `06-31` |
+| `00207` | C99 compiler bug: CFG panic on goto into ordinary block scope; VLA legality remains guarded by the same task. | `08-26` |
+| `00213` | GNU extension semantics bug: parsed statement expressions are not semantically lowered, causing missing output. | `11-07` |
+| `00218` | Implementation-defined bitfield policy gap: enum bitfield should zero-extend for this suite. | `09-27` |
+
+Existing xfails retained as non-C99/future-scope unless a later task elects to
+support the extension: `00046`, `00050`, `00216`, `00219`. `00152` should be
+removed from xfail by `04-21`.
 
 ## Acceptance
 - The latest c-testsuite report has no unclassified fail/xfail entries.
