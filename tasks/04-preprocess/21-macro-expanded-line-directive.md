@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 04-21: macro-expanded `#line` directive
 
 **Phase:** 04-preprocess    **Depends on:** 04-15, 04-20    **Milestone:** M6+

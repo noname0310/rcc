@@ -14,10 +14,6 @@ id     = "c-testsuite::00050"
 reason = "14-lang-extensions: anonymous union member inside struct is outside C99 parser scope"
 
 [[xfail]]
-id     = "c-testsuite::00152"
-reason = "04-preprocess: macro-expanded #line directive is not fully implemented"
-
-[[xfail]]
 id     = "c-testsuite::00216"
 reason = "14-lang-extensions: empty aggregate extension and anonymous aggregate members are outside C99 parser scope"
 

@@ -28,7 +28,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [18-chibicc-preprocess-tests](18-chibicc-preprocess-tests.md)
 - [x] [19-fuzz-target](19-fuzz-target.md)
 - [x] [20-gnu-extensions](20-gnu-extensions.md)
-- [ ] [21-macro-expanded-line-directive](21-macro-expanded-line-directive.md)
+- [x] [21-macro-expanded-line-directive](21-macro-expanded-line-directive.md)
 
 ## Downstream
 

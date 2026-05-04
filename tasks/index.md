@@ -10,7 +10,7 @@ phase's `index.md` next.
 - [x] [01-test-infra](01-test-infra/index.md) — vendor suites + conformance harness
 - [x] [02-diagnostics](02-diagnostics/index.md) — real diagnostic emitter + error-code registry
 - [x] [03-lex](03-lex/index.md) — full C99 pp-token lexer
-- [ ] [04-preprocess](04-preprocess/index.md) — C preprocessor
+- [x] [04-preprocess](04-preprocess/index.md) — C preprocessor
 - [x] [05-parse](05-parse/index.md) — recursive-descent + Pratt parser
 - [ ] [06-hir-lower](06-hir-lower/index.md) — AST → HIR
 - [ ] [07-typeck](07-typeck/index.md) — conversions + const-eval

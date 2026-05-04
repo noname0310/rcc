@@ -9,7 +9,7 @@
 
 use rcc_errors::{codes::E0019, Diagnostic, Label, Level};
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_span::{Interner, Span, Symbol};
+use rcc_span::{Interner, SourceMap, Span, Symbol};
 
 use crate::macros::{MacroDef, MacroKind};
 
@@ -394,19 +394,53 @@ fn parse_undef(
 }
 
 fn parse_line_directive(span: Span, body: &[PpToken], src: &str) -> Result<Directive, Diagnostic> {
+    let (line_no, file) =
+        parse_line_operands(span, body, |tok| Some(token_text(tok, src).to_string()))?;
+    Ok(Directive::Line { span, line: line_no, file })
+}
+
+/// Parse the operands of a `#line` directive after macro expansion.
+///
+/// C99 §6.10.4 requires the preprocessing tokens after `line` to be
+/// macro-expanded before interpreting the resulting decimal line
+/// number and optional string-literal file name. Expanded tokens may
+/// originate from macro replacement lists in synthetic files, so this
+/// helper resolves text through the session [`SourceMap`] instead of
+/// through the directive's original source buffer.
+pub fn parse_expanded_line_operands(
+    span: Span,
+    body: &[PpToken],
+    source_map: &SourceMap,
+) -> Result<(u32, Option<String>), Diagnostic> {
+    parse_line_operands(span, body, |tok| {
+        let file = source_map.file(tok.span.file);
+        file.src.get(tok.span.lo.0 as usize..tok.span.hi.0 as usize).map(ToString::to_string)
+    })
+}
+
+fn parse_line_operands<F>(
+    span: Span,
+    body: &[PpToken],
+    mut token_text: F,
+) -> Result<(u32, Option<String>), Diagnostic>
+where
+    F: FnMut(&PpToken) -> Option<String>,
+{
     let Some(num_tok) = body.first() else {
         return Err(malformed_line(span));
     };
     if !matches!(num_tok.kind, PpTokenKind::PpNumber(_)) {
         return Err(malformed_line(num_tok.span));
     }
-    let line_no: u32 =
-        token_text(num_tok, src).parse().map_err(|_| malformed_line(num_tok.span))?;
+    let line_no: u32 = token_text(num_tok)
+        .ok_or_else(|| malformed_line(num_tok.span))?
+        .parse()
+        .map_err(|_| malformed_line(num_tok.span))?;
 
     // Optional `"file"` — string literal, quotes stripped.
     let file = body.get(1).and_then(|t| match t.kind {
         PpTokenKind::StringLit { .. } => {
-            let raw = token_text(t, src);
+            let raw = token_text(t)?;
             // Strip leading encoding prefix (`u8`, `L`, `u`, `U`) and
             // the surrounding quotes; `#line`'s filename is a plain
             // s-char-sequence and doesn't use prefixes, but be
@@ -422,7 +456,7 @@ fn parse_line_directive(span: Span, body: &[PpToken], src: &str) -> Result<Direc
         _ => None,
     });
 
-    Ok(Directive::Line { span, line: line_no, file })
+    Ok((line_no, file))
 }
 
 fn parse_error_directive(span: Span, body: &[PpToken], src: &str) -> Directive {

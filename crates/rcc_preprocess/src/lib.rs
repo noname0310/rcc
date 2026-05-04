@@ -419,6 +419,16 @@ impl<'a> Preprocessor<'a> {
             return Vec::new();
         }
 
+        // C99 §6.10.4: the tokens after `#line` are macro-expanded
+        // before the directive body is interpreted. The generic
+        // directive parser intentionally works on raw tokens, so this
+        // runtime path handles `#line MACRO` before parse_directive_ext
+        // would reject the leading identifier as malformed.
+        if is_directive_named(line, src, "line") {
+            self.dispatch_line_directive(line);
+            return Vec::new();
+        }
+
         match directive::parse_directive_ext(
             line,
             src,
@@ -474,6 +484,20 @@ impl<'a> Preprocessor<'a> {
             Err(diag) => self.session.handler.emit(&diag),
         }
         Vec::new()
+    }
+
+    fn dispatch_line_directive(&mut self, line: &[PpToken]) {
+        let hash = &line[0];
+        let span = line.last().map(|t| hash.span.to(t.span)).unwrap_or(hash.span);
+        let expanded = self.expand_tokens(line[2..].to_vec());
+        let parsed = {
+            let sm = self.session.source_map.read().unwrap();
+            directive::parse_expanded_line_operands(span, &expanded, &sm)
+        };
+        match parsed {
+            Ok((line_no, file)) => self.apply_line_directive(span, line_no, file),
+            Err(diag) => self.session.handler.emit(&diag),
+        }
     }
 
     /// Handle a parsed `#error` directive: emit E0020 with the
@@ -799,6 +823,16 @@ fn is_conditional_by_name(line: &[PpToken], src: &str) -> Option<directive::Cond
         "endif" => Some(directive::ConditionalKind::EndIf),
         _ => None,
     }
+}
+
+fn is_directive_named(line: &[PpToken], src: &str, expected: &str) -> bool {
+    let Some(name_tok) = line.get(1) else {
+        return false;
+    };
+    if name_tok.kind != PpTokenKind::Ident {
+        return false;
+    }
+    &src[name_tok.span.lo.0 as usize..name_tok.span.hi.0 as usize] == expected
 }
 
 /// Whether a `#elif`'s controlling expression should be evaluated
@@ -1726,6 +1760,37 @@ dead1
         let mut pp = Preprocessor::new(&mut sess);
         let out = pp.run(id);
         assert_eq!(joined_text(&pp, &out), "100");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn line_directive_expands_object_like_line_number() {
+        // C99 §6.10.4 expands the directive body before interpreting
+        // it, so an object-like macro may provide the line operand.
+        let (mut sess, id, cap) = seed("#define line 1000\n#line line\n__LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "1000");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn line_directive_expands_object_like_filename() {
+        let (mut sess, id, cap) =
+            seed("#define FILE_NAME \"macro.c\"\n#line 7 FILE_NAME\n__FILE__ __LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"macro.c\"7");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn line_directive_expands_function_like_operands() {
+        let (mut sess, id, cap) =
+            seed("#define LOC(n, f) n f\n#line LOC(55, \"loc.c\")\n__FILE__ __LINE__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "\"loc.c\"55");
         assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
     }
 
