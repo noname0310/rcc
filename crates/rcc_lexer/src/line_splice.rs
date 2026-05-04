@@ -20,6 +20,41 @@ pub struct LineSpliceCursor<'a> {
     inner: Cursor<'a>,
 }
 
+/// Remove phase-2 backslash-newline splice sequences from a source slice.
+///
+/// Token spans deliberately keep physical byte ranges, so a token that begins
+/// after a splice can cover bytes such as `\\\r\nIDENT`. Any code recovering a
+/// token's logical spelling from its span must run the same phase-2 removal
+/// before interning or decoding that spelling.
+#[must_use]
+pub fn strip_line_splices(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some('\n') => {
+                    chars.next();
+                    continue;
+                }
+                Some('\r') => {
+                    chars.next();
+                    if matches!(chars.peek(), Some('\n')) {
+                        chars.next();
+                        continue;
+                    }
+                    out.push('\\');
+                    out.push('\r');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
 impl<'a> LineSpliceCursor<'a> {
     /// Build a line-splicing cursor over `src`.
     pub fn new(src: &'a str) -> Self {

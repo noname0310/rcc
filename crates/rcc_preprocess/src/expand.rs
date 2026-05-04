@@ -48,7 +48,9 @@ use rcc_errors::{
     codes::{E0024, E0025, E0026},
     Diagnostic, Handler, Label, Level,
 };
-use rcc_lexer::{tokenize, PpNumberKind, PpToken, PpTokenKind, Punct, StringEncoding};
+use rcc_lexer::{
+    strip_line_splices, tokenize, PpNumberKind, PpToken, PpTokenKind, Punct, StringEncoding,
+};
 use rcc_span::{BytePos, Interner, SourceMap, Span, Symbol};
 
 use crate::line_map::LineMap;
@@ -650,7 +652,7 @@ impl Expander<'_> {
     fn token_text(&self, tok: &PpToken) -> String {
         let sm = self.source_map.read().unwrap();
         let src = &sm.file(tok.span.file).src;
-        src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
+        strip_line_splices(&src[tok.span.lo.0 as usize..tok.span.hi.0 as usize])
     }
 
     /// Render a function-like macro argument's raw token sequence as a
@@ -693,11 +695,7 @@ impl Expander<'_> {
                 body.push(' ');
             }
             first = false;
-            let text = {
-                let sm = self.source_map.read().unwrap();
-                let src = &sm.file(tok.span.file).src;
-                src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
-            };
+            let text = self.token_text(tok);
             for ch in text.chars() {
                 match ch {
                     '\\' => body.push_str("\\\\"),
@@ -943,7 +941,7 @@ impl Expander<'_> {
         let text = {
             let sm = self.source_map.read().unwrap();
             let src = &sm.file(tok.span.file).src;
-            src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
+            strip_line_splices(&src[tok.span.lo.0 as usize..tok.span.hi.0 as usize])
         };
         self.interner.intern(&text)
     }
@@ -1105,7 +1103,7 @@ mod tests {
             .iter()
             .map(|t| {
                 let src = &sm.file(t.span.file).src;
-                src[t.span.lo.0 as usize..t.span.hi.0 as usize].to_string()
+                strip_line_splices(&src[t.span.lo.0 as usize..t.span.hi.0 as usize])
             })
             .collect::<Vec<_>>()
             .join(" ")
@@ -1256,6 +1254,29 @@ mod tests {
         let out = run_expand(&mut sess, &macros, line);
 
         assert_eq!(pp(&sess, &out), "2 2");
+    }
+
+    #[test]
+    fn object_body_after_crlf_splice_rescans_function_like_macro() {
+        // `gcc-torture/execute/20020108-1.c` defines repetition macros
+        // where each body token sits after a CRLF splice. Token spans keep
+        // the physical bytes (`\\\r\nREPEAT_FN`), but macro lookup must use
+        // the logical phase-2 spelling (`REPEAT_FN`) during rescan.
+        let mut sess = fresh_session();
+        let mut macros = MacroTable::default();
+        install_fn(&mut sess, &mut macros, "CAT", &["A", "B"], "A ## B");
+        install_fn(&mut sess, &mut macros, "REPEAT_FN", &["N"], "int CAT(f_, N) ( void ) ;");
+        install_object(
+            &mut sess,
+            &mut macros,
+            "REPEAT_2",
+            "\\\r\nREPEAT_FN ( 0 ) \\\r\nREPEAT_FN ( 1 )",
+        );
+
+        let (_file, line) = tok_line(&mut sess, "call", "REPEAT_2\n");
+        let out = run_expand(&mut sess, &macros, line);
+
+        assert_eq!(pp(&sess, &out), "int f_0 ( void ) ; int f_1 ( void ) ;");
     }
 
     #[test]

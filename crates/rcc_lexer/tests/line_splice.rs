@@ -1,4 +1,4 @@
-use rcc_lexer::LineSpliceCursor;
+use rcc_lexer::{strip_line_splices, LineSpliceCursor};
 use rcc_span::FileId;
 
 // ── LineSpliceCursor unit tests ─────────────────────────────────────
@@ -74,6 +74,13 @@ fn crlf_splice() {
         chars.push(ch);
     }
     assert_eq!(chars, vec!['a', 'b', 'c', 'd']);
+}
+
+#[test]
+fn strip_line_splices_removes_lf_and_crlf_sequences() {
+    assert_eq!(strip_line_splices("A\\\nB"), "AB");
+    assert_eq!(strip_line_splices("A\\\r\nB"), "AB");
+    assert_eq!(strip_line_splices("A\\\rB"), "A\\\rB");
 }
 
 #[test]

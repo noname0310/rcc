@@ -13,7 +13,7 @@
 //! representation in [`TokenKind`].
 
 use rcc_errors::{codes, Diagnostic, Label, Level};
-use rcc_lexer::{PpNumberKind, PpToken, PpTokenKind};
+use rcc_lexer::{strip_line_splices, PpNumberKind, PpToken, PpTokenKind};
 use rcc_session::Session;
 use rcc_span::Span;
 
@@ -363,7 +363,7 @@ fn intern_span(session: &mut Session, span: Span) -> rcc_span::Symbol {
 fn span_text(session: &Session, span: Span) -> String {
     let sm = session.source_map.read().expect("source map poisoned");
     let file = sm.file(span.file);
-    file.src[span.lo.0 as usize..span.hi.0 as usize].to_owned()
+    strip_line_splices(&file.src[span.lo.0 as usize..span.hi.0 as usize])
 }
 
 #[cfg(test)]
@@ -417,6 +417,19 @@ mod tests {
         let pp = tok(PpTokenKind::Ident, fid, 0, 3);
         let t = pp_to_token(&mut sess, pp).expect("ident converts");
         assert_eq!(t.span, pp.span, "span preserved 1:1");
+        match t.kind {
+            TokenKind::Ident(sym) => assert_eq!(sess.interner.get(sym), "foo"),
+            other => panic!("expected Ident, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spliced_ident_uses_logical_spelling_for_interning() {
+        let src = "fo\\\r\no";
+        let (mut sess, fid) = mk_session(src);
+        let pp = tok(PpTokenKind::Ident, fid, 0, src.len() as u32);
+        let t = pp_to_token(&mut sess, pp).expect("ident converts");
+        assert_eq!(t.span, pp.span, "physical span remains diagnostic-accurate");
         match t.kind {
             TokenKind::Ident(sym) => assert_eq!(sess.interner.get(sym), "foo"),
             other => panic!("expected Ident, got {other:?}"),

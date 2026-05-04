@@ -145,7 +145,7 @@ use rcc_ast::{
     StringLiteral as AstStringLiteral, UnOp,
 };
 use rcc_errors::codes;
-use rcc_lexer::{Punct, StringEncoding};
+use rcc_lexer::{strip_line_splices, Punct, StringEncoding};
 use rcc_span::{Span, Symbol};
 
 use crate::decl::parse_type_name;
@@ -1478,7 +1478,7 @@ pub(crate) fn intern_span_text(p: &mut Parser<'_>, span: rcc_span::Span) -> Symb
     let text = {
         let sm = p.session.source_map.read().expect("source map poisoned");
         let file = sm.file(span.file);
-        file.src[span.lo.0 as usize..span.hi.0 as usize].to_owned()
+        strip_line_splices(&file.src[span.lo.0 as usize..span.hi.0 as usize])
     };
     p.session.interner.intern(&text)
 }

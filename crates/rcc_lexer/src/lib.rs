@@ -26,7 +26,7 @@ mod test_util;
 pub use cursor::Cursor;
 use kinds::Punct as P;
 pub use kinds::{PpNumberKind, PpTokenKind, Punct, StringEncoding};
-pub use line_splice::LineSpliceCursor;
+pub use line_splice::{strip_line_splices, LineSpliceCursor};
 
 /// A single preprocessing token.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

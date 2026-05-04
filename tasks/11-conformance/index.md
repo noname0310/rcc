@@ -31,7 +31,7 @@ current numeric milestone already passes.
 - [x] [14-gcc-torture-smoke](14-gcc-torture-smoke.md)
 - [x] [15-gcc-torture-60pct](15-gcc-torture-60pct.md)
 - [x] [15a-gcc-torture-parser-declaration-forms](15a-gcc-torture-parser-declaration-forms.md)
-- [ ] [15f-gcc-torture-deferred-macro-rescan](15f-gcc-torture-deferred-macro-rescan.md)
+- [x] [15f-gcc-torture-deferred-macro-rescan](15f-gcc-torture-deferred-macro-rescan.md)
 - [ ] [15b-gcc-torture-remaining-builtin-compat](15b-gcc-torture-remaining-builtin-compat.md)
 - [ ] [15c-gcc-torture-pointer-comparison-codegen](15c-gcc-torture-pointer-comparison-codegen.md)
 - [ ] [15d-gcc-torture-vla-layout-codegen](15d-gcc-torture-vla-layout-codegen.md)
