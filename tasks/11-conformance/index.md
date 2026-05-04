@@ -44,7 +44,7 @@ current numeric milestone already passes.
 - [x] [15l-gcc-torture-bitfield-precision-cluster](15l-gcc-torture-bitfield-precision-cluster.md)
 - [x] [15l1-gcc-torture-wide-bitfield-precision](15l1-gcc-torture-wide-bitfield-precision.md)
 - [x] [15m-gcc-torture-scalar-conversion-cluster](15m-gcc-torture-scalar-conversion-cluster.md)
-- [ ] [15m1-gcc-torture-990222-assignment-result-control](15m1-gcc-torture-990222-assignment-result-control.md)
+- [x] [15m1-gcc-torture-990222-assignment-result-control](15m1-gcc-torture-990222-assignment-result-control.md)
 - [ ] [15m2-gcc-torture-20030916-uchar-index-wrap](15m2-gcc-torture-20030916-uchar-index-wrap.md)
 - [ ] [15n-gcc-torture-vla-lifetime-cluster](15n-gcc-torture-vla-lifetime-cluster.md)
 - [ ] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)

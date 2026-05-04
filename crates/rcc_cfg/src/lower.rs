@@ -345,6 +345,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             lower_as_rvalue(builder, cx, *rhs)
         }
         HirExprKind::Assign { lhs, rhs } => {
+            if let Some(parts) = compound_assign_parts(cx, *lhs, *rhs) {
+                return lower_compound_assign(builder, cx, span, *lhs, parts);
+            }
             // CFG policy: compute the destination place before the
             // source value. For assignment expressions with side
             // effects this is the single order represented in MIR.
@@ -654,6 +657,120 @@ fn lower_inc_dec(
     } else {
         new_value
     }
+}
+
+#[derive(Copy, Clone)]
+struct CompoundAssignParts {
+    op: HirBinOp,
+    rhs: HirExprId,
+    lhs_value_ty: TyId,
+    result_ty: TyId,
+    final_ty: TyId,
+    final_convert: Option<ConvertKind>,
+}
+
+fn compound_assign_parts(
+    cx: &LowerCx<'_>,
+    lhs: HirExprId,
+    rhs: HirExprId,
+) -> Option<CompoundAssignParts> {
+    let (core_rhs, final_convert) = match cx.body.exprs[rhs].kind {
+        HirExprKind::Convert { operand, kind }
+            if matches!(kind, ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic) =>
+        {
+            (operand, Some(kind))
+        }
+        _ => (rhs, None),
+    };
+    let HirExprKind::Binary { op, lhs: binary_lhs, rhs: binary_rhs } = cx.body.exprs[core_rhs].kind
+    else {
+        return None;
+    };
+    if !same_lvalue_expr(cx.body, lhs, binary_lhs) {
+        return None;
+    }
+    Some(CompoundAssignParts {
+        op,
+        rhs: binary_rhs,
+        lhs_value_ty: cx.body.exprs[binary_lhs].ty,
+        result_ty: cx.body.exprs[core_rhs].ty,
+        final_ty: cx.body.exprs[rhs].ty,
+        final_convert,
+    })
+}
+
+fn same_lvalue_expr(body: &HirBody, lhs: HirExprId, candidate: HirExprId) -> bool {
+    if lhs == candidate {
+        return true;
+    }
+    match body.exprs[candidate].kind {
+        HirExprKind::Convert { operand, .. } => same_lvalue_expr(body, lhs, operand),
+        _ => false,
+    }
+}
+
+fn lower_compound_assign(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    lhs: HirExprId,
+    parts: CompoundAssignParts,
+) -> Operand {
+    let dest = lower_as_place(builder, cx, lhs);
+    let dest_ty = cx.body.exprs[lhs].ty;
+    let mut lhs_value = Operand::Copy(dest.clone());
+    if dest_ty != parts.lhs_value_ty {
+        let lhs_temp = builder.alloc_temp(parts.lhs_value_ty, span);
+        push_assign(
+            builder,
+            span,
+            lhs_temp,
+            Rvalue::Cast { op: lhs_value, to: parts.lhs_value_ty, kind: CastKind::IntToInt },
+        );
+        lhs_value = Operand::Copy(Place { base: lhs_temp, projection: Vec::new() });
+    }
+
+    let rhs_value = lower_as_rvalue(builder, cx, parts.rhs);
+    let rhs_ty = cx.body.exprs[parts.rhs].ty;
+    let cfg_op = pick_binop(parts.op, parts.lhs_value_ty, rhs_ty, cx.tcx);
+    let rhs_value = if matches!(cfg_op, BinOp::Shl | BinOp::AShr | BinOp::LShr)
+        && rhs_ty != parts.lhs_value_ty
+    {
+        let rhs_temp = builder.alloc_temp(parts.lhs_value_ty, span);
+        push_assign(
+            builder,
+            span,
+            rhs_temp,
+            Rvalue::Cast { op: rhs_value, to: parts.lhs_value_ty, kind: CastKind::IntToInt },
+        );
+        Operand::Copy(Place { base: rhs_temp, projection: Vec::new() })
+    } else {
+        rhs_value
+    };
+
+    let result_temp = builder.alloc_temp(parts.result_ty, span);
+    push_assign(builder, span, result_temp, Rvalue::BinaryOp(cfg_op, lhs_value, rhs_value));
+    let mut value = Operand::Copy(Place { base: result_temp, projection: Vec::new() });
+
+    if let Some(kind) = parts.final_convert {
+        if let Some(cast_kind) = convert_to_cast_kind(kind, parts.result_ty, parts.final_ty, cx.tcx)
+        {
+            let final_temp = builder.alloc_temp(parts.final_ty, span);
+            push_assign(
+                builder,
+                span,
+                final_temp,
+                Rvalue::Cast { op: value, to: parts.final_ty, kind: cast_kind },
+            );
+            value = Operand::Copy(Place { base: final_temp, projection: Vec::new() });
+        }
+    }
+
+    builder.push(Statement {
+        kind: StatementKind::Assign { place: dest.clone(), rvalue: Rvalue::Use(value) },
+        span,
+    });
+    Operand::Copy(dest)
 }
 
 fn inc_dec_binop(tcx: &TyCtxt, operand_ty: TyId, is_decrement: bool) -> BinOp {

@@ -1,5 +1,7 @@
 # 11-15m1: gcc-torture 990222 assignment-result control
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15m    **Milestone:** M6
 
 ## Goal
@@ -25,6 +27,16 @@ conformance runner rather than rcc-generated code.
 - `gcc-torture::execute::990222-1` passes under WSL LLVM, or the remaining
   failure is proven to be non-rcc with a checked runner/tooling task.
 - No xfail, skip, or result masking is added.
+
+## Result
+- Root cause: HIR lowered compound assignment as `lhs = lhs op rhs`; CFG
+  lowering then lowered the destination place and the RHS lvalue separately.
+  For `*--ptr += 1`, that executed `--ptr` twice.
+- CFG lowering now detects the typed compound-assignment pattern and lowers the
+  destination place once, then reuses that place for the old value, operation,
+  narrowed store, and assignment-expression result.
+- Added `compound_assign_lhs_once` e2e fixture.
+- WSL gcc-torture scoped probe: `990222-1` passes.
 
 ## References
 - `tasks/11-conformance/15m-gcc-torture-scalar-conversion-cluster.md`
