@@ -101,10 +101,14 @@ pub const KEYWORDS: &[(&str, Keyword)] = &[
     ("goto", Keyword::Goto),
     ("if", Keyword::If),
     ("inline", Keyword::Inline),
+    ("__inline", Keyword::Inline),
+    ("__inline__", Keyword::Inline),
     ("int", Keyword::Int),
     ("long", Keyword::Long),
     ("register", Keyword::Register),
     ("restrict", Keyword::Restrict),
+    ("__restrict", Keyword::Restrict),
+    ("__restrict__", Keyword::Restrict),
     ("return", Keyword::Return),
     ("short", Keyword::Short),
     ("signed", Keyword::Signed),
@@ -147,7 +151,8 @@ mod tests {
     fn table_has_all_37_c99_keywords() {
         // C99 §6.4.1: 37 reserved words (32 from C89 + inline, restrict,
         // _Bool, _Complex, _Imaginary).
-        assert_eq!(KEYWORDS.len(), 37);
+        let c99_count = KEYWORDS.iter().filter(|(spelling, _)| !spelling.starts_with("__")).count();
+        assert_eq!(c99_count, 37);
     }
 
     #[test]
@@ -195,6 +200,14 @@ mod tests {
     fn c99_lowercase_keywords_are_classified() {
         assert_eq!(classify_ident("inline"), Some(Keyword::Inline));
         assert_eq!(classify_ident("restrict"), Some(Keyword::Restrict));
+    }
+
+    #[test]
+    fn gnu_keyword_aliases_are_classified() {
+        assert_eq!(classify_ident("__inline"), Some(Keyword::Inline));
+        assert_eq!(classify_ident("__inline__"), Some(Keyword::Inline));
+        assert_eq!(classify_ident("__restrict"), Some(Keyword::Restrict));
+        assert_eq!(classify_ident("__restrict__"), Some(Keyword::Restrict));
     }
 
     #[test]

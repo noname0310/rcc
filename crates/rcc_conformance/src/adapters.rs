@@ -752,6 +752,7 @@ impl Adapter for GccTortureAdapter {
                 .arg("-fgnu-labels-as-values")
                 .arg("-fgnu-lvalue-comma")
                 .arg("-fgnu-function-names")
+                .arg("-fgnu89-inline")
                 .arg("-fgnu-builtin-libcalls");
         }
         compile.arg("-o").arg(&exe_path).arg(&case.path);

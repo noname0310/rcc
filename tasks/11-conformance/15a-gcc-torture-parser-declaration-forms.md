@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15a: gcc-torture parser declaration forms
 
 **Phase:** 11-conformance    **Depends on:** 11-15    **Milestone:** M6
@@ -23,6 +25,24 @@ parser fixes instead of treating the 60% gate as sufficient.
   and `20020108-1` no longer fail with parser shape errors unless classified
   as out-of-scope non-C99 syntax.
 - No xfail entries are added for ordinary C99 parser bugs.
+
+## Result
+- Added parser keyword aliases for GNU reserved spellings `__restrict`,
+  `__restrict__`, `__inline`, and `__inline__`.
+- Added `-fgnu89-inline` to the gcc-torture full adapter path so inline
+  declarations use the intended compatibility semantics.
+- Representative outcomes:
+  - `20001024-1`: parser failure fixed, now passes.
+  - `20001121-1`: parser failure fixed; link failure fixed by passing
+    `-fgnu89-inline`, now passes.
+  - `20000822-1`: classified out-of-scope for C99 because it requires GNU
+    nested functions/trampolines.
+  - `20020108-1`: classified as a C99 preprocessor rescan bug, split into
+    task 11-15f instead of being hidden here.
+- Full gcc-torture WSL rerun improved from 1104/1650 to 1126/1650 passing.
+  Parser-shape clusters reduced: `expected ';' after declaration` 87 -> 77,
+  `expected ')' to close parameter list` 15 -> 9.
+- No xfail entries were added.
 
 ## References
 - `target/wsl/gcc-torture-full-15-final.json`
