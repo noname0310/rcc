@@ -1,5 +1,7 @@
 # 09-27: enum bitfield unsignedness policy
 
+> ✓ done — 2026-05-04
+
 **Phase:** 09-codegen-llvm    **Depends on:** 09-21    **Milestone:** M6+
 
 ## Goal
@@ -27,6 +29,12 @@ enum values that do not fit in a signed bitfield of the selected width.
 ## Acceptance
 - `c-testsuite::00218` produces no stdout and exits successfully.
 - Existing bitfield tests remain green.
+
+## Implementation note
+- rcc keeps ordinary enum object signedness tied to the resolved enum
+  representation, but enum-typed bitfield loads are zero-extended as an
+  implementation-defined policy. Signed integer bitfields continue to
+  sign-extend.
 
 ## References
 - C99 §6.7.2.1 implementation-defined bitfield signedness

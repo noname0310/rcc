@@ -2341,7 +2341,7 @@ pub mod backend {
             else {
                 return Err(type_lowering_error(access.field_ty, "bit-field type is not integer"));
             };
-            let signed = self.is_signed_integer_ty(access.field_ty)?;
+            let signed = self.bitfield_load_is_signed(access.field_ty)?;
             let value = self.cast_int_value(narrow, field_ty, signed, "bf.ext")?;
             Ok(Some(value.as_basic_value_enum()))
         }
@@ -3901,6 +3901,18 @@ pub mod backend {
                     other
                 ))),
             }
+        }
+
+        fn bitfield_load_is_signed(&self, ty: TyId) -> Result<bool, CodegenError> {
+            // C99 leaves bitfield signedness implementation-defined for some
+            // base types. rcc keeps ordinary enum objects on their resolved
+            // representation, but enum bitfields are zero-extended so positive
+            // enumerators with the width's top bit set are not read back as
+            // negative values.
+            if matches!(self.tcx.get(ty), Ty::Enum(_)) {
+                return Ok(false);
+            }
+            self.is_signed_integer_ty(ty)
         }
 
         fn float_ty_width(&self, ty: TyId) -> Result<u32, CodegenError> {
@@ -9271,6 +9283,56 @@ mod tests {
         );
 
         assert!(ir.contains("sext i3"), "signed 3-bit read should sign-extend:\n{ir}");
+    }
+
+    /// Enum bitfields use rcc's implementation-defined unsigned policy so
+    /// positive enum values with the field's top bit set are not sign-extended.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn bitfield_enum_read_zero_extends_to_declared_type() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let enum_def = defs.push(Def {
+            id: DefId(0),
+            name: Symbol(528),
+            span: DUMMY_SP,
+            kind: DefKind::Enum { repr: tcx.int, variants: Vec::new() },
+        });
+        defs[enum_def].id = enum_def;
+        let enum_ty = tcx.intern(Ty::Enum(enum_def));
+        let rec = record_def(&mut defs, RecordKind::Struct, vec![bitfield(enum_ty, 8)]);
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let ret_ty = enum_ty;
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(529)), rec_ty, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(Place {
+                        base: Local(1),
+                        projection: vec![Projection::Field(0)],
+                    })),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+
+        let ir = codegen_fixture_ir_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__bitfield_enum_read",
+            ret_ty,
+            body,
+        );
+
+        assert!(ir.contains("zext i8"), "enum 8-bit read should zero-extend:\n{ir}");
+        assert!(!ir.contains("sext i8"), "enum bitfield must not be sign-extended:\n{ir}");
     }
 
     /// Writing one packed bitfield performs a read-modify-write on the
