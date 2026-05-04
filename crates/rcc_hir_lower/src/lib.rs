@@ -12,8 +12,8 @@
 #![warn(missing_docs)]
 
 use rcc_ast::{
-    BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl, RecordSpec, Stmt, StmtKind,
-    StorageClass, TranslationUnit, TypeSpec,
+    BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl, OffsetofDesignator,
+    RecordSpec, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec,
 };
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
@@ -3727,8 +3727,12 @@ pub fn lower_expr(
             let ty_id = lower_type_name(ty, DeclScope::Block, tcx, resolver, crate_, session);
             HirExprKind::BuiltinVaArg { ap: ap_id, ty: ty_id }
         }
-        rcc_ast::ExprKind::BuiltinOffsetof { .. }
-        | rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => HirExprKind::IntConst(0),
+        rcc_ast::ExprKind::BuiltinOffsetof { ty, designators } => {
+            let value =
+                lower_builtin_offsetof(ty, designators, expr.span, crate_, tcx, resolver, session);
+            HirExprKind::IntConst(i128::from(value))
+        }
+        rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => HirExprKind::IntConst(0),
         rcc_ast::ExprKind::StmtExpr(block) => {
             let (stmts, result) =
                 lower_stmt_expr_block(block, body, scope, crate_, tcx, resolver, session);
@@ -3837,6 +3841,123 @@ pub fn lower_expr(
     });
     body.exprs[expr_id].id = expr_id;
     expr_id
+}
+
+fn lower_builtin_offsetof(
+    ty: &rcc_ast::TypeName,
+    designators: &[OffsetofDesignator],
+    span: Span,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> u64 {
+    let mut current_ty = lower_type_name(ty, DeclScope::Block, tcx, resolver, crate_, session);
+    let layouts = LayoutCx::with_defs_for_target(tcx, &crate_.defs, session.opts.target.clone());
+    let mut offset = 0_u64;
+
+    for designator in designators {
+        match designator {
+            OffsetofDesignator::Field(name) => {
+                let Ty::Record(def) = tcx.get(current_ty) else {
+                    emit_offsetof_error(session, span, "offsetof field designator needs a record");
+                    return 0;
+                };
+                let Ok(record_layout) = layouts.record_layout_of(current_ty) else {
+                    emit_offsetof_error(session, span, "could not compute record layout");
+                    return 0;
+                };
+                let DefKind::Record { fields, .. } = &crate_.defs[*def].kind else {
+                    emit_offsetof_error(session, span, "offsetof record definition is malformed");
+                    return 0;
+                };
+                let Some(field_idx) = fields.iter().position(|field| field.name == Some(*name))
+                else {
+                    let field = session.interner.get(*name);
+                    emit_offsetof_error(session, span, format!("record has no field `{field}`"));
+                    return 0;
+                };
+                offset = match offset.checked_add(record_layout.fields[field_idx].offset) {
+                    Some(value) => value,
+                    None => {
+                        emit_offsetof_error(session, span, "offsetof computation overflowed");
+                        return 0;
+                    }
+                };
+                current_ty = fields[field_idx].ty;
+            }
+            OffsetofDesignator::Index(index) => {
+                let idx = match eval_offsetof_index(index) {
+                    Some(value) if value >= 0 => value as u64,
+                    _ => {
+                        emit_offsetof_error(
+                            session,
+                            span,
+                            "offsetof array designator needs a non-negative integer constant",
+                        );
+                        return 0;
+                    }
+                };
+                let Ty::Array { elem, .. } = tcx.get(current_ty).clone() else {
+                    emit_offsetof_error(
+                        session,
+                        span,
+                        "offsetof subscript designator needs an array",
+                    );
+                    return 0;
+                };
+                let Ok(elem_layout) = layouts.layout_of(elem.ty) else {
+                    emit_offsetof_error(session, span, "could not compute array element layout");
+                    return 0;
+                };
+                let Some(delta) = elem_layout.size.checked_mul(idx) else {
+                    emit_offsetof_error(session, span, "offsetof array index overflowed");
+                    return 0;
+                };
+                offset = match offset.checked_add(delta) {
+                    Some(value) => value,
+                    None => {
+                        emit_offsetof_error(session, span, "offsetof computation overflowed");
+                        return 0;
+                    }
+                };
+                current_ty = elem.ty;
+            }
+        }
+    }
+
+    offset
+}
+
+fn emit_offsetof_error(session: &mut Session, span: Span, msg: impl Into<String>) {
+    session.handler.struct_err(span, msg.into()).code(rcc_errors::codes::E0084).emit();
+}
+
+fn eval_offsetof_index(expr: &rcc_ast::Expr) -> Option<i128> {
+    match &expr.kind {
+        rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::CharLit(lit) => Some(i128::from(lit.value)),
+        rcc_ast::ExprKind::Paren(inner) => eval_offsetof_index(inner),
+        rcc_ast::ExprKind::Unary { op, operand } => {
+            let value = eval_offsetof_index(operand)?;
+            match op {
+                rcc_ast::UnOp::Plus => Some(value),
+                rcc_ast::UnOp::Neg => value.checked_neg(),
+                _ => None,
+            }
+        }
+        rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
+            let lhs = eval_offsetof_index(lhs)?;
+            let rhs = eval_offsetof_index(rhs)?;
+            match op {
+                rcc_ast::BinOp::Add => lhs.checked_add(rhs),
+                rcc_ast::BinOp::Sub => lhs.checked_sub(rhs),
+                rcc_ast::BinOp::Mul => lhs.checked_mul(rhs),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn hir_int_base(base: rcc_ast::IntBase) -> IntLiteralBase {

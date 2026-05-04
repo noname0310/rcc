@@ -50,7 +50,7 @@ current numeric milestone already passes.
 - [x] [15n1-gcc-torture-pr77767-vla-parameter-bound-side-effects](15n1-gcc-torture-pr77767-vla-parameter-bound-side-effects.md)
 - [x] [15o-gcc-torture-block-scope-extern](15o-gcc-torture-block-scope-extern.md)
 - [x] [15p-gcc-torture-varargs-cluster](15p-gcc-torture-varargs-cluster.md)
-- [ ] [15q-gcc-torture-aggregate-memory-cluster](15q-gcc-torture-aggregate-memory-cluster.md)
+- [x] [15q-gcc-torture-aggregate-memory-cluster](15q-gcc-torture-aggregate-memory-cluster.md)
 - [ ] [15r-gcc-torture-gnu-field-alignment](15r-gcc-torture-gnu-field-alignment.md)
 - [ ] [15s-gcc-torture-gnu-vector-cluster](15s-gcc-torture-gnu-vector-cluster.md)
 - [ ] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)

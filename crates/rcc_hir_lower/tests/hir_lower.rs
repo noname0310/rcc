@@ -3686,6 +3686,29 @@ fn regression_gate_va_list_call_argument_decays_to_pointer() {
     );
 }
 
+#[test]
+fn regression_gate_builtin_offsetof_lowers_field_and_array_path() {
+    let src = r#"
+        struct U { short a; short b; };
+        struct T { int tag; struct U arr[3]; };
+        int f(void) { return __builtin_offsetof(struct T, arr[2].b); }
+    "#;
+    let (hir, _tcx, cap, sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let f = def_named(&hir, &sess, "f");
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    assert!(
+        body.exprs.iter().any(|expr| matches!(expr.kind, HirExprKind::IntConst(14))),
+        "offsetof(struct T, arr[2].b) should lower to byte offset 14; exprs={:?}",
+        body.exprs
+    );
+}
+
 fn assert_post_inc_stmt_targets_local(body: &Body, stmt: rcc_hir::HirStmtId, expected: Local) {
     let HirStmtKind::Expr(expr) = body.stmts[stmt].kind else {
         panic!("expected parameter-bound expression statement");

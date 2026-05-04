@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rcc_data_structures::FxHashMap;
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_session::{Arch, DataModel, Os, Session};
+use rcc_session::{Arch, DataModel, Endianness, Os, Session};
 use rcc_span::{BytePos, FileId, Span, Symbol};
 
 pub mod cond_stack;
@@ -352,6 +352,14 @@ impl<'a> Preprocessor<'a> {
         self.install_static_predefined("__LONG_MAX__", "9223372036854775807L");
         self.install_static_predefined("__LONG_LONG_MAX__", "9223372036854775807LL");
         self.install_static_predefined("__SIZE_TYPE__", "unsigned long");
+        self.install_static_predefined("__ORDER_LITTLE_ENDIAN__", "1234");
+        self.install_static_predefined("__ORDER_BIG_ENDIAN__", "4321");
+        self.install_static_predefined("__ORDER_PDP_ENDIAN__", "3412");
+        let byte_order = match self.session.opts.target.endianness {
+            Endianness::Little => "1234",
+            Endianness::Big => "4321",
+        };
+        self.install_static_predefined("__BYTE_ORDER__", byte_order);
 
         self.install_static_predefined("__builtin_abort", "abort");
         self.install_static_predefined("__builtin_exit", "exit");
@@ -1536,6 +1544,21 @@ mod run_tests {
         let gnu_out = gnu_pp.run(gnu_id);
 
         assert_eq!(joined_text(&gnu_pp, &gnu_out), "printf(\"x\")((void)(p))");
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn gnu_byte_order_predefined_macros_follow_target_endianness() {
+        let opts =
+            rcc_session::Options { gnu_builtin_libcalls: true, ..rcc_session::Options::default() };
+        let (mut sess, id, cap) = seed_with_opts(
+            opts,
+            "__BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__ __ORDER_BIG_ENDIAN__ __ORDER_PDP_ENDIAN__\n",
+        );
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "1234123443213412");
         assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
     }
 

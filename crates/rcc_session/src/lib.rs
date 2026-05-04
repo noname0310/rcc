@@ -14,7 +14,9 @@ use std::sync::{Arc, RwLock};
 pub use rcc_errors::WarningConfig;
 use rcc_errors::{CaptureEmitter, Handler, StderrEmitter};
 use rcc_span::{Interner, SourceMap};
-pub use rcc_target::{Arch, DataModel, Environment, Os, TargetError, TargetInfo, TargetTriple};
+pub use rcc_target::{
+    Arch, DataModel, Endianness, Environment, Os, TargetError, TargetInfo, TargetTriple,
+};
 
 /// Stages at which the driver can dump intermediate state.
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]

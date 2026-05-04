@@ -1,5 +1,8 @@
 # 11-15q: gcc-torture aggregate memory cluster
 
+> ✓ done — 2026-05-04 — fixed `__builtin_offsetof` lowering and GNU
+> byte-order predefined macros; WSL gcc-torture aggregate cluster is 3/3 pass.
+
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal
