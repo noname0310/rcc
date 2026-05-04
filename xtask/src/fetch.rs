@@ -221,9 +221,22 @@ The `csmith` binary will be at `build/src/csmith` (Linux/macOS) or
 
 ## Usage (differential fuzzing)
 
-See `tasks/12-fuzz-differential/` for the harness that invokes csmith
-to generate random C programs and compares rcc output against a
-reference compiler.
+Build rcc first, then run the differential harness:
+
+```sh
+cargo build --release --bin rcc
+cargo run --release --package rcc_conformance --bin rcc_csmith_diff -- \
+  --rcc target/release/rcc \
+  --csmith third_party/testsuites/csmith/build/src/csmith \
+  --runtime-include third_party/testsuites/csmith/runtime \
+  --iterations 10 \
+  --max-source-bytes 10240
+```
+
+The harness generates random C programs and compares rcc execution
+against host `cc`. Disagreements are written under `target/csmith-diff/`
+and should be promoted to focused compiler-bug tasks. See
+`tasks/12-fuzz-differential/`.
 ";
     std::fs::write(&install, content).with_context(|| format!("writing {}", install.display()))?;
     println!("  install -> {}", install.display());

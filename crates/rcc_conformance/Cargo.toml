@@ -16,6 +16,10 @@ path = "src/bin/rcc_conformance_run.rs"
 name = "rcc_conformance_render"
 path = "src/bin/rcc_conformance_render.rs"
 
+[[bin]]
+name = "rcc_csmith_diff"
+path = "src/bin/rcc_csmith_diff.rs"
+
 [dependencies]
 anyhow     = { workspace = true }
 clap       = { workspace = true }
