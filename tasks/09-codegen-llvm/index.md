@@ -35,6 +35,8 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [25-filecheck-tests](25-filecheck-tests.md)
 - [x] [26-debug-ir-metadata](26-debug-ir-metadata.md)
 - [x] [27-enum-bitfield-unsignedness-policy](27-enum-bitfield-unsignedness-policy.md)
+- [x] [28-sysv-direct-aggregate-abi-classes](28-sysv-direct-aggregate-abi-classes.md)
+- [ ] [29-aggregate-va-arg-lowering](29-aggregate-va-arg-lowering.md)
 
 ## Downstream
 

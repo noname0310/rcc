@@ -372,12 +372,11 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             return Ok(indirect_param(ty, layout));
         }
 
-        let mut chunks = vec![Eightbyte::default(); eightbytes];
-        self.classify_ty_into(ty, 0, &mut chunks)?;
-        post_cleanup(&mut chunks);
+        let chunks = self.aggregate_chunks(ty, eightbytes)?;
 
         if chunks.iter().any(|chunk| chunk.class == AbiClass::Memory)
             || needs_memory_after_cleanup(&chunks)
+            || has_x87_class(&chunks)
         {
             return Ok(indirect_param(ty, layout));
         }
@@ -395,22 +394,73 @@ impl<'tcx> SysvParamClassifier<'tcx> {
     }
 
     fn aggregate_return(&self, ty: TyId) -> Result<AbiReturn, CodegenError> {
-        let param = self.aggregate_param(ty)?;
-        let ret = match param.kind {
-            AbiParamKind::Direct(units) => AbiReturn {
+        let layout =
+            self.layout.layout_of(ty).map_err(|err| type_lowering_error(ty, err.to_string()))?;
+        let eightbytes = eightbyte_count(layout.size, ty)?;
+        if eightbytes > 4 {
+            return Ok(AbiReturn {
                 source: ty,
-                kind: AbiReturnKind::Direct { units },
-                classes: param.classes,
-                zeroext: false,
-            },
-            AbiParamKind::Indirect { align, size, .. } => AbiReturn {
-                source: ty,
-                kind: AbiReturnKind::Indirect { sret: true, align, size },
+                kind: AbiReturnKind::Indirect {
+                    sret: true,
+                    align: layout.align,
+                    size: layout.size,
+                },
                 classes: vec![AbiClass::Memory],
                 zeroext: false,
-            },
-        };
-        Ok(ret)
+            });
+        }
+
+        let chunks = self.aggregate_chunks(ty, eightbytes)?;
+        if chunks.iter().any(|chunk| chunk.class == AbiClass::Memory)
+            || needs_memory_after_cleanup(&chunks)
+        {
+            return Ok(AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Indirect {
+                    sret: true,
+                    align: layout.align,
+                    size: layout.size,
+                },
+                classes: vec![AbiClass::Memory],
+                zeroext: false,
+            });
+        }
+
+        let classes = chunks.iter().map(|chunk| chunk.class).collect::<Vec<_>>();
+        if is_single_x87_return(&chunks) {
+            return Ok(AbiReturn {
+                source: ty,
+                kind: AbiReturnKind::Direct {
+                    units: vec![AbiParamUnit {
+                        class: AbiClass::X87,
+                        kind: AbiParamUnitKind::Float(FloatKind::F80),
+                    }],
+                },
+                classes,
+                zeroext: false,
+            });
+        }
+
+        let mut units = Vec::with_capacity(chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            if chunk.class == AbiClass::NoClass {
+                continue;
+            }
+            let size = eightbyte_payload_size(layout.size, idx);
+            units.push(AbiParamUnit { class: chunk.class, kind: unit_kind(chunk, size, ty)? });
+        }
+        Ok(AbiReturn { source: ty, kind: AbiReturnKind::Direct { units }, classes, zeroext: false })
+    }
+
+    fn aggregate_chunks(
+        &self,
+        ty: TyId,
+        eightbytes: usize,
+    ) -> Result<Vec<Eightbyte>, CodegenError> {
+        let mut chunks = vec![Eightbyte::default(); eightbytes];
+        self.classify_ty_into(ty, 0, &mut chunks)?;
+        post_cleanup(&mut chunks);
+        Ok(chunks)
     }
 
     fn classify_ty_into(
@@ -642,6 +692,19 @@ fn needs_memory_after_cleanup(chunks: &[Eightbyte]) -> bool {
     }
     chunks.first().map(|chunk| chunk.class != AbiClass::Sse).unwrap_or(false)
         || chunks.iter().skip(1).any(|chunk| chunk.class != AbiClass::SseUp)
+}
+
+fn has_x87_class(chunks: &[Eightbyte]) -> bool {
+    chunks
+        .iter()
+        .any(|chunk| matches!(chunk.class, AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87))
+}
+
+fn is_single_x87_return(chunks: &[Eightbyte]) -> bool {
+    matches!(
+        chunks,
+        [Eightbyte { class: AbiClass::X87, .. }, Eightbyte { class: AbiClass::X87Up, .. }]
+    )
 }
 
 fn mark_memory(chunks: &mut [Eightbyte]) {
@@ -6054,6 +6117,32 @@ mod tests {
         assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["i32"]);
         assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["double"]);
         assert_eq!(abi.fixed_param_count, 3);
+    }
+
+    #[test]
+    fn sysv_abi_classifies_single_long_double_aggregate_like_clang() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let one_long_double =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.long_double)]);
+        let one_long_double_ty = tcx.intern(Ty::Record(one_long_double));
+        let void = tcx.void;
+
+        let ret_fn = func_ty(&mut tcx, one_long_double_ty, Vec::new(), false);
+        let param_fn = func_ty(&mut tcx, void, vec![one_long_double_ty], false);
+
+        let ret_abi = sysv_fn_abi(&tcx, &defs, ret_fn).unwrap();
+        let param_abi = sysv_fn_abi(&tcx, &defs, param_fn).unwrap();
+
+        assert_eq!(return_shape(&tcx, &ret_abi.ret), "x86_fp80");
+        assert!(!return_uses_sret(&ret_abi.ret));
+        assert_eq!(ret_abi.ret.classes, [AbiClass::X87, AbiClass::X87Up]);
+        assert_eq!(abi_shapes(&tcx, &param_abi.params[0]), ["ptr"]);
+        assert_eq!(param_abi.params[0].classes, [AbiClass::Memory]);
+        assert!(matches!(
+            param_abi.params[0].kind,
+            AbiParamKind::Indirect { byval: true, align: 16, size: 16 }
+        ));
     }
 
     #[test]
