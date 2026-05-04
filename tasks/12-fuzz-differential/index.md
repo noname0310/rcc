@@ -8,7 +8,7 @@ Long-running oracle verification: cargo-fuzz per front-end crate + csmith differ
 
 ## Tasks (pick in order)
 
-- [ ] [01-lexer-fuzz-24h](01-lexer-fuzz-24h.md)
+- [x] [01-lexer-fuzz-24h](01-lexer-fuzz-24h.md)
 - [ ] [02-preprocess-fuzz](02-preprocess-fuzz.md)
 - [ ] [03-parser-fuzz](03-parser-fuzz.md)
 - [ ] [04-csmith-differential-harness](04-csmith-differential-harness.md)

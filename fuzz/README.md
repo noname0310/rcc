@@ -96,6 +96,26 @@ Any discovered crash is written to `fuzz/artifacts/lex/` and should be
 minified (`cargo +nightly fuzz tmin lex <artifact>`) and then filed as
 a new task under 03-lex/ or the relevant downstream phase.
 
+### Nightly 24 h-class run
+
+The scheduled workflow lives at `.github/workflows/fuzz-nightly.yml`.
+GitHub-hosted runners currently cap a single job at 6 h, so the
+workflow runs four independent lex shards at just under 6 h each. This
+gives a 24 h-class aggregate fuzzing budget without relying on a
+self-hosted runner.
+
+Manual dispatch accepts shorter values for development:
+
+```bash
+gh workflow run fuzz-nightly.yml -f max_total_time=60 -f max_len=131072
+```
+
+Each shard uploads `fuzz/corpus/lex/` and its crash directory. Failures
+use the repository's normal GitHub Actions notifications. To route
+alerts into Slack, email, or another incident bridge, configure the
+repository secret `FUZZ_ALERT_WEBHOOK_URL`; the workflow posts a small
+JSON payload containing the failing shard and run URL.
+
 ## Running the preprocess fuzzer
 
 The `preprocess` target drives the complete phase 04 pipeline:
@@ -212,6 +232,8 @@ best-effort local environment for this particular task.
 ## References
 
 - Task spec (lex): [`tasks/03-lex/12-fuzz-target.md`](../tasks/03-lex/12-fuzz-target.md).
+- Nightly task spec: [`tasks/12-fuzz-differential/01-lexer-fuzz-24h.md`](../tasks/12-fuzz-differential/01-lexer-fuzz-24h.md).
 - Task spec (preprocess): [`tasks/04-preprocess/19-fuzz-target.md`](../tasks/04-preprocess/19-fuzz-target.md).
+- GitHub-hosted runner limits: <https://docs.github.com/en/actions/reference/usage-limits-for-self-hosted-runners>.
 - cargo-fuzz book: <https://rust-fuzz.github.io/book/cargo-fuzz.html>.
 - libFuzzer flags: <https://llvm.org/docs/LibFuzzer.html#options>.

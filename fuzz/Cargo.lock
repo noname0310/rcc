@@ -182,6 +182,7 @@ version = "0.0.1"
 dependencies = [
  "rcc_errors",
  "rcc_span",
+ "rcc_target",
 ]
 
 [[package]]
@@ -190,6 +191,10 @@ version = "0.0.1"
 dependencies = [
  "rustc-hash",
 ]
+
+[[package]]
+name = "rcc_target"
+version = "0.0.1"
 
 [[package]]
 name = "rustc-hash"
