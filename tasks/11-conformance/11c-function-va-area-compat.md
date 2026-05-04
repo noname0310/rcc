@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11c: chibicc __va_area__ compatibility
 
 **Phase:** 11-conformance    **Depends on:** 11-11, 11b    **Milestone:** M4+
@@ -31,6 +33,11 @@ Support the chibicc compatibility builtin `__va_area__` well enough for
 - `function.c` advances past the `__va_area__` undeclared diagnostic.
 - `__va_area__` outside a variadic function is rejected.
 - Existing C99 `va_start`/`va_arg` tests stay green.
+
+## Notes (agent)
+- `function.c` now reaches object/link stage past `__va_area__`; the next
+  observed blocker is `inline_fn` link semantics, owned by the following
+  conformance task.
 
 ## References
 - chibicc `test/function.c` line 96.

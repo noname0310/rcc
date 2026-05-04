@@ -191,6 +191,13 @@ pub struct Options {
     /// option off, HIR lowering emits W0022 while preserving the alias for
     /// compatibility tests.
     pub gnu_function_names: bool,
+    /// Enable chibicc/GNU `__va_area__` without a warning.
+    ///
+    /// `__va_area__` is a non-standard compatibility identifier used by
+    /// chibicc tests to read the current variadic function's `va_list` save
+    /// area. With this option off, HIR lowering still preserves it inside
+    /// variadic functions but emits W0023.
+    pub gnu_va_area: bool,
 }
 
 impl Default for Options {
@@ -223,6 +230,7 @@ impl Default for Options {
             gnu_labels_as_values: false,
             gnu_lvalue_comma: false,
             gnu_function_names: false,
+            gnu_va_area: false,
         }
     }
 }

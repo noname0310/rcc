@@ -159,6 +159,8 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-function-names"
             | "gnu-function-name"
             | "gnu-function"
+            | "gnu-va-area"
+            | "chibicc-va-area"
     )
 }
 
@@ -361,6 +363,10 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_function_names: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-function-names" | "gnu-function-name" | "gnu-function")
         }),
+        gnu_va_area: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-va-area" | "chibicc-va-area")),
     }
 }
 

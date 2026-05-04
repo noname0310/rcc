@@ -141,6 +141,34 @@ fn complex_to_real_return() {
 }
 
 #[test]
+fn array_field_of_struct_return_lowers_without_panic() {
+    let mir = render("struct S { int a[2]; }; struct S g(void); int f(void) { return g().a[1]; }");
+
+    assert!(mir.contains("call"), "expected call in MIR:\n{mir}");
+    assert!(mir.contains(".field0[1]"), "expected field/index projection in MIR:\n{mir}");
+}
+
+#[test]
+fn function_parameter_adjustment_lowers_without_invalid_deref() {
+    let mir = render(
+        "int ret3(void); int param_decay2(int x()) { return x(); } \
+         int f(void) { return param_decay2(ret3); }",
+    );
+
+    assert!(mir.contains("call copy _1()"), "expected adjusted function parameter call:\n{mir}");
+}
+
+#[test]
+fn repeated_function_deref_callee_lowers_without_invalid_deref() {
+    let mir = render("int add2(int, int); int f(void) { return (***add2)(2, 3); }");
+
+    assert!(
+        mir.contains("call copy"),
+        "expected indirect call through function designator:\n{mir}"
+    );
+}
+
+#[test]
 fn sizeof_incomplete_type_reports_layout_error() {
     let cap =
         diagnostics_after_mir_build("struct S; unsigned long f(void) { return sizeof(struct S); }");

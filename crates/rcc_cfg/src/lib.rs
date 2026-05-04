@@ -289,6 +289,8 @@ pub enum Rvalue {
         /// Type of the value to extract.
         ty: TyId,
     },
+    /// chibicc/GNU `__va_area__` — pointer to current function's varargs save area.
+    BuiltinVaArea,
 }
 
 /// Cast kinds recognised by the backend.

@@ -751,6 +751,13 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::LabelAddr(name);
             expr_id
         }
+        HirExprKind::BuiltinVaArea => {
+            let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+            body.exprs[expr_id].ty = void_ptr;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinVaArea;
+            expr_id
+        }
         HirExprKind::Comma { lhs, rhs } => {
             let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
             // LHS is evaluated for side effects and discarded — apply
@@ -2116,6 +2123,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
         | HirExprKind::LabelAddr(_)
+        | HirExprKind::BuiltinVaArea
         | HirExprKind::Cond { .. }
         | HirExprKind::OmittedCond { .. }
         | HirExprKind::Assign { .. }

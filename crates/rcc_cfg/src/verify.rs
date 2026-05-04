@@ -85,6 +85,7 @@ pub enum ProjectionKind {
 enum InferredTy {
     Known(TyId),
     AddressOf { pointee: TyId },
+    VoidPtr,
 }
 
 impl fmt::Display for CfgError {
@@ -308,6 +309,7 @@ fn verify_rvalue_typed(
             let _ = verify_operand_typed(body, tcx, hir, ap, at, errors);
             Some(InferredTy::Known(*ty))
         }
+        Rvalue::BuiltinVaArea => Some(InferredTy::VoidPtr),
     }
 }
 
@@ -574,6 +576,15 @@ fn verify_type_match(
                 errors.push(CfgError {
                     at,
                     kind: CfgErrorKind::TypeMismatch { expected, actual: pointee },
+                });
+            }
+        },
+        InferredTy::VoidPtr => match tcx.get(expected) {
+            Ty::Ptr(q) if q.ty == tcx.void => {}
+            _ => {
+                errors.push(CfgError {
+                    at,
+                    kind: CfgErrorKind::TypeMismatch { expected, actual: tcx.void },
                 });
             }
         },

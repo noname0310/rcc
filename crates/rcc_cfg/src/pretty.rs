@@ -120,6 +120,7 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::BuiltinVaArg { ap, ty } => {
             format!("va_arg({}, {})", fmt_operand(ap), fmt_ty(tcx, *ty))
         }
+        Rvalue::BuiltinVaArea => "__va_area__".to_owned(),
     }
 }
 

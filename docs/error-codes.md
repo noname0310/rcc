@@ -1325,3 +1325,19 @@ char *f(void) { return __FUNCTION__; }  // warning[W0022] in strict C99 mode
 HIR lowering preserves `__FUNCTION__` as a function-name string so GNU
 compatibility tests can continue. Enable `Options::gnu_function_names`
 to accept the alias without this compatibility warning.
+
+## W0023 — GNU __va_area__ compatibility builtin
+
+C99 exposes variadic arguments through `<stdarg.h>`, not through an
+identifier that names the ABI varargs save area. Some chibicc fixtures
+use `__va_area__` inside variadic functions:
+
+```c
+void f(int n, ...) {
+    void *p = __va_area__;  // warning[W0023] in strict C99 mode
+}
+```
+
+HIR lowering accepts `__va_area__` only inside variadic functions so the
+compatibility suite can exercise runtime varargs behaviour. Enable
+`Options::gnu_va_area` to accept it without this compatibility warning.

@@ -986,6 +986,7 @@ impl BodyBuilder {
             | HirExprKind::LocalRef(_)
             | HirExprKind::DefRef(_)
             | HirExprKind::LabelAddr(_)
+            | HirExprKind::BuiltinVaArea
             | HirExprKind::SizeofType(_) => {}
         }
     }

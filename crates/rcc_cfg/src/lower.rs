@@ -160,6 +160,11 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let target = builder.label_block(*name);
             Operand::Const(Const { kind: ConstKind::BlockAddress(target), ty })
         }
+        HirExprKind::BuiltinVaArea => {
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(builder, span, temp, Rvalue::BuiltinVaArea);
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
         HirExprKind::LocalRef(hir_local) => {
             let local = cx.locals.lookup(*hir_local);
             Operand::Copy(Place { base: local, projection: Vec::new() })
@@ -232,6 +237,14 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
                 if let Some(def) = direct_global_ref(cx, *operand) {
                     return Operand::Const(Const { kind: ConstKind::Global(def), ty });
                 }
+            }
+            if *kind == ConvertKind::FuncToPtr
+                && matches!(cx.tcx.get(cx.body.exprs[*operand].ty), Ty::Func { .. })
+            {
+                let place = lower_as_place(builder, cx, *operand);
+                let temp = builder.alloc_temp(ty, span);
+                push_assign(builder, span, temp, Rvalue::AddressOf(place));
+                return Operand::Copy(Place { base: temp, projection: Vec::new() });
             }
             if *kind == ConvertKind::ArrayToPtr
                 && matches!(cx.tcx.get(cx.body.exprs[*operand].ty), Ty::Array { .. })
@@ -470,7 +483,12 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
             Place { base: base.base, projection }
         }
         HirExprKind::Field { base, field_index } => {
-            let base_place = lower_as_place(builder, cx, *base);
+            let base_place = if cx.body.exprs[*base].value_cat == ValueCat::LValue {
+                lower_as_place(builder, cx, *base)
+            } else {
+                let base_value = lower_as_rvalue(builder, cx, *base);
+                operand_to_place(builder, cx, base_value, expr.span)
+            };
             let mut projection = base_place.projection;
             projection.push(Projection::Field(*field_index));
             Place { base: base_place.base, projection }

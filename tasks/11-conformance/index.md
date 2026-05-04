@@ -24,7 +24,7 @@ current numeric milestone already passes.
 - [x] [11-chibicc-function-prereq-triage](11-chibicc-function-prereq-triage.md)
 - [x] [11a-function-stage-common-support](11a-function-stage-common-support.md)
 - [x] [11b-function-name-predefined-identifiers](11b-function-name-predefined-identifiers.md)
-- [ ] [11c-function-va-area-compat](11c-function-va-area-compat.md)
+- [x] [11c-function-va-area-compat](11c-function-va-area-compat.md)
 - [ ] [11d-function-abi-runtime-smoke](11d-function-abi-runtime-smoke.md)
 - [ ] [12-chibicc-function-green](12-chibicc-function-green.md)
 - [ ] [13-chibicc-preprocess](13-chibicc-preprocess.md)

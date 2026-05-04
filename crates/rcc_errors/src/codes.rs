@@ -112,6 +112,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0020, W0020_DESC),
     (W0021, W0021_DESC),
     (W0022, W0022_DESC),
+    (W0023, W0023_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -864,6 +865,15 @@ const W0021_DESC: &str = "GNU lvalue comma extension";
 /// `Options::gnu_function_names` is enabled.
 pub const W0022: &str = "W0022";
 const W0022_DESC: &str = "GNU function name alias";
+
+/// chibicc/GNU `__va_area__` compatibility builtin accepted in strict C99 mode.
+///
+/// C99 exposes variadic arguments through `<stdarg.h>` macros, not through a
+/// magic identifier naming the ABI save area. HIR lowering accepts this inside
+/// variadic functions for chibicc compatibility and emits this warning unless
+/// `Options::gnu_va_area` is enabled.
+pub const W0023: &str = "W0023";
+const W0023_DESC: &str = "GNU __va_area__ compatibility builtin";
 
 #[cfg(test)]
 mod tests {

@@ -131,6 +131,14 @@ fn gnu_function_names_flag_sets_frontend_option() {
 }
 
 #[test]
+fn gnu_va_area_flag_sets_frontend_option() {
+    let cli = parse(&["rcc", "-fgnu-va-area", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_va_area);
+}
+
+#[test]
 fn strict_binary_integer_literal_is_rejected() {
     let input = TempCFile::new("strict-binary", "int x = 0b10;\n");
     let output = input.sibling("ast");

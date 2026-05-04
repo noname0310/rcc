@@ -423,6 +423,7 @@ impl ChibiccAdapter {
             .arg("-fgnu-labels-as-values")
             .arg("-fgnu-lvalue-comma")
             .arg("-fgnu-function-names")
+            .arg("-fgnu-va-area")
             .arg("-I")
             .arg(case_dir)
             .arg("-o")

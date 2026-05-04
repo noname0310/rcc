@@ -2521,6 +2521,53 @@ fn snippet_function_alias_option_suppresses_warning() {
 }
 
 #[test]
+fn snippet_va_area_lowers_inside_variadic_function() {
+    let (hir, _tcx, cap) =
+        checked_snippet_with_diagnostics("void f(int n, ...) { void *p = __va_area__; }");
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0023)),
+        "strict mode should warn for __va_area__: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0071)),
+        "__va_area__ must not be reported as undeclared in a variadic function: {diags:?}"
+    );
+    let body = hir.bodies.values().next().expect("function body");
+    assert!(
+        body.exprs.iter().any(|expr| matches!(expr.kind, HirExprKind::BuiltinVaArea)),
+        "__va_area__ should lower to a dedicated HIR node"
+    );
+}
+
+#[test]
+fn snippet_va_area_option_suppresses_warning() {
+    let opts = Options { gnu_va_area: true, ..Options::default() };
+    let (_hir, _tcx, cap) =
+        checked_snippet_with_options("void f(int n, ...) { void *p = __va_area__; }", opts);
+    let diags = cap.diagnostics();
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0023)),
+        "GNU option should suppress W0023: {diags:?}"
+    );
+}
+
+#[test]
+fn snippet_va_area_rejects_non_variadic_function() {
+    let (_hir, _tcx, cap) =
+        checked_snippet_with_diagnostics("void f(void) { void *p = __va_area__; }");
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0071)),
+        "non-variadic __va_area__ use should be rejected: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0023)),
+        "invalid __va_area__ use should not also emit compatibility warning: {diags:?}"
+    );
+}
+
+#[test]
 fn snippet_global_char_array_string_initializer_has_static_payload() {
     let (hir, tcx) = lower_snippet("char s[] = \"hi\";");
     let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();

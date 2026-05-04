@@ -1123,6 +1123,7 @@ fn populate_switch_case_tables_in_expr(
         | HirExprKind::StringRef(_)
         | HirExprKind::LocalRef(_)
         | HirExprKind::DefRef(_)
+        | HirExprKind::BuiltinVaArea
         | HirExprKind::SizeofType(_)
         | HirExprKind::LabelAddr(_) => {}
     }
@@ -3146,7 +3147,9 @@ pub fn lower_expr(
             return lower_expr(inner, body, scope, crate_, tcx, resolver, session);
         }
         rcc_ast::ExprKind::Ident(sym) => {
-            if let Some(kind) =
+            if let Some(kind) = lower_va_area(*sym, expr.span, crate_, resolver, session) {
+                kind
+            } else if let Some(kind) =
                 lower_predefined_function_name(*sym, expr.span, crate_, tcx, resolver, session)
             {
                 kind
@@ -3522,6 +3525,51 @@ fn lower_predefined_function_name(
     };
     let def_id = intern_string_literal(&lit, span, crate_, tcx, resolver);
     Some(HirExprKind::StringRef(def_id))
+}
+
+fn lower_va_area(
+    ident: Symbol,
+    span: Span,
+    crate_: &HirCrate,
+    resolver: &Resolver,
+    session: &mut Session,
+) -> Option<HirExprKind> {
+    if session.interner.get(ident) != "__va_area__" {
+        return None;
+    }
+
+    let Some(function) = resolver.current_function else {
+        invalid_va_area_use(
+            span,
+            session,
+            "`__va_area__` is only available inside variadic functions",
+        );
+        return Some(HirExprKind::IntConst(0));
+    };
+    let variadic = matches!(crate_.defs[function].kind, DefKind::Function { variadic: true, .. });
+    if !variadic {
+        invalid_va_area_use(
+            span,
+            session,
+            "`__va_area__` is only available inside variadic functions",
+        );
+        return Some(HirExprKind::IntConst(0));
+    }
+
+    if !session.opts.gnu_va_area {
+        session
+            .handler
+            .struct_warn(span, "GNU `__va_area__` is not part of C99")
+            .code(rcc_errors::codes::W0023)
+            .note("lowering it as a pointer to the current function's varargs save area")
+            .emit();
+    }
+
+    Some(HirExprKind::BuiltinVaArea)
+}
+
+fn invalid_va_area_use(span: Span, session: &mut Session, msg: &str) {
+    session.handler.struct_err(span, msg).code(rcc_errors::codes::E0071).emit();
 }
 
 /// Intern a string literal into the global table.

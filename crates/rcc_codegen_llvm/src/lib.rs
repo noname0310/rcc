@@ -2741,6 +2741,9 @@ pub mod backend {
                     Ok(self.emit_place_addr(place, locals, body)?.as_basic_value_enum())
                 }
                 Rvalue::LoadGlobal { def, ty } => self.emit_global_object_load(*def, *ty),
+                Rvalue::BuiltinVaArea => Err(CodegenError::Internal(
+                    "`__va_area__` requires function-local codegen".to_owned(),
+                )),
                 Rvalue::Len(place) => {
                     let base = place.base;
                     let decl = body.locals.get(base).ok_or_else(|| {
@@ -4574,6 +4577,17 @@ pub mod backend {
         }
     }
 
+    fn body_uses_va_area(body: &Body) -> bool {
+        body.blocks.iter().any(|block| {
+            block.statements.iter().any(|statement| {
+                matches!(
+                    &statement.kind,
+                    StatementKind::Assign { rvalue: Rvalue::BuiltinVaArea, .. }
+                )
+            })
+        })
+    }
+
     struct FnCodegen<'cg, 'a, 'ctx> {
         cx: &'cg CodegenCx<'a, 'ctx>,
         function: FunctionValue<'ctx>,
@@ -4581,6 +4595,7 @@ pub mod backend {
         locals: LocalMap<'ctx>,
         vla_stacks: VlaStackMap<'ctx>,
         blocks: IndexVec<BasicBlockId, LlvmBasicBlock<'ctx>>,
+        va_area: Option<PointerValue<'ctx>>,
     }
 
     impl<'cg, 'a, 'ctx> FnCodegen<'cg, 'a, 'ctx> {
@@ -4629,7 +4644,12 @@ pub mod backend {
                 vla_stacks.push(None);
             }
 
-            Ok(Self { cx, function, body, locals, vla_stacks, blocks })
+            let mut this = Self { cx, function, body, locals, vla_stacks, blocks, va_area: None };
+            if body_uses_va_area(body) {
+                this.va_area = Some(this.init_va_area_slot()?);
+            }
+
+            Ok(this)
         }
 
         fn codegen_body(&mut self) -> Result<(), CodegenError> {
@@ -4751,9 +4771,13 @@ pub mod backend {
             }
         }
 
-        fn emit_rvalue_value(&self, rvalue: &Rvalue) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        fn emit_rvalue_value(
+            &mut self,
+            rvalue: &Rvalue,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             match rvalue {
                 Rvalue::Use(operand) => self.emit_operand_value(operand),
+                Rvalue::BuiltinVaArea => self.emit_va_area(),
                 _ => self.cx.emit_rvalue_value(rvalue, &self.locals, self.body),
             }
         }
@@ -5121,11 +5145,29 @@ pub mod backend {
             })
         }
 
-        fn emit_va_start(&self, ap: &Operand, _last_param: &Operand) -> Result<(), CodegenError> {
-            let ap_ptr = self.va_list_ptr(ap)?;
+        fn init_va_area_slot(&self) -> Result<PointerValue<'ctx>, CodegenError> {
+            let va_ty = self.cx.type_cx().basic_type_of(self.cx.tcx.builtin_va_list)?;
+            let slot = self.cx.build_entry_alloca(self.function, va_ty, "__va_area__.addr")?;
+            self.emit_va_start_ptr(slot)?;
+            Ok(slot)
+        }
+
+        fn emit_va_area(&self) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let slot = self.va_area.ok_or_else(|| {
+                CodegenError::Internal("`__va_area__` used without a materialized slot".to_owned())
+            })?;
+            Ok(slot.as_basic_value_enum())
+        }
+
+        fn emit_va_start_ptr(&self, ap_ptr: PointerValue<'ctx>) -> Result<(), CodegenError> {
             let intrinsic = self.va_start_intrinsic();
             self.cx.builder.build_call(intrinsic, &[ap_ptr.into()], "").map_err(builder_error)?;
             Ok(())
+        }
+
+        fn emit_va_start(&self, ap: &Operand, _last_param: &Operand) -> Result<(), CodegenError> {
+            let ap_ptr = self.va_list_ptr(ap)?;
+            self.emit_va_start_ptr(ap_ptr)
         }
 
         fn emit_va_end(&self, ap: &Operand) -> Result<(), CodegenError> {
@@ -7198,7 +7240,13 @@ mod tests {
         locals.push(cfg_local_decl(Some(local_name), tcx.int, false));
         let mut blocks = IndexVec::new();
         blocks.push(rcc_cfg::BasicBlock::default());
-        Body { def: Some(def), locals, blocks, ret_ty: Some(tcx.void) }
+        Body {
+            def: Some(def),
+            locals,
+            blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(tcx.void),
+        }
     }
 
     #[cfg(feature = "llvm")]
@@ -7777,7 +7825,13 @@ mod tests {
         for block in blocks {
             cfg_blocks.push(block);
         }
-        Body { def: None, locals, blocks: cfg_blocks, ret_ty: Some(ret_ty) }
+        Body {
+            def: None,
+            locals,
+            blocks: cfg_blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(ret_ty),
+        }
     }
 
     #[cfg(feature = "llvm")]
@@ -9106,7 +9160,7 @@ mod tests {
 
         let mut blocks = IndexVec::new();
         blocks.push(rcc_cfg::BasicBlock::default());
-        Body { def: None, locals, blocks, ret_ty: Some(tcx.void) }
+        Body { def: None, locals, blocks, labels: FxHashMap::default(), ret_ty: Some(tcx.void) }
     }
 
     /// Position a test function so helper methods can append instructions.
@@ -9234,7 +9288,13 @@ mod tests {
         });
         let mut blocks = IndexVec::new();
         blocks.push(rcc_cfg::BasicBlock::default());
-        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+        let body = Body {
+            def: None,
+            locals,
+            blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(tcx.void),
+        };
 
         let place = Place { base: Local(1), projection: vec![Projection::Field(1)] };
         let addr = cx.emit_place_addr(&place, &allocas, &body).unwrap();
@@ -9289,7 +9349,13 @@ mod tests {
         });
         let mut blocks = IndexVec::new();
         blocks.push(rcc_cfg::BasicBlock::default());
-        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+        let body = Body {
+            def: None,
+            locals,
+            blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(tcx.void),
+        };
 
         let idx = Operand::Const(Const { kind: ConstKind::Int(2), ty: tcx.int });
         let place = Place { base: Local(1), projection: vec![Projection::Index(idx)] };
@@ -9349,7 +9415,13 @@ mod tests {
         });
         let mut blocks = IndexVec::new();
         blocks.push(rcc_cfg::BasicBlock::default());
-        let body = Body { def: None, locals, blocks, ret_ty: Some(tcx.void) };
+        let body = Body {
+            def: None,
+            locals,
+            blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(tcx.void),
+        };
 
         let idx = Operand::Const(Const { kind: ConstKind::Int(2), ty: tcx.int });
         let place = Place {
@@ -10986,7 +11058,13 @@ mod tests {
         cfg_blocks.push(block2);
         cfg_blocks.push(block3);
 
-        let body = Body { def: Some(def), locals, blocks: cfg_blocks, ret_ty: Some(int_ty) };
+        let body = Body {
+            def: Some(def),
+            locals,
+            blocks: cfg_blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(int_ty),
+        };
         let hir = hir_with_defs(defs);
         let mut bodies = FxHashMap::default();
         bodies.insert(def, body);
@@ -10996,6 +11074,58 @@ mod tests {
         assert!(ir.contains("va_start"), "IR missing va_start:\n{ir}");
         assert!(ir.contains("va_arg"), "IR missing va_arg:\n{ir}");
         assert!(ir.contains("va_end"), "IR missing va_end:\n{ir}");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn va_area_rvalue_materializes_hidden_va_list_slot() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+
+        let fn_ty = func_ty(&mut tcx, int_ty, vec![int_ty], true);
+        let fn_name = session.interner.intern("__test_va_area");
+        let mut defs = IndexVec::new();
+        let def = function_def(
+            &mut defs,
+            fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, variadic: true, ..FunctionDefOptions::default() },
+        );
+
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, int_ty, false)); // 0: ret
+        locals.push(cfg_local_decl(None, int_ty, true)); // 1: last param
+        locals.push(cfg_local_decl(None, void_ptr, false)); // 2: __va_area__ value temp
+
+        let va_area_place = local_place(Local(2));
+        let block0 = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign { place: va_area_place, rvalue: Rvalue::BuiltinVaArea },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+
+        let mut cfg_blocks = IndexVec::new();
+        cfg_blocks.push(block0);
+
+        let body = Body {
+            def: Some(def),
+            locals,
+            blocks: cfg_blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(int_ty),
+        };
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(def, body);
+
+        let ir = codegen(&mut session, &tcx, &hir, &bodies).unwrap().ir_text;
+
+        assert!(ir.contains("__va_area__.addr"), "IR missing hidden va_area slot:\n{ir}");
+        assert!(ir.contains("llvm.va_start"), "IR missing va_start for __va_area__:\n{ir}");
     }
 
     #[cfg(feature = "llvm")]
@@ -11063,7 +11193,13 @@ mod tests {
         cfg_blocks.push(block2);
         cfg_blocks.push(block3);
 
-        let body = Body { def: Some(def), locals, blocks: cfg_blocks, ret_ty: Some(int_ty) };
+        let body = Body {
+            def: Some(def),
+            locals,
+            blocks: cfg_blocks,
+            labels: FxHashMap::default(),
+            ret_ty: Some(int_ty),
+        };
         let hir = hir_with_defs(defs);
         let mut bodies = FxHashMap::default();
         bodies.insert(def, body);
@@ -11104,6 +11240,7 @@ mod tests {
                 b.push(cfg_block(vec![assign_ret(int_ty, 0)], TerminatorKind::Return));
                 b
             },
+            labels: FxHashMap::default(),
             ret_ty: Some(int_ty),
         };
 

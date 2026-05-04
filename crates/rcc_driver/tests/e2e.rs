@@ -206,6 +206,58 @@ mod linux {
     }
 
     #[test]
+    fn gnu_va_area_fmt_reaches_libc_vsprintf() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping __va_area__ e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("rcc-driver-va-area-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
+        let c_path = dir.join("va_area_fmt.c");
+        fs::write(
+            &c_path,
+            r#"
+typedef struct {
+  unsigned gp_offset;
+  unsigned fp_offset;
+  void *overflow_arg_area;
+  void *reg_save_area;
+} __va_elem;
+typedef __va_elem va_list[1];
+
+int vsprintf(char *str, const char *fmt, va_list ap);
+int strcmp(const char *a, const char *b);
+int puts(const char *s);
+
+char *fmtbuf(char *buf, char *fmt, ...) {
+  va_list ap;
+  *ap = *(__va_elem *)__va_area__;
+  vsprintf(buf, fmt, ap);
+  return buf;
+}
+
+int main(void) {
+  char buf[64];
+  fmtbuf(buf, "%d %s", 7, "ok");
+  puts(buf);
+  return strcmp(buf, "7 ok");
+}
+"#,
+        )
+        .unwrap_or_else(|err| panic!("write {}: {err}", c_path.display()));
+
+        let fixture = Fixture {
+            name: "gnu_va_area_fmt".into(),
+            c_path,
+            stdout: b"7 ok\n".to_vec(),
+            status: 0,
+        };
+        assert_fixture(&fixture);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn differential_vs_host_cc() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping differential e2e: LLVM backend feature is disabled");

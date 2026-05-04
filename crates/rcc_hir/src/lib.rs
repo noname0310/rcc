@@ -499,6 +499,12 @@ pub enum HirExprKind {
     /// Type checking assigns this expression type `void *`. CFG lowering
     /// resolves the label name to a function-local basic block.
     LabelAddr(Symbol),
+    /// chibicc/GNU compatibility builtin `__va_area__`.
+    ///
+    /// This is not C99. HIR lowering only emits it for variadic functions and
+    /// type checking gives it type `void *`; LLVM codegen materialises the
+    /// current function's hidden varargs save-area object.
+    BuiltinVaArea,
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).
