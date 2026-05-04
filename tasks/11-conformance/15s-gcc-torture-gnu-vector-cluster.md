@@ -1,5 +1,7 @@
 # 11-15s: gcc-torture GNU vector cluster
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal
@@ -23,5 +25,12 @@ needed by gcc-torture.
 - At least one vector runtime case passes or the implementation task split is
   complete.
 
+## Outcome
+The cluster is split into `11-15s1` through `11-15s7`; see
+`docs/gnu-vector-design.md`. A WSL baseline run measured all ten listed cases as
+runtime failures after compilation, which confirms the missing feature is
+first-class vector semantics rather than unrelated parser/codegen crashes.
+
 ## References
 - `docs/gcc-torture-signal-clusters.md`
+- `docs/gnu-vector-design.md`
