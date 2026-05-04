@@ -221,6 +221,11 @@ impl Preprocessor<'_> {
             },
         };
 
+        if self.active_includes.contains_key(&new_file) {
+            self.session.handler.emit(&recursive_include(directive_span, &resolved));
+            return Vec::new();
+        }
+
         // `#pragma once` fast path: a previous inclusion marked this
         // file as include-once, so any further inclusion is an
         // unconditional no-op. Checked ahead of the `#ifndef` guard
@@ -241,7 +246,9 @@ impl Preprocessor<'_> {
             }
         }
 
+        self.active_includes.insert(new_file, ());
         let tokens = self.run(new_file);
+        self.active_includes.remove(&new_file);
 
         // First-inclusion fingerprinting: scan for both the
         // `#pragma once` marker and the canonical `#ifndef` guard
@@ -318,6 +325,25 @@ fn cannot_load_header(span: Span, path: &Path, err: &std::io::Error) -> Diagnost
         }],
         notes: vec![],
         help: vec![],
+    }
+}
+
+fn recursive_include(span: Span, path: &Path) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0021),
+        message: format!("recursive include of `{}`", path.display()),
+        labels: vec![Label {
+            span,
+            message: "this header is already being expanded".into(),
+            primary: true,
+        }],
+        notes: vec![
+            "include guards and `#pragma once` only take effect after the first inclusion \
+             finishes; direct include cycles must be rejected while the file is active"
+                .into(),
+        ],
+        help: vec!["break the include cycle or add a guard around the recursive include".into()],
     }
 }
 
@@ -566,6 +592,25 @@ mod tests {
 
         assert_eq!(text, "intfrom_virtual;");
         assert!(sess.source_dependencies().iter().any(|dep| dep.path == header_path));
+    }
+
+    #[test]
+    fn recursive_virtual_include_is_diagnosed_without_stack_overflow() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_vfs__");
+        let main_path = root.join("main.c");
+        let header_path = root.join("loop.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"loop.h\"\n"));
+        sess.add_virtual_file(header_path.clone(), Arc::from("#include \"loop.h\"\nint after;\n"));
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+
+        assert!(!out.is_empty(), "tokens after the recursive include should still recover");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one recursive-include diagnostic: {diags:?}");
+        assert_eq!(diags[0].code, Some(E0021));
+        assert!(diags[0].message.contains("recursive include"));
     }
 
     #[test]

@@ -55,6 +55,13 @@ pub struct Preprocessor<'a> {
     pub include_guards: FxHashMap<FileId, Symbol>,
     /// Files that should be processed at most once (`#pragma once`).
     pub pragma_once: FxHashMap<FileId, ()>,
+    /// Files currently being expanded through recursive `#include`.
+    ///
+    /// Include guards and `#pragma once` are only detectable after a
+    /// file has been processed at least once. A direct or indirect
+    /// include cycle can therefore recur before those caches populate;
+    /// this active set is the recursion brake for that case.
+    pub active_includes: FxHashMap<FileId, ()>,
     /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
     /// snapshots. These pragmas are not part of C99, but system headers
     /// and conformance fixtures commonly use them as benign state-saving
@@ -95,6 +102,7 @@ impl<'a> Preprocessor<'a> {
             macros: MacroTable::default(),
             include_guards: FxHashMap::default(),
             pragma_once: FxHashMap::default(),
+            active_includes: FxHashMap::default(),
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
             pragma_pack: None,
