@@ -773,6 +773,9 @@ fn mark_memory(chunks: &mut [Eightbyte]) {
 fn unit_kind(chunk: &Eightbyte, size: u64, ty: TyId) -> Result<AbiParamUnitKind, CodegenError> {
     match chunk.class {
         AbiClass::Integer => {
+            if !chunk.floats.is_empty() {
+                return Ok(AbiParamUnitKind::Integer { bits: bits_for_size(size, ty)? });
+            }
             let mut ints = chunk.ints.clone();
             ints.sort_by_key(|part| part.offset);
             match ints.as_slice() {
@@ -1592,7 +1595,13 @@ pub mod backend {
                 (
                     self.def_name(def_data),
                     *ty,
-                    function_linkage(*has_body, *is_static, *is_inline, *is_extern_inline),
+                    function_linkage(
+                        *has_body,
+                        *is_static,
+                        *is_inline,
+                        *is_extern_inline,
+                        self.session.opts.gnu89_inline,
+                    ),
                 )
             };
             let fn_ty = self.type_cx().fn_type_of(ty)?;
@@ -6238,11 +6247,13 @@ pub mod backend {
         is_static: bool,
         is_inline: bool,
         is_extern_inline: bool,
+        gnu89_inline: bool,
     ) -> LlvmLinkage {
-        match (has_body, is_static, is_inline, is_extern_inline) {
-            (_, true, _, _) => LlvmLinkage::Internal,
-            (true, false, true, false) => LlvmLinkage::AvailableExternally,
-            (_, false, _, _) => LlvmLinkage::External,
+        match (has_body, is_static, is_inline, is_extern_inline, gnu89_inline) {
+            (_, true, _, _, _) => LlvmLinkage::Internal,
+            (true, false, true, false, false) => LlvmLinkage::AvailableExternally,
+            (true, false, true, true, true) => LlvmLinkage::AvailableExternally,
+            (_, false, _, _, _) => LlvmLinkage::External,
         }
     }
 
@@ -6379,6 +6390,8 @@ mod tests {
     use rcc_hir::{DefKind, Field, IntRank, Qual, RecordKind};
     #[cfg(feature = "llvm")]
     use rcc_hir::{Linkage, ObjectQuals};
+    #[cfg(feature = "llvm")]
+    use rcc_session::Options;
     use rcc_session::Session;
     use rcc_span::{Symbol, DUMMY_SP};
 
@@ -6764,6 +6777,12 @@ mod tests {
         let two_floats =
             record_def(&mut defs, RecordKind::Struct, vec![field(tcx.float), field(tcx.float)]);
         let two_floats_ty = tcx.intern(Ty::Record(two_floats));
+        let int_float_double = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.int), field(tcx.float), field(tcx.double)],
+        );
+        let int_float_double_ty = tcx.intern(Ty::Record(int_float_double));
         let char_array =
             tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(3), is_vla: false });
         let three_chars = record_def(&mut defs, RecordKind::Struct, vec![field(char_array)]);
@@ -6778,22 +6797,24 @@ mod tests {
         let fn_ty = func_ty(
             &mut tcx,
             ret,
-            vec![pair_ty, mix_ty, two_floats_ty, three_chars_ty, big_ty],
+            vec![pair_ty, mix_ty, two_floats_ty, int_float_double_ty, three_chars_ty, big_ty],
             false,
         );
 
         let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
 
-        assert_eq!(abi.fixed_param_count, 6);
+        assert_eq!(abi.fixed_param_count, 8);
         assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["i64"]);
         assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["i32", "double"]);
         assert_eq!(abi_shapes(&tcx, &abi.params[2]), ["<2 x float>"]);
-        assert_eq!(abi_shapes(&tcx, &abi.params[3]), ["i24"]);
-        assert_eq!(abi_shapes(&tcx, &abi.params[4]), ["ptr"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[3]), ["i64", "double"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[4]), ["i24"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[5]), ["ptr"]);
         assert_eq!(abi.params[1].classes, [AbiClass::Integer, AbiClass::Sse]);
-        assert_eq!(abi.params[4].classes, [AbiClass::Memory]);
+        assert_eq!(abi.params[3].classes, [AbiClass::Integer, AbiClass::Sse]);
+        assert_eq!(abi.params[5].classes, [AbiClass::Memory]);
         assert!(matches!(
-            abi.params[4].kind,
+            abi.params[5].kind,
             AbiParamKind::Indirect { byval: true, align: 8, size: 24 }
         ));
     }
@@ -7121,6 +7142,36 @@ mod tests {
         );
         assert_eq!(cx.global_decl(static_global).unwrap().get_linkage(), LlvmLinkage::Internal);
         assert_eq!(cx.global_decl(external_global).unwrap().get_linkage(), LlvmLinkage::External);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_gnu89_inline_option_emits_plain_inline_definition() {
+        use inkwell::module::Linkage as LlvmLinkage;
+
+        let context = inkwell::context::Context::create();
+        let cap = rcc_errors::CaptureEmitter::new();
+        let handler = rcc_errors::Handler::with_emitter(Box::new(cap));
+        let mut session =
+            Session::with_handler(Options { gnu89_inline: true, ..Options::default() }, handler);
+        let mut tcx = TyCtxt::new();
+        let fn_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let inline_fn_name = session.interner.intern("inline_fn");
+        let mut defs = IndexVec::new();
+        let inline_fn = function_def(
+            &mut defs,
+            inline_fn_name,
+            fn_ty,
+            FunctionDefOptions { has_body: true, is_inline: true, ..FunctionDefOptions::default() },
+        );
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        cx.declare_all().unwrap();
+
+        assert_eq!(cx.function_decl(inline_fn).unwrap().get_linkage(), LlvmLinkage::External);
     }
 
     #[cfg(feature = "llvm")]

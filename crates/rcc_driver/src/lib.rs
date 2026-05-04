@@ -161,6 +161,9 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-function"
             | "gnu-va-area"
             | "chibicc-va-area"
+            | "gnu89-inline"
+            | "gnu-inline"
+            | "chibicc-inline"
     )
 }
 
@@ -367,6 +370,10 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             .feature_flags
             .iter()
             .any(|flag| matches!(flag.as_str(), "gnu-va-area" | "chibicc-va-area")),
+        gnu89_inline: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu89-inline" | "gnu-inline" | "chibicc-inline")),
     }
 }
 

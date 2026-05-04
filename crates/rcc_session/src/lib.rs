@@ -198,6 +198,13 @@ pub struct Options {
     /// area. With this option off, HIR lowering still preserves it inside
     /// variadic functions but emits W0023.
     pub gnu_va_area: bool,
+    /// Enable GNU89/chibicc inline emission semantics.
+    ///
+    /// Strict C99 plain `inline` external-linkage definitions do not provide an
+    /// external definition. chibicc fixtures expect the older GNU89 behaviour
+    /// where a plain inline definition is emitted normally; this option keeps
+    /// that compatibility mode explicit.
+    pub gnu89_inline: bool,
 }
 
 impl Default for Options {
@@ -231,6 +238,7 @@ impl Default for Options {
             gnu_lvalue_comma: false,
             gnu_function_names: false,
             gnu_va_area: false,
+            gnu89_inline: false,
         }
     }
 }
