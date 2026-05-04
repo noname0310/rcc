@@ -1,5 +1,7 @@
 # 11-16f: tcc-tests2 dead-code CFG panic
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-16    **Milestone:** M6
 
 ## Goal
@@ -21,6 +23,17 @@ attempt to terminate an already terminated block.
 - `BodyBuilder::terminate: block ... is already terminated` is covered by a
   regression test.
 
+## Result
+- Fixed conditional and short-circuit lowering so an arm that already
+  terminates does not receive an extra `goto` to the join block.
+- Fixed GNU statement-expression lowering to create an explicit unreachable
+  cleanup block when the statement-expression body terminates before scope
+  exit, keeping StorageLive/StorageDead structurally balanced.
+- `tcc-tests2::87_dead_code` and `tcc-tests2::89_nocode_wanted` both pass.
+- WSL tcc-tests2 baseline after this task: 88 discovered, 70 pass, 9 xfail,
+  5 fail, 4 skip.
+
 ## References
 - `target/wsl/tcc-tests2-16-final.json`
+- `target/wsl/tcc-tests2-16f-final.json`
 - `crates/rcc_cfg/src/build.rs`.

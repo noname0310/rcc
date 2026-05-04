@@ -1179,10 +1179,12 @@ fn lower_short_circuit(
     let rhs_op = lower_as_rvalue(builder, cx, rhs);
     let rhs_ty = cx.body.exprs[rhs].ty;
     let rhs_zero = scalar_zero(cx.tcx, rhs_ty);
-    push_assign(builder, span, result_local, Rvalue::BinaryOp(BinOp::Ne, rhs_op, rhs_zero));
-    // Use the cursor (might differ from rhs_block if rhs itself emitted
-    // sub-blocks); the goto terminates whatever current is.
-    builder.goto(join_block, span);
+    if !builder.is_current_terminated() {
+        push_assign(builder, span, result_local, Rvalue::BinaryOp(BinOp::Ne, rhs_op, rhs_zero));
+        // Use the cursor (might differ from rhs_block if rhs itself emitted
+        // sub-blocks); the goto terminates whatever current is.
+        builder.goto(join_block, span);
+    }
 
     // Continue lowering at the join block.
     builder.switch_to(join_block);
@@ -1243,17 +1245,21 @@ fn lower_ternary(
     // Then arm.
     builder.switch_to(then_block);
     let then_op = lower_as_rvalue(builder, cx, then_expr);
-    if let Some(result_local) = result_local {
-        push_assign(builder, span, result_local, Rvalue::Use(then_op));
+    if !builder.is_current_terminated() {
+        if let Some(result_local) = result_local {
+            push_assign(builder, span, result_local, Rvalue::Use(then_op));
+        }
+        builder.goto(join_block, span);
     }
-    builder.goto(join_block, span);
 
     builder.switch_to(else_block);
     let else_op = lower_as_rvalue(builder, cx, else_expr);
-    if let Some(result_local) = result_local {
-        push_assign(builder, span, result_local, Rvalue::Use(else_op));
+    if !builder.is_current_terminated() {
+        if let Some(result_local) = result_local {
+            push_assign(builder, span, result_local, Rvalue::Use(else_op));
+        }
+        builder.goto(join_block, span);
     }
-    builder.goto(join_block, span);
 
     builder.switch_to(join_block);
 
@@ -1304,7 +1310,9 @@ fn lower_omitted_ternary(
 
         builder.switch_to(else_block);
         let _else_op = lower_as_rvalue(builder, cx, else_expr);
-        builder.goto(join_block, span);
+        if !builder.is_current_terminated() {
+            builder.goto(join_block, span);
+        }
 
         builder.switch_to(join_block);
         return Operand::Const(Const { kind: ConstKind::Int(0), ty });
@@ -1335,8 +1343,10 @@ fn lower_omitted_ternary(
 
     builder.switch_to(else_block);
     let else_op = lower_as_rvalue(builder, cx, else_expr);
-    push_assign(builder, span, result_local, Rvalue::Use(else_op));
-    builder.goto(join_block, span);
+    if !builder.is_current_terminated() {
+        push_assign(builder, span, result_local, Rvalue::Use(else_op));
+        builder.goto(join_block, span);
+    }
 
     builder.switch_to(join_block);
 
@@ -1835,19 +1845,36 @@ fn lower_statement_expression(
         lower_stmt(builder, cx, *stmt);
     }
     let value = if let Some(expr) = result {
-        let value = lower_as_rvalue(builder, cx, expr);
-        let temp = builder.alloc_temp(ty, span);
-        builder.push(Statement {
-            kind: StatementKind::Assign {
-                place: Place { base: temp, projection: Vec::new() },
-                rvalue: Rvalue::Use(value),
-            },
-            span,
-        });
-        Operand::Copy(Place { base: temp, projection: Vec::new() })
+        if builder.is_current_terminated() {
+            Operand::Const(Const { kind: ConstKind::ZeroInit, ty })
+        } else {
+            let value = lower_as_rvalue(builder, cx, expr);
+            if builder.is_current_terminated() {
+                Operand::Const(Const { kind: ConstKind::ZeroInit, ty })
+            } else {
+                let temp = builder.alloc_temp(ty, span);
+                builder.push(Statement {
+                    kind: StatementKind::Assign {
+                        place: Place { base: temp, projection: Vec::new() },
+                        rvalue: Rvalue::Use(value),
+                    },
+                    span,
+                });
+                Operand::Copy(Place { base: temp, projection: Vec::new() })
+            }
+        }
     } else {
         Operand::Const(Const { kind: ConstKind::ZeroInit, ty })
     };
+    if builder.is_current_terminated() {
+        // The statement expression's runtime path cannot fall through, but
+        // its lexical scope still needs a structural cleanup block so the CFG
+        // verifier sees balanced StorageLive/StorageDead markers. The block
+        // is intentionally left unreachable unless an enclosing construct
+        // connects it later as part of its own unreachable continuation.
+        let cleanup = builder.new_block();
+        builder.switch_to(cleanup);
+    }
     builder.exit_scope(span);
     value
 }

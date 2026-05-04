@@ -221,6 +221,8 @@ const FIXTURES: &[Fixture] = &[
 // - 08-20: every edge case is fed through verify_body after build_bodies.
 // - 08-21: source-level order fixtures assert MIR order only; they never depend
 //   on a runtime result for unspecified operand order.
+// - 11-16f: dead conditional arms that contain statement expressions may
+//   terminate themselves; CFG lowering must not add a second goto afterwards.
 const EDGE_FIXTURES: &[EdgeFixture] = &[
     EdgeFixture {
         name: "edge_for_decl_init_prefix_inc",
@@ -278,6 +280,13 @@ const EDGE_FIXTURES: &[EdgeFixture] = &[
         src: "int g(int, int); int f(void) { int a = 0; int b = 0; return g(a = 1, b = 2); }",
         functions: 1,
     },
+    EdgeFixture {
+        name: "edge_dead_stmt_expr_conditional_arm",
+        task: "11-16f",
+        review_finding: "conditional lowering must not double-terminate a dead statement-expression arm",
+        src: "extern int printf(const char *, ...); void f(void) { (1 ? printf(\"ok\\n\") : ({ loop: printf(\"bad\\n\"); goto loop; })); }",
+        functions: 1,
+    },
 ];
 
 #[test]
@@ -301,7 +310,10 @@ fn cfg_fixture_matrix_satisfies_invariants() {
 
 #[test]
 fn edge_source_pipeline_stabilization_fixtures() {
-    assert!(EDGE_FIXTURES.len() >= 8, "expected coverage for tasks 08-16 through 08-21");
+    assert!(
+        EDGE_FIXTURES.len() >= 9,
+        "expected coverage for tasks 08-16 through 08-21 plus 11-16f"
+    );
 
     for fixture in EDGE_FIXTURES {
         let lowered = lower_snippet(fixture.name, fixture.src);
