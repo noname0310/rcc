@@ -21,9 +21,9 @@ use rcc_ast::{
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
-    Body, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId, HirExprKind,
-    HirStmtKind, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp, RecordKind, TyCtxt,
-    TyId, ValueCat,
+    Body, ConvertKind, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId,
+    HirExprKind, HirStmtKind, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp,
+    RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -121,7 +121,7 @@ fn gnu_builtin_libcalls_injects_external_libc_declarations() {
     rcc_typeck::check(&mut sess, &mut tcx, &mut hir);
 
     assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
-    for name in ["memcpy", "strlen", "abort", "printf"] {
+    for name in ["memcpy", "strlen", "abort", "printf", "vprintf", "vfprintf"] {
         let def = hir
             .defs
             .iter()
@@ -131,6 +131,18 @@ fn gnu_builtin_libcalls_injects_external_libc_declarations() {
         if name == "strlen" {
             let DefKind::Function { ty, .. } = def.kind else { unreachable!() };
             assert!(matches!(tcx.get(ty), Ty::Func { ret, .. } if *ret == tcx.ulong));
+        }
+        if matches!(name, "vprintf" | "vfprintf") {
+            let DefKind::Function { ty, .. } = def.kind else { unreachable!() };
+            let Ty::Func { params, .. } = tcx.get(ty) else {
+                panic!("expected function type for {name}");
+            };
+            let va_param = params.last().expect("v*printf should have a va_list parameter");
+            assert!(
+                matches!(tcx.get(*va_param), Ty::Ptr(q) if q.ty == tcx.builtin_va_list),
+                "{name} must use pointer-adjusted va_list, got {:?}",
+                tcx.get(*va_param)
+            );
         }
     }
 }
@@ -2031,6 +2043,28 @@ fn snippet_function_declaration_is_function_prototype() {
 }
 
 #[test]
+fn builtin_va_list_function_parameter_adjusts_to_pointer() {
+    let (hir, tcx) = lower_snippet("typedef __builtin_va_list va_list; int sink(va_list);");
+    let def = hir
+        .defs
+        .iter()
+        .find(|def| matches!(def.kind, DefKind::Function { .. }))
+        .expect("expected function declaration");
+    let DefKind::Function { ty, .. } = def.kind else { unreachable!() };
+    match tcx.get(ty) {
+        Ty::Func { params, .. } => {
+            assert_eq!(params.len(), 1);
+            assert!(
+                matches!(tcx.get(params[0]), Ty::Ptr(q) if q.ty == tcx.builtin_va_list),
+                "__builtin_va_list parameter should adjust to pointer, got {:?}",
+                tcx.get(params[0])
+            );
+        }
+        other => panic!("expected function type, got {other:?}"),
+    }
+}
+
+#[test]
 fn snippet_function_prototype_storage_flags_are_preserved() {
     let (hir, _tcx) = lower_snippet("static int s(int); extern int e(int);");
     let DefKind::Function { has_body, is_static, is_inline, is_extern_inline, .. } =
@@ -3590,6 +3624,65 @@ fn regression_gate_block_scope_extern_binds_file_scope_object() {
     assert!(
         !expr_references_local(body, ret, Local(0)),
         "inner `extern int v` must not resolve to the block local"
+    );
+}
+
+#[test]
+fn regression_gate_float_literal_suffix_survives_typeck() {
+    let (hir, tcx, cap, _sess) = lower_and_typeck_snippet(
+        "float f(void) { return 1.0f; } long double g(void) { return 2.0L; }",
+    );
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    let literal_tys = hir
+        .bodies
+        .values()
+        .flat_map(|body| body.exprs.iter())
+        .filter_map(|expr| matches!(expr.kind, HirExprKind::FloatConst(_)).then_some(expr.ty))
+        .collect::<Vec<_>>();
+    assert!(literal_tys.contains(&tcx.float), "`1.0f` should remain float");
+    assert!(literal_tys.contains(&tcx.long_double), "`2.0L` should remain long double");
+}
+
+#[test]
+fn regression_gate_va_list_call_argument_decays_to_pointer() {
+    let src = r#"
+        typedef __builtin_va_list va_list;
+        void sink(va_list);
+        void f(int n, ...) {
+            va_list ap;
+            sink(ap);
+        }
+    "#;
+    let (hir, tcx, cap, sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let f = def_named(&hir, &sess, "f");
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    let call = body
+        .exprs
+        .iter()
+        .find(|expr| matches!(expr.kind, HirExprKind::Call { .. }))
+        .expect("missing sink call");
+    let HirExprKind::Call { args, .. } = &call.kind else { unreachable!() };
+    assert_eq!(args.len(), 1);
+    let arg = args[0];
+    assert!(
+        matches!(tcx.get(body.exprs[arg].ty), Ty::Ptr(q) if q.ty == tcx.builtin_va_list),
+        "va_list call argument should be pointer-adjusted, got {:?}",
+        tcx.get(body.exprs[arg].ty)
+    );
+    assert!(
+        matches!(body.exprs[arg].kind, HirExprKind::Convert { kind: ConvertKind::ArrayToPtr, .. }),
+        "va_list call argument should carry array-style decay, got {:?}",
+        body.exprs[arg].kind
     );
 }
 

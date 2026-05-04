@@ -1,5 +1,9 @@
 # 11-15p: gcc-torture varargs cluster
 
+> ✓ done — 2026-05-04 — fixed SysV scalar, long double, pointer-to-va_list,
+> and va_list parameter-adjustment runtime bugs; WSL gcc-torture cluster is
+> 4/4 pass.
+
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal

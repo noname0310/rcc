@@ -2932,20 +2932,134 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-            let ap_place = match ap {
-                Operand::Copy(place) | Operand::Move(place) => place,
-                Operand::Const(_) => {
-                    return Err(CodegenError::Internal(
-                        "va_arg operand must be an addressable place".to_owned(),
-                    ));
-                }
-            };
-            let ap_ptr = self.emit_place_addr(ap_place, locals, body)?;
+            let ap_ptr = self.va_arg_list_ptr(ap, locals, body)?;
             if self.is_memory_aggregate_ty(ty) {
                 return self.emit_aggregate_va_arg(ap_ptr, ty);
             }
             let llvm_ty = self.type_cx().basic_type_of(ty)?;
+            if matches!(self.tcx.get(ty), Ty::Float(FloatKind::F80)) {
+                let layout = self.memory_layout(ty)?;
+                let src = self.va_arg_overflow_addr(ap_ptr, layout.align, layout.size)?;
+                return self
+                    .builder
+                    .build_load(llvm_ty, src, "va_arg.longdouble")
+                    .map_err(builder_error);
+            }
+            if let Some((offset_field, limit, slot_bytes, name)) = self.scalar_va_arg_slot(ty) {
+                return self.emit_scalar_va_arg(
+                    ap_ptr,
+                    ty,
+                    llvm_ty,
+                    offset_field,
+                    limit,
+                    slot_bytes,
+                    name,
+                );
+            }
             self.builder.build_va_arg(ap_ptr, llvm_ty, "va_arg").map_err(builder_error)
+        }
+
+        fn va_arg_list_ptr(
+            &self,
+            ap: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<PointerValue<'ctx>, CodegenError> {
+            match ap {
+                Operand::Copy(place) | Operand::Move(place) => {
+                    let ap_ty = self.place_ty(place, body)?;
+                    if matches!(self.tcx.get(ap_ty), Ty::Ptr(q) if q.ty == self.tcx.builtin_va_list)
+                    {
+                        return match self.emit_operand_value(ap, locals, body)? {
+                            BasicValueEnum::PointerValue(ptr) => Ok(ptr),
+                            other => Err(CodegenError::Internal(format!(
+                                "va_arg pointer operand lowered to non-pointer value {other:?}"
+                            ))),
+                        };
+                    }
+                    self.emit_place_addr(place, locals, body)
+                }
+                Operand::Const(_) => Err(CodegenError::Internal(
+                    "va_arg operand must be an addressable place".to_owned(),
+                )),
+            }
+        }
+
+        fn scalar_va_arg_slot(&self, ty: TyId) -> Option<(u64, u32, u32, &'static str)> {
+            match self.tcx.get(ty) {
+                Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) => Some((0, 48, 8, "gp")),
+                Ty::Float(FloatKind::F32 | FloatKind::F64) => Some((1, 176, 16, "fp")),
+                _ => None,
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn emit_scalar_va_arg(
+            &self,
+            ap_ptr: PointerValue<'ctx>,
+            ty: TyId,
+            llvm_ty: BasicTypeEnum<'ctx>,
+            offset_field: u64,
+            limit: u32,
+            slot_bytes: u32,
+            name: &str,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let layout = self.memory_layout(ty)?;
+            let offset_ptr =
+                self.va_list_i32_field_ptr(ap_ptr, offset_field, &format!("va.{name}_offset.ptr"))?;
+            let offset = self
+                .builder
+                .build_load(self.context.i32_type(), offset_ptr, &format!("va.{name}_offset"))
+                .map_err(builder_error)?
+                .into_int_value();
+            let can_use_reg =
+                self.va_arg_offset_fits(offset, limit, slot_bytes, &format!("va.{name}.ok"))?;
+
+            let reg_save_area_ptr = self.va_list_ptr_field_ptr(ap_ptr, 3, "va.reg_save.ptr")?;
+            let reg_save_area = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    reg_save_area_ptr,
+                    "va.reg_save",
+                )
+                .map_err(builder_error)?
+                .into_pointer_value();
+            let reg_offset = self
+                .builder
+                .build_int_z_extend(offset, self.context.i64_type(), "va.scalar.slot.ext")
+                .map_err(builder_error)?;
+            let reg_ptr = self.build_gep(
+                self.context.i8_type(),
+                reg_save_area,
+                &[reg_offset],
+                "va.scalar.reg.slot",
+            )?;
+
+            let (overflow, overflow_next, overflow_ptr) =
+                self.va_arg_overflow_candidate(ap_ptr, layout.align, layout.size)?;
+            let selected_ptr = self
+                .builder
+                .build_select(can_use_reg, reg_ptr, overflow, "va.scalar.addr")
+                .map_err(builder_error)?
+                .into_pointer_value();
+
+            let next_offset = self.add_i32_const(offset, slot_bytes, "va.scalar.offset.next")?;
+            let selected_offset = self
+                .builder
+                .build_select(can_use_reg, next_offset, offset, "va.scalar.offset.select")
+                .map_err(builder_error)?
+                .into_int_value();
+            self.builder.build_store(offset_ptr, selected_offset).map_err(builder_error)?;
+
+            let selected_overflow = self
+                .builder
+                .build_select(can_use_reg, overflow, overflow_next, "va.scalar.overflow.select")
+                .map_err(builder_error)?
+                .into_pointer_value();
+            self.builder.build_store(overflow_ptr, selected_overflow).map_err(builder_error)?;
+
+            self.builder.build_load(llvm_ty, selected_ptr, "va_arg.scalar").map_err(builder_error)
         }
 
         fn emit_aggregate_va_arg(
@@ -5364,6 +5478,14 @@ pub mod backend {
         // ---------------------------------------------------------------
 
         fn va_list_ptr(&self, operand: &Operand) -> Result<PointerValue<'ctx>, CodegenError> {
+            if self.operand_is_va_list_pointer(operand)? {
+                return match self.emit_operand_value(operand)? {
+                    BasicValueEnum::PointerValue(ptr) => Ok(ptr),
+                    other => Err(CodegenError::Internal(format!(
+                        "va_list pointer operand lowered to non-pointer value {other:?}"
+                    ))),
+                };
+            }
             self.cx.emit_place_addr(
                 match operand {
                     Operand::Copy(place) | Operand::Move(place) => place,
@@ -5376,6 +5498,11 @@ pub mod backend {
                 &self.locals,
                 self.body,
             )
+        }
+
+        fn operand_is_va_list_pointer(&self, operand: &Operand) -> Result<bool, CodegenError> {
+            let ty = self.operand_ty(operand)?;
+            Ok(matches!(self.cx.tcx.get(ty), Ty::Ptr(q) if q.ty == self.cx.tcx.builtin_va_list))
         }
 
         fn va_start_intrinsic(&self) -> FunctionValue<'ctx> {
@@ -7279,20 +7406,17 @@ mod tests {
     }
 
     #[test]
-    fn sysv_abi_classifies_builtin_va_list_param_as_memory() {
+    fn sysv_abi_classifies_builtin_va_list_pointer_param_as_integer() {
         let mut tcx = TyCtxt::new();
         let ret = tcx.void;
-        let va_list = tcx.builtin_va_list;
-        let fn_ty = func_ty(&mut tcx, ret, vec![va_list], false);
+        let va_list_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.builtin_va_list)));
+        let fn_ty = func_ty(&mut tcx, ret, vec![va_list_ptr], false);
         let defs = IndexVec::new();
 
         let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
 
-        assert_eq!(abi.params[0].classes, [AbiClass::Memory]);
-        assert!(matches!(
-            abi.params[0].kind,
-            AbiParamKind::Indirect { byval: true, align: 8, size: 24 }
-        ));
+        assert_eq!(abi.params[0].classes, [AbiClass::Integer]);
+        assert!(matches!(abi.params[0].kind, AbiParamKind::Direct(_)));
     }
 
     #[test]

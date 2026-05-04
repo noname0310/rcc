@@ -258,6 +258,14 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
                 push_assign(builder, span, temp, Rvalue::AddressOf(place));
                 return Operand::Copy(Place { base: temp, projection: Vec::new() });
             }
+            if *kind == ConvertKind::ArrayToPtr
+                && matches!(cx.tcx.get(cx.body.exprs[*operand].ty), Ty::BuiltinVaList)
+            {
+                let place = lower_as_place(builder, cx, *operand);
+                let temp = builder.alloc_temp(ty, span);
+                push_assign(builder, span, temp, Rvalue::AddressOf(place));
+                return Operand::Copy(Place { base: temp, projection: Vec::new() });
+            }
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
             if matches!(kind, ConvertKind::RealToComplex | ConvertKind::ComplexToReal) {

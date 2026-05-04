@@ -64,6 +64,7 @@ fn install_gnu_builtin_libcalls(
         is_restrict: false,
     }));
     let char_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.char_)));
+    let va_list_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.builtin_va_list)));
 
     let builtins = [
         ("abort", tcx.void, Vec::new(), false),
@@ -72,8 +73,8 @@ fn install_gnu_builtin_libcalls(
         ("fprintf", tcx.int, vec![void_ptr, const_char_ptr], true),
         ("sprintf", tcx.int, vec![char_ptr, const_char_ptr], true),
         ("snprintf", tcx.int, vec![char_ptr, tcx.ulong, const_char_ptr], true),
-        ("vprintf", tcx.int, vec![const_char_ptr, tcx.builtin_va_list], false),
-        ("vfprintf", tcx.int, vec![void_ptr, const_char_ptr, tcx.builtin_va_list], false),
+        ("vprintf", tcx.int, vec![const_char_ptr, va_list_ptr], false),
+        ("vfprintf", tcx.int, vec![void_ptr, const_char_ptr, va_list_ptr], false),
         ("malloc", void_ptr, vec![tcx.ulong], false),
         ("alloca", void_ptr, vec![tcx.ulong], false),
         ("memcpy", void_ptr, vec![void_ptr, const_void_ptr, tcx.ulong], false),
@@ -3400,13 +3401,17 @@ pub fn lower_expr(
     resolver: &mut Resolver,
     session: &mut Session,
 ) -> HirExprId {
+    let mut initial_ty = tcx.error;
     let kind: HirExprKind = match &expr.kind {
         rcc_ast::ExprKind::IntLit(lit) => HirExprKind::IntLiteral {
             value: i128::try_from(lit.value).unwrap_or(i128::MAX),
             base: hir_int_base(lit.base),
             suffix: hir_int_suffix(lit.suffix),
         },
-        rcc_ast::ExprKind::FloatLit(lit) => HirExprKind::FloatConst(lit.value),
+        rcc_ast::ExprKind::FloatLit(lit) => {
+            initial_ty = hir_float_literal_ty(lit.suffix, tcx);
+            HirExprKind::FloatConst(lit.value)
+        }
         rcc_ast::ExprKind::CharLit(lit) => HirExprKind::IntConst(i128::from(lit.value)),
         rcc_ast::ExprKind::StringLit(lit) => {
             let def_id = intern_string_literal(lit, expr.span, crate_, tcx, resolver);
@@ -3825,7 +3830,7 @@ pub fn lower_expr(
 
     let expr_id = body.exprs.push(HirExpr {
         id: HirExprId(0),
-        ty: tcx.error,
+        ty: initial_ty,
         value_cat: ValueCat::RValue,
         span: expr.span,
         kind,
@@ -3851,6 +3856,14 @@ fn hir_int_suffix(suffix: rcc_ast::IntSuffix) -> IntLiteralSuffix {
         rcc_ast::IntSuffix::UL => IntLiteralSuffix::UL,
         rcc_ast::IntSuffix::LL => IntLiteralSuffix::LL,
         rcc_ast::IntSuffix::ULL => IntLiteralSuffix::ULL,
+    }
+}
+
+fn hir_float_literal_ty(suffix: rcc_ast::FloatSuffix, tcx: &TyCtxt) -> TyId {
+    match suffix {
+        rcc_ast::FloatSuffix::None => tcx.double,
+        rcc_ast::FloatSuffix::F => tcx.float,
+        rcc_ast::FloatSuffix::L => tcx.long_double,
     }
 }
 
@@ -4969,6 +4982,13 @@ fn adjust_param_type(ty: TyId, tcx: &mut TyCtxt) -> TyId {
         Ty::Array { elem, .. } => {
             // Decay to pointer to element type.
             tcx.intern(Ty::Ptr(elem))
+        }
+        Ty::BuiltinVaList => {
+            // On the SysV/glibc target model, `__builtin_va_list` is
+            // represented as the object payload of the real single-element
+            // array typedef. Function parameters therefore adjust to a
+            // pointer, matching clang's libc ABI for `vprintf`.
+            tcx.intern(Ty::Ptr(Qual::plain(ty)))
         }
         Ty::Func { .. } => {
             // Decay to pointer to function.

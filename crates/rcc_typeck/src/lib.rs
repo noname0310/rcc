@@ -493,7 +493,9 @@ pub fn visit_expr(
             expr_id
         }
         HirExprKind::FloatConst(_) => {
-            body.exprs[expr_id].ty = tcx.double;
+            if body.exprs[expr_id].ty == tcx.error {
+                body.exprs[expr_id].ty = tcx.double;
+            }
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             expr_id
         }
@@ -2308,6 +2310,12 @@ pub fn decay_if_needed(
     let (decay_kind, new_ty) = match tcx.get(body.exprs[expr].ty).clone() {
         Ty::Array { elem, .. } if ctx == DecayContext::Normal => {
             (ConvertKind::ArrayToPtr, tcx.intern(Ty::Ptr(elem)))
+        }
+        Ty::BuiltinVaList if ctx == DecayContext::Normal => {
+            // Our target model stores a `va_list` object as the SysV payload
+            // but semantically follows glibc's one-element array typedef.
+            // Ordinary value contexts therefore decay it to a pointer.
+            (ConvertKind::ArrayToPtr, tcx.intern(Ty::Ptr(Qual::plain(body.exprs[expr].ty))))
         }
         Ty::Func { .. } if ctx == DecayContext::Normal => {
             // `func -> &func` is type "pointer to function", with no
