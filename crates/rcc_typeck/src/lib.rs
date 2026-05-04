@@ -1644,7 +1644,27 @@ fn type_binary(
     body.exprs[expr_id].ty = result_ty;
     body.exprs[expr_id].value_cat = ValueCat::RValue;
     body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs: lhs_final, rhs: rhs_final };
-    expr_id
+
+    let result_precision = match op {
+        BinOp::Add
+        | BinOp::Sub
+        | BinOp::Mul
+        | BinOp::Div
+        | BinOp::Rem
+        | BinOp::BitAnd
+        | BinOp::BitXor
+        | BinOp::BitOr => merge_bitfield_precision(lhs_precision, rhs_precision),
+        BinOp::Shl | BinOp::Shr => lhs_precision,
+        BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::Eq
+        | BinOp::Ne
+        | BinOp::LogAnd
+        | BinOp::LogOr => None,
+    };
+    apply_bitfield_precision(body, tcx, expr_id, result_ty, result_precision)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1941,6 +1961,20 @@ fn apply_bitfield_precision(
         push_bitfield_precision(body, expr, ty, precision)
     } else {
         expr
+    }
+}
+
+fn merge_bitfield_precision(
+    lhs: Option<BitfieldPrecision>,
+    rhs: Option<BitfieldPrecision>,
+) -> Option<BitfieldPrecision> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(BitfieldPrecision {
+            width: lhs.width.max(rhs.width),
+            signed: lhs.signed && rhs.signed,
+        }),
+        (Some(precision), None) | (None, Some(precision)) => Some(precision),
+        (None, None) => None,
     }
 }
 
@@ -5587,6 +5621,14 @@ mod tests {
         body.root = Some(stmt_id);
     }
 
+    fn root_expr(body: &Body) -> HirExprId {
+        let root = body.root.expect("root stmt");
+        let HirStmtKind::Expr(expr) = body.stmts[root].kind else {
+            panic!("expected expression root");
+        };
+        expr
+    }
+
     fn set_root_return(body: &mut Body, expr: Option<HirExprId>) -> HirStmtId {
         let stmt_id = body.stmts.push(HirStmt {
             id: HirStmtId(0),
@@ -5848,6 +5890,84 @@ mod tests {
                 kind: ConvertKind::LvalueToRvalue
             } if got_member == member
         ));
+
+        let root = root_expr(&body);
+        let HirExprKind::Convert {
+            operand: result_operand,
+            kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+        } = body.exprs[root].kind
+        else {
+            panic!("expected result bit-field precision wrapper, got {:?}", body.exprs[root].kind);
+        };
+        assert_eq!(result_operand, bin);
+        assert_eq!(body.exprs[root].ty, body.exprs[bin].ty);
+    }
+
+    #[test]
+    fn shift_expression_wraps_wide_bitfield_result_precision() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let u40 = session.interner.intern("u40");
+        let record = DefId(73);
+        let rec_ty = tcx.intern(Ty::Record(record));
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        def_info.insert(
+            record,
+            DefSnapshot {
+                ty: None,
+                value_cat: ValueCat::RValue,
+                enumerator_value: None,
+                object_quals: ObjectQuals::none(),
+                record_fields: Some(vec![FieldSnapshot {
+                    name: Some(u40),
+                    ty: tcx.ulong_long,
+                    bit_width: Some(40),
+                    ms_bitfields: false,
+                    quals: ObjectQuals::none(),
+                }]),
+            },
+        );
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: u40, field_span: DUMMY_SP },
+        );
+        let rhs = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::IntLiteral {
+                value: 32,
+                base: IntLiteralBase::Decimal,
+                suffix: IntLiteralSuffix::None,
+            },
+        );
+        let bin = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::Binary { op: BinOp::Shl, lhs: member, rhs },
+        );
+        set_root_expr(&mut body, bin);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        let root = root_expr(&body);
+        let HirExprKind::Convert {
+            operand: result_operand,
+            kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+        } = body.exprs[root].kind
+        else {
+            panic!(
+                "expected shift result bit-field precision wrapper, got {:?}",
+                body.exprs[root].kind
+            );
+        };
+        assert_eq!(result_operand, bin);
+        assert_eq!(body.exprs[root].ty, body.exprs[bin].ty);
     }
 
     #[test]

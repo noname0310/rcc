@@ -208,7 +208,7 @@ fn aggregate_local_field() {
     define i32 @f() {
     entry:
       %ret.addr = alloca i32, align 4
-      %local.addr = alloca %rcc.record.0, align 8
+      %local.addr = alloca %rcc.record.0, align 4
       call void @llvm.lifetime.start.p0(i64 8, ptr %local.addr)
       call void @llvm.memset.p0.i64(ptr align 4 %local.addr, i8 0, i64 8, i1 false)
       store i32 1, ptr %local.addr, align 4

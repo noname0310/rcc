@@ -96,7 +96,7 @@ fn response_file_preserves_windows_paths_and_escaped_quotes() {
     let cli = parse(&["rcc".to_owned(), at(&rsp)]).expect("parse escaping response file");
 
     assert_eq!(cli.defines, [("MSG".to_owned(), Some("\"hello\"".to_owned()))]);
-    assert_eq!(cli.input, [PathBuf::from("C:\\\\src dir\\\\hello.c")]);
+    assert_eq!(cli.input, [PathBuf::from(r"C:\src dir\hello.c")]);
 }
 
 #[test]

@@ -214,13 +214,21 @@ mod linux {
     }
 
     fn compile_with_host_cc(fixture: &Fixture, exe: &Path) -> Output {
+        let std = if fixture.name.starts_with("gnu_") { "-std=gnu99" } else { "-std=c99" };
         Command::new("cc")
-            .arg("-std=c99")
+            .arg(std)
             .arg(&fixture.c_path)
             .arg("-o")
             .arg(exe)
             .output()
             .unwrap_or_else(|err| panic!("{}: failed to run host cc: {err}", fixture.name))
+    }
+
+    fn host_cc_differential_supported(fixture: &Fixture) -> bool {
+        // This fixture remains covered by `e2e_fixtures`. Some host compilers
+        // reject its GNU lvalue-comma expression even in GNU dialect modes, so
+        // it cannot act as a portable differential oracle.
+        fixture.name != "gnu_control_flow"
     }
 
     fn report_path() -> PathBuf {
@@ -1096,6 +1104,11 @@ const unsigned long v = 0xdeadbeefL;
         let mut failures = Vec::new();
         let mut report = Vec::new();
         for fixture in &fixtures {
+            if !host_cc_differential_supported(fixture) {
+                report.push(format!("{}\tskipped\tskipped\t0\t0", fixture.name));
+                continue;
+            }
+
             let rcc_exe = TempExe::new(&format!("{}-rcc", fixture.name));
             let cc_exe = TempExe::new(&format!("{}-cc", fixture.name));
             compile_fixture(fixture, &rcc_exe.path)
