@@ -86,6 +86,8 @@ fn audit_sizeof_layout(session: &mut Session, hir_body: &HirBody, layout: &Layou
                 }
             }
             HirExprKind::SizeofType(ty) => layout.layout_of(ty),
+            HirExprKind::AlignofExpr(operand) => layout.layout_of(hir_body.exprs[operand].ty),
+            HirExprKind::AlignofType(ty) => layout.layout_of(ty),
             _ => continue,
         };
         if let Err(err) = result {
@@ -976,6 +978,7 @@ impl BodyBuilder {
             | HirExprKind::Convert { operand, .. }
             | HirExprKind::Cast { operand, .. }
             | HirExprKind::SizeofExpr(operand)
+            | HirExprKind::AlignofExpr(operand)
             | HirExprKind::AddressOf(operand)
             | HirExprKind::Deref(operand) => {
                 self.collect_expr_labels(hir_body, *operand, local_map, scopes);
@@ -1057,7 +1060,8 @@ impl BodyBuilder {
             | HirExprKind::DefRef(_)
             | HirExprKind::LabelAddr(_)
             | HirExprKind::BuiltinVaArea
-            | HirExprKind::SizeofType(_) => {}
+            | HirExprKind::SizeofType(_)
+            | HirExprKind::AlignofType(_) => {}
         }
     }
 

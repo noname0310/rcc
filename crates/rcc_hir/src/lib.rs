@@ -119,6 +119,10 @@ pub enum DefKind {
     Record {
         /// Struct or union?
         kind: RecordKind,
+        /// GNU/MS-compatible packed record layout.
+        packed: bool,
+        /// Microsoft-compatible bit-field allocation policy.
+        ms_bitfields: bool,
         /// GNU `aligned(N)` override, when enabled by the frontend.
         align_override: Option<u32>,
         /// GNU `scalar_storage_order("...")` record attribute, if present.
@@ -479,6 +483,10 @@ pub enum HirExprKind {
     SizeofExpr(HirExprId),
     /// `sizeof(type-name)`.
     SizeofType(TyId),
+    /// GNU `__alignof__ expr`.
+    AlignofExpr(HirExprId),
+    /// GNU `__alignof__(type-name)`.
+    AlignofType(TyId),
     /// C99 compound literal `(type-name){ initializer-list }`.
     ///
     /// The type part is preserved here; storage materialisation is handled by

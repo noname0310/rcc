@@ -746,6 +746,8 @@ fn create_incomplete_tag(
     let kind = match expected_kind {
         TagKind::Struct => DefKind::Record {
             kind: RecordKind::Struct,
+            packed: false,
+            ms_bitfields: false,
             align_override: None,
             scalar_storage_order: None,
             layout: None,
@@ -753,6 +755,8 @@ fn create_incomplete_tag(
         },
         TagKind::Union => DefKind::Record {
             kind: RecordKind::Union,
+            packed: false,
+            ms_bitfields: false,
             align_override: None,
             scalar_storage_order: None,
             layout: None,
@@ -1034,6 +1038,7 @@ fn walk_expr_labels(
         }
         rcc_ast::ExprKind::Unary { operand, .. }
         | rcc_ast::ExprKind::SizeofExpr(operand)
+        | rcc_ast::ExprKind::AlignofExpr(operand)
         | rcc_ast::ExprKind::Paren(operand) => {
             walk_expr_labels(operand, resolver, session, pass);
         }
@@ -1095,7 +1100,7 @@ fn walk_expr_labels(
             walk_type_name_labels(ty, resolver, session, pass);
             walk_expr_labels(expr, resolver, session, pass);
         }
-        rcc_ast::ExprKind::SizeofType(ty) => {
+        rcc_ast::ExprKind::SizeofType(ty) | rcc_ast::ExprKind::AlignofType(ty) => {
             walk_type_name_labels(ty, resolver, session, pass);
         }
         rcc_ast::ExprKind::CompoundLiteral { ty, init } => {
@@ -1453,6 +1458,7 @@ fn populate_switch_case_tables_in_expr(
         | HirExprKind::Convert { operand, .. }
         | HirExprKind::Cast { operand, .. }
         | HirExprKind::SizeofExpr(operand)
+        | HirExprKind::AlignofExpr(operand)
         | HirExprKind::AddressOf(operand)
         | HirExprKind::Deref(operand)
         | HirExprKind::BuiltinVaEnd { ap: operand } => {
@@ -1529,6 +1535,7 @@ fn populate_switch_case_tables_in_expr(
         | HirExprKind::DefRef(_)
         | HirExprKind::BuiltinVaArea
         | HirExprKind::SizeofType(_)
+        | HirExprKind::AlignofType(_)
         | HirExprKind::LabelAddr(_) => {}
     }
 }
@@ -4188,6 +4195,22 @@ pub fn lower_expr(
             );
             HirExprKind::SizeofType(ty)
         }
+        rcc_ast::ExprKind::AlignofExpr(inner) => {
+            let inner_id = lower_expr(inner, body, scope, crate_, tcx, resolver, session);
+            HirExprKind::AlignofExpr(inner_id)
+        }
+        rcc_ast::ExprKind::AlignofType(ty) => {
+            let ty = lower_type_name_in_scope(
+                ty,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            HirExprKind::AlignofType(ty)
+        }
         rcc_ast::ExprKind::CompoundLiteral { ty, init } => {
             let ty = lower_type_name_in_scope(
                 ty,
@@ -4946,7 +4969,10 @@ fn lower_typeof_expr_to_ty(
             let len = lit.bytes.len().saturating_add(1) as u64;
             tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(len), is_vla: false })
         }
-        rcc_ast::ExprKind::SizeofExpr(_) | rcc_ast::ExprKind::SizeofType(_) => tcx.ulong,
+        rcc_ast::ExprKind::SizeofExpr(_)
+        | rcc_ast::ExprKind::SizeofType(_)
+        | rcc_ast::ExprKind::AlignofExpr(_)
+        | rcc_ast::ExprKind::AlignofType(_) => tcx.ulong,
         _ => {
             session
                 .handler
@@ -5070,6 +5096,7 @@ fn lower_type_from_parts_in_scope(
         return tcx.error;
     }
     apply_aligned_attr_override_to_record(base, &specs.attrs, tcx, crate_, session);
+    apply_packed_attr_to_record(base, &specs.attrs, tcx, crate_, session);
     apply_scalar_storage_order_attr_to_record(base, &specs.attrs, tcx, crate_, session);
     let mut ty = apply_declarator_with_base_quals_in_scope(
         base,
@@ -5085,6 +5112,7 @@ fn lower_type_from_parts_in_scope(
     ty = apply_vector_size_attrs_to_type(ty, &specs.attrs, tcx, session);
     ty = apply_vector_size_attrs_to_type(ty, &declarator.attrs, tcx, session);
     apply_aligned_attr_override_to_record(ty, &declarator.attrs, tcx, crate_, session);
+    apply_packed_attr_to_record(ty, &declarator.attrs, tcx, crate_, session);
     apply_scalar_storage_order_attr_to_record(ty, &declarator.attrs, tcx, crate_, session);
     ty
 }
@@ -5110,6 +5138,37 @@ fn apply_aligned_attr_override_to_record(
 
 fn aligned_attr_override(attrs: &[rcc_ast::Attribute], session: &Session) -> Option<u32> {
     attrs.iter().filter_map(|attr| aligned_attr_value(attr, session)).max()
+}
+
+fn apply_packed_attr_to_record(
+    ty: TyId,
+    attrs: &[rcc_ast::Attribute],
+    tcx: &TyCtxt,
+    crate_: &mut HirCrate,
+    session: &Session,
+) {
+    if !packed_attr_present(attrs, session) {
+        return;
+    }
+    let Ty::Record(def_id) = *tcx.get(ty) else {
+        return;
+    };
+    let DefKind::Record { packed, .. } = &mut crate_.defs[def_id].kind else {
+        return;
+    };
+    *packed = true;
+}
+
+fn packed_attr_present(attrs: &[rcc_ast::Attribute], session: &Session) -> bool {
+    attrs
+        .iter()
+        .any(|attr| matches!(session.interner.get(attr.name), "packed" | "__packed__" | "packed__"))
+}
+
+fn ms_struct_attr_present(attrs: &[rcc_ast::Attribute], session: &Session) -> bool {
+    attrs.iter().any(|attr| {
+        matches!(session.interner.get(attr.name), "ms_struct" | "__ms_struct__" | "ms_struct__")
+    })
 }
 
 fn aligned_attr_value(attr: &rcc_ast::Attribute, session: &Session) -> Option<u32> {
@@ -5577,6 +5636,8 @@ fn lower_record_spec_to_ty(
             span: spec.span,
             kind: DefKind::Record {
                 kind: hir_kind,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order: None,
                 layout: None,
@@ -6231,6 +6292,19 @@ fn eval_array_bound_as_i128(
             let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
             Some(i128::from(layout.size))
         }
+        rcc_ast::ExprKind::AlignofType(type_name) => {
+            let ty = lower_type_name_in_scope(
+                type_name,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
+            Some(i128::from(layout.align))
+        }
         rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
         rcc_ast::ExprKind::Paren(inner) => {
             eval_array_bound_as_i128(inner, scope, typedef_scope, tcx, resolver, crate_, session)
@@ -6611,6 +6685,8 @@ pub fn lower_record(
         // pass a non-defining spec, but stay defensive.
         return DefKind::Record {
             kind,
+            packed: packed_attr_present(&spec.attrs, session),
+            ms_bitfields: session.opts.ms_bitfields || ms_struct_attr_present(&spec.attrs, session),
             align_override: aligned_attr_override(&spec.attrs, session),
             scalar_storage_order: scalar_storage_order_attr(&spec.attrs, session),
             layout: None,
@@ -6706,6 +6782,8 @@ pub fn lower_record(
 
     DefKind::Record {
         kind,
+        packed: packed_attr_present(&spec.attrs, session),
+        ms_bitfields: session.opts.ms_bitfields || ms_struct_attr_present(&spec.attrs, session),
         align_override: aligned_attr_override(&spec.attrs, session),
         scalar_storage_order: scalar_storage_order_attr(&spec.attrs, session),
         layout: None,

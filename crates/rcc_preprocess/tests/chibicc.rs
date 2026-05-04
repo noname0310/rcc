@@ -120,11 +120,14 @@ const MACRO_C_ALLOWED_ERRORS: &[&str] = &["E0014", "E0022", "E0025"];
 /// Upper bound on the total number of error diagnostics `macro.c` is
 /// allowed to produce in strict C99 mode. E0013 was resolved by
 /// the computed `#include` support (task 04-20b); current baseline
-/// is 33 after task 10-18 started routing ordinary `#include`
+/// is 34 after strict redefinition diagnostics started replacing
+/// the table entry for recovery, which exposes one additional
+/// same-bucket E0022 later in the fixture.
+/// Task 10-18 routed ordinary `#include`
 /// directives through `Preprocessor::run`, which exposes one
 /// additional strict-C99 redefinition in chibicc's included test
 /// header.
-const MACRO_C_ERROR_CEILING: usize = 33;
+const MACRO_C_ERROR_CEILING: usize = 34;
 
 #[test]
 fn chibicc_macro_c_runs_to_completion_with_bounded_gaps() {

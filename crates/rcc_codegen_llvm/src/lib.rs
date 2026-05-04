@@ -1976,9 +1976,11 @@ pub mod backend {
                     locals.push(placeholder);
                 } else {
                     let storage_ty = self.local_storage_type(decl.ty)?;
+                    let align = self.local_storage_align(decl.ty)?;
                     let alloca = self.build_entry_alloca(
                         function,
                         storage_ty,
+                        align,
                         &self.local_storage_name(local, decl),
                     )?;
                     locals.push(alloca);
@@ -2096,10 +2098,25 @@ pub mod backend {
             }
         }
 
+        fn local_storage_align(&self, ty: TyId) -> Result<u32, CodegenError> {
+            match self.tcx.get(ty) {
+                Ty::Void => Ok(1),
+                Ty::Array { is_vla: true, .. } => Err(CodegenError::Internal(
+                    "VLA local materialization is deferred to task 09-17".to_owned(),
+                )),
+                _ => self
+                    .layout_cx()
+                    .layout_of(ty)
+                    .map(|layout| layout.align)
+                    .map_err(|err| type_lowering_error(ty, err.to_string())),
+            }
+        }
+
         fn build_entry_alloca(
             &self,
             function: FunctionValue<'ctx>,
             ty: BasicTypeEnum<'ctx>,
+            align: u32,
             name: &str,
         ) -> Result<PointerValue<'ctx>, CodegenError> {
             let entry = function.get_first_basic_block().ok_or_else(|| {
@@ -2119,6 +2136,16 @@ pub mod backend {
             }
 
             let alloca = self.builder.build_alloca(ty, name).map_err(builder_error)?;
+            if align > 1 {
+                let inst = alloca.as_instruction().ok_or_else(|| {
+                    CodegenError::Internal(format!("entry alloca `{name}` is not an instruction"))
+                })?;
+                inst.set_alignment(align).map_err(|err| {
+                    CodegenError::Internal(format!(
+                        "failed to set alignment {align} on entry alloca `{name}`: {err}"
+                    ))
+                })?;
+            }
             if let Some(block) = saved_block {
                 self.builder.position_at_end(block);
             }
@@ -2653,11 +2680,16 @@ pub mod backend {
                 .into_int_value();
             let logical_storage =
                 self.apply_scalar_storage_order_load(storage, access.scalar_storage_order)?;
-            let field_mask = width_mask.checked_shl(access.bit_offset).ok_or_else(|| {
-                CodegenError::Internal("bit-field mask shift overflowed".to_owned())
-            })?;
-            let storage_mask = bit_mask(access.storage_bits)?;
-            let clear_mask = access.storage_ty.const_int(storage_mask & !field_mask, false);
+            let field_mask = if access.bit_offset == 0 {
+                value_mask
+            } else {
+                let amount = access.storage_ty.const_int(u64::from(access.bit_offset), false);
+                self.builder
+                    .build_left_shift(value_mask, amount, "bf.mask.shl")
+                    .map_err(builder_error)?
+            };
+            let clear_mask =
+                self.builder.build_not(field_mask, "bf.clear.mask").map_err(builder_error)?;
             let kept = self
                 .builder
                 .build_and(logical_storage, clear_mask, "bf.keep")
@@ -5355,6 +5387,7 @@ pub mod backend {
                     let slot = cx.build_entry_alloca(
                         function,
                         stack_token_ty,
+                        8,
                         &format!("vla_stack{}.addr", local.0),
                     )?;
                     vla_stacks.push(Some(slot));
@@ -5958,7 +5991,9 @@ pub mod backend {
 
         fn init_va_area_slot(&self) -> Result<PointerValue<'ctx>, CodegenError> {
             let va_ty = self.cx.type_cx().basic_type_of(self.cx.tcx.builtin_va_list)?;
-            let slot = self.cx.build_entry_alloca(self.function, va_ty, "__va_area__.addr")?;
+            let align = self.cx.local_storage_align(self.cx.tcx.builtin_va_list)?;
+            let slot =
+                self.cx.build_entry_alloca(self.function, va_ty, align, "__va_area__.addr")?;
             self.emit_va_start_ptr(slot)?;
             Ok(slot)
         }
@@ -6193,7 +6228,7 @@ pub mod backend {
         let bits = u32::try_from(bits).map_err(|_| {
             CodegenError::Internal("bit-field storage unit exceeds u32 bits".to_owned())
         })?;
-        if bits == 0 || bits > 64 {
+        if bits == 0 || bits > 128 {
             return Err(CodegenError::Internal(format!(
                 "unsupported {bits}-bit bit-field storage unit"
             )));
@@ -6584,10 +6619,9 @@ pub mod backend {
                         continue;
                     }
                     if field_layout.offset < offset {
-                        return self.type_error(
-                            ty,
-                            "explicit bit-field storage overlaps previous LLVM field",
-                        );
+                        out.push(self.padding_type(unit_end - offset, ty)?);
+                        offset = unit_end;
+                        continue;
                     }
                     if field_layout.offset > offset {
                         out.push(self.padding_type(field_layout.offset - offset, ty)?);
@@ -6959,10 +6993,9 @@ pub mod backend {
                         continue;
                     }
                     if field_layout.offset < offset {
-                        return Err(CodegenError::Internal(
-                            "explicit bit-field storage overlaps previous constant field"
-                                .to_owned(),
-                        ));
+                        values.push(self.padding_const(unit_end - offset, ty)?.into());
+                        offset = unit_end;
+                        continue;
                     }
                     if field_layout.offset > offset {
                         values.push(self.padding_const(field_layout.offset - offset, ty)?.into());
@@ -7653,6 +7686,8 @@ mod tests {
             span: DUMMY_SP,
             kind: rcc_hir::DefKind::Record {
                 kind: RecordKind::Struct,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order: None,
                 layout: None,
@@ -7776,6 +7811,8 @@ mod tests {
             span: DUMMY_SP,
             kind: DefKind::Record {
                 kind,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order: None,
                 layout: None,
@@ -7798,6 +7835,8 @@ mod tests {
             span: DUMMY_SP,
             kind: DefKind::Record {
                 kind,
+                packed: false,
+                ms_bitfields: false,
                 align_override: Some(align),
                 scalar_storage_order: None,
                 layout: None,
@@ -8560,7 +8599,10 @@ mod tests {
         let node_ptr = tcx.intern(Ty::Ptr(Qual::plain(node_ty)));
         defs[node].kind = DefKind::Record {
             kind: RecordKind::Struct,
+            packed: false,
+            ms_bitfields: false,
             align_override: None,
+            scalar_storage_order: None,
             layout: None,
             fields: vec![field(tcx.int), field(node_ptr)],
         };

@@ -321,6 +321,8 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         }
         HirExprKind::SizeofExpr(operand) => lower_sizeof_expr(builder, cx, expr_id, *operand),
         HirExprKind::SizeofType(ty) => lower_sizeof_type(cx, expr_id, *ty),
+        HirExprKind::AlignofExpr(operand) => lower_alignof_expr(cx, expr_id, *operand),
+        HirExprKind::AlignofType(ty) => lower_alignof_type(cx, expr_id, *ty),
         HirExprKind::VectorInit { ty, lanes } => {
             let lane_ops =
                 lanes.iter().map(|lane| lower_as_rvalue(builder, cx, *lane)).collect::<Vec<_>>();
@@ -2007,8 +2009,33 @@ fn lower_sizeof_type(cx: &LowerCx<'_>, expr_id: HirExprId, ty: TyId) -> Operand 
     Operand::Const(Const { kind: ConstKind::Int(size), ty: expr.ty })
 }
 
+fn lower_alignof_expr(cx: &LowerCx<'_>, expr_id: HirExprId, operand: HirExprId) -> Operand {
+    let expr = &cx.body.exprs[expr_id];
+    let operand_ty = cx.body.exprs[operand].ty;
+    let align = layout_align_as_i128(
+        cx.layout
+            .layout_of(operand_ty)
+            .unwrap_or_else(|err| panic!("__alignof__ layout failed for {operand_ty:?}: {err}")),
+    );
+    Operand::Const(Const { kind: ConstKind::Int(align), ty: expr.ty })
+}
+
+fn lower_alignof_type(cx: &LowerCx<'_>, expr_id: HirExprId, ty: TyId) -> Operand {
+    let expr = &cx.body.exprs[expr_id];
+    let align = layout_align_as_i128(
+        cx.layout
+            .layout_of(ty)
+            .unwrap_or_else(|err| panic!("__alignof__(type) layout failed for {ty:?}: {err}")),
+    );
+    Operand::Const(Const { kind: ConstKind::Int(align), ty: expr.ty })
+}
+
 fn layout_size_as_i128(layout: rcc_hir::Layout) -> i128 {
     i128::from(layout.size)
+}
+
+fn layout_align_as_i128(layout: rcc_hir::Layout) -> i128 {
+    i128::from(layout.align)
 }
 
 /// `true` for C aggregate types (array / struct / union). Enums are
@@ -6468,6 +6495,8 @@ mod tests {
             span: DUMMY_SP,
             kind: rcc_hir::DefKind::Record {
                 kind: rcc_hir::RecordKind::Struct,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order: None,
                 layout: None,

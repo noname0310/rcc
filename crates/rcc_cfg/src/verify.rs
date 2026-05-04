@@ -916,6 +916,8 @@ mod tests {
             span: DUMMY_SP,
             kind: DefKind::Record {
                 kind: RecordKind::Struct,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order: None,
                 layout: None,

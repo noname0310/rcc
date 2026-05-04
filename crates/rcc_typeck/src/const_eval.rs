@@ -10,7 +10,8 @@
 //! constant, a character constant, a `sizeof` expression whose result
 //! is a constant, or a cast to an integer type. The operators allowed
 //! are arithmetic, bitwise, shift, relational, equality, logical, the
-//! conditional, the unary integer operators, casts, and `sizeof`.
+//! conditional, the unary integer operators, casts, `sizeof`, and GNU
+//! `__alignof__`.
 //! Assignment, comma, function call, pre/post-increment, and address-
 //! of expressions are *not* part of an integer constant expression and
 //! cause the evaluator to bail with `None`.
@@ -175,6 +176,16 @@ impl<'a> ConstEval<'a> {
                 let size = self.size_of_ty(ty)?;
                 #[allow(clippy::cast_precision_loss)]
                 Some(size as f64)
+            }
+            HirExprKind::AlignofExpr(operand) => {
+                let ty = body.exprs.get(operand)?.ty;
+                #[allow(clippy::cast_precision_loss)]
+                self.align_of_ty(ty).map(|align| align as f64)
+            }
+            HirExprKind::AlignofType(ty) => {
+                let align = self.align_of_ty(ty)?;
+                #[allow(clippy::cast_precision_loss)]
+                Some(align as f64)
             }
 
             // ---- Operators ------------------------------------------------
@@ -596,6 +607,11 @@ impl<'a> ConstEval<'a> {
                 self.size_of_ty(ty)
             }
             HirExprKind::SizeofType(ty) => self.size_of_ty(ty),
+            HirExprKind::AlignofExpr(operand) => {
+                let ty = body.exprs.get(operand)?.ty;
+                self.align_of_ty(ty)
+            }
+            HirExprKind::AlignofType(ty) => self.align_of_ty(ty),
 
             // The typeck pass wraps ICE-bearing expressions in
             // `Convert { kind: IntegerPromotion | UsualArithmetic |
@@ -662,6 +678,16 @@ impl<'a> ConstEval<'a> {
         }
         .ok()?;
         Some(i128::from(layout.size))
+    }
+
+    /// Compute the ABI alignment of a type in bytes using the shared layout service.
+    pub fn align_of_ty(&self, ty: TyId) -> Option<i128> {
+        let layout = match self.defs {
+            Some(defs) => LayoutCx::with_defs(self.tcx, defs).layout_of(ty),
+            None => LayoutCx::new(self.tcx).layout_of(ty),
+        }
+        .ok()?;
+        Some(i128::from(layout.align))
     }
 
     fn eval_binary(

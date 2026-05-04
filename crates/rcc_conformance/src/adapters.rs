@@ -751,6 +751,7 @@ impl Adapter for GccTortureAdapter {
                 .arg("-fgnu-case-ranges")
                 .arg("-fgnu-labels-as-values")
                 .arg("-fgnu-lvalue-comma")
+                .arg("-fgnu-alignof")
                 .arg("-fgnu-function-names")
                 .arg("-fgnu89-inline")
                 .arg("-fgnu-builtin-libcalls");
@@ -903,7 +904,7 @@ impl TccTests2Adapter {
         }
     }
 
-    fn compile_flags() -> [&'static str; 19] {
+    fn compile_flags() -> [&'static str; 21] {
         [
             "-w",
             "-fgnu-binary-literals",
@@ -921,6 +922,8 @@ impl TccTests2Adapter {
             "-fgnu-labels-as-values",
             "-fgnu-lvalue-comma",
             "-fgnu-typeof",
+            "-fgnu-alignof",
+            "-fgnu-pragma-pack",
             "-fgnu-function-names",
             "-fgnu-builtin-libcalls",
             "-lm",
@@ -975,7 +978,11 @@ impl Adapter for TccTests2Adapter {
             if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
 
         let mut compile = Command::new(rcc_path);
-        compile.args(Self::compile_flags()).arg("-o").arg(&exe_path).arg(&case.path);
+        compile.args(Self::compile_flags());
+        if stem == "95_bitfields_ms" {
+            compile.arg("-fms-bitfields");
+        }
+        compile.arg("-o").arg(&exe_path).arg(&case.path);
         match run_with_timeout(&mut compile, TIMEOUT) {
             Ok(o) if o.status.success() => {}
             Ok(o) => {

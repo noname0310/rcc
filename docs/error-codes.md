@@ -1355,3 +1355,16 @@ extern typeof(f) f;  // warning[W0024] in strict C99 mode
 The parser preserves the specifier so compatibility declarations can
 reach HIR lowering. Enable `Options::gnu_typeof` or pass
 `-fgnu-typeof` to accept it without this compatibility warning.
+
+## W0025 — GNU __alignof__ expression extension
+
+`__alignof__(expr)` and `__alignof__(type-name)` are GNU C extensions, not
+C99 syntax:
+
+```c
+int a[__alignof__(struct S)];
+```
+
+The parser preserves the expression so target-layout queries can reach HIR and
+CFG lowering. Enable `Options::gnu_alignof` or pass `-fgnu-alignof` to accept it
+without this compatibility warning.

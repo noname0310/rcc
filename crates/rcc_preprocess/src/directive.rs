@@ -418,6 +418,56 @@ pub fn parse_expanded_line_operands(
     })
 }
 
+/// Parse the operands of a computed `#include` after macro expansion.
+///
+/// C99 §6.10.2p4 requires macro expansion first, then interpretation as a
+/// header name. Expanded tokens may come from macro replacement lists in
+/// synthetic files, so token spelling is resolved through the session
+/// [`SourceMap`].
+pub fn parse_expanded_include_operands(
+    span: Span,
+    body: &[PpToken],
+    source_map: &SourceMap,
+) -> Result<(bool, String), Diagnostic> {
+    let Some(first) = body.first() else {
+        return Err(malformed_include(span));
+    };
+
+    match first.kind {
+        PpTokenKind::StringLit { .. } | PpTokenKind::HeaderName => {
+            if body.len() != 1 {
+                return Err(malformed_include(span));
+            }
+            let raw = expanded_token_text(first, source_map)
+                .ok_or_else(|| malformed_include(first.span))?;
+            let is_system = raw.starts_with('<');
+            Ok((is_system, raw))
+        }
+        PpTokenKind::Punct(Punct::Lt) => {
+            let Some(last) = body.last() else {
+                return Err(malformed_include(span));
+            };
+            if !matches!(last.kind, PpTokenKind::Punct(Punct::Gt)) || body.len() < 2 {
+                return Err(malformed_include(span));
+            }
+            let mut header = String::from("<");
+            for tok in &body[1..body.len() - 1] {
+                let text = expanded_token_text(tok, source_map)
+                    .ok_or_else(|| malformed_include(tok.span))?;
+                header.push_str(&text);
+            }
+            header.push('>');
+            Ok((true, header))
+        }
+        _ => Err(malformed_include(first.span)),
+    }
+}
+
+fn expanded_token_text(tok: &PpToken, source_map: &SourceMap) -> Option<String> {
+    let file = source_map.file(tok.span.file);
+    file.src.get(tok.span.lo.0 as usize..tok.span.hi.0 as usize).map(ToString::to_string)
+}
+
 fn parse_line_operands<F>(
     span: Span,
     body: &[PpToken],

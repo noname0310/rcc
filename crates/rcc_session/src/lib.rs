@@ -193,6 +193,26 @@ pub struct Options {
     /// compatibility suites; with this option off, each use emits W0024 as a
     /// strict-C99 compatibility warning.
     pub gnu_typeof: bool,
+    /// Enable GNU `__alignof__` expressions without a warning.
+    ///
+    /// GNU C accepts `__alignof__(expr)` and `__alignof__(type-name)` as an
+    /// extension. The parser preserves both forms in strict mode so downstream
+    /// layout-sensitive tests can still run, but emits W0025 unless this flag
+    /// is enabled.
+    pub gnu_alignof: bool,
+    /// Enable `#pragma pack(push, N)` / `#pragma pack(pop)` record packing.
+    ///
+    /// GCC and MSVC use this pragma family to alter subsequent record layout.
+    /// rcc lowers supported `pack(push,1)` regions into an explicit packed
+    /// record attribute in the preprocessor so later phases do not need a
+    /// source-span side table.
+    pub gnu_pragma_pack: bool,
+    /// Use Microsoft-compatible bit-field allocation for record layout.
+    ///
+    /// This is off for the C99/Linux SysV default. Compatibility suites can
+    /// opt in through `-fms-bitfields` or the GCC-compatible
+    /// `-mms-bitfields` spelling normalized by the driver.
+    pub ms_bitfields: bool,
     /// Enable GNU `__FUNCTION__` predefined function name alias without a warning.
     ///
     /// C99 defines `__func__` as an implicit function-scope identifier. GNU C
@@ -260,6 +280,9 @@ impl Default for Options {
             gnu_labels_as_values: false,
             gnu_lvalue_comma: false,
             gnu_typeof: false,
+            gnu_alignof: false,
+            gnu_pragma_pack: false,
+            ms_bitfields: false,
             gnu_function_names: false,
             instrument_functions: false,
             gnu_va_area: false,

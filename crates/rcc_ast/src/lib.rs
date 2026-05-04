@@ -693,6 +693,10 @@ pub enum ExprKind {
     SizeofExpr(Box<Expr>),
     /// `sizeof(type)`
     SizeofType(TypeName),
+    /// GNU `__alignof__ expr`
+    AlignofExpr(Box<Expr>),
+    /// GNU `__alignof__(type)`
+    AlignofType(TypeName),
     /// `(type){ init }`  -- C99 compound literal.
     CompoundLiteral {
         /// Type being initialised.

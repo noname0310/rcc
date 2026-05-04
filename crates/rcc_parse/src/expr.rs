@@ -591,6 +591,11 @@ pub fn parse_prefix_unary(p: &mut Parser<'_>) -> Option<Expr> {
     if matches!(tok.kind, TokenKind::Keyword(Keyword::Sizeof)) {
         return parse_sizeof(p);
     }
+    if let TokenKind::Ident(sym) = tok.kind {
+        if is_gnu_alignof_name(p, sym) {
+            return parse_gnu_alignof(p);
+        }
+    }
 
     // Cast-expression (§6.5.4): `( type-name ) cast-expression`.
     // We only take this branch when the one-token lookahead past `(`
@@ -696,6 +701,40 @@ fn parse_sizeof(p: &mut Parser<'_>) -> Option<Expr> {
     let span = kw_span.to(operand.span);
     let id = p.fresh_id();
     Some(Expr { id, kind: ExprKind::SizeofExpr(Box::new(operand)), span })
+}
+
+fn is_gnu_alignof_name(p: &Parser<'_>, sym: Symbol) -> bool {
+    matches!(p.session.interner.get(sym), "__alignof" | "__alignof__")
+}
+
+fn parse_gnu_alignof(p: &mut Parser<'_>) -> Option<Expr> {
+    let op_span = p.cur_span();
+    p.bump(); // `__alignof__` / `__alignof`
+    if !p.session.opts.gnu_alignof {
+        p.session
+            .handler
+            .struct_warn(op_span, "GNU `__alignof__` expression is not part of C99")
+            .code(codes::W0025)
+            .note("parsing it as an extension so target layout can be queried")
+            .emit();
+    }
+
+    if let Some(tok) = p.peek() {
+        if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) && starts_type_name_after_lparen(p) {
+            let lparen_span = tok.span;
+            p.bump(); // `(`
+            let ty = parse_type_name(p);
+            let end_span = expect_rparen_after_type(p, lparen_span, "__alignof__");
+            let span = op_span.to(end_span.unwrap_or(op_span));
+            let id = p.fresh_id();
+            return Some(Expr { id, kind: ExprKind::AlignofType(ty), span });
+        }
+    }
+
+    let operand = parse_prefix_unary(p)?;
+    let span = op_span.to(operand.span);
+    let id = p.fresh_id();
+    Some(Expr { id, kind: ExprKind::AlignofExpr(Box::new(operand)), span })
 }
 
 /// One-token lookahead: does the token immediately after the current
@@ -3130,7 +3169,15 @@ mod tests {
         src: &str,
         typedefs: &[&str],
     ) -> (Expr, Vec<rcc_errors::Diagnostic>, Session) {
-        let (mut sess, fid, cap) = mk_session(src);
+        parse_expr_full_with_opts(src, typedefs, Options::default())
+    }
+
+    fn parse_expr_full_with_opts(
+        src: &str,
+        typedefs: &[&str],
+        opts: Options,
+    ) -> (Expr, Vec<rcc_errors::Diagnostic>, Session) {
+        let (mut sess, fid, cap) = mk_session_with_opts(src, opts);
         let pps: Vec<PpToken> = Tokenizer::new(fid, src).collect();
         let tokens = convert(&mut sess, &pps);
         let typedef_syms: Vec<_> = typedefs.iter().map(|name| sess.interner.intern(name)).collect();
@@ -3247,6 +3294,39 @@ mod tests {
                 );
             }
             other => panic!("expected SizeofType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gnu_alignof_type_parses_with_option() {
+        let src = "__alignof__(struct S)";
+        let opts = Options { gnu_alignof: true, ..Options::default() };
+        let (e, diags, _sess) = parse_expr_full_with_opts(src, &[], opts);
+        assert!(diags.is_empty(), "clean: {diags:?}");
+        match &e.kind {
+            ExprKind::AlignofType(ty) => {
+                assert!(
+                    matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Record(rec)] if rec.kind == RecordKind::Struct)
+                );
+            }
+            other => panic!("expected AlignofType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gnu_alignof_expr_warns_in_strict_mode() {
+        let src = "__alignof__(x)";
+        let (e, diags, sess) = parse_expr_full(src, &[]);
+        assert!(diags.iter().any(|d| d.code == Some(codes::W0025)), "missing W0025: {diags:?}");
+        match &e.kind {
+            ExprKind::AlignofExpr(inner) => match &inner.kind {
+                ExprKind::Paren(paren) => match &paren.kind {
+                    ExprKind::Ident(sym) => assert_eq!(sess.interner.get(*sym), "x"),
+                    other => panic!("expected Ident(x), got {other:?}"),
+                },
+                other => panic!("expected Paren(Ident(x)), got {other:?}"),
+            },
+            other => panic!("expected AlignofExpr, got {other:?}"),
         }
     }
 

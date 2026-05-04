@@ -43,6 +43,14 @@ pub struct FieldLayout {
     pub scalar_storage_order: Option<ScalarStorageOrder>,
 }
 
+#[derive(Copy, Clone)]
+struct StructLayoutAttrs {
+    packed: bool,
+    ms_bitfields: bool,
+    align_override: Option<u32>,
+    scalar_storage_order: Option<ScalarStorageOrder>,
+}
+
 /// Layout metadata for an array type.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ArrayLayout {
@@ -259,8 +267,15 @@ impl<'tcx> LayoutCx<'tcx> {
             return Err(LayoutError::Unsupported { ty, feature: "recursive record by value" });
         }
         let def_data = defs.get(def).ok_or(LayoutError::MissingDefinition { def })?;
-        let DefKind::Record { kind, align_override, scalar_storage_order, layout, fields } =
-            &def_data.kind
+        let DefKind::Record {
+            kind,
+            packed,
+            ms_bitfields,
+            align_override,
+            scalar_storage_order,
+            layout,
+            fields,
+        } = &def_data.kind
         else {
             return Err(LayoutError::ExpectedRecord { def });
         };
@@ -292,13 +307,18 @@ impl<'tcx> LayoutCx<'tcx> {
             RecordKind::Struct => self.struct_layout_details(
                 ty,
                 fields,
-                *align_override,
-                *scalar_storage_order,
+                StructLayoutAttrs {
+                    packed: *packed,
+                    ms_bitfields: *ms_bitfields,
+                    align_override: *align_override,
+                    scalar_storage_order: *scalar_storage_order,
+                },
                 record_stack,
             ),
             RecordKind::Union => self.union_layout_details(
                 ty,
                 fields,
+                *packed,
                 *align_override,
                 *scalar_storage_order,
                 record_stack,
@@ -312,24 +332,194 @@ impl<'tcx> LayoutCx<'tcx> {
         &self,
         ty: TyId,
         fields: &[crate::Field],
-        align_override: Option<u32>,
-        scalar_storage_order: Option<ScalarStorageOrder>,
+        attrs: StructLayoutAttrs,
         record_stack: &mut Vec<DefId>,
     ) -> LayoutResult<RecordLayout> {
+        let StructLayoutAttrs { packed, ms_bitfields, align_override, scalar_storage_order } =
+            attrs;
+        if ms_bitfields {
+            return self.struct_layout_details_ms(ty, fields, attrs, record_stack);
+        }
         let mut offset = 0_u64;
         let mut max_align = 1_u32;
         let mut layouts = Vec::with_capacity(fields.len());
-        let mut bit_unit: Option<BitUnit> = None;
+        let mut bit_cursor = 0_u64;
         let msb_first = self.bitfields_are_msb_first(scalar_storage_order);
         for (idx, field) in fields.iter().enumerate() {
             if let Some(width) = field.bit_width {
-                let storage =
+                let natural_storage =
                     apply_field_align(self.layout_of_inner(field.ty, record_stack)?, field);
-                let storage_bits = storage_size_bits(storage, ty)?;
+                let storage = apply_packed_layout(natural_storage, packed);
+                let storage_bits = storage_size_bits(natural_storage, ty)?;
                 max_align = max_align.max(storage.align);
 
                 if width == 0 {
-                    offset = finish_bit_unit(offset, bit_unit.take(), ty)?;
+                    bit_cursor = next_allocation_unit(bit_cursor, storage_bits, ty)?;
+                    offset = offset.max(bits_to_bytes(bit_cursor, ty)?);
+                    layouts.push(FieldLayout {
+                        offset: bits_to_bytes(bit_cursor, ty)?,
+                        bit_offset: Some(0),
+                        bit_width: Some(width),
+                        storage_size: 0,
+                        storage_align: storage.align,
+                        scalar_storage_order,
+                    });
+                    continue;
+                }
+
+                if packed {
+                    if field.align_override.is_some() {
+                        bit_cursor = next_allocation_unit(bit_cursor, storage_bits, ty)?;
+                    }
+                    let field_start = bit_cursor;
+                    let field_offset = field_start / 8;
+                    let bit_offset = u32::try_from(field_start % 8)
+                        .map_err(|_| LayoutError::SizeOverflow { ty })?;
+                    let storage_size = bits_to_bytes(
+                        u64::from(bit_offset)
+                            .checked_add(u64::from(width))
+                            .ok_or(LayoutError::SizeOverflow { ty })?,
+                        ty,
+                    )?;
+                    let storage_bits =
+                        storage_size_bits(Layout { size: storage_size, align: storage.align }, ty)?;
+                    let bit_offset = if msb_first {
+                        storage_bits
+                            .checked_sub(bit_offset)
+                            .and_then(|base| base.checked_sub(width))
+                            .ok_or(LayoutError::SizeOverflow { ty })?
+                    } else {
+                        bit_offset
+                    };
+                    layouts.push(FieldLayout {
+                        offset: field_offset,
+                        bit_offset: Some(bit_offset),
+                        bit_width: Some(width),
+                        storage_size,
+                        storage_align: storage.align,
+                        scalar_storage_order,
+                    });
+                    bit_cursor = bit_cursor
+                        .checked_add(u64::from(width))
+                        .ok_or(LayoutError::SizeOverflow { ty })?;
+                    offset = offset.max(
+                        field_offset
+                            .checked_add(storage_size)
+                            .ok_or(LayoutError::SizeOverflow { ty })?,
+                    );
+                    continue;
+                }
+
+                if field.align_override.is_some() {
+                    bit_cursor = align_bits_to(bit_cursor, storage.align)
+                        .ok_or(LayoutError::SizeOverflow { ty })?;
+                }
+                let (unit_base_bits, start_bits) =
+                    place_in_declared_unit(bit_cursor, storage_bits, width, ty)?;
+                let within = start_bits
+                    .checked_sub(unit_base_bits)
+                    .ok_or(LayoutError::SizeOverflow { ty })?;
+                let within = u32::try_from(within).map_err(|_| LayoutError::SizeOverflow { ty })?;
+                let bit_offset = if msb_first {
+                    storage_bits
+                        .checked_sub(within)
+                        .and_then(|base| base.checked_sub(width))
+                        .ok_or(LayoutError::SizeOverflow { ty })?
+                } else {
+                    within
+                };
+                layouts.push(FieldLayout {
+                    offset: unit_base_bits / 8,
+                    bit_offset: Some(bit_offset),
+                    bit_width: Some(width),
+                    storage_size: natural_storage.size,
+                    storage_align: storage.align,
+                    scalar_storage_order,
+                });
+                bit_cursor = start_bits
+                    .checked_add(u64::from(width))
+                    .ok_or(LayoutError::SizeOverflow { ty })?;
+                offset = offset.max(
+                    (unit_base_bits / 8)
+                        .checked_add(natural_storage.size)
+                        .ok_or(LayoutError::SizeOverflow { ty })?,
+                );
+                continue;
+            }
+
+            let (field_layout, flexible) =
+                self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
+            let field_layout = apply_packed_layout(apply_field_align(field_layout, field), packed);
+            let field_offset = bits_to_bytes(bit_cursor, ty)?;
+            let field_offset = align_to(field_offset, field_layout.align)
+                .ok_or(LayoutError::SizeOverflow { ty })?;
+            layouts.push(FieldLayout {
+                offset: field_offset,
+                bit_offset: None,
+                bit_width: None,
+                storage_size: field_layout.size,
+                storage_align: field_layout.align,
+                scalar_storage_order: None,
+            });
+            max_align = max_align.max(field_layout.align);
+            if !flexible {
+                let field_end = field_offset
+                    .checked_add(field_layout.size)
+                    .ok_or(LayoutError::SizeOverflow { ty })?;
+                offset = offset.max(field_end);
+                bit_cursor = field_end.checked_mul(8).ok_or(LayoutError::SizeOverflow { ty })?;
+            } else {
+                bit_cursor = field_offset.checked_mul(8).ok_or(LayoutError::SizeOverflow { ty })?;
+            }
+        }
+        let has_record_align_override = align_override.is_some();
+        if let Some(align) = align_override {
+            max_align = max_align.max(align);
+        }
+        let size = if packed && !has_record_align_override {
+            offset
+        } else {
+            align_to(offset, max_align).ok_or(LayoutError::SizeOverflow { ty })?
+        };
+        Ok(RecordLayout { layout: Layout { size, align: max_align }, fields: layouts })
+    }
+
+    fn struct_layout_details_ms(
+        &self,
+        ty: TyId,
+        fields: &[crate::Field],
+        attrs: StructLayoutAttrs,
+        record_stack: &mut Vec<DefId>,
+    ) -> LayoutResult<RecordLayout> {
+        let StructLayoutAttrs { packed, align_override, scalar_storage_order, .. } = attrs;
+        let mut offset = 0_u64;
+        let mut max_align = 1_u32;
+        let mut layouts = Vec::with_capacity(fields.len());
+        let mut bit_unit: Option<MsBitUnit> = None;
+        let msb_first = self.bitfields_are_msb_first(scalar_storage_order);
+        for (idx, field) in fields.iter().enumerate() {
+            if let Some(width) = field.bit_width {
+                let natural_storage =
+                    apply_field_align(self.layout_of_inner(field.ty, record_stack)?, field);
+                let storage = if packed {
+                    Layout {
+                        size: natural_storage.size,
+                        align: if field.align_override.is_some() {
+                            natural_storage.align
+                        } else {
+                            1
+                        },
+                    }
+                } else {
+                    natural_storage
+                };
+                let storage_bits = storage_size_bits(natural_storage, ty)?;
+                max_align = max_align.max(storage.align);
+
+                if width == 0 {
+                    if let Some(unit) = bit_unit.take() {
+                        offset = offset.max(unit.end_offset(ty)?);
+                    }
                     offset =
                         align_to(offset, storage.align).ok_or(LayoutError::SizeOverflow { ty })?;
                     layouts.push(FieldLayout {
@@ -343,57 +533,75 @@ impl<'tcx> LayoutCx<'tcx> {
                     continue;
                 }
 
-                let needs_new_unit = bit_unit
-                    .as_ref()
-                    .map(|unit| {
-                        !bit_unit_can_accept(unit, storage_bits, width)
-                            || (storage.align > unit.storage_align
-                                && unit.offset % u64::from(storage.align) != 0)
-                    })
-                    .unwrap_or(true);
-                if needs_new_unit {
-                    offset = finish_bit_unit(offset, bit_unit.take(), ty)?;
+                let compatible = |unit: &MsBitUnit| {
+                    unit.storage_size == natural_storage.size
+                        && unit.storage_bits == storage_bits
+                        && unit.storage_align == storage.align
+                };
+                let can_share = bit_unit.as_ref().is_some_and(|unit| {
+                    compatible(unit)
+                        && u64::from(unit.used_bits) + u64::from(width)
+                            <= u64::from(unit.storage_bits)
+                });
+                if !can_share {
+                    if let Some(unit) = bit_unit.take() {
+                        offset = offset.max(unit.end_offset(ty)?);
+                    }
                     offset =
                         align_to(offset, storage.align).ok_or(LayoutError::SizeOverflow { ty })?;
-                    bit_unit = Some(BitUnit {
+                    bit_unit = Some(MsBitUnit {
                         offset,
-                        storage_size: storage.size,
+                        storage_size: natural_storage.size,
                         storage_align: storage.align,
                         storage_bits,
                         used_bits: 0,
-                        fields: Vec::new(),
                     });
-                } else if let Some(unit) = &mut bit_unit {
-                    expand_bit_unit(unit, storage, storage_bits);
                 }
 
-                let mut unit = bit_unit.take().expect("bit-field unit exists after allocation");
-                let layout_idx = layouts.len();
+                let unit = bit_unit.as_mut().expect("MS bit-field unit exists after allocation");
+                let bit_offset = if msb_first {
+                    unit.storage_bits
+                        .checked_sub(unit.used_bits)
+                        .and_then(|base| base.checked_sub(width))
+                        .ok_or(LayoutError::SizeOverflow { ty })?
+                } else {
+                    unit.used_bits
+                };
                 layouts.push(FieldLayout {
                     offset: unit.offset,
-                    bit_offset: Some(unit.used_bits),
+                    bit_offset: Some(bit_offset),
                     bit_width: Some(width),
                     storage_size: unit.storage_size,
                     storage_align: unit.storage_align,
                     scalar_storage_order,
                 });
-                unit.fields.push(layout_idx);
                 unit.used_bits =
                     unit.used_bits.checked_add(width).ok_or(LayoutError::SizeOverflow { ty })?;
-                refresh_bit_unit_offsets(&mut layouts, &unit, msb_first);
                 if unit.used_bits == unit.storage_bits {
-                    offset = finish_bit_unit(offset, Some(unit), ty)?;
-                    bit_unit = None;
-                } else {
-                    bit_unit = Some(unit);
+                    let unit = bit_unit.take().expect("unit exists");
+                    offset = offset.max(unit.end_offset(ty)?);
                 }
                 continue;
             }
 
-            offset = finish_bit_unit(offset, bit_unit.take(), ty)?;
+            if let Some(unit) = bit_unit.take() {
+                offset = offset.max(unit.end_offset(ty)?);
+            }
             let (field_layout, flexible) =
                 self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
-            let field_layout = apply_field_align(field_layout, field);
+            let natural_field_layout = apply_field_align(field_layout, field);
+            let field_layout = if packed {
+                Layout {
+                    size: natural_field_layout.size,
+                    align: if field.align_override.is_some() {
+                        natural_field_layout.align
+                    } else {
+                        1
+                    },
+                }
+            } else {
+                natural_field_layout
+            };
             offset =
                 align_to(offset, field_layout.align).ok_or(LayoutError::SizeOverflow { ty })?;
             layouts.push(FieldLayout {
@@ -411,11 +619,18 @@ impl<'tcx> LayoutCx<'tcx> {
                     .ok_or(LayoutError::SizeOverflow { ty })?;
             }
         }
-        offset = finish_bit_unit(offset, bit_unit, ty)?;
+        if let Some(unit) = bit_unit {
+            offset = offset.max(unit.end_offset(ty)?);
+        }
+        let has_record_align_override = align_override.is_some();
         if let Some(align) = align_override {
             max_align = max_align.max(align);
         }
-        let size = align_to(offset, max_align).ok_or(LayoutError::SizeOverflow { ty })?;
+        let size = if packed && !has_record_align_override {
+            offset
+        } else {
+            align_to(offset, max_align).ok_or(LayoutError::SizeOverflow { ty })?
+        };
         Ok(RecordLayout { layout: Layout { size, align: max_align }, fields: layouts })
     }
 
@@ -423,6 +638,7 @@ impl<'tcx> LayoutCx<'tcx> {
         &self,
         ty: TyId,
         fields: &[crate::Field],
+        packed: bool,
         align_override: Option<u32>,
         scalar_storage_order: Option<ScalarStorageOrder>,
         record_stack: &mut Vec<DefId>,
@@ -433,7 +649,7 @@ impl<'tcx> LayoutCx<'tcx> {
         for (idx, field) in fields.iter().enumerate() {
             let (layout, flexible) =
                 self.field_storage_layout(field.ty, idx, fields.len(), record_stack)?;
-            let layout = apply_field_align(layout, field);
+            let layout = apply_field_align(apply_packed_layout(layout, packed), field);
             let storage_size = if field.bit_width == Some(0) || flexible { 0 } else { layout.size };
             let bit_offset = match field.bit_width {
                 Some(width) if width != 0 && self.bitfields_are_msb_first(scalar_storage_order) => {
@@ -511,9 +727,30 @@ fn vector_align(bytes: u64) -> u32 {
     u32::try_from(bytes.min(16)).unwrap_or(16).max(1)
 }
 
+struct MsBitUnit {
+    offset: u64,
+    storage_size: u64,
+    storage_align: u32,
+    storage_bits: u32,
+    used_bits: u32,
+}
+
+impl MsBitUnit {
+    fn end_offset(&self, ty: TyId) -> LayoutResult<u64> {
+        self.offset.checked_add(self.storage_size).ok_or(LayoutError::SizeOverflow { ty })
+    }
+}
+
 fn apply_field_align(mut layout: Layout, field: &crate::Field) -> Layout {
     if let Some(align) = field.align_override {
         layout.align = layout.align.max(align);
+    }
+    layout
+}
+
+fn apply_packed_layout(mut layout: Layout, packed: bool) -> Layout {
+    if packed {
+        layout.align = 1;
     }
     layout
 }
@@ -537,60 +774,49 @@ fn float_layout_kind(kind: FloatKind) -> FloatLayoutKind {
     }
 }
 
-struct BitUnit {
-    offset: u64,
-    storage_size: u64,
-    storage_align: u32,
-    storage_bits: u32,
-    used_bits: u32,
-    fields: Vec<usize>,
-}
-
 fn storage_size_bits(layout: Layout, ty: TyId) -> LayoutResult<u32> {
     let bits = layout.size.checked_mul(8).ok_or(LayoutError::SizeOverflow { ty })?;
     u32::try_from(bits).map_err(|_| LayoutError::SizeOverflow { ty })
 }
 
-fn finish_bit_unit(offset: u64, bit_unit: Option<BitUnit>, ty: TyId) -> LayoutResult<u64> {
-    match bit_unit {
-        Some(unit) => {
-            let unit_end = unit
-                .offset
-                .checked_add(unit.storage_size)
-                .ok_or(LayoutError::SizeOverflow { ty })?;
-            Ok(offset.max(unit_end))
-        }
-        None => Ok(offset),
+fn place_in_declared_unit(
+    cursor: u64,
+    storage_bits: u32,
+    width: u32,
+    ty: TyId,
+) -> LayoutResult<(u64, u64)> {
+    let storage_bits = u64::from(storage_bits);
+    let width = u64::from(width);
+    let unit_base = (cursor / storage_bits)
+        .checked_mul(storage_bits)
+        .ok_or(LayoutError::SizeOverflow { ty })?;
+    if cursor.checked_add(width).ok_or(LayoutError::SizeOverflow { ty })?
+        <= unit_base.checked_add(storage_bits).ok_or(LayoutError::SizeOverflow { ty })?
+    {
+        return Ok((unit_base, cursor));
+    }
+    let next = unit_base.checked_add(storage_bits).ok_or(LayoutError::SizeOverflow { ty })?;
+    Ok((next, next))
+}
+
+fn next_allocation_unit(cursor: u64, storage_bits: u32, ty: TyId) -> LayoutResult<u64> {
+    let storage_bits = u64::from(storage_bits);
+    let unit_base = (cursor / storage_bits)
+        .checked_mul(storage_bits)
+        .ok_or(LayoutError::SizeOverflow { ty })?;
+    if cursor == unit_base {
+        Ok(cursor)
+    } else {
+        unit_base.checked_add(storage_bits).ok_or(LayoutError::SizeOverflow { ty })
     }
 }
 
-fn bit_unit_can_accept(unit: &BitUnit, storage_bits: u32, width: u32) -> bool {
-    let expanded_bits = unit.storage_bits.max(storage_bits);
-    u64::from(unit.used_bits) + u64::from(width) <= u64::from(expanded_bits)
+fn bits_to_bytes(bits: u64, ty: TyId) -> LayoutResult<u64> {
+    bits.checked_add(7).map(|value| value / 8).ok_or(LayoutError::SizeOverflow { ty })
 }
 
-fn expand_bit_unit(unit: &mut BitUnit, storage: Layout, storage_bits: u32) {
-    if storage.size > unit.storage_size {
-        unit.storage_size = storage.size;
-        unit.storage_bits = storage_bits;
-    }
-    if storage.align > unit.storage_align {
-        unit.storage_align = storage.align;
-    }
-}
-
-fn refresh_bit_unit_offsets(layouts: &mut [FieldLayout], unit: &BitUnit, msb_first: bool) {
-    let mut used = 0_u32;
-    for &idx in &unit.fields {
-        let width = layouts[idx].bit_width.expect("bit unit only tracks bit-fields");
-        layouts[idx].offset = unit.offset;
-        layouts[idx].storage_size = unit.storage_size;
-        layouts[idx].storage_align = unit.storage_align;
-        if msb_first {
-            layouts[idx].bit_offset = Some(unit.storage_bits - used - width);
-        }
-        used += width;
-    }
+fn align_bits_to(bits: u64, byte_align: u32) -> Option<u64> {
+    align_to(bits, byte_align.checked_mul(8)?)
 }
 
 fn align_to(value: u64, align: u32) -> Option<u64> {
@@ -625,6 +851,8 @@ mod tests {
             span: DUMMY_SP,
             kind: DefKind::Record {
                 kind,
+                packed: false,
+                ms_bitfields: false,
                 align_override: None,
                 scalar_storage_order,
                 layout: None,
@@ -632,6 +860,19 @@ mod tests {
             },
         });
         defs[id].id = id;
+        id
+    }
+
+    fn packed_record_def(
+        defs: &mut IndexVec<DefId, Def>,
+        kind: RecordKind,
+        fields: Vec<Field>,
+    ) -> DefId {
+        let id = record_def_with_order(defs, kind, None, fields);
+        let DefKind::Record { packed, .. } = &mut defs[id].kind else {
+            unreachable!("record_def_with_order creates a record")
+        };
+        *packed = true;
         id
     }
 
@@ -793,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_underlying_bitfields_share_expanded_storage_unit() {
+    fn mixed_underlying_bitfields_start_at_declared_type_boundaries() {
         let mut tcx = TyCtxt::new();
         let mut defs = IndexVec::new();
         let rec = record_def(
@@ -812,9 +1053,9 @@ mod tests {
 
         assert_eq!(layout.layout, Layout { size: 2, align: 2 });
         assert_eq!(layout.fields[0].bit_offset, Some(0));
-        assert_eq!(layout.fields[1].bit_offset, Some(12));
-        assert!(layout.fields.iter().all(|field| field.offset == 0));
-        assert!(layout.fields.iter().all(|field| field.storage_size == 2));
+        assert_eq!(layout.fields[1].offset, 1);
+        assert_eq!(layout.fields[1].bit_offset, Some(4));
+        assert!(layout.fields[1..].iter().all(|field| field.storage_size == 1));
     }
 
     #[test]
@@ -838,6 +1079,7 @@ mod tests {
 
         assert_eq!(layout.layout, Layout { size: 2, align: 2 });
         assert_eq!(layout.fields[0].bit_offset, Some(4));
+        assert_eq!(layout.fields[1].offset, 1);
         assert_eq!(layout.fields[1].bit_offset, Some(3));
         assert_eq!(layout.fields[2].bit_offset, Some(2));
         assert_eq!(layout.fields[3].bit_offset, Some(1));
@@ -846,6 +1088,30 @@ mod tests {
             .fields
             .iter()
             .all(|field| field.scalar_storage_order == Some(ScalarStorageOrder::BigEndian)));
+    }
+
+    #[test]
+    fn packed_bitfields_cross_declared_type_boundaries_bit_contiguously() {
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = packed_record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![bitfield(tcx.uint, 12), bitfield(tcx.uchar, 7), bitfield(tcx.uint, 12)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let layout = LayoutCx::with_defs(&tcx, &defs).record_layout_of(rec_ty).unwrap();
+
+        assert_eq!(layout.layout, Layout { size: 4, align: 1 });
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[0].bit_offset, Some(0));
+        assert_eq!(layout.fields[0].storage_size, 2);
+        assert_eq!(layout.fields[1].offset, 1);
+        assert_eq!(layout.fields[1].bit_offset, Some(4));
+        assert_eq!(layout.fields[1].storage_size, 2);
+        assert_eq!(layout.fields[2].offset, 2);
+        assert_eq!(layout.fields[2].bit_offset, Some(3));
+        assert_eq!(layout.fields[2].storage_size, 2);
     }
 
     #[test]

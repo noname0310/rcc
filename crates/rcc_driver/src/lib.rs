@@ -173,6 +173,13 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-typeof"
             | "gnu-typeof-expr"
             | "gnu-typeof-type"
+            | "gnu-alignof"
+            | "gnu-alignof-expr"
+            | "gnu-alignof-type"
+            | "gnu-pragma-pack"
+            | "pragma-pack"
+            | "ms-bitfields"
+            | "gnu-ms-bitfields"
             | "gnu-function-names"
             | "gnu-function-name"
             | "gnu-function"
@@ -408,6 +415,17 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_typeof: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-typeof" | "gnu-typeof-expr" | "gnu-typeof-type")
         }),
+        gnu_alignof: cli.feature_flags.iter().any(|flag| {
+            matches!(flag.as_str(), "gnu-alignof" | "gnu-alignof-expr" | "gnu-alignof-type")
+        }),
+        gnu_pragma_pack: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-pragma-pack" | "pragma-pack")),
+        ms_bitfields: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "ms-bitfields" | "gnu-ms-bitfields")),
         gnu_function_names: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-function-names" | "gnu-function-name" | "gnu-function")
         }),

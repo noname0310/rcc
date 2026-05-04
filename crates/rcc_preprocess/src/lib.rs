@@ -65,6 +65,11 @@ pub struct Preprocessor<'a> {
     /// `__LINE__` expansion (task 04-15). The lexer is unchanged; the
     /// built-in expander consults this map when computing values.
     pub line_overrides: LineMap,
+    /// `#pragma pack` state. `None` means natural record alignment;
+    /// `Some(1)` means subsequent records are rewritten as packed.
+    pub pragma_pack: Option<u32>,
+    /// Stack used by `#pragma pack(push, N)` / `#pragma pack(pop)`.
+    pub pragma_pack_stack: Vec<Option<u32>>,
     /// Set once [`Self::install_cli_defines`] + [`Self::install_predefined`]
     /// have seeded the macro table. `run()` is re-entered for every
     /// `#include`d file and must install those entries *exactly* once
@@ -92,6 +97,8 @@ impl<'a> Preprocessor<'a> {
             pragma_once: FxHashMap::default(),
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
+            pragma_pack: None,
+            pragma_pack_stack: Vec::new(),
             predefined_installed: false,
             halted: false,
         }
@@ -161,6 +168,7 @@ impl<'a> Preprocessor<'a> {
                 continue;
             }
             let expanded = self.expand_tokens(line);
+            let expanded = self.apply_pragma_pack(expanded);
             out.extend(expanded);
         }
 
@@ -531,6 +539,19 @@ impl<'a> Preprocessor<'a> {
             Ok(directive::Directive::Include { span, is_system, header }) => {
                 return self.process_include(&header, is_system, span, line[0].span.file);
             }
+            Ok(directive::Directive::IncludeTokens { span, tokens }) => {
+                let expanded = self.expand_tokens(tokens);
+                let parsed = {
+                    let sm = self.session.source_map.read().unwrap();
+                    directive::parse_expanded_include_operands(span, &expanded, &sm)
+                };
+                match parsed {
+                    Ok((is_system, header)) => {
+                        return self.process_include(&header, is_system, span, line[0].span.file);
+                    }
+                    Err(diag) => self.session.handler.emit(&diag),
+                }
+            }
             Ok(directive::Directive::Line { span, line, file }) => {
                 self.apply_line_directive(span, line, file);
             }
@@ -540,9 +561,8 @@ impl<'a> Preprocessor<'a> {
             Ok(directive::Directive::Pragma { span, tokens }) => {
                 self.dispatch_pragma_directive(span, &tokens, src);
             }
-            // `Include` is still resolved out-of-band (task 04-03);
-            // conditional variants are routed above before ever
-            // reaching `parse_directive`.
+            // Conditional variants are routed above before ever reaching
+            // `parse_directive`.
             Ok(_) => {}
             Err(diag) => self.session.handler.emit(&diag),
         }
@@ -617,6 +637,9 @@ impl<'a> Preprocessor<'a> {
                     self.pop_macro_pragma(name);
                 }
             }
+            Some("pack") if self.session.opts.gnu_pragma_pack => {
+                self.dispatch_pack_pragma(tokens, src);
+            }
             _ => {
                 let diag = unknown_pragma(span, tokens, src);
                 self.session.handler.emit(&diag);
@@ -647,6 +670,65 @@ impl<'a> Preprocessor<'a> {
                 self.macros.undef(sym);
             }
         }
+    }
+
+    fn dispatch_pack_pragma(&mut self, tokens: &[PpToken], src: &str) {
+        match parse_pack_pragma(tokens, src) {
+            Some(PackPragma::Push(value)) => {
+                self.pragma_pack_stack.push(self.pragma_pack);
+                self.pragma_pack = value;
+            }
+            Some(PackPragma::Pop) => {
+                self.pragma_pack = self.pragma_pack_stack.pop().flatten();
+            }
+            Some(PackPragma::Set(value)) => {
+                self.pragma_pack = value;
+            }
+            None => {}
+        }
+    }
+
+    fn apply_pragma_pack(&mut self, tokens: Vec<PpToken>) -> Vec<PpToken> {
+        if self.pragma_pack != Some(1) {
+            return tokens;
+        }
+        let packed_attr = self.packed_attribute_tokens();
+        let mut out = Vec::with_capacity(tokens.len() + packed_attr.len());
+        for token in tokens {
+            let inject = if token.kind == PpTokenKind::Ident {
+                let text = self.token_text(&token);
+                matches!(text.as_str(), "struct" | "union")
+            } else {
+                false
+            };
+            out.push(token);
+            if inject {
+                out.extend_from_slice(&packed_attr);
+            }
+        }
+        out
+    }
+
+    fn packed_attribute_tokens(&mut self) -> Vec<PpToken> {
+        let src = "__attribute__((packed))";
+        let file_id = {
+            let mut sm = self.session.source_map.write().unwrap();
+            sm.add_file(PathBuf::from("<pragma pack>"), Arc::from(src))
+        };
+        rcc_lexer::tokenize(file_id, src)
+            .filter(|tok| {
+                !matches!(
+                    tok.kind,
+                    PpTokenKind::Whitespace | PpTokenKind::Newline | PpTokenKind::Eof
+                )
+            })
+            .collect()
+    }
+
+    fn token_text(&self, token: &PpToken) -> String {
+        let sm = self.session.source_map.read().unwrap();
+        let file = sm.file(token.span.file);
+        file.src[token.span.lo.0 as usize..token.span.hi.0 as usize].to_owned()
     }
 
     /// Install a `#line` override driven by a [`directive::Directive::Line`].
@@ -975,6 +1057,54 @@ fn pragma_macro_name<'src>(tokens: &[PpToken], src: &'src str) -> Option<&'src s
     raw.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PackPragma {
+    Push(Option<u32>),
+    Pop,
+    Set(Option<u32>),
+}
+
+fn parse_pack_pragma(tokens: &[PpToken], src: &str) -> Option<PackPragma> {
+    let [name, lparen, rest @ .., rparen] = tokens else {
+        return None;
+    };
+    if !is_ident_text(name, src, "pack")
+        || !matches!(lparen.kind, PpTokenKind::Punct(Punct::LParen))
+        || !matches!(rparen.kind, PpTokenKind::Punct(Punct::RParen))
+    {
+        return None;
+    }
+    match rest {
+        [] => Some(PackPragma::Set(None)),
+        [op] if is_ident_text(op, src, "pop") => Some(PackPragma::Pop),
+        [op] if is_ident_text(op, src, "push") => Some(PackPragma::Push(None)),
+        [value] => pack_value(value, src).map(|value| PackPragma::Set(Some(value))),
+        [op, comma, value]
+            if is_ident_text(op, src, "push")
+                && matches!(comma.kind, PpTokenKind::Punct(Punct::Comma)) =>
+        {
+            pack_value(value, src).map(|value| PackPragma::Push(Some(value)))
+        }
+        _ => None,
+    }
+}
+
+fn pack_value(token: &PpToken, src: &str) -> Option<u32> {
+    if !matches!(token.kind, PpTokenKind::PpNumber(_)) {
+        return None;
+    }
+    let raw = src.get(token.span.lo.0 as usize..token.span.hi.0 as usize)?;
+    let value = raw.parse::<u32>().ok()?;
+    matches!(value, 1 | 2 | 4 | 8 | 16).then_some(value)
+}
+
+fn is_ident_text(token: &PpToken, src: &str, expected: &str) -> bool {
+    token.kind == PpTokenKind::Ident
+        && src
+            .get(token.span.lo.0 as usize..token.span.hi.0 as usize)
+            .is_some_and(|text| text == expected)
+}
+
 /// Build the W0001 warning for an unrecognised `#pragma`. Labels the
 /// first body token (the pragma's name) so the user can see which
 /// form was dropped; falls back to the directive span when the
@@ -1058,8 +1188,8 @@ mod run_tests {
     };
     use rcc_lexer::PpNumberKind;
     use rcc_session::{Options, Session};
-    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::{fs, path::PathBuf};
 
     /// Load `src` into a fresh session (with a capturing emitter) and
     /// return `(Session, FileId, CaptureEmitter)`.
@@ -1117,6 +1247,13 @@ mod run_tests {
         assert_eq!(d.labels.len(), 2, "both defs must be labelled");
         assert!(d.labels.iter().any(|l| l.primary), "primary label on the new def");
         assert!(d.labels.iter().any(|l| !l.primary), "secondary label on the previous def");
+
+        let foo = pp.session.interner.intern("FOO");
+        let def = pp.macros.get(foo).expect("FOO must remain defined after diagnostic recovery");
+        let sm = pp.session.source_map.read().unwrap();
+        let src = &sm.file(def.body[0].span.file).src;
+        let txt = &src[def.body[0].span.lo.0 as usize..def.body[0].span.hi.0 as usize];
+        assert_eq!(txt, "43", "strict redefinition diagnostics still recover with latest body");
     }
 
     #[test]
@@ -2083,6 +2220,30 @@ dead1
     }
 
     #[test]
+    fn gnu_pragma_pack_injects_packed_attribute_for_records() {
+        let (mut sess, id, cap) =
+            seed("#pragma pack(push,1)\nstruct S { char c; int i; };\n#pragma pack(pop)\n");
+        sess.opts.gnu_pragma_pack = true;
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "struct__attribute__((packed))S{charc;inti;};");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pragma_pack_stays_unknown_without_feature_flag() {
+        let (mut sess, id, cap) = seed("#pragma pack(push,1)\nstruct S { int i; };\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "structS{inti;};");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Some(W0001));
+    }
+
+    #[test]
     fn acceptance_pragma_stdc_family_is_silently_accepted() {
         // §6.10.6: `STDC` pragmas are reserved. Every form of
         // `#pragma STDC ...` is accepted silently — no diagnostic,
@@ -2246,6 +2407,43 @@ abort
             !errors.iter().any(|d| d.code == Some(E0013)),
             "computed #include must not emit E0013, got {errors:?}"
         );
+    }
+
+    #[test]
+    fn computed_include_string_macro_resolves_header() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let header = tmp.path().join("foo.h");
+        fs::write(&header, "int included;\n").expect("write header");
+        let main = tmp.path().join("main.c");
+        fs::write(&main, "#define HDR \"foo.h\"\n#include HDR\n").expect("write main");
+
+        let cap = CaptureEmitter::new();
+        let mut sess =
+            Session::with_handler(Options::default(), Handler::with_emitter(Box::new(cap.clone())));
+        let id = sess.source_map.write().unwrap().load_file(&main).expect("load main");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "intincluded;");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn computed_include_angle_macro_reparses_header_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("foo.h"), "int angle;\n").expect("write header");
+        let main = tmp.path().join("main.c");
+        fs::write(&main, "#define HDR < foo.h\n#include HDR >\n").expect("write main");
+
+        let opts = Options { include_paths: vec![tmp.path().to_path_buf()], ..Options::default() };
+        let cap = CaptureEmitter::new();
+        let mut sess = Session::with_handler(opts, Handler::with_emitter(Box::new(cap.clone())));
+        let id = sess.source_map.write().unwrap().load_file(&main).expect("load main");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "intangle;");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
     }
 
     // (c) GNU named variadic

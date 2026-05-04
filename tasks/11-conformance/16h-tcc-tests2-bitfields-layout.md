@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-16h: tcc-tests2 bit-field layout
 
 **Phase:** 11-conformance    **Depends on:** 11-16g    **Milestone:** M6

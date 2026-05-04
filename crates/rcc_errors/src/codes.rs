@@ -114,6 +114,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0022, W0022_DESC),
     (W0023, W0023_DESC),
     (W0024, W0024_DESC),
+    (W0025, W0025_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -883,6 +884,14 @@ const W0023_DESC: &str = "GNU __va_area__ compatibility builtin";
 /// emits this warning unless `Options::gnu_typeof` is enabled.
 pub const W0024: &str = "W0024";
 const W0024_DESC: &str = "GNU typeof type specifier extension";
+
+/// GNU `__alignof__` expression accepted in strict C99 mode.
+///
+/// `__alignof__(expr)` and `__alignof__(type-name)` are GNU C extensions. The
+/// parser preserves them so target-layout queries can reach HIR/CFG lowering
+/// and emits this warning unless `Options::gnu_alignof` is enabled.
+pub const W0025: &str = "W0025";
+const W0025_DESC: &str = "GNU __alignof__ expression extension";
 
 #[cfg(test)]
 mod tests {

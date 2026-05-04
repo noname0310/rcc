@@ -197,7 +197,8 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
         | ExprKind::Member { base: operand, .. }
         | ExprKind::Arrow { base: operand, .. }
         | ExprKind::Paren(operand)
-        | ExprKind::SizeofExpr(operand) => v.visit_expr(operand),
+        | ExprKind::SizeofExpr(operand)
+        | ExprKind::AlignofExpr(operand) => v.visit_expr(operand),
         ExprKind::Cond { cond, then_expr, else_expr } => {
             v.visit_expr(cond);
             v.visit_expr(then_expr);
@@ -238,7 +239,7 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             v.visit_type_name(ty);
             v.visit_expr(expr);
         }
-        ExprKind::SizeofType(t) => v.visit_type_name(t),
+        ExprKind::SizeofType(t) | ExprKind::AlignofType(t) => v.visit_type_name(t),
         ExprKind::CompoundLiteral { ty, init } => {
             v.visit_type_name(ty);
             v.visit_initializer(init.as_ref());

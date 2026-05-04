@@ -22,7 +22,7 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, ConvertKind, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId,
-    HirExprKind, HirStmtKind, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp,
+    HirExprKind, HirStmtKind, Layout, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp,
     RecordKind, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
@@ -840,6 +840,29 @@ fn gnu_aligned_attribute_sets_record_layout_override() {
     let x_layout = LayoutCx::with_defs(&tcx, &hir.defs).layout_of(x_ty).unwrap();
     assert_eq!(x_layout.align, 32);
     assert_eq!(x_layout.size, 32);
+}
+
+#[test]
+fn gnu_packed_attribute_sets_record_layout_policy() {
+    let src = r#"
+        struct __attribute__((packed)) s { char c; int i; };
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, mut tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let record = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { packed: true, fields, .. } if fields.len() == 2 => Some(id),
+            _ => None,
+        })
+        .expect("packed record should carry layout policy");
+    let record_ty = tcx.intern(Ty::Record(record));
+    let layout = LayoutCx::with_defs(&tcx, &hir.defs).record_layout_of(record_ty).unwrap();
+    assert_eq!(layout.layout, Layout { size: 5, align: 1 });
+    assert_eq!(layout.fields[1].offset, 1);
 }
 
 #[test]
@@ -1799,6 +1822,8 @@ fn init_record_per_field_assign() {
         span: DUMMY_SP,
         kind: DefKind::Record {
             kind: RecordKind::Struct,
+            packed: false,
+            ms_bitfields: false,
             align_override: None,
             scalar_storage_order: None,
             layout: None,
@@ -1969,6 +1994,8 @@ fn expr_member_access_preserves_requested_field_name() {
         span: DUMMY_SP,
         kind: DefKind::Record {
             kind: RecordKind::Struct,
+            packed: false,
+            ms_bitfields: false,
             align_override: None,
             scalar_storage_order: None,
             layout: None,

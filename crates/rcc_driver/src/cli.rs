@@ -376,6 +376,7 @@ where
                 return OsString::from(format!("--quoted-dependency-target={target}"));
             }
             match text.as_ref() {
+                "-mms-bitfields" => OsString::from("-fms-bitfields"),
                 "-std" => OsString::from("--std"),
                 "-ansi" => OsString::from("--ansi"),
                 "-MM" => OsString::from("--user-dependencies"),

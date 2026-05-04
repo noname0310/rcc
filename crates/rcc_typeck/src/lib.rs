@@ -228,6 +228,8 @@ pub struct FieldSnapshot {
     pub ty: TyId,
     /// Bit-field width, if this field is a bit-field.
     pub bit_width: Option<u32>,
+    /// Whether the enclosing record uses Microsoft bit-field promotion rules.
+    pub ms_bitfields: bool,
     /// Object qualifiers attached to this field declaration.
     pub quals: ObjectQuals,
 }
@@ -271,7 +273,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             object_quals: ObjectQuals::none(),
             record_fields: None,
         },
-        DefKind::Record { fields, .. } => DefSnapshot {
+        DefKind::Record { fields, ms_bitfields, .. } => DefSnapshot {
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
@@ -283,6 +285,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
                         name: field.name,
                         ty: field.ty,
                         bit_width: field.bit_width,
+                        ms_bitfields: *ms_bitfields,
                         quals: field.quals,
                     })
                     .collect(),
@@ -760,10 +763,24 @@ pub fn visit_expr(
             body.exprs[expr_id].kind = HirExprKind::SizeofExpr(op2);
             expr_id
         }
+        HirExprKind::AlignofExpr(operand) => {
+            let op2 = visit_expr(operand, body, tcx, session, def_info);
+            let op2 = decay_if_needed(tcx, body, op2, DecayContext::SizeofOperand);
+            body.exprs[expr_id].ty = tcx.ulong;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::AlignofExpr(op2);
+            expr_id
+        }
         HirExprKind::SizeofType(ty) => {
             body.exprs[expr_id].ty = tcx.ulong;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::SizeofType(ty);
+            expr_id
+        }
+        HirExprKind::AlignofType(ty) => {
+            body.exprs[expr_id].ty = tcx.ulong;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::AlignofType(ty);
             expr_id
         }
         HirExprKind::CompoundLiteral { ty, local, init_stmts } => {
@@ -1890,6 +1907,11 @@ fn expr_bit_precision(
             let record = member_base_record(body, tcx, base)?;
             let field = def_info.get(&record)?.record_fields.as_ref()?.get(field_index as usize)?;
             let width = field.bit_width?;
+            if field.ms_bitfields
+                && int_rank_of(tcx, field.ty).is_some_and(|rank| rank > IntRank::Int)
+            {
+                return None;
+            }
             Some(BitfieldPrecision { width, signed: is_signed_integer(tcx, field.ty) })
         }
         HirExprKind::Convert { kind: ConvertKind::BitfieldPrecision { width, signed }, .. } => {
@@ -1924,6 +1946,13 @@ fn apply_bitfield_precision(
 
 fn is_signed_integer(tcx: &TyCtxt, ty: TyId) -> bool {
     matches!(*tcx.get(ty), Ty::Int { signed: true, .. })
+}
+
+fn int_rank_of(tcx: &TyCtxt, ty: TyId) -> Option<IntRank> {
+    match *tcx.get(ty) {
+        Ty::Int { rank, .. } => Some(rank),
+        _ => None,
+    }
 }
 
 fn usual_arithmetic_with_bitfields(
@@ -2647,7 +2676,7 @@ pub fn decay_if_needed(
 /// | `Convert { kind: ArrayToPtr | FuncToPtr }`      | rvalue   |
 /// | other `Convert { .. }`                          | rvalue   |
 /// | `Cast { .. }`                                   | rvalue   |
-/// | `SizeofType(_)`                                | rvalue   |
+/// | `SizeofType(_)` / `AlignofType(_)`             | rvalue   |
 /// | `CompoundLiteral { .. }`                       | lvalue   |
 /// | `Binary`, `Unary`, `Call`, `StmtExpr`           | rvalue   |
 /// | `AddressOf`                                     | rvalue   |
@@ -2677,6 +2706,8 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::StmtExpr { .. }
         | HirExprKind::SizeofExpr(_)
         | HirExprKind::SizeofType(_)
+        | HirExprKind::AlignofExpr(_)
+        | HirExprKind::AlignofType(_)
         | HirExprKind::Cast { .. }
         | HirExprKind::AddressOf(_)
         | HirExprKind::LabelAddr(_)
@@ -5597,6 +5628,7 @@ mod tests {
                             name,
                             ty,
                             bit_width: None,
+                            ms_bitfields: false,
                             quals: ObjectQuals::none(),
                         })
                         .collect(),
@@ -5655,6 +5687,7 @@ mod tests {
                     name: Some(u3),
                     ty: tcx.uint,
                     bit_width: Some(3),
+                    ms_bitfields: false,
                     quals: ObjectQuals::none(),
                 }]),
             },
@@ -5696,6 +5729,7 @@ mod tests {
                     name: Some(u3),
                     ty: tcx.uint,
                     bit_width: Some(3),
+                    ms_bitfields: false,
                     quals: ObjectQuals::none(),
                 }]),
             },
@@ -5760,6 +5794,7 @@ mod tests {
                     name: Some(u40),
                     ty: tcx.ulong_long,
                     bit_width: Some(40),
+                    ms_bitfields: false,
                     quals: ObjectQuals::none(),
                 }]),
             },

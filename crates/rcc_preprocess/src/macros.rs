@@ -137,8 +137,9 @@ impl MacroTable {
 ///   interchangeable) and return `Ok(())`.
 /// - Existing definition that *differs* from the new one → return an
 ///   E0022 diagnostic with primary label on the new definition and a
-///   secondary label on the previous one; the table is left
-///   unchanged.
+///   secondary label on the previous one; the new definition still
+///   replaces the old one so error recovery does not cascade through
+///   later directives that depend on the latest spelling.
 ///
 /// Two definitions are identical iff their
 /// [`MacroKind`] values match exactly (object-like vs function-like;
@@ -180,7 +181,9 @@ pub fn define_macro(
             macros.define(def);
             return Ok(Some(warning));
         }
-        return Err(redefinition_diagnostic(existing, &def, interner));
+        let diagnostic = redefinition_diagnostic(existing, &def, interner);
+        macros.define(def);
+        return Err(diagnostic);
     }
     macros.define(def);
     Ok(None)

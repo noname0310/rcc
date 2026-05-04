@@ -148,6 +148,13 @@ impl VerifyCx<'_> {
                         format_args!("{kind} def#{} sizeof(type-name) type", def_id.0),
                     );
                 }
+                HirExprKind::AlignofType(ty) => {
+                    self.verify_ty(
+                        expr.span,
+                        *ty,
+                        format_args!("{kind} def#{} __alignof__(type-name) type", def_id.0),
+                    );
+                }
                 HirExprKind::CompoundLiteral { ty, local, .. } => {
                     self.verify_ty(
                         expr.span,
