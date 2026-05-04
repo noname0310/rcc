@@ -512,6 +512,44 @@ fn switch_condition_undergoes_integer_promotion() {
     }
 }
 
+#[test]
+fn subscript_index_undergoes_integer_promotion() {
+    let (mut sess, _cap) = Session::for_test();
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+
+    let ptr_ty = ptr_to_int(&mut tcx);
+    let p_local = push_local(&mut body, ptr_ty);
+    let i_local = push_local(&mut body, tcx.uchar);
+    let base = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(p_local));
+    let index = push_kind(&mut body, tcx.uchar, HirExprKind::LocalRef(i_local));
+    let subscript = push_kind(&mut body, tcx.int, HirExprKind::Index { base, index });
+    root_stmt(&mut body, subscript);
+
+    check_body(&mut body, &mut tcx, &mut sess);
+
+    let HirExprKind::Index { index: promoted, .. } = body.exprs[subscript].kind else {
+        panic!("expected subscript expression");
+    };
+    assert_eq!(body.exprs[promoted].ty, tcx.int);
+    match body.exprs[promoted].kind {
+        HirExprKind::Convert { operand, kind: ConvertKind::IntegerPromotion } => {
+            assert_eq!(body.exprs[operand].ty, tcx.uchar);
+            assert!(
+                matches!(
+                    body.exprs[operand].kind,
+                    HirExprKind::Convert {
+                        operand: original,
+                        kind: ConvertKind::LvalueToRvalue,
+                    } if original == index
+                ),
+                "promotion should wrap the lvalue-to-rvalue index"
+            );
+        }
+        ref other => panic!("expected IntegerPromotion wrapper, got {other:?}"),
+    }
+}
+
 // ─── 6. pointer_convert — C99 §6.3.2.3 ───────────────────────────────────
 
 #[test]

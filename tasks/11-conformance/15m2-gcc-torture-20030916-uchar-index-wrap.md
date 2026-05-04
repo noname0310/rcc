@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15m2: gcc-torture 20030916 unsigned-char index wrap
 
 **Phase:** 11-conformance    **Depends on:** 11-15m1    **Milestone:** M6

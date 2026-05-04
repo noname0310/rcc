@@ -576,11 +576,28 @@ pub fn visit_expr(
         HirExprKind::Index { base, index } => {
             let base2 = visit_expr(base, body, tcx, session, def_info);
             let index2 = visit_expr(index, body, tcx, session, def_info);
+            let index_precision = expr_bit_precision(index2, body, tcx, def_info);
             // `a[i]` is `*(a + i)`: base decays to pointer, index is an
-            // integer rvalue. Result type is the pointee of the decayed
-            // base; result is an lvalue.
+            // integer rvalue promoted as the integer operand of pointer
+            // addition. Result type is the pointee of the decayed base;
+            // result is an lvalue.
             let base2 = rvalue_decayed(base2, body, tcx);
             let index2 = rvalue_decayed(index2, body, tcx);
+            let index_ty = body.exprs[index2].ty;
+            let index2 = if is_integer(tcx, index_ty) {
+                let promoted = integer_promotion(
+                    tcx,
+                    index_ty,
+                    index_precision.map(|precision| precision.width),
+                );
+                if promoted != index_ty {
+                    push_int_promote(body, index2, promoted)
+                } else {
+                    index2
+                }
+            } else {
+                index2
+            };
             let elem = match *tcx.get(body.exprs[base2].ty) {
                 Ty::Ptr(q) => q.ty,
                 _ => tcx.error,
