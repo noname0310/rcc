@@ -341,6 +341,12 @@ pub enum CastKind {
     PtrToInt,
     /// Integer to pointer.
     IntToPtr,
+    /// Same-size GNU vector/scalar or vector/vector bit reinterpretation.
+    VectorBitcast,
+    /// Element-wise GNU vector conversion. This is kept distinct from
+    /// `VectorBitcast` so lowering cannot silently reinterpret bytes when a
+    /// future GNU vector rule requires lane conversion.
+    VectorElementCast,
 }
 
 /// Binary op for the CFG (post type-checking; concrete semantics known).

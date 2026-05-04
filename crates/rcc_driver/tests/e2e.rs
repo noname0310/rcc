@@ -424,6 +424,97 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_scalar_bitcast_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector scalar-cast e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_scalar_bitcast",
+            r#"
+typedef int v2si __attribute__((vector_size(8)));
+int main(void) {
+  long long bits = 0x0000000200000001LL;
+  v2si v = (v2si)bits;
+  long long roundtrip = (long long)v;
+  return roundtrip == bits ? 0 : 1;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_vector_bitcast_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector vector-cast e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_vector_bitcast",
+            r#"
+typedef int v2si __attribute__((vector_size(8)));
+typedef float v2sf __attribute__((vector_size(8)));
+int main(void) {
+  v2sf f = { 2.0, 6.0 };
+  v2si i = (v2si)f;
+  v2sf g = (v2sf)i;
+  float *p = (float *)&g;
+  if (p[0] != 2.0) return 1;
+  if (p[1] != 6.0) return 2;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_invalid_cast_diagnostic_probe() {
+        let dir = TempSourceDir::new("gnu_vector_invalid_cast");
+        let c_path = dir.path.join("gnu_vector_invalid_cast.c");
+        fs::write(
+            &c_path,
+            r#"
+typedef int v4si __attribute__((vector_size(16)));
+int main(void) {
+  long long bits = 0;
+  v4si v = (v4si)bits;
+  return 0;
+}
+"#,
+        )
+        .unwrap_or_else(|err| panic!("write {}: {err}", c_path.display()));
+        let fixture = Fixture {
+            name: "gnu_vector_invalid_cast".to_owned(),
+            c_path,
+            stdout: vec![],
+            status: 0,
+        };
+        let exe = TempExe::new("gnu_vector_invalid_cast");
+        let cap = CaptureEmitter::new();
+        let handler = Handler::with_emitter(Box::new(cap.clone()));
+        let mut session = Session::with_handler(
+            Options { output: Some(exe.path.clone()), gnu_attributes: true, ..Options::default() },
+            handler,
+        );
+        let _ = pipeline::compile(&mut session, &fixture.c_path);
+
+        assert!(session.handler.has_errors(), "invalid vector cast must fail before codegen");
+        assert!(
+            cap.diagnostics().iter().any(|diag| diag.message.contains("invalid GNU vector cast")),
+            "diagnostics: {:?}",
+            cap.diagnostics()
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");

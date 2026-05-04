@@ -3471,6 +3471,10 @@ pub mod backend {
                 CastKind::PtrToPtr => self.emit_ptr_to_ptr_cast(operand, to, locals, body),
                 CastKind::PtrToInt => self.emit_ptr_to_int_cast(operand, to, locals, body),
                 CastKind::IntToPtr => self.emit_int_to_ptr_cast(operand, to, locals, body),
+                CastKind::VectorBitcast => self.emit_vector_bitcast(operand, to, locals, body),
+                CastKind::VectorElementCast => {
+                    self.emit_vector_element_cast(operand, to, locals, body)
+                }
             }
         }
 
@@ -3702,6 +3706,85 @@ pub mod backend {
                 .build_int_to_ptr(value, to_ty, "inttoptr")
                 .map(|value| value.as_basic_value_enum())
                 .map_err(builder_error)
+        }
+
+        fn emit_vector_bitcast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_operand_value(operand, locals, body)?;
+            let to_ty = self.type_cx().basic_type_of(to)?;
+            self.builder.build_bit_cast(value, to_ty, "vec.bitcast").map_err(builder_error)
+        }
+
+        fn emit_vector_element_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let from_elem = self.vector_elem_ty(from_ty)?;
+            let to_elem = self.vector_elem_ty(to)?;
+            let BasicTypeEnum::VectorType(to_vector_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "vector element cast target is not a vector"));
+            };
+            let value = self.emit_operand_value(operand, locals, body)?.into_vector_value();
+            match (self.tcx.get(from_elem), self.tcx.get(to_elem)) {
+                (Ty::Int { .. }, Ty::Int { .. }) => self
+                    .builder
+                    .build_int_cast_sign_flag(
+                        value,
+                        to_vector_ty,
+                        self.is_signed_integer_ty(to_elem)?,
+                        "vec.intcast",
+                    )
+                    .map(|value| value.as_basic_value_enum())
+                    .map_err(builder_error),
+                (Ty::Int { .. }, Ty::Float(_)) => {
+                    if self.is_signed_integer_ty(from_elem)? {
+                        self.builder
+                            .build_signed_int_to_float(value, to_vector_ty, "vec.sitofp")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(builder_error)
+                    } else {
+                        self.builder
+                            .build_unsigned_int_to_float(value, to_vector_ty, "vec.uitofp")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(builder_error)
+                    }
+                }
+                (Ty::Float(_), Ty::Int { .. }) => {
+                    if self.is_signed_integer_ty(to_elem)? {
+                        self.builder
+                            .build_float_to_signed_int(value, to_vector_ty, "vec.fptosi")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(builder_error)
+                    } else {
+                        self.builder
+                            .build_float_to_unsigned_int(value, to_vector_ty, "vec.fptoui")
+                            .map(|value| value.as_basic_value_enum())
+                            .map_err(builder_error)
+                    }
+                }
+                (Ty::Float(_), Ty::Float(_)) => self
+                    .builder
+                    .build_float_cast(value, to_vector_ty, "vec.fpcast")
+                    .map(|value| value.as_basic_value_enum())
+                    .map_err(builder_error),
+                _ => Err(type_lowering_error(to, "unsupported vector element cast")),
+            }
+        }
+
+        fn vector_elem_ty(&self, ty: TyId) -> Result<TyId, CodegenError> {
+            match self.tcx.get(ty) {
+                Ty::Vector { elem, .. } => Ok(*elem),
+                _ => Err(type_lowering_error(ty, "expected GNU vector type")),
+            }
         }
 
         fn emit_real_operand_as_float_kind(
@@ -9513,6 +9596,103 @@ mod tests {
             assert_codegen_fixture_verifies(&mut tcx, "__cast_int_to_ptr", int_ptr_ty, int_to_ptr);
         assert!(int_to_ptr_ir.contains("inttoptr i64"), "IR:\n{int_to_ptr_ir}");
         assert!(int_to_ptr_ir.contains("to ptr"), "IR:\n{int_to_ptr_ir}");
+    }
+
+    /// Same-size GNU vector/scalar casts are explicit LLVM bitcasts.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_vector_scalar_bitcast_opcode_table() {
+        let mut tcx = TyCtxt::new();
+        let v2si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let long_long = tcx.long_long;
+
+        let vector_to_scalar = cast_return_body(long_long, v2si, CastKind::VectorBitcast);
+        let ir = assert_codegen_fixture_verifies(
+            &mut tcx,
+            "__cast_vector_to_long_long",
+            long_long,
+            vector_to_scalar,
+        );
+
+        assert!(ir.contains("bitcast <2 x i32>"), "IR:\n{ir}");
+        assert!(ir.contains("to i64"), "IR:\n{ir}");
+    }
+
+    /// Same-size GNU vector/vector casts are bit reinterpretations even when
+    /// the element scalar kinds differ.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_vector_vector_bitcast_opcode_table() {
+        let mut tcx = TyCtxt::new();
+        let v2si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let v2sf = tcx.intern(Ty::Vector { elem: tcx.float, lanes: 2, bytes: 8 });
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(Some(Symbol(421)), v2si, false));
+        locals.push(cfg_local_decl(Some(Symbol(422)), v2sf, false));
+        let body = cfg_body_with_locals(
+            tcx.void,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(1)),
+                        rvalue: Rvalue::Cast {
+                            op: local_copy(Local(2)),
+                            to: v2si,
+                            kind: CastKind::VectorBitcast,
+                        },
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+
+        let ret_ty = tcx.void;
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__cast_v2sf_to_v2si", ret_ty, body);
+
+        assert!(ir.contains("bitcast <2 x float>"), "IR:\n{ir}");
+        assert!(ir.contains("to <2 x i32>"), "IR:\n{ir}");
+    }
+
+    /// The CFG has a distinct element-conversion cast for future vector rules,
+    /// separate from the same-size bitcast used by GCC torture casts.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn cast_vector_element_conversion_has_distinct_opcode() {
+        let mut tcx = TyCtxt::new();
+        let v2si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let v2sf = tcx.intern(Ty::Vector { elem: tcx.float, lanes: 2, bytes: 8 });
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(Some(Symbol(423)), v2sf, false));
+        locals.push(cfg_local_decl(Some(Symbol(424)), v2si, false));
+        let body = cfg_body_with_locals(
+            tcx.void,
+            locals,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: local_place(Local(1)),
+                        rvalue: Rvalue::Cast {
+                            op: local_copy(Local(2)),
+                            to: v2sf,
+                            kind: CastKind::VectorElementCast,
+                        },
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+
+        let ret_ty = tcx.void;
+        let ir =
+            assert_codegen_fixture_verifies(&mut tcx, "__cast_v2si_to_v2sf_elements", ret_ty, body);
+
+        assert!(ir.contains("sitofp <2 x i32>"), "IR:\n{ir}");
+        assert!(ir.contains("to <2 x float>"), "IR:\n{ir}");
     }
 
     // -----------------------------------------------------------------------

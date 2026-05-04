@@ -11,7 +11,7 @@ use rcc_hir::{
     rcc_hir_binop::{BinOp, UnOp},
     Body, ConvertKind, DefId, DefKind, FloatKind, GlobalInit, GlobalInitValue, HirCrate, HirExpr,
     HirExprId, HirExprKind, HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, IntRank,
-    ObjectQuals, Qual, Ty, TyCtxt, TyId, ValueCat,
+    LayoutCx, ObjectQuals, Qual, Ty, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::Symbol;
@@ -725,6 +725,13 @@ pub fn visit_expr(
             // otherwise fall back to the operand's type so we do not poison
             // the IR.
             let dst = if to == tcx.error { body.exprs[op2].ty } else { to };
+            if !valid_explicit_cast(body.exprs[op2].ty, dst, tcx) {
+                emit_invalid_vector_cast(session, body.exprs[expr_id].span);
+                body.exprs[expr_id].ty = tcx.error;
+                body.exprs[expr_id].value_cat = ValueCat::RValue;
+                body.exprs[expr_id].kind = HirExprKind::Cast { operand: op2, to: tcx.error };
+                return expr_id;
+            }
             body.exprs[expr_id].ty = dst;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Cast { operand: op2, to: dst };
@@ -1046,6 +1053,54 @@ fn check_scalar_operand(
 
 fn is_scalar(tcx: &TyCtxt, ty: TyId) -> bool {
     is_arithmetic(tcx, ty) || is_pointer(tcx, ty)
+}
+
+fn valid_explicit_cast(src: TyId, dst: TyId, tcx: &TyCtxt) -> bool {
+    let src_is_vector = is_vector(tcx, src);
+    let dst_is_vector = is_vector(tcx, dst);
+    if !src_is_vector && !dst_is_vector {
+        return true;
+    }
+
+    if src == tcx.error || dst == tcx.error {
+        return true;
+    }
+
+    match (src_is_vector, dst_is_vector) {
+        (true, true) => same_layout_size(tcx, src, dst),
+        (true, false) => is_integer_like(tcx, dst) && same_layout_size(tcx, src, dst),
+        (false, true) => is_integer_like(tcx, src) && same_layout_size(tcx, src, dst),
+        (false, false) => true,
+    }
+}
+
+fn is_vector(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Vector { .. })
+}
+
+fn is_integer_like(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Enum(_))
+}
+
+fn same_layout_size(tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
+    let layouts = LayoutCx::new(tcx);
+    let Ok(a) = layouts.layout_of(a) else {
+        return false;
+    };
+    let Ok(b) = layouts.layout_of(b) else {
+        return false;
+    };
+    a.size == b.size
+}
+
+fn emit_invalid_vector_cast(session: &mut Session, span: rcc_span::Span) {
+    session
+        .handler
+        .struct_err(span, "invalid GNU vector cast")
+        .code(rcc_errors::codes::E0083)
+        .note("vector casts require equal object sizes")
+        .note("vector/scalar casts require the scalar operand to be an integer type")
+        .emit();
 }
 
 fn unify_conditional_arms(
@@ -4062,6 +4117,47 @@ mod tests {
         let operand = push_kind(&mut body, tcx.int, HirExprKind::LocalRef(Local(0)));
         let id = push_kind(&mut body, tcx.int, HirExprKind::Cast { operand, to: tcx.int });
         assert_eq!(value_category(&body, id), ValueCat::RValue);
+    }
+
+    #[test]
+    fn valid_same_size_integer_to_vector_cast_typechecks() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let vector_ty = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let mut body = Body::default();
+        let local = push_local(&mut body, Some(session.interner.intern("x")), tcx.long_long, false);
+        let operand = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(local));
+        let cast = push_kind(&mut body, tcx.error, HirExprKind::Cast { operand, to: vector_ty });
+        set_root_expr(&mut body, cast);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[cast].ty, vector_ty);
+        assert!(!session.handler.has_errors(), "diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn invalid_vector_cast_reports_vector_specific_error() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let vector_ty = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let mut body = Body::default();
+        let local = push_local(&mut body, Some(session.interner.intern("x")), tcx.long_long, false);
+        let operand = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(local));
+        let cast = push_kind(&mut body, tcx.error, HirExprKind::Cast { operand, to: vector_ty });
+        set_root_expr(&mut body, cast);
+
+        check_body(&mut body, &mut tcx, &mut session);
+
+        assert_eq!(body.exprs[cast].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| {
+                diag.code == Some(rcc_errors::codes::E0083)
+                    && diag.message.contains("invalid GNU vector cast")
+            }),
+            "expected vector-specific E0083, got {:?}",
+            cap.diagnostics()
+        );
     }
 
     /// `&x` produces a pointer rvalue.

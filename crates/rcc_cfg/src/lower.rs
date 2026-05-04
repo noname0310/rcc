@@ -2133,6 +2133,7 @@ enum TyClass {
     UnsignedInt,
     Float,
     Ptr,
+    Vector,
     Other,
 }
 
@@ -2146,7 +2147,8 @@ fn classify(id: TyId, tcx: &TyCtxt) -> TyClass {
         // Convert wrapper) but if we see one raw treat it as pointer.
         Ty::Array { .. } => TyClass::Ptr,
         Ty::Func { .. } => TyClass::Ptr,
-        Ty::Void | Ty::Vector { .. } | Ty::Record(_) | Ty::Enum(_) | Ty::Error => TyClass::Other,
+        Ty::Vector { .. } => TyClass::Vector,
+        Ty::Void | Ty::Record(_) | Ty::Enum(_) | Ty::Error => TyClass::Other,
         Ty::BuiltinVaList => TyClass::Other,
     }
 }
@@ -2201,6 +2203,9 @@ fn explicit_cast_kind(from_ty: TyId, to_ty: TyId, tcx: &TyCtxt) -> CastKind {
         (TyClass::Ptr, TyClass::Ptr) => CastKind::PtrToPtr,
         (TyClass::Ptr, TyClass::SignedInt | TyClass::UnsignedInt) => CastKind::PtrToInt,
         (TyClass::SignedInt | TyClass::UnsignedInt, TyClass::Ptr) => CastKind::IntToPtr,
+        (TyClass::Vector, TyClass::Vector)
+        | (TyClass::Vector, TyClass::SignedInt | TyClass::UnsignedInt)
+        | (TyClass::SignedInt | TyClass::UnsignedInt, TyClass::Vector) => CastKind::VectorBitcast,
         _ => arithmetic_cast(from_ty, to_ty, tcx),
     }
 }
