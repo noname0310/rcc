@@ -172,6 +172,16 @@ pub struct LabelInfo {
     /// block still needs `StorageLive` for the locals that the jump
     /// bypassed.
     pub ordinary_locals_to_live: Vec<crate::Local>,
+    /// All locals whose declarations are in scope before this label,
+    /// including VLA locals. A backward goto to a label before a later
+    /// declaration must end the lifetime of every currently-live local
+    /// not present in this set.
+    pub locals_live_at_label: Vec<crate::Local>,
+    /// VLA locals whose declarations are in scope before this label.
+    /// Jumping to such a label is only valid if those VLA locals are
+    /// already live on the source edge; otherwise the jump would bypass
+    /// their runtime allocation.
+    pub vla_locals_live_at_label: Vec<crate::Local>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -179,6 +189,8 @@ struct LabelScopeState {
     has_runtime_entry: bool,
     has_vla: bool,
     ordinary_locals: Vec<crate::Local>,
+    vla_locals: Vec<crate::Local>,
+    live_locals: Vec<crate::Local>,
 }
 
 /// Loop context for break/continue target resolution.
@@ -714,6 +726,27 @@ impl BodyBuilder {
         }
     }
 
+    fn active_locals(&self) -> Vec<Local> {
+        self.scopes.iter().flat_map(|scope| scope.iter().copied()).collect()
+    }
+
+    fn emit_storage_deads_except(&mut self, keep_live: &[Local], span: Span) {
+        if self.is_current_terminated() {
+            return;
+        }
+        let mut to_dead: Vec<Local> = Vec::new();
+        for depth in (0..self.scopes.len()).rev() {
+            for &local in self.scopes[depth].iter().rev() {
+                if !keep_live.contains(&local) {
+                    to_dead.push(local);
+                }
+            }
+        }
+        for local in to_dead {
+            self.push(Statement { kind: StatementKind::StorageDead(local), span });
+        }
+    }
+
     /// Convenience: terminate the current block with a plain `Goto(target)`.
     pub fn goto(&mut self, target: BasicBlockId, span: Span) {
         self.terminate(Terminator { kind: TerminatorKind::Goto(target), span });
@@ -730,6 +763,8 @@ impl BodyBuilder {
                 runtime_scope_depth: None,
                 vla_scope_depth: None,
                 ordinary_locals_to_live: Vec::new(),
+                locals_live_at_label: Vec::new(),
+                vla_locals_live_at_label: Vec::new(),
             },
         );
     }
@@ -771,6 +806,7 @@ impl BodyBuilder {
     pub fn goto_label(&mut self, name: Symbol, span: Span) {
         let info = self.label_info(name);
         let current_depth = self.scope_depth();
+        let active_locals = self.active_locals();
         if let Some(vla_depth) = info.vla_scope_depth {
             assert!(
                 current_depth >= vla_depth,
@@ -779,9 +815,13 @@ impl BodyBuilder {
                 info.scope_depth
             );
         }
-        if current_depth > info.scope_depth {
-            self.emit_storage_deads_to_depth(info.scope_depth, span);
+        for local in &info.vla_locals_live_at_label {
+            assert!(
+                active_locals.contains(local),
+                "goto into VLA scope: label requires live VLA local {local:?}"
+            );
         }
+        self.emit_storage_deads_except(&info.locals_live_at_label, span);
         self.goto(info.block, span);
     }
 
@@ -827,6 +867,14 @@ impl BodyBuilder {
                         ordinary_locals_to_live: scopes
                             .iter()
                             .flat_map(|scope| scope.ordinary_locals.iter().copied())
+                            .collect(),
+                        locals_live_at_label: scopes
+                            .iter()
+                            .flat_map(|scope| scope.live_locals.iter().copied())
+                            .collect(),
+                        vla_locals_live_at_label: scopes
+                            .iter()
+                            .flat_map(|scope| scope.vla_locals.iter().copied())
                             .collect(),
                     },
                 );
@@ -887,12 +935,15 @@ impl BodyBuilder {
             HirStmtKind::Return(None) => {}
             HirStmtKind::LocalDecl { local, init } => {
                 if let Some(scope) = scopes.last_mut() {
+                    let cfg_local = local_map.lookup(*local);
                     scope.has_runtime_entry = true;
                     if hir_body.locals[*local].vla_len.is_some() {
                         scope.has_vla = true;
+                        scope.vla_locals.push(cfg_local);
                     } else {
-                        scope.ordinary_locals.push(local_map.lookup(*local));
+                        scope.ordinary_locals.push(cfg_local);
                     }
+                    scope.live_locals.push(cfg_local);
                 }
                 if let Some(vla_len) = hir_body.locals[*local].vla_len {
                     self.collect_expr_labels(hir_body, vla_len, local_map, scopes);

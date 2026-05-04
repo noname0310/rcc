@@ -252,6 +252,7 @@ fn vla_sizeof() {
       %tmp3.addr = alloca i64, align 8
       %tmp4.addr = alloca i64, align 8
       %tmp5.addr = alloca i64, align 8
+      %vla_stack2.addr = alloca ptr, align 8
       %param.unit = getelementptr i8, ptr %param.addr, i64 0
       store i32 %0, ptr %param.unit, align 4
       %load = load i32, ptr %param.addr, align 4
@@ -259,6 +260,7 @@ fn vla_sizeof() {
       store i64 %sext, ptr %tmp3.addr, align 8
       %vla_len = load i64, ptr %tmp3.addr, align 8
       %vla_stack = call ptr @llvm.stacksave.p0()
+      store ptr %vla_stack, ptr %vla_stack2.addr, align 8
       %local.addr = alloca i32, i64 %vla_len, align 4
       %len = load i64, ptr %tmp3.addr, align 8
       store i64 %len, ptr %tmp4.addr, align 8
@@ -267,7 +269,8 @@ fn vla_sizeof() {
       store i64 %mul, ptr %tmp5.addr, align 8
       %load2 = load i64, ptr %tmp5.addr, align 8
       store i64 %load2, ptr %ret.addr, align 8
-      call void @llvm.stackrestore.p0(ptr %vla_stack)
+      %vla_stack_token = load ptr, ptr %vla_stack2.addr, align 8
+      call void @llvm.stackrestore.p0(ptr %vla_stack_token)
       %load3 = load i64, ptr %ret.addr, align 8
       ret i64 %load3
     }

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-04
+
 # 11-15n: gcc-torture VLA lifetime cluster
 
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
@@ -21,6 +23,15 @@ gcc-torture aborts.
 - The three listed cases pass or are split into narrower checked tasks.
 - No VLA case is skipped due to runtime cost; use reduced fixtures for fast
   regression tests.
+
+## Result
+- `20040811-1` and `vla-dealloc-1` pass after CFG emits `StorageDead` for
+  locals whose lifetime starts after the target label, and LLVM stores VLA
+  stack tokens in entry-block slots so branch-local `StorageDead` blocks can
+  restore them path-independently.
+- `pr77767` is split to `11-15n1` because it is a separate HIR/function
+  parameter lowering issue: adjusted VLA parameter bounds with side effects
+  (`a++`, `c++`) are currently dropped.
 
 ## References
 - `docs/gcc-torture-signal-clusters.md`

@@ -958,7 +958,7 @@ pub mod backend {
     /// LLVM storage addresses for CFG locals.
     pub type LocalMap<'ctx> = IndexVec<Local, PointerValue<'ctx>>;
 
-    /// Saved stack tokens for VLA locals, restored on `StorageDead`.
+    /// Entry-block slots holding the latest stack token for each VLA local.
     pub type VlaStackMap<'ctx> = IndexVec<Local, Option<PointerValue<'ctx>>>;
 
     #[derive(Copy, Clone, Debug)]
@@ -1960,6 +1960,15 @@ pub mod backend {
                         .into_int_value();
                     let elem_llvm_ty = self.type_cx().basic_type_of(elem.ty)?;
                     let stack_token = self.emit_stack_save()?;
+                    let stack_slot = vla_stacks.get(local).copied().flatten().ok_or_else(|| {
+                        CodegenError::Internal(format!(
+                            "VLA local {local:?} is missing a stack token slot"
+                        ))
+                    })?;
+                    self.builder
+                        .build_store(stack_slot, stack_token)
+                        .map(|_| ())
+                        .map_err(builder_error)?;
                     let alloca = self
                         .builder
                         .build_array_alloca(
@@ -1969,7 +1978,6 @@ pub mod backend {
                         )
                         .map_err(builder_error)?;
                     locals[local] = alloca;
-                    vla_stacks[local] = Some(stack_token);
                     Ok(())
                 }
                 _ => self.emit_lifetime_marker("llvm.lifetime.start.p0", local, locals, body),
@@ -1989,12 +1997,17 @@ pub mod backend {
                 CodegenError::Internal(format!("local {local:?} is missing from body"))
             })?;
             if matches!(self.tcx.get(decl.ty), Ty::Array { is_vla: true, .. }) {
-                let stack_token =
-                    vla_stacks.get_mut(local).and_then(Option::take).ok_or_else(|| {
-                        CodegenError::Internal(format!(
-                            "VLA local {local:?} reached StorageDead before StorageLive"
-                        ))
-                    })?;
+                let stack_slot = vla_stacks.get(local).copied().flatten().ok_or_else(|| {
+                    CodegenError::Internal(format!(
+                        "VLA local {local:?} is missing a stack token slot"
+                    ))
+                })?;
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let stack_token = self
+                    .builder
+                    .build_load(ptr_ty.as_basic_type_enum(), stack_slot, "vla_stack_token")
+                    .map_err(builder_error)?
+                    .into_pointer_value();
                 self.emit_stack_restore(stack_token)
             } else {
                 self.emit_lifetime_marker("llvm.lifetime.end.p0", local, locals, body)
@@ -4878,8 +4891,18 @@ pub mod backend {
             let locals = cx.materialize_locals(function, body)?;
             cx.emit_debug_declarations(function, body, &locals)?;
             let mut vla_stacks = VlaStackMap::with_capacity(body.locals.len());
-            for _ in body.locals.iter() {
-                vla_stacks.push(None);
+            let stack_token_ty = cx.context.ptr_type(AddressSpace::default()).as_basic_type_enum();
+            for (local, decl) in body.locals.iter_enumerated() {
+                if matches!(cx.tcx.get(decl.ty), Ty::Array { is_vla: true, .. }) {
+                    let slot = cx.build_entry_alloca(
+                        function,
+                        stack_token_ty,
+                        &format!("vla_stack{}.addr", local.0),
+                    )?;
+                    vla_stacks.push(Some(slot));
+                } else {
+                    vla_stacks.push(None);
+                }
             }
 
             let mut this = Self { cx, function, body, locals, vla_stacks, blocks, va_area: None };
