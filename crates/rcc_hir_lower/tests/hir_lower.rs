@@ -94,6 +94,45 @@ fn block_scope_function_declaration_binds_def_without_local_storage() {
 }
 
 #[test]
+fn gnu_builtin_libcalls_injects_external_libc_declarations() {
+    let src = r#"
+        int main(void) {
+            char dst[4];
+            char src[4];
+            __builtin_memcpy(dst, src, 4);
+            if (__builtin_strlen(dst) == 99)
+                abort();
+            return __CHAR_BIT__ == 8 ? 0 : 1;
+        }
+    "#;
+    let opts = Options { gnu_builtin_libcalls: true, ..Options::default() };
+    let cap = CaptureEmitter::new();
+    let handler = Handler::with_emitter(Box::new(cap.clone()));
+    let mut sess = Session::with_handler(opts, handler);
+    let fid =
+        sess.source_map.write().unwrap().add_file(PathBuf::from("<gnu-builtins>"), Arc::from(src));
+    let pp_tokens = rcc_preprocess::preprocess(&mut sess, fid);
+    let ast = rcc_parse::parse(&mut sess, pp_tokens).expect("parse returned None");
+    let mut tcx = TyCtxt::new();
+    let mut hir = lower(&ast, &mut tcx, &mut sess);
+    rcc_typeck::check(&mut sess, &mut tcx, &mut hir);
+
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    for name in ["memcpy", "strlen", "abort"] {
+        let def = hir
+            .defs
+            .iter()
+            .find(|def| sess.interner.get(def.name) == name)
+            .unwrap_or_else(|| panic!("missing injected declaration for {name}"));
+        assert!(matches!(def.kind, DefKind::Function { has_body: false, .. }));
+        if name == "strlen" {
+            let DefKind::Function { ty, .. } = def.kind else { unreachable!() };
+            assert!(matches!(tcx.get(ty), Ty::Func { ret, .. } if *ret == tcx.ulong));
+        }
+    }
+}
+
+#[test]
 fn block_scope_static_object_binds_internal_global_without_local_storage() {
     let src = r#"
         int main(void) {

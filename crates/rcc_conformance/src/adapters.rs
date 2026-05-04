@@ -634,11 +634,31 @@ impl ChibiccAdapter {
 }
 
 /// `gcc-torture` adapter (GPL-licensed; gated by `--include-gpl`).
-pub struct GccTortureAdapter;
+pub struct GccTortureAdapter {
+    mode: GccTortureMode,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum GccTortureMode {
+    Smoke,
+    FullExecute,
+}
 
 impl GccTortureAdapter {
     /// Smoke subset list relative to the fetched gcc-torture checkout.
     pub const SMOKE_SUBSET: &'static str = "smoke-subset.txt";
+
+    /// Run only the tracked smoke subset.
+    #[must_use]
+    pub fn smoke() -> Self {
+        Self { mode: GccTortureMode::Smoke }
+    }
+
+    /// Run every `gcc.c-torture/execute/*.c` file.
+    #[must_use]
+    pub fn full_execute() -> Self {
+        Self { mode: GccTortureMode::FullExecute }
+    }
 
     fn read_smoke_subset(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
         let path = root.join(Self::SMOKE_SUBSET);
@@ -662,18 +682,47 @@ impl GccTortureAdapter {
         anyhow::ensure!(!files.is_empty(), "{} contains no smoke cases", path.display());
         Ok(files)
     }
+
+    fn discover_full_execute(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        let execute_dir = root.join("gcc/testsuite/gcc.c-torture/execute");
+        anyhow::ensure!(
+            execute_dir.is_dir(),
+            "gcc-torture execute directory not found: {}",
+            execute_dir.display()
+        );
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(&execute_dir)
+            .map_err(|err| anyhow::anyhow!("cannot read {}: {err}", execute_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "c") {
+                files.push(path);
+            }
+        }
+        anyhow::ensure!(!files.is_empty(), "{} contains no .c files", execute_dir.display());
+        Ok(files)
+    }
+
+    fn case_from_path(path: PathBuf) -> anyhow::Result<TestCase> {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", path.display()))?;
+        Ok(TestCase { id: format!("gcc-torture::execute::{stem}"), path })
+    }
 }
 
 impl Adapter for GccTortureAdapter {
     fn discover(&self, root: &Path) -> anyhow::Result<Vec<TestCase>> {
+        let files = match self.mode {
+            GccTortureMode::Smoke => Self::read_smoke_subset(root)?,
+            GccTortureMode::FullExecute => Self::discover_full_execute(root)?,
+        };
         let mut cases = Vec::new();
-        for path in Self::read_smoke_subset(root)? {
-            anyhow::ensure!(path.is_file(), "gcc-torture smoke case not found: {}", path.display());
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| anyhow::anyhow!("non-UTF-8 filename: {}", path.display()))?;
-            cases.push(TestCase { id: format!("gcc-torture::execute::{stem}"), path });
+        for path in files {
+            anyhow::ensure!(path.is_file(), "gcc-torture case not found: {}", path.display());
+            cases.push(Self::case_from_path(path)?);
         }
         cases.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(cases)
@@ -685,7 +734,27 @@ impl Adapter for GccTortureAdapter {
             if cfg!(windows) { tmp.path().join("test.exe") } else { tmp.path().join("test") };
 
         let mut compile = Command::new(rcc_path);
-        compile.arg("-w").arg("-o").arg(&exe_path).arg(&case.path);
+        compile.arg("-w");
+        if self.mode == GccTortureMode::FullExecute {
+            compile
+                .arg("-fgnu-binary-literals")
+                .arg("-fgnu-statement-expressions")
+                .arg("-fgnu-omitted-conditional-operand")
+                .arg("-fgnu-conditional-void-operand")
+                .arg("-fgnu-permissive-redefinition")
+                .arg("-fgnu-named-variadic")
+                .arg("-fgnu-permissive-paste")
+                .arg("-fgnu-va-args-elision")
+                .arg("-fgnu-range-designators")
+                .arg("-fgnu-attributes")
+                .arg("-fgnu-inline-asm")
+                .arg("-fgnu-case-ranges")
+                .arg("-fgnu-labels-as-values")
+                .arg("-fgnu-lvalue-comma")
+                .arg("-fgnu-function-names")
+                .arg("-fgnu-builtin-libcalls");
+        }
+        compile.arg("-o").arg(&exe_path).arg(&case.path);
         match run_with_timeout(&mut compile, TIMEOUT) {
             Ok(o) if o.status.success() => {}
             Ok(o) => {

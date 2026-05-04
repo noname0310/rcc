@@ -33,10 +33,67 @@ pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> 
     let mut crate_ = HirCrate::default();
     let mut resolver = Resolver::default();
     assign_def_ids(ast, tcx, session, &mut crate_, &mut resolver);
+    if session.opts.gnu_builtin_libcalls {
+        install_gnu_builtin_libcalls(tcx, session, &mut crate_, &mut resolver);
+    }
     finalize_file_scope_tag_definitions(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
     crate_
+}
+
+fn install_gnu_builtin_libcalls(
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+    let const_void_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: tcx.void,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let const_char_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: tcx.char_,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+
+    let builtins = [
+        ("abort", tcx.void, Vec::new(), false),
+        ("exit", tcx.void, vec![tcx.int], false),
+        ("memcpy", void_ptr, vec![void_ptr, const_void_ptr, tcx.ulong], false),
+        ("memset", void_ptr, vec![void_ptr, tcx.int, tcx.ulong], false),
+        ("memcmp", tcx.int, vec![const_void_ptr, const_void_ptr, tcx.ulong], false),
+        ("strcmp", tcx.int, vec![const_char_ptr, const_char_ptr], false),
+        ("strlen", tcx.ulong, vec![const_char_ptr], false),
+    ];
+
+    for (name, ret, params, variadic) in builtins {
+        let sym = session.interner.intern(name);
+        if resolver.ordinary.contains_key(&sym) {
+            continue;
+        }
+        let ty = tcx.intern(Ty::Func { ret, params, variadic, proto: true });
+        let def = crate_.defs.push(Def {
+            id: DefId(0),
+            name: sym,
+            span: rcc_span::DUMMY_SP,
+            kind: DefKind::Function {
+                ty,
+                has_body: false,
+                is_static: false,
+                is_inline: false,
+                is_extern_inline: false,
+                variadic,
+            },
+        });
+        crate_.defs[def].id = def;
+        resolver.ordinary.insert(sym, def);
+    }
 }
 
 fn lower_function_bodies(

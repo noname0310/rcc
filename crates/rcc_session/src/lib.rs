@@ -205,6 +205,14 @@ pub struct Options {
     /// where a plain inline definition is emitted normally; this option keeps
     /// that compatibility mode explicit.
     pub gnu89_inline: bool,
+    /// Enable common GNU builtin libc aliases and predefined scalar limits.
+    ///
+    /// GCC torture tests often use identifiers such as `__builtin_abort`,
+    /// `__builtin_memcpy`, `__CHAR_BIT__`, and `__INT_MAX__` without including
+    /// libc headers. Strict C99 keeps these names undeclared; this compatibility
+    /// mode maps builtin libc names to normal external libc calls and injects
+    /// the matching prototypes.
+    pub gnu_builtin_libcalls: bool,
 }
 
 impl Default for Options {
@@ -239,6 +247,7 @@ impl Default for Options {
             gnu_function_names: false,
             gnu_va_area: false,
             gnu89_inline: false,
+            gnu_builtin_libcalls: false,
         }
     }
 }

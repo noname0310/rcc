@@ -147,6 +147,24 @@ fn gnu89_inline_flag_sets_frontend_option() {
 }
 
 #[test]
+fn gnu_extension_flags_added_for_conformance_are_wired() {
+    let cli = parse(&[
+        "rcc",
+        "-fgnu-range-designators",
+        "-fgnu-attributes",
+        "-fgnu-inline-asm",
+        "-fgnu-builtin-libcalls",
+        "hello.c",
+    ]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_range_designators);
+    assert!(opts.gnu_attributes);
+    assert!(opts.gnu_inline_asm);
+    assert!(opts.gnu_builtin_libcalls);
+}
+
+#[test]
 fn gnu_preprocessor_compat_flags_set_frontend_options() {
     let cli = parse(&[
         "rcc",

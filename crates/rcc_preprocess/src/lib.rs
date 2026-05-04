@@ -289,6 +289,9 @@ impl<'a> Preprocessor<'a> {
         self.install_static_predefined("__DATE__", &format!("\"{date}\""));
         self.install_static_predefined("__TIME__", &format!("\"{time}\""));
         self.install_target_predefined();
+        if self.session.opts.gnu_builtin_libcalls {
+            self.install_gnu_builtin_predefined();
+        }
         self.install_builtin_predefined("__FILE__", BuiltinMacro::File);
         self.install_builtin_predefined("__LINE__", BuiltinMacro::Line);
     }
@@ -341,6 +344,22 @@ impl<'a> Preprocessor<'a> {
             }
             Os::None => {}
         }
+    }
+
+    fn install_gnu_builtin_predefined(&mut self) {
+        self.install_static_predefined("__CHAR_BIT__", "8");
+        self.install_static_predefined("__INT_MAX__", "2147483647");
+        self.install_static_predefined("__LONG_MAX__", "9223372036854775807L");
+        self.install_static_predefined("__LONG_LONG_MAX__", "9223372036854775807LL");
+        self.install_static_predefined("__SIZE_TYPE__", "unsigned long");
+
+        self.install_static_predefined("__builtin_abort", "abort");
+        self.install_static_predefined("__builtin_exit", "exit");
+        self.install_static_predefined("__builtin_memcpy", "memcpy");
+        self.install_static_predefined("__builtin_memset", "memset");
+        self.install_static_predefined("__builtin_memcmp", "memcmp");
+        self.install_static_predefined("__builtin_strcmp", "strcmp");
+        self.install_static_predefined("__builtin_strlen", "strlen");
     }
 
     fn install_static_predefined(&mut self, name: &str, body_src: &str) {

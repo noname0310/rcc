@@ -155,6 +155,7 @@ jobs:
             --rcc target/release/rcc \
             --include-gpl \
             --suite gcc-torture \
+            --mode smoke \
             --output docs/gcc-torture-smoke.json
       - name: Upload gcc-torture smoke report
         if: always()
@@ -162,3 +163,50 @@ jobs:
         with:
           name: gcc-torture-smoke-report
           path: docs/gcc-torture-smoke.json
+  gcc-torture-full:
+    name: gcc-torture execute (GPL, nightly)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev
+          echo "LLVM_SYS_181_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+      - name: Fetch gcc-torture (GPL gated)
+        run: cargo xtask fetch-testsuites --include-gpl --only gcc-torture
+      - name: Build rcc with LLVM
+        run: cargo build --release -p rcc_driver --features rcc_codegen_llvm/llvm
+      - name: Run gcc-torture execute suite
+        run: |
+          cargo run --release --package rcc_conformance --bin rcc_conformance_run -- \
+            --rcc target/release/rcc \
+            --include-gpl \
+            --suite gcc-torture \
+            --output docs/gcc-torture-full.json
+      - name: Check gcc-torture execute KPI
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("docs/gcc-torture-full.json").read_text())
+          suite = next(s for s in report["suites"] if s["name"] == "gcc-torture")
+          cases = suite["cases"]
+          passing = sum(1 for c in cases.values() if c["status"] in ("pass", "xfail"))
+          rate = passing / len(cases)
+          print(f"gcc-torture execute pass_rate={rate:.3f} ({passing}/{len(cases)})")
+          if rate < 0.60:
+              raise SystemExit("gcc-torture execute pass_rate below 0.600")
+          PY
+      - name: Upload gcc-torture full report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcc-torture-full-report
+          path: docs/gcc-torture-full.json

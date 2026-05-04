@@ -159,6 +159,12 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-omitted-conditional"
             | "gnu-conditional-void-operand"
             | "gnu-conditional-void"
+            | "gnu-range-designators"
+            | "gnu-ranges"
+            | "gnu-attributes"
+            | "gnu-attribute"
+            | "gnu-inline-asm"
+            | "gnu-asm"
             | "gnu-case-ranges"
             | "gnu-case-range"
             | "gnu-labels-as-values"
@@ -172,6 +178,9 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu89-inline"
             | "gnu-inline"
             | "chibicc-inline"
+            | "gnu-builtin-libcalls"
+            | "gnu-libc-builtins"
+            | "gnu-common-builtins"
     )
 }
 
@@ -371,9 +380,18 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         gnu_conditional_void_operand: cli.feature_flags.iter().any(|flag| {
             matches!(flag.as_str(), "gnu-conditional-void-operand" | "gnu-conditional-void")
         }),
-        gnu_range_designators: false,
-        gnu_attributes: false,
-        gnu_inline_asm: false,
+        gnu_range_designators: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-range-designators" | "gnu-ranges")),
+        gnu_attributes: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-attributes" | "gnu-attribute")),
+        gnu_inline_asm: cli
+            .feature_flags
+            .iter()
+            .any(|flag| matches!(flag.as_str(), "gnu-inline-asm" | "gnu-asm")),
         gnu_case_ranges: cli
             .feature_flags
             .iter()
@@ -394,6 +412,12 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             .feature_flags
             .iter()
             .any(|flag| matches!(flag.as_str(), "gnu89-inline" | "gnu-inline" | "chibicc-inline")),
+        gnu_builtin_libcalls: cli.feature_flags.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                "gnu-builtin-libcalls" | "gnu-libc-builtins" | "gnu-common-builtins"
+            )
+        }),
     }
 }
 

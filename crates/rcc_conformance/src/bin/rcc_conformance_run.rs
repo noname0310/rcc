@@ -32,6 +32,8 @@ enum Mode {
     /// instead of upstream `test/common`.
     #[value(name = "stage-1-3")]
     Stage1To3,
+    /// gcc-torture smoke subset from `smoke-subset.txt`.
+    Smoke,
 }
 
 /// Run conformance suites against `rcc` and emit a JSON report.
@@ -85,7 +87,8 @@ fn build_suite(name: &str, include_gpl: bool, mode: Mode) -> anyhow::Result<Suit
         ("chibicc", Mode::Compile) => Box::new(ChibiccAdapter::compile()),
         ("chibicc", Mode::Preprocess) => Box::new(ChibiccAdapter::preprocess()),
         ("chibicc", Mode::Stage1To3) => Box::new(ChibiccAdapter::stages1_to_3()),
-        ("gcc-torture", _) => Box::new(GccTortureAdapter),
+        ("gcc-torture", Mode::Smoke) => Box::new(GccTortureAdapter::smoke()),
+        ("gcc-torture", _) => Box::new(GccTortureAdapter::full_execute()),
         ("tcc-tests2", _) => Box::new(TccTests2Adapter),
         ("llvm-test-suite", _) => Box::new(LlvmTestSuiteAdapter),
         ("csmith", _) => Box::new(CsmithDifferentialAdapter),
