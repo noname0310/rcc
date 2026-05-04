@@ -1,5 +1,7 @@
 # 11-15s7: GNU vector cluster conformance gate
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15s6    **Milestone:** M6
 
 ## Goal

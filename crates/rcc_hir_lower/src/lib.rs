@@ -2670,7 +2670,7 @@ fn lower_vector_initializer(
 
 #[allow(clippy::too_many_arguments)]
 fn lower_vector_lane_exprs(
-    elem_ty: TyId,
+    _elem_ty: TyId,
     lanes: u32,
     items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
     span: Span,
@@ -2710,7 +2710,11 @@ fn lower_vector_lane_exprs(
         exprs.push(lower_expr(expr, body, scope, crate_, tcx, resolver, session));
     }
     while exprs.len() < lanes as usize {
-        exprs.push(push_int_const(0, elem_ty, span, body));
+        // C zero-initialization starts from the integer constant `0` and then
+        // applies the destination conversion. Keeping the synthetic lane as
+        // `int` lets typeck insert the same conversion wrapper as it would for
+        // an explicit `{ 0 }` initializer, including float vector lanes.
+        exprs.push(push_int_const(0, tcx.int, span, body));
     }
     exprs
 }
@@ -3322,10 +3326,11 @@ fn emit_zero_init(
             }
         }
         _ => {
-            // Scalar leaf — emit `target = 0;`. `scope` is unused for
+            // Scalar leaf: emit the canonical integer zero and let typeck
+            // insert the destination conversion. `scope` is unused for
             // zero-init since we synthesise the RHS directly.
             let _ = (scope, resolver, session);
-            let zero = push_int_const(0, target_ty, span, body);
+            let zero = push_int_const(0, tcx.int, span, body);
             emit_assign_stmt(target, zero, span, body, out);
         }
     }

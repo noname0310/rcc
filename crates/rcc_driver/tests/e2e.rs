@@ -372,6 +372,33 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_float_zero_fill_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector float zero-fill e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_float_zero_fill",
+            r#"
+typedef float v4sf __attribute__((vector_size(16)));
+int main(void) {
+  v4sf x = (v4sf){ 18.0, 20.0, 22 };
+  float *p = (float *)&x;
+  if (p[0] != 18.0) return 1;
+  if (p[1] != 20.0) return 2;
+  if (p[2] != 22.0) return 3;
+  if (p[3] != 0.0) return 4;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn gnu_vector_memcmp_byte_view_runtime_probe() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping GNU vector byte-view e2e: LLVM backend feature is disabled");

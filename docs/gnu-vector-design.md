@@ -10,18 +10,39 @@ vector-extension gaps, not generic conformance failures.
 
 Measured with WSL LLVM 18 and the full gcc-torture adapter:
 
-| Case | Current result | Primary feature |
+| Case | 15s7 result | Primary feature |
 | --- | --- | --- |
-| `20050316-1` | fail: killed by signal | vector/scalar bitcasts, vector returns |
-| `20050316-2` | fail: killed by signal | int/float vector bitcasts |
-| `20050316-3` | fail: killed by signal | signed/unsigned vector bitcasts |
-| `20050604-1` | fail: killed by signal | vector compound literals, `+=` |
-| `pr92618` | fail: killed by signal | may-alias vector pointer stores, vector returns |
-| `scal-to-vec1` | fail: killed by signal | scalar-vector arithmetic splats |
-| `scal-to-vec2` | fail: killed by signal | scalar function result splats |
-| `scal-to-vec3` | fail: killed by signal | integer literal splats into float/double vectors |
-| `simd-4` | fail: killed by signal | vector-to-integer bitcast |
-| `simd-6` | fail: killed by signal | vector multiply, memcmp byte view |
+| `20050316-1` | pass | vector/scalar bitcasts, vector returns |
+| `20050316-2` | pass | int/float vector bitcasts |
+| `20050316-3` | pass | signed/unsigned vector bitcasts |
+| `20050604-1` | pass | vector compound literals, `+=` |
+| `pr92618` | pass | may-alias vector pointer stores, vector returns |
+| `scal-to-vec1` | pass | scalar-vector arithmetic splats |
+| `scal-to-vec2` | pass | scalar function result splats |
+| `scal-to-vec3` | pass | integer literal splats into float/double vectors |
+| `simd-4` | pass | vector-to-integer bitcast |
+| `simd-6` | pass | vector multiply, memcmp byte view |
+
+15s7 WSL verification:
+
+```text
+cargo run -p rcc_conformance --bin rcc_conformance_run -- \
+  --rcc target/wsl/debug/rcc \
+  --suite gcc-torture --include-gpl \
+  --case gcc-torture::execute::20050316-1 \
+  --case gcc-torture::execute::20050316-2 \
+  --case gcc-torture::execute::20050316-3 \
+  --case gcc-torture::execute::20050604-1 \
+  --case gcc-torture::execute::pr92618 \
+  --case gcc-torture::execute::scal-to-vec1 \
+  --case gcc-torture::execute::scal-to-vec2 \
+  --case gcc-torture::execute::scal-to-vec3 \
+  --case gcc-torture::execute::simd-4 \
+  --case gcc-torture::execute::simd-6 \
+  --output target/wsl/gcc-vector-cluster-15s7.json
+```
+
+Expected result: `10 pass, 0 fail, 0 xfail, 0 skip`.
 
 ## Type Model
 
@@ -41,8 +62,9 @@ Rules:
 - `lanes = B / sizeof(elem)` and must be non-zero with no remainder.
 - Element types in this slice are integer and floating scalar types only.
 - `sizeof(vector)` is `bytes`; alignment is at least `bytes` up to the target's
-  natural vector alignment cap. The initial LP64/SysV slice should match LLVM's
-  fixed-vector ABI for 64-bit and 128-bit vectors.
+  natural vector alignment cap. The initial LP64/SysV slice matches LLVM's
+  fixed-vector ABI for the 32-bit, 64-bit, and 128-bit vectors exercised by the
+  gcc-torture vector cluster.
 
 ## Lowering
 
