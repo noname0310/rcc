@@ -295,6 +295,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             Ty::Void => Err(type_lowering_error(ty, "void is not a parameter type")),
             Ty::Func { .. } => Err(type_lowering_error(ty, "function parameters must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
+            Ty::Vector { .. } => Err(type_lowering_error(ty, "vector ABI is not implemented yet")),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_param(ty)),
             Ty::BuiltinVaList | Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => {
                 self.aggregate_param(ty)
@@ -312,6 +313,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             }),
             Ty::Func { .. } => Err(type_lowering_error(ty, "function return types must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
+            Ty::Vector { .. } => Err(type_lowering_error(ty, "vector ABI is not implemented yet")),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_return(ty)),
             Ty::Complex(FloatKind::F80) => Ok(AbiReturn {
                 source: ty,
@@ -494,6 +496,9 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             }
             Ty::Complex(FloatKind::F80) => {
                 merge_range(chunks, offset, 32, AbiClass::ComplexX87, ty)
+            }
+            Ty::Vector { .. } => {
+                Err(type_lowering_error(ty, "vector ABI classification is not implemented yet"))
             }
             Ty::Array { elem, .. } => self.classify_array(ty, elem.ty, offset, chunks),
             Ty::Record(_) => self.classify_record(ty, offset, chunks),
@@ -1451,6 +1456,16 @@ pub mod backend {
                         .map_err(|e| type_lowering_error(ty, e))?
                         .as_type()
                 }
+                Ty::Vector { lanes, bytes, .. } => debug
+                    .builder
+                    .create_basic_type(
+                        &format!("gnu vector {lanes} lanes"),
+                        bytes.saturating_mul(8),
+                        0x00,
+                        DIFlags::PUBLIC,
+                    )
+                    .map_err(|e| type_lowering_error(ty, e))?
+                    .as_type(),
                 Ty::Ptr(pointee) => {
                     let pointee = self.debug_type(pointee.ty)?;
                     debug
@@ -5796,6 +5811,16 @@ pub mod backend {
                 Ty::Int { rank, .. } => self.int_type(*rank).into(),
                 Ty::Float(kind) => self.float_type(*kind).into(),
                 Ty::Complex(kind) => self.complex_type(*kind).into(),
+                Ty::Vector { elem, lanes, .. } => match self.basic_type_of(*elem)? {
+                    BasicTypeEnum::IntType(elem) => elem.vec_type(*lanes).into(),
+                    BasicTypeEnum::FloatType(elem) => elem.vec_type(*lanes).into(),
+                    other => {
+                        return self.type_error(
+                            ty,
+                            format!("unsupported vector element LLVM type: {other:?}"),
+                        );
+                    }
+                },
                 Ty::Ptr(_) => self.ptr_type().into(),
                 Ty::Array { elem, len: Some(len), is_vla: false } => {
                     let elem_ty = self.basic_type_of_qual(*elem)?;
@@ -6999,6 +7024,9 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
         Ty::Int { signed: false, rank } => format!("u{:?}", rank).to_lowercase(),
         Ty::Float(k) => format!("{:?}", k).to_lowercase(),
         Ty::Complex(k) => format!("complex {:?}", k).to_lowercase(),
+        Ty::Vector { elem, lanes, bytes } => {
+            format!("vector lanes={lanes} bytes={bytes} elem={}", pretty_ty(tcx, *elem))
+        }
         Ty::Ptr(q) => format!("ptr({:?})", q),
         Ty::Array { len, is_vla, .. } => format!("array[{:?} vla={}]", len, is_vla),
         Ty::Func { variadic, .. } => format!("func(variadic={})", variadic),
@@ -7950,6 +7978,20 @@ mod tests {
             lowered.print_to_string().to_string(),
             "%rcc.record.0 = type <{ i8, [7 x i8], i32, [4 x i8] }>"
         );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_lowers_fixed_vector_type() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let vector = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let hir = hir_with_defs(IndexVec::new());
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(vector).unwrap();
+
+        assert_eq!(lowered.print_to_string().to_string(), "<4 x i32>");
     }
 
     #[cfg(feature = "llvm")]

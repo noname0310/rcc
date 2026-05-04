@@ -182,6 +182,7 @@ fn fmt_ty(tcx: &TyCtxt, ty: TyId) -> String {
         Ty::Int { signed, rank } => fmt_int(*signed, *rank).to_string(),
         Ty::Float(kind) => fmt_float(*kind).to_string(),
         Ty::Complex(kind) => format!("_Complex {}", fmt_float(*kind)),
+        Ty::Vector { elem, lanes, .. } => format!("<{} x {}>", lanes, fmt_ty(tcx, *elem)),
         Ty::Ptr(q) => format!("{}*", fmt_qual(tcx, *q)),
         Ty::Array { elem, len, is_vla } => {
             let len = if *is_vla {

@@ -27,6 +27,15 @@ pub enum Ty {
     Float(FloatKind),
     /// `_Complex` variants (C99 §6.2.5p11).
     Complex(FloatKind),
+    /// GNU fixed-size vector extension.
+    Vector {
+        /// Scalar element type.
+        elem: TyId,
+        /// Number of vector lanes.
+        lanes: u32,
+        /// Total vector object size in bytes.
+        bytes: u64,
+    },
     /// Pointer to qualified type.
     Ptr(Qual),
     /// Array of `elem`. `len` = `None` for incomplete or `[*]` VLA.

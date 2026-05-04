@@ -4558,7 +4558,7 @@ fn lower_type_from_parts_in_scope(
         return tcx.error;
     }
     apply_aligned_attr_override_to_record(base, &specs.attrs, tcx, crate_, session);
-    let ty = apply_declarator_with_base_quals_in_scope(
+    let mut ty = apply_declarator_with_base_quals_in_scope(
         base,
         specs.quals,
         declarator,
@@ -4569,6 +4569,8 @@ fn lower_type_from_parts_in_scope(
         crate_,
         session,
     );
+    ty = apply_vector_size_attrs_to_type(ty, &specs.attrs, tcx, session);
+    ty = apply_vector_size_attrs_to_type(ty, &declarator.attrs, tcx, session);
     apply_aligned_attr_override_to_record(ty, &declarator.attrs, tcx, crate_, session);
     ty
 }
@@ -4612,6 +4614,260 @@ fn aligned_attr_value(attr: &rcc_ast::Attribute, session: &Session) -> Option<u3
     };
     let align = u32::try_from(raw).ok()?;
     (align != 0 && align.is_power_of_two()).then_some(align)
+}
+
+fn apply_vector_size_attrs_to_type(
+    mut ty: TyId,
+    attrs: &[rcc_ast::Attribute],
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    for attr in attrs {
+        if !is_vector_size_attr(attr, session) {
+            continue;
+        }
+        let Some(bytes) = vector_size_attr_bytes(attr, tcx, session) else {
+            emit_invalid_vector_size(
+                attr.span,
+                "vector_size requires an integer byte size",
+                session,
+            );
+            return tcx.error;
+        };
+        ty = make_vector_type(ty, bytes, attr.span, tcx, session);
+        if ty == tcx.error {
+            return ty;
+        }
+    }
+    ty
+}
+
+fn is_vector_size_attr(attr: &rcc_ast::Attribute, session: &Session) -> bool {
+    matches!(session.interner.get(attr.name), "vector_size" | "__vector_size__" | "vector_size__")
+}
+
+fn vector_size_attr_bytes(
+    attr: &rcc_ast::Attribute,
+    tcx: &TyCtxt,
+    session: &Session,
+) -> Option<u64> {
+    let [arg] = attr.args.as_slice() else {
+        return None;
+    };
+    AttrExprParser::new(&arg.tokens, tcx, session).parse()
+}
+
+fn make_vector_type(
+    elem: TyId,
+    bytes: u64,
+    span: Span,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    if bytes == 0 || !bytes.is_power_of_two() {
+        emit_invalid_vector_size(
+            span,
+            "vector_size must be a non-zero power-of-two byte size",
+            session,
+        );
+        return tcx.error;
+    }
+    if !matches!(tcx.get(elem), Ty::Int { .. } | Ty::Float(_)) {
+        emit_invalid_vector_size(
+            span,
+            "vector_size currently requires an integer or floating element type",
+            session,
+        );
+        return tcx.error;
+    }
+    let elem_layout = match LayoutCx::new(tcx).layout_of(elem) {
+        Ok(layout) => layout,
+        Err(_) => {
+            emit_invalid_vector_size(
+                span,
+                "vector_size element type has no compile-time layout",
+                session,
+            );
+            return tcx.error;
+        }
+    };
+    if elem_layout.size == 0 || bytes % elem_layout.size != 0 {
+        emit_invalid_vector_size(
+            span,
+            "vector_size byte size must be a multiple of the element size",
+            session,
+        );
+        return tcx.error;
+    }
+    let lanes = bytes / elem_layout.size;
+    let Ok(lanes) = u32::try_from(lanes) else {
+        emit_invalid_vector_size(span, "vector_size lane count is too large", session);
+        return tcx.error;
+    };
+    if lanes == 0 {
+        emit_invalid_vector_size(span, "vector_size must contain at least one lane", session);
+        return tcx.error;
+    }
+    tcx.intern(Ty::Vector { elem, lanes, bytes })
+}
+
+fn emit_invalid_vector_size(span: Span, message: &str, session: &mut Session) {
+    session.handler.struct_err(span, message).code(rcc_errors::codes::E0061).emit();
+}
+
+struct AttrExprParser<'a> {
+    tokens: &'a [rcc_ast::AttributeToken],
+    pos: usize,
+    tcx: &'a TyCtxt,
+    session: &'a Session,
+}
+
+impl<'a> AttrExprParser<'a> {
+    fn new(tokens: &'a [rcc_ast::AttributeToken], tcx: &'a TyCtxt, session: &'a Session) -> Self {
+        Self { tokens, pos: 0, tcx, session }
+    }
+
+    fn parse(mut self) -> Option<u64> {
+        let value = self.parse_add()?;
+        (self.pos == self.tokens.len()).then_some(value)
+    }
+
+    fn parse_add(&mut self) -> Option<u64> {
+        let mut lhs = self.parse_mul()?;
+        loop {
+            if self.eat_punct("+") {
+                lhs = lhs.checked_add(self.parse_mul()?)?;
+            } else if self.eat_punct("-") {
+                lhs = lhs.checked_sub(self.parse_mul()?)?;
+            } else {
+                return Some(lhs);
+            }
+        }
+    }
+
+    fn parse_mul(&mut self) -> Option<u64> {
+        let mut lhs = self.parse_primary()?;
+        loop {
+            if self.eat_punct("*") {
+                lhs = lhs.checked_mul(self.parse_primary()?)?;
+            } else if self.eat_punct("/") {
+                let rhs = self.parse_primary()?;
+                if rhs == 0 {
+                    return None;
+                }
+                lhs /= rhs;
+            } else {
+                return Some(lhs);
+            }
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<u64> {
+        if self.eat_punct("(") {
+            let value = self.parse_add()?;
+            return self.eat_punct(")").then_some(value);
+        }
+        if self.eat_symbol("sizeof") {
+            return self.parse_sizeof();
+        }
+        let token = self.tokens.get(self.pos)?;
+        if let rcc_ast::AttributeTokenKind::Int(value) = token.kind {
+            self.pos += 1;
+            return u64::try_from(value).ok();
+        }
+        None
+    }
+
+    fn parse_sizeof(&mut self) -> Option<u64> {
+        if !self.eat_punct("(") {
+            return None;
+        }
+        let start = self.pos;
+        let mut depth = 1_u32;
+        while let Some(token) = self.tokens.get(self.pos) {
+            if self.token_is_punct(token, "(") {
+                depth += 1;
+            } else if self.token_is_punct(token, ")") {
+                depth -= 1;
+                if depth == 0 {
+                    let ty = self.builtin_type_from_tokens(&self.tokens[start..self.pos])?;
+                    self.pos += 1;
+                    return LayoutCx::new(self.tcx).layout_of(ty).ok().map(|layout| layout.size);
+                }
+            }
+            self.pos += 1;
+        }
+        None
+    }
+
+    fn builtin_type_from_tokens(&self, tokens: &[rcc_ast::AttributeToken]) -> Option<TyId> {
+        let mut words = Vec::new();
+        for token in tokens {
+            let rcc_ast::AttributeTokenKind::Symbol(sym) = token.kind else {
+                return None;
+            };
+            words.push(self.session.interner.get(sym));
+        }
+        match words.as_slice() {
+            ["char"] | ["signed", "char"] => Some(self.tcx.char_),
+            ["unsigned", "char"] => Some(self.tcx.uchar),
+            ["short"] | ["short", "int"] | ["signed", "short"] | ["signed", "short", "int"] => {
+                Some(self.tcx.short)
+            }
+            ["unsigned", "short"] | ["unsigned", "short", "int"] => Some(self.tcx.ushort),
+            ["int"] | ["signed"] | ["signed", "int"] => Some(self.tcx.int),
+            ["unsigned"] | ["unsigned", "int"] => Some(self.tcx.uint),
+            ["long"] | ["long", "int"] | ["signed", "long"] | ["signed", "long", "int"] => {
+                Some(self.tcx.long)
+            }
+            ["unsigned", "long"] | ["unsigned", "long", "int"] => Some(self.tcx.ulong),
+            ["long", "long"]
+            | ["long", "long", "int"]
+            | ["signed", "long", "long"]
+            | ["signed", "long", "long", "int"] => Some(self.tcx.long_long),
+            ["unsigned", "long", "long"] | ["unsigned", "long", "long", "int"] => {
+                Some(self.tcx.ulong_long)
+            }
+            ["float"] => Some(self.tcx.float),
+            ["double"] => Some(self.tcx.double),
+            ["long", "double"] => Some(self.tcx.long_double),
+            _ => None,
+        }
+    }
+
+    fn eat_symbol(&mut self, expected: &str) -> bool {
+        let Some(token) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        let rcc_ast::AttributeTokenKind::Symbol(sym) = token.kind else {
+            return false;
+        };
+        if self.session.interner.get(sym) == expected {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_punct(&mut self, expected: &str) -> bool {
+        let Some(token) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        if self.token_is_punct(token, expected) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn token_is_punct(&self, token: &rcc_ast::AttributeToken, expected: &str) -> bool {
+        let rcc_ast::AttributeTokenKind::Punct(sym) = token.kind else {
+            return false;
+        };
+        self.session.interner.get(sym) == expected
+    }
 }
 
 /// Lower an AST `type-name` (used by casts, `sizeof(type)`, and compound

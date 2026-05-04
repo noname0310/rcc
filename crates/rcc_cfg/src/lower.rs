@@ -2139,7 +2139,7 @@ fn classify(id: TyId, tcx: &TyCtxt) -> TyClass {
         // Convert wrapper) but if we see one raw treat it as pointer.
         Ty::Array { .. } => TyClass::Ptr,
         Ty::Func { .. } => TyClass::Ptr,
-        Ty::Void | Ty::Record(_) | Ty::Enum(_) | Ty::Error => TyClass::Other,
+        Ty::Void | Ty::Vector { .. } | Ty::Record(_) | Ty::Enum(_) | Ty::Error => TyClass::Other,
         Ty::BuiltinVaList => TyClass::Other,
     }
 }

@@ -187,6 +187,7 @@ impl<'tcx> LayoutCx<'tcx> {
                     align: base.align,
                 })
             }
+            Ty::Vector { bytes, .. } => Ok(Layout { size: *bytes, align: vector_align(*bytes) }),
             Ty::Ptr(_) => Ok(type_layout(self.target.layouts.pointer)),
             Ty::Func { .. } => {
                 Err(LayoutError::Unsized { ty, reason: "function types have no object size" })
@@ -462,6 +463,10 @@ fn type_layout(layout: TypeLayout) -> Layout {
     Layout { size: layout.size, align: layout.align }
 }
 
+fn vector_align(bytes: u64) -> u32 {
+    u32::try_from(bytes.min(16)).unwrap_or(16).max(1)
+}
+
 fn apply_field_align(mut layout: Layout, field: &crate::Field) -> Layout {
     if let Some(align) = field.align_override {
         layout.align = layout.align.max(align);
@@ -572,6 +577,17 @@ mod tests {
         assert_eq!(layouts.layout_of(tcx.long).unwrap(), Layout { size: 4, align: 4 });
         assert_eq!(layouts.layout_of(tcx.long_long).unwrap(), Layout { size: 8, align: 8 });
         assert_eq!(layouts.layout_of(tcx.long_double).unwrap(), Layout { size: 8, align: 8 });
+    }
+
+    #[test]
+    fn vector_layout_reports_total_size_and_abi_alignment() {
+        let mut tcx = TyCtxt::new();
+        let v4si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 4, bytes: 16 });
+        let v2si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let layouts = LayoutCx::new(&tcx);
+
+        assert_eq!(layouts.layout_of(v4si).unwrap(), Layout { size: 16, align: 16 });
+        assert_eq!(layouts.layout_of(v2si).unwrap(), Layout { size: 8, align: 8 });
     }
 
     #[test]

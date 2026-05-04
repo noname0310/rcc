@@ -885,6 +885,78 @@ fn gnu_aligned_attribute_sets_field_layout_override() {
 }
 
 #[test]
+fn gnu_vector_size_attribute_lowers_typedef_and_sizeof_layout() {
+    let src = r#"
+        typedef int v4si __attribute__((vector_size(16)));
+        int size_check[sizeof(v4si)];
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let vector_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Typedef(ty) if matches!(tcx.get(ty), Ty::Vector { .. }) => Some(ty),
+            _ => None,
+        })
+        .expect("vector typedef should lower to Ty::Vector");
+
+    match tcx.get(vector_ty) {
+        Ty::Vector { elem, lanes, bytes } => {
+            assert_eq!(*elem, tcx.int);
+            assert_eq!(*lanes, 4);
+            assert_eq!(*bytes, 16);
+        }
+        other => panic!("expected vector type, got {other:?}"),
+    }
+    assert_eq!(
+        LayoutCx::with_defs(&tcx, &hir.defs).layout_of(vector_ty).unwrap(),
+        rcc_hir::Layout { size: 16, align: 16 }
+    );
+}
+
+#[test]
+fn gnu_vector_size_attribute_evaluates_sizeof_expression() {
+    let src = r#"
+        #define vector(elcount, type) __attribute__((vector_size((elcount) * sizeof(type)))) type
+        typedef vector(4, float) v4sf;
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let vector_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match def.kind {
+            DefKind::Typedef(ty) if matches!(tcx.get(ty), Ty::Vector { .. }) => Some(ty),
+            _ => None,
+        })
+        .expect("vector macro typedef should lower to Ty::Vector");
+
+    assert!(matches!(
+        tcx.get(vector_ty),
+        Ty::Vector { elem, lanes: 4, bytes: 16 } if *elem == tcx.float
+    ));
+}
+
+#[test]
+fn gnu_vector_size_attribute_rejects_invalid_byte_size() {
+    let src = r#"
+        typedef int bad __attribute__((vector_size(3)));
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().any(|diag| diag.code == Some(rcc_errors::codes::E0061)),
+        "expected E0061, got {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn aggregate_initializers_skip_unnamed_bitfields() {
     let src = r#"
         struct S { int a:4; int :4; int b:4; int c:4; } x = { 2, 3, 4 };
@@ -3337,6 +3409,7 @@ fn assert_ty_has_no_error(tcx: &TyCtxt, ty: TyId, context: &str) {
         Ty::Error => panic!("{context} unexpectedly contains tcx.error"),
         Ty::Ptr(pointee) => assert_ty_has_no_error(tcx, pointee.ty, context),
         Ty::Array { elem, .. } => assert_ty_has_no_error(tcx, elem.ty, context),
+        Ty::Vector { elem, .. } => assert_ty_has_no_error(tcx, *elem, context),
         Ty::Func { ret, params, .. } => {
             assert_ty_has_no_error(tcx, *ret, context);
             for param in params {

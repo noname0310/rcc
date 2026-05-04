@@ -1,5 +1,7 @@
 # 11-15s1: GNU vector type and layout
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15s    **Milestone:** M6
 
 ## Goal
