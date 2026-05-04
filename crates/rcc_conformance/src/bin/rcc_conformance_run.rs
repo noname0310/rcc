@@ -52,7 +52,7 @@ struct Cli {
     #[arg(long, default_value = "docs/conformance.json")]
     output: PathBuf,
 
-    /// Include GPL-licensed suites (e.g. gcc-torture).
+    /// Include optional external suites kept behind the historical GPL opt-in flag.
     #[arg(long)]
     include_gpl: bool,
 
@@ -72,12 +72,17 @@ struct Cli {
     cases: Vec<String>,
 }
 
-/// Known suite names and whether they require `--include-gpl`.
+/// Optional suites still guarded by the historical `--include-gpl` flag.
+///
+/// The flag is retained as an explicit opt-in for large external
+/// compatibility suites. CI may download and execute these tests inside
+/// the runner; the guard is not meant to imply that running the tests
+/// locally or in CI is a redistribution event.
 const GPL_SUITES: &[&str] = &["gcc-torture"];
 
 fn build_suite(name: &str, include_gpl: bool, mode: Mode) -> anyhow::Result<Suite> {
     if GPL_SUITES.contains(&name) && !include_gpl {
-        bail!("suite `{name}` is GPL-licensed; pass --include-gpl to enable it");
+        bail!("suite `{name}` is optional; pass --include-gpl to enable it");
     }
 
     let root = PathBuf::from("third_party/testsuites").join(name);

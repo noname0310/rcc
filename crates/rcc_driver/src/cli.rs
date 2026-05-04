@@ -143,7 +143,7 @@ pub struct Cli {
     #[arg(long = "no-pie", conflicts_with = "pie")]
     pub no_pie: bool,
 
-    /// Include GPL-licensed test suites during `fetch-testsuites` / conformance runs.
+    /// Include optional external test suites during `fetch-testsuites` / conformance runs.
     #[arg(long)]
     pub include_gpl_tests: bool,
 }

@@ -22,9 +22,10 @@ extensions we deliberately don't support.
 ## Result
 - `GccTortureAdapter` now has separate smoke and full execute modes.
 - Full mode discovers every direct `gcc.c-torture/execute/*.c` case.
-- The full manual job fetches gcc-torture behind `--include-gpl`, runs the
-  full execute adapter, uploads the JSON report, and fails if pass rate drops
-  below 0.600.
+- The full manual job fetches gcc-torture behind the explicit opt-in flag,
+  runs the full execute adapter, uploads the JSON report, and fails if pass
+  rate drops below 0.600. It remains manual because it is long-running, not
+  because CI execution of the suite is blocked.
 - Added `-fgnu-builtin-libcalls` so GCC torture's common builtin libc aliases
   and predefined scalar-limit macros are enabled only in explicit compatibility
   mode, not strict C99 mode.

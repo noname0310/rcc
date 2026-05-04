@@ -1,13 +1,13 @@
 > ✓ done — 2026-04-23
 
-# 01-04: Vendor tcc tests2 (LGPL-gated)
+# 01-04: Vendor tcc tests2 (optional external suite)
 
 **Phase:** 01-test-infra    **Depends on:** 01-01    **Milestone:** M0.5
 
 ## Goal
 Fetch TinyCC's `tests/tests2/` directory behind the same `--include-gpl`
-flag used for GCC torture. LGPL is separately safer but gated together
-for UX simplicity.
+flag used for GCC torture. The flag is kept as an explicit external-suite
+opt-in; CI may fetch and execute the suite inside the runner.
 
 ## Scope
 - In: sparse path for `tests/tests2`; pin upstream to a tag; copy

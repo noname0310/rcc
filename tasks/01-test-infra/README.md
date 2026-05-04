@@ -12,7 +12,7 @@ cells in [`docs/conformance.md`](../../docs/conformance.md).
 |---|------|---------|
 | 01 | [`01-fetch-ctestsuite.md`](01-fetch-ctestsuite.md) | Vendor `c-testsuite`, pin commit. |
 | 02 | [`02-fetch-chibicc.md`](02-fetch-chibicc.md) | Sparse-checkout `chibicc/test`. |
-| 03 | [`03-fetch-gcc-torture.md`](03-fetch-gcc-torture.md) | GPL gate for gcc-torture. |
+| 03 | [`03-fetch-gcc-torture.md`](03-fetch-gcc-torture.md) | Optional gcc-torture fetch. |
 | 04 | [`04-fetch-tcc-tests2.md`](04-fetch-tcc-tests2.md) | Sparse tcc `tests2`. |
 | 05 | [`05-fetch-llvm-test-suite.md`](05-fetch-llvm-test-suite.md) | llvm-test-suite SingleSource. |
 | 06 | [`06-fetch-csmith.md`](06-fetch-csmith.md) | Pin + build csmith. |
@@ -27,7 +27,8 @@ cells in [`docs/conformance.md`](../../docs/conformance.md).
 ## Exit criteria
 
 1. `cargo xtask fetch-testsuites` completes cleanly on a fresh
-   checkout (permissive suites only; `--include-gpl` adds the rest).
+   checkout (default suites only; `--include-gpl` adds optional external
+   suites).
 2. `cargo run --release --package rcc_conformance` produces a report
    where every suite column shows `Discovered > 0, Pass = 0`.
 3. CI has a `conformance` job that fails if any configured cell

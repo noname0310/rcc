@@ -147,7 +147,7 @@ TinyCC-only binary floating literal xfail.
 - **Fail** — ran, did not match. Blocks merge if in the required subset
   for the current milestone.
 - **Skip** — intentionally not run (feature unsupported, adapter not
-  yet implemented, GPL suite excluded without `--include-gpl`).
+  yet implemented, or optional suite not selected for that run).
 
 Some skips are semantic policy, not missing implementation. Cases whose stdout
 depends on C99-unspecified evaluation order are listed in
@@ -162,7 +162,7 @@ mistake a valid CFG evaluation-order choice for a compiler bug.
 | `ChibiccAdapter` (compile)   | implemented; full default compile mode is exploratory and currently extension-heavy (7 pass, 34 fail on 2026-05-05 WSL) |
 | `ChibiccAdapter` (preprocess)| landed at M5 (task 04-18); see chibicc row above |
 | `ChibiccAdapter` (stage-1-3) | landed at task 11-05; current required gate is 3 pass, 0 fail |
-| `GccTortureAdapter`          | implemented; smoke/full execute modes are GPL-gated |
+| `GccTortureAdapter`          | implemented; smoke runs in push CI, full execute remains manual because it is long-running |
 | `TccTests2Adapter`           | implemented at task 11-16; current WSL baseline is 75 pass, 9 xfail, 0 fail, 4 skip |
 | `LlvmTestSuiteAdapter`       | implemented at task 11-17; manual curated SingleSource subset currently 6 pass, 0 fail |
 | `CsmithDifferentialAdapter`  | interface frozen; implementation M7 |

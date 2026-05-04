@@ -18,7 +18,7 @@ enum Cmd {
     /// Download / update every external test suite listed in
     /// `third_party/MANIFEST.toml` into `third_party/testsuites/`.
     FetchTestsuites {
-        /// Also fetch GPL-licensed suites (gcc-torture, tcc-tests2).
+        /// Also fetch optional external suites (gcc-torture, tcc-tests2).
         #[arg(long)]
         include_gpl: bool,
         /// Only fetch this named suite.

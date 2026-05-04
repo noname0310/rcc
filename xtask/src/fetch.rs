@@ -3,7 +3,8 @@
 //!
 //! Design goals:
 //! * Reproducible: every suite is pinned to a specific `rev`.
-//! * License-safe: GPL suites are skipped unless `--include-gpl` is passed.
+//! * Explicit opt-in: large/viral-license suites are skipped unless
+//!   `--include-gpl` is passed.
 //! * Offline-friendly: if the checkout already exists at the right rev, skip.
 
 use std::path::Path;
@@ -26,7 +27,10 @@ pub fn run(manifest: &Manifest, include_gpl: bool, only: Option<&str>) -> Result
             }
         }
         if suite.gpl && !include_gpl {
-            println!("skip {:<18} ({}): pass --include-gpl to fetch", suite.name, suite.license);
+            println!(
+                "skip {:<18} ({}): optional suite; pass --include-gpl to fetch",
+                suite.name, suite.license
+            );
             continue;
         }
 
@@ -348,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn gpl_suite_skipped_without_flag() {
+    fn optional_suite_skipped_without_flag() {
         let manifest = crate::manifest::Manifest {
             suite: vec![Suite {
                 name: "gpl-test".into(),
@@ -365,7 +369,7 @@ mod tests {
         // include_gpl = false → should skip and not error
         // (actual git clone is never reached because gpl gate fires first)
         let result = run(&manifest, false, None);
-        assert!(result.is_ok(), "skipping GPL suites should not error");
+        assert!(result.is_ok(), "skipping optional suites should not error");
     }
 
     #[test]

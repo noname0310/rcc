@@ -25,10 +25,6 @@ fn discover_real_suite_count() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("third_party/testsuites/tcc-tests2");
-    if !root.join("tests/tests2").is_dir() {
-        eprintln!("skipping real tcc-tests2 count: suite is gated behind --include-gpl");
-        return;
-    }
     let cases = TccTests2Adapter.discover(&root).unwrap();
 
     assert!(cases.len() >= 80, "unexpected tests2 case count: {}", cases.len());

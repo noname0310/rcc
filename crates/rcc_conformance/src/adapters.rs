@@ -633,7 +633,11 @@ impl ChibiccAdapter {
     }
 }
 
-/// `gcc-torture` adapter (GPL-licensed; gated by `--include-gpl`).
+/// `gcc-torture` adapter.
+///
+/// The upstream checkout is still fetched via the historical
+/// `--include-gpl` opt-in so ordinary `fetch-testsuites` does not pull
+/// a large optional suite by accident.
 pub struct GccTortureAdapter {
     mode: GccTortureMode,
 }

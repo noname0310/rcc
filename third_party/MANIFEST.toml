@@ -1,8 +1,10 @@
 # External C test suites fetched by `cargo xtask fetch-testsuites`.
 #
 # Every entry is pinned by `rev` (git) or URL (tarball). License columns are
-# informational; the GPL gate is enforced by the `gpl = true` flag, which
-# requires `cargo xtask fetch-testsuites --include-gpl`.
+# informational. Entries with `gpl = true` are optional external suites
+# fetched only when `cargo xtask fetch-testsuites --include-gpl` is passed.
+# CI may download and execute them inside the runner; the opt-in prevents
+# accidental heavyweight fetches, not normal test execution.
 
 [[suite]]
 name        = "c-testsuite"

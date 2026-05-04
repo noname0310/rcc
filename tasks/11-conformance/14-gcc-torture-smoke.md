@@ -16,17 +16,17 @@ pointers. Serves as an early warning for regressions, not a gate.
 
 ## Deliverables
 - Subset file + adapter branch.
-- manual CI job (respects GPL gate).
+- automatic CI smoke job.
 
 ## Acceptance
-- Nightly CI exposes numbers for the subset.
+- Push CI exposes numbers for the subset.
 - Subset picked so ≥ 70 % pass rate is achievable at M4.
 
 ## Result
 - Added a tracked smoke subset list with 35 `gcc.c-torture/execute` files.
 - Added `GccTortureAdapter` discovery and run support behind the existing
-  GPL gate; the GPL source checkout remains ignored.
-- Added a workflow-dispatch CI job that fetches gcc-torture with
+  explicit opt-in flag; the source checkout remains ignored.
+- Added a push CI job that fetches gcc-torture with
   `--include-gpl`, builds the LLVM-enabled driver, runs the subset, and
   uploads the JSON report.
 - Local WSL validation: 35 discovered, 35 passed, 0 failed, pass rate 1.000.

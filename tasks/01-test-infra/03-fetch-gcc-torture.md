@@ -1,13 +1,14 @@
 > ✓ done — 2026-04-23
 
-# 01-03: Vendor gcc-torture (GPL-gated)
+# 01-03: Vendor gcc-torture (optional external suite)
 
 **Phase:** 01-test-infra    **Depends on:** 01-01    **Milestone:** M0.5
 
 ## Goal
-Wire GPL-gated fetch of `gcc/testsuite/gcc.c-torture/{compile,execute}/`.
-The GPL boundary is enforced by `xtask`: without `--include-gpl` the
-suite is skipped with a visible warning.
+Wire opt-in fetch of `gcc/testsuite/gcc.c-torture/{compile,execute}/`.
+The opt-in boundary is enforced by `xtask`: without `--include-gpl` the
+suite is skipped with a visible warning so ordinary fetches do not pull a
+large optional suite.
 
 ## Scope
 - In: verify `--include-gpl` flag; sparse path; `LICENSES/gcc-torture.txt`;
@@ -23,7 +24,7 @@ suite is skipped with a visible warning.
 
 ## Acceptance
 - `cargo xtask fetch-testsuites` **without** `--include-gpl`: skips
-  with a printed `skip gcc-torture (GPL-...): pass --include-gpl`.
+  with a printed optional-suite message.
 - `cargo xtask fetch-testsuites --include-gpl`: populates
   `third_party/testsuites/gcc-torture/gcc/testsuite/gcc.c-torture/execute/0000.c`
   (or similar first file).
