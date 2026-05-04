@@ -1,0 +1,73 @@
+# 11-04: c-testsuite residual bug triage
+
+**Phase:** 11-conformance    **Depends on:** 11-03    **Milestone:** M6+
+
+## Goal
+Stop treating c-testsuite success as only a percentage. Every non-pass TU in
+the latest report must be classified as one of:
+
+- C99 compiler bug: must be fixed or scheduled as a blocking task.
+- Non-C99 extension: may stay xfail with a precise reason.
+- Test-policy case: may skip/xfail only with a documented semantic reason.
+
+## Current non-pass TUs
+Source: `docs/conformance.json` generated after task `11-03`
+(`204 pass / 11 fail / 5 xfail`).
+
+### Failures to triage as compiler bugs unless proven otherwise
+
+| TU | Current symptom |
+|---|---|
+| `c-testsuite::00044` | `E0070` redeclaration of `T` in the same scope |
+| `c-testsuite::00053` | `E0070` redeclaration of `T` in the same scope |
+| `c-testsuite::00124` | `E0071` undeclared identifier `a` |
+| `c-testsuite::00149` | `E0084` non-constant expression in static initializer |
+| `c-testsuite::00150` | `E0084` non-constant expression in static initializer |
+| `c-testsuite::00199` | compiler panic in CFG build: goto into local scope |
+| `c-testsuite::00204` | compiler panic in CFG lowering: non-lvalue place |
+| `c-testsuite::00205` | `E0081` initializer/type assignment failure |
+| `c-testsuite::00207` | compiler panic in CFG build: goto into local scope |
+| `c-testsuite::00213` | stdout mismatch |
+| `c-testsuite::00218` | stdout mismatch |
+
+### Existing xfails that must be reviewed
+
+| TU | Current xfail reason | Initial policy |
+|---|---|---|
+| `c-testsuite::00046` | anonymous struct/union members | non-C99 extension |
+| `c-testsuite::00050` | anonymous union member inside struct | non-C99 extension |
+| `c-testsuite::00152` | macro-expanded `#line` directive | likely C99 compiler bug; should not stay hidden |
+| `c-testsuite::00216` | empty aggregate extension / anonymous aggregate members | mixed extension; split reason if needed |
+| `c-testsuite::00219` | C11 `_Generic` | non-C99 extension |
+
+## Scope
+- In:
+  - Re-run c-testsuite locally and confirm the current non-pass list.
+  - Refresh `docs/conformance.md` if it is stale relative to
+    `docs/conformance.json`.
+  - For each non-pass TU, decide whether it is a C99 bug, non-C99 extension,
+    or documented policy case.
+  - Create focused follow-up tasks in the owning phase for every C99 compiler
+    bug.
+  - Remove or rewrite any xfail entry that hides a C99 compiler bug.
+- Out:
+  - Fixing every listed bug in this task. This is a classification and tasking
+    task; fixes happen in the owner tasks it creates.
+
+## Deliverables
+- Updated failure matrix with owner phase/crate and next task for each TU.
+- Follow-up task files for every C99 compiler bug.
+- Clean xfail policy: no C99 compiler bug remains xfailed without an owning
+  fix task.
+
+## Acceptance
+- The latest c-testsuite report has no unclassified fail/xfail entries.
+- Compiler panics are always classified as compiler bugs.
+- `docs/conformance.md` and `docs/conformance.json` do not disagree about the
+  current pass/fail counts.
+- The next active task after this one is unambiguous.
+
+## References
+- `docs/conformance.json`
+- `third_party/testsuites/c-testsuite/xfail.toml`
+- `tasks/00-overview/03-working-agreement.md`

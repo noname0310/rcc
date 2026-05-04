@@ -1,6 +1,9 @@
 # 11-conformance: index
 
-Each task = one KPI cell in 00-overview/02-kpi-dashboard.md. Move pass rates up and keep them there.
+Each task either owns one KPI cell in 00-overview/02-kpi-dashboard.md or
+turns an external-suite failure into a concrete compiler-bug task. Pass rate
+is a gate, not a hiding place: C99 compiler bugs must be fixed even when the
+current numeric milestone already passes.
 
 ## Upstream deps
 
@@ -11,13 +14,21 @@ Each task = one KPI cell in 00-overview/02-kpi-dashboard.md. Move pass rates up 
 - [x] [01-ctestsuite-m3-40pct](01-ctestsuite-m3-40pct.md)
 - [x] [02-ctestsuite-m4-70pct](02-ctestsuite-m4-70pct.md)
 - [x] [03-ctestsuite-m6-95pct](03-ctestsuite-m6-95pct.md)
-- [ ] [04-chibicc-stages-1-3](04-chibicc-stages-1-3.md)
-- [ ] [05-chibicc-preprocess](05-chibicc-preprocess.md)
-- [ ] [06-gcc-torture-smoke](06-gcc-torture-smoke.md)
-- [ ] [07-gcc-torture-60pct](07-gcc-torture-60pct.md)
-- [ ] [08-tcc-tests2](08-tcc-tests2.md)
-- [ ] [09-llvm-test-suite](09-llvm-test-suite.md)
-- [ ] [10-xfail-shrink](10-xfail-shrink.md)
+- [ ] [04-ctestsuite-residual-bug-triage](04-ctestsuite-residual-bug-triage.md)
+- [ ] [05-chibicc-stage-isolation](05-chibicc-stage-isolation.md)
+- [ ] [06-gnu-binary-integer-literals](06-gnu-binary-integer-literals.md)
+- [ ] [07-gnu-statement-expression-semantics](07-gnu-statement-expression-semantics.md)
+- [ ] [08-chibicc-arith-green](08-chibicc-arith-green.md)
+- [ ] [09-gnu-control-flow-extensions](09-gnu-control-flow-extensions.md)
+- [ ] [10-chibicc-control-green](10-chibicc-control-green.md)
+- [ ] [11-chibicc-function-prereq-triage](11-chibicc-function-prereq-triage.md)
+- [ ] [12-chibicc-function-green](12-chibicc-function-green.md)
+- [ ] [13-chibicc-preprocess](13-chibicc-preprocess.md)
+- [ ] [14-gcc-torture-smoke](14-gcc-torture-smoke.md)
+- [ ] [15-gcc-torture-60pct](15-gcc-torture-60pct.md)
+- [ ] [16-tcc-tests2](16-tcc-tests2.md)
+- [ ] [17-llvm-test-suite](17-llvm-test-suite.md)
+- [ ] [18-xfail-shrink](18-xfail-shrink.md)
 
 ## Downstream
 

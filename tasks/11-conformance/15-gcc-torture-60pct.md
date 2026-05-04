@@ -1,6 +1,6 @@
-# 11-07: gcc-torture execute ≥ 60 %
+# 11-15: gcc-torture execute ≥ 60 %
 
-**Phase:** 11-conformance    **Depends on:** 11-06    **Milestone:** M6
+**Phase:** 11-conformance    **Depends on:** 11-14    **Milestone:** M6
 
 ## Goal
 Run the full `gcc.c-torture/execute/` suite (~1200 files). Target

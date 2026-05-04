@@ -1,4 +1,4 @@
-# 11-06: gcc-torture smoke
+# 11-14: gcc-torture smoke
 
 **Phase:** 11-conformance    **Depends on:** 01-03    **Milestone:** M4
 

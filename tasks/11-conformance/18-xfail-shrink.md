@@ -1,4 +1,4 @@
-# 11-10: Continuously shrink xfail lists
+# 11-18: Continuously shrink xfail lists
 
 **Phase:** 11-conformance    **Depends on:** all feature phases    **Milestone:** M2 → M7
 
