@@ -62,7 +62,7 @@ current numeric milestone already passes.
 - [x] [15s7-gnu-vector-cluster-gate](15s7-gnu-vector-cluster-gate.md)
 - [x] [15t-gcc-torture-gnu-builtin-libcalls](15t-gcc-torture-gnu-builtin-libcalls.md)
 - [x] [15u-gcc-torture-gnu-inline-asm](15u-gcc-torture-gnu-inline-asm.md)
-- [ ] [15v-gcc-torture-gnu89-legacy](15v-gcc-torture-gnu89-legacy.md)
+- [x] [15v-gcc-torture-gnu89-legacy](15v-gcc-torture-gnu89-legacy.md)
 - [ ] [15w-gcc-torture-scalar-storage-order](15w-gcc-torture-scalar-storage-order.md)
 - [ ] [16-tcc-tests2](16-tcc-tests2.md)
 - [ ] [17-llvm-test-suite](17-llvm-test-suite.md)

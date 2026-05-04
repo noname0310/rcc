@@ -131,7 +131,7 @@ fn lower_function_bodies(
             continue;
         };
 
-        let fn_ty = lower_type_from_parts(
+        let mut fn_ty = lower_type_from_parts(
             &func_def.specs,
             &func_def.declarator,
             DeclScope::File,
@@ -140,6 +140,7 @@ fn lower_function_bodies(
             crate_,
             session,
         );
+        fn_ty = lower_kr_function_type(func_def, fn_ty, tcx, resolver, crate_, session);
         let variadic = match tcx.get(fn_ty) {
             Ty::Func { variadic, .. } => *variadic,
             _ => false,
@@ -156,6 +157,7 @@ fn lower_function_bodies(
         resolver.push_tag_scope();
         let param_bound_stmts = lower_function_params(
             &func_def.declarator,
+            &func_def.kr_decls,
             &mut body,
             &mut scope,
             tcx,
@@ -185,8 +187,10 @@ fn lower_function_bodies(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_function_params(
     declarator: &Declarator,
+    kr_decls: &[rcc_ast::Decl],
     body: &mut Body,
     scope: &mut ScopeStack,
     tcx: &mut TyCtxt,
@@ -204,6 +208,12 @@ fn lower_function_params(
     }) else {
         return Vec::new();
     };
+
+    if !func_decl.kr_names.is_empty() {
+        return lower_kr_function_params(
+            func_decl, kr_decls, body, scope, tcx, resolver, crate_, session,
+        );
+    }
 
     let mut entry_stmts = Vec::new();
     for param in &func_decl.params {
@@ -241,6 +251,111 @@ fn lower_function_params(
         }
     }
     entry_stmts
+}
+
+#[derive(Copy, Clone)]
+struct KrParamInfo {
+    ty: TyId,
+    quals: ObjectQuals,
+    span: Span,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_kr_function_params(
+    func_decl: &rcc_ast::FunctionDeclarator,
+    kr_decls: &[rcc_ast::Decl],
+    body: &mut Body,
+    scope: &mut ScopeStack,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> Vec<HirStmtId> {
+    let declared = lower_kr_param_info_map(kr_decls, tcx, resolver, crate_, session);
+    for (name, span) in &func_decl.kr_names {
+        let info = declared.get(name).copied().unwrap_or(KrParamInfo {
+            ty: tcx.int,
+            quals: ObjectQuals::none(),
+            span: *span,
+        });
+        let local = body.locals.push(LocalDecl {
+            name: Some(*name),
+            ty: info.ty,
+            quals: info.quals,
+            vla_len: None,
+            is_param: true,
+            span: info.span,
+        });
+        scope.insert(*name, Binding::Local(local));
+    }
+    Vec::new()
+}
+
+fn lower_kr_function_type(
+    func_def: &rcc_ast::FunctionDef,
+    fn_ty: TyId,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> TyId {
+    let Some(func_decl) = func_def.declarator.derived.iter().rev().find_map(|d| match d {
+        DerivedDeclarator::Function(f) => Some(f),
+        _ => None,
+    }) else {
+        return fn_ty;
+    };
+    if func_decl.kr_names.is_empty() {
+        return fn_ty;
+    }
+
+    let declared = lower_kr_param_info_map(&func_def.kr_decls, tcx, resolver, crate_, session);
+    let params = func_decl
+        .kr_names
+        .iter()
+        .map(|(name, _)| declared.get(name).map_or(tcx.int, |info| info.ty))
+        .collect::<Vec<_>>();
+    match tcx.get(fn_ty).clone() {
+        Ty::Func { ret, variadic, .. } => {
+            tcx.intern(Ty::Func { ret, params, variadic, proto: false })
+        }
+        _ => fn_ty,
+    }
+}
+
+fn lower_kr_param_info_map(
+    kr_decls: &[rcc_ast::Decl],
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> FxHashMap<Symbol, KrParamInfo> {
+    let mut map = FxHashMap::default();
+    for decl in kr_decls {
+        for init_decl in &decl.inits {
+            let Some((name, span)) = init_decl.declarator.name else {
+                continue;
+            };
+            let raw_ty = lower_type_from_parts(
+                &decl.specs,
+                &init_decl.declarator,
+                DeclScope::Param,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            map.insert(
+                name,
+                KrParamInfo {
+                    ty: adjust_param_type(raw_ty, tcx),
+                    quals: declaration_object_quals(&decl.specs, &init_decl.declarator),
+                    span,
+                },
+            );
+        }
+    }
+    map
 }
 
 fn prepend_function_entry_stmts(

@@ -1010,6 +1010,41 @@ void __cyg_profile_func_exit(void *fn, void *parent) {
     }
 
     #[test]
+    fn gnu89_kr_parameter_declaration_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU89 K&R e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu89_kr_param_decl",
+            r#"
+unsigned int a[0x1000];
+extern const unsigned long v;
+
+main()
+{
+  f(v);
+  f(v);
+  exit(0);
+}
+
+f(a)
+     unsigned long a;
+{
+  if (a != 0xdeadbeefL)
+    abort();
+}
+
+const unsigned long v = 0xdeadbeefL;
+"#,
+            b"",
+            0,
+            Options { gnu_builtin_libcalls: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn differential_vs_host_cc() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping differential e2e: LLVM backend feature is disabled");

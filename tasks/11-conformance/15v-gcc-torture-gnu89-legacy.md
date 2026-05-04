@@ -1,5 +1,7 @@
 # 11-15v: gcc-torture GNU89 legacy cases
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal

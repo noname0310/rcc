@@ -3768,6 +3768,46 @@ fn regression_gate_function_prototype_and_definition_share_def_id() {
 }
 
 #[test]
+fn regression_gate_kr_parameter_declaration_sets_body_param_type() {
+    let (hir, tcx, cap, sess) = lower_and_typeck_snippet(
+        r#"
+        f(a)
+             unsigned long a;
+        {
+          return a == 0xdeadbeefL;
+        }
+        "#,
+    );
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "K&R fixture should only warn, got {:?}",
+        cap.diagnostics()
+    );
+
+    let f = def_named(&hir, &sess, "f");
+    let DefKind::Function { ty, has_body, .. } = f.kind else {
+        panic!("f should be a function definition");
+    };
+    assert!(has_body);
+    match tcx.get(ty) {
+        Ty::Func { ret, params, proto: false, .. } => {
+            assert_eq!(*ret, tcx.int);
+            assert_eq!(params.as_slice(), &[tcx.ulong]);
+        }
+        other => panic!("expected old-style function with unsigned long param, got {other:?}"),
+    }
+
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    let a = body
+        .locals
+        .iter()
+        .find(|local| local.name.is_some_and(|sym| sess.interner.get(sym) == "a"))
+        .expect("missing K&R parameter local a");
+    assert_eq!(a.ty, tcx.ulong);
+    assert!(a.is_param);
+}
+
+#[test]
 fn regression_gate_vla_parameter_bound_side_effects_enter_body() {
     let (hir, _tcx, cap, sess) =
         lower_and_typeck_snippet("int foo(int a, int b[a++], int c, int d[c++]) { return a + c; }");
