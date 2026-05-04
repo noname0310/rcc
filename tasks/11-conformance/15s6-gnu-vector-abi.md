@@ -1,5 +1,7 @@
 # 11-15s6: GNU vector ABI for parameters and returns
 
+> ✓ done — 2026-05-04
+
 **Phase:** 11-conformance    **Depends on:** 11-15s5    **Milestone:** M6
 
 ## Goal
@@ -7,7 +9,7 @@ Pass and return fixed-size vectors through the SysV ABI without scalar or
 aggregate fallback corruption.
 
 ## Scope
-- In: 64-bit and 128-bit fixed vectors used by gcc-torture.
+- In: 32-bit, 64-bit, and 128-bit fixed vectors used by gcc-torture.
 - In: direct vector params and returns.
 - Out: platform-specific non-SysV vector ABI differences.
 

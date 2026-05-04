@@ -582,6 +582,101 @@ int main(void) {
     }
 
     #[test]
+    fn gnu_vector_argument_abi_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector argument ABI e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_argument_abi",
+            r#"
+typedef int v2si __attribute__((vector_size(8)));
+typedef float v4sf __attribute__((vector_size(16)));
+int take_i(v2si x) {
+  int *p = (int *)&x;
+  return p[0] == 1 && p[1] == 2;
+}
+int take_f(v4sf x) {
+  float *p = (float *)&x;
+  return p[0] == 3.0 && p[1] == 4.0 && p[2] == 5.0 && p[3] == 6.0;
+}
+int main(void) {
+  v2si i = { 1, 2 };
+  v4sf f = { 3.0, 4.0, 5.0, 6.0 };
+  return take_i(i) && take_f(f) ? 0 : 1;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_return_abi_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector return ABI e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_return_abi",
+            r#"
+typedef int v4si __attribute__((vector_size(16)));
+v4si make(int base) {
+  return (v4si){ base, base + 1, base + 2, base + 3 };
+}
+int main(void) {
+  v4si x = make(7);
+  int *p = (int *)&x;
+  if (p[0] != 7) return 1;
+  if (p[1] != 8) return 2;
+  if (p[2] != 9) return 3;
+  if (p[3] != 10) return 4;
+  return 0;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn gnu_vector_20050316_reduced_call_return_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping GNU vector 20050316 ABI e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "gnu_vector_20050316_reduced",
+            r#"
+typedef int v2si __attribute__((vector_size(8)));
+typedef unsigned int v2usi __attribute__((vector_size(8)));
+v2si id(v2usi x) {
+  return (v2si)x;
+}
+long long pack(v2si x) {
+  return (long long)x;
+}
+int main(void) {
+  v2usi x = { 6, 6 };
+  v2si y = id(x);
+  int *p = (int *)&y;
+  if (p[0] != 6) return 1;
+  if (p[1] != 6) return 2;
+  return pack(y) == 0x0000000600000006LL ? 0 : 3;
+}
+"#,
+            b"",
+            0,
+            Options { gnu_attributes: true, ..Options::default() },
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");

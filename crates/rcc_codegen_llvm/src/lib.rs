@@ -295,7 +295,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             Ty::Void => Err(type_lowering_error(ty, "void is not a parameter type")),
             Ty::Func { .. } => Err(type_lowering_error(ty, "function parameters must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
-            Ty::Vector { .. } => Err(type_lowering_error(ty, "vector ABI is not implemented yet")),
+            Ty::Vector { .. } => self.vector_param(ty),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_param(ty)),
             Ty::BuiltinVaList | Ty::Complex(_) | Ty::Array { .. } | Ty::Record(_) => {
                 self.aggregate_param(ty)
@@ -313,7 +313,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             }),
             Ty::Func { .. } => Err(type_lowering_error(ty, "function return types must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
-            Ty::Vector { .. } => Err(type_lowering_error(ty, "vector ABI is not implemented yet")),
+            Ty::Vector { .. } => self.vector_return(ty),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) | Ty::Float(_) => Ok(self.scalar_return(ty)),
             Ty::Complex(FloatKind::F80) => Ok(AbiReturn {
                 source: ty,
@@ -349,6 +349,18 @@ impl<'tcx> SysvParamClassifier<'tcx> {
         }
     }
 
+    fn vector_param(&self, ty: TyId) -> Result<AbiParam, CodegenError> {
+        self.ensure_supported_vector_abi(ty)?;
+        Ok(AbiParam {
+            source: ty,
+            kind: AbiParamKind::Direct(vec![AbiParamUnit {
+                class: AbiClass::Sse,
+                kind: AbiParamUnitKind::Source(ty),
+            }]),
+            classes: vec![AbiClass::Sse],
+        })
+    }
+
     fn scalar_return(&self, ty: TyId) -> AbiReturn {
         let classes = match self.tcx.get(ty) {
             Ty::Float(FloatKind::F80) => vec![AbiClass::X87, AbiClass::X87Up],
@@ -363,6 +375,36 @@ impl<'tcx> SysvParamClassifier<'tcx> {
             },
             classes,
             zeroext: matches!(self.tcx.get(ty), Ty::Int { rank: rcc_hir::IntRank::Bool, .. }),
+        }
+    }
+
+    fn vector_return(&self, ty: TyId) -> Result<AbiReturn, CodegenError> {
+        self.ensure_supported_vector_abi(ty)?;
+        Ok(AbiReturn {
+            source: ty,
+            kind: AbiReturnKind::Direct {
+                units: vec![AbiParamUnit {
+                    class: AbiClass::Sse,
+                    kind: AbiParamUnitKind::Source(ty),
+                }],
+            },
+            classes: vec![AbiClass::Sse],
+            zeroext: false,
+        })
+    }
+
+    fn ensure_supported_vector_abi(&self, ty: TyId) -> Result<(), CodegenError> {
+        let Ty::Vector { bytes, .. } = self.tcx.get(ty) else {
+            return Err(type_lowering_error(ty, "non-vector type cannot use vector ABI"));
+        };
+        match *bytes {
+            4 | 8 | 16 => Ok(()),
+            _ => Err(type_lowering_error(
+                ty,
+                format!(
+                    "vector ABI only supports 32-bit, 64-bit, and 128-bit vectors, got {bytes} bytes"
+                ),
+            )),
         }
     }
 
@@ -7548,6 +7590,9 @@ mod tests {
             Ty::Float(kind) => llvm_float_shape(*kind).to_owned(),
             Ty::Ptr(_) => "ptr".to_owned(),
             Ty::Enum(_) => "i32".to_owned(),
+            Ty::Vector { elem, lanes, .. } => {
+                format!("<{lanes} x {}>", llvm_source_shape(tcx, *elem))
+            }
             other => panic!("unexpected source ABI unit: {other:?}"),
         }
     }
@@ -7663,6 +7708,39 @@ mod tests {
         assert_eq!(abi.params[0].classes, [AbiClass::Integer]);
         assert_eq!(abi.params[1].classes, [AbiClass::Sse]);
         assert_eq!(abi.params[2].classes, [AbiClass::Integer]);
+    }
+
+    #[test]
+    fn sysv_abi_classifies_vector_params_and_returns_as_direct_sse_source() {
+        let mut tcx = TyCtxt::new();
+        let v2hi = tcx.intern(Ty::Vector { elem: tcx.short, lanes: 2, bytes: 4 });
+        let v2si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 2, bytes: 8 });
+        let v4sf = tcx.intern(Ty::Vector { elem: tcx.float, lanes: 4, bytes: 16 });
+        let fn_ty = func_ty(&mut tcx, v4sf, vec![v2hi, v2si, v4sf], false);
+        let defs = IndexVec::new();
+
+        let abi = sysv_fn_abi(&tcx, &defs, fn_ty).unwrap();
+
+        assert_eq!(return_shape(&tcx, &abi.ret), "<4 x float>");
+        assert_eq!(abi.ret.classes, [AbiClass::Sse]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[0]), ["<2 x i16>"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[1]), ["<2 x i32>"]);
+        assert_eq!(abi_shapes(&tcx, &abi.params[2]), ["<4 x float>"]);
+        assert_eq!(abi.params[0].classes, [AbiClass::Sse]);
+        assert_eq!(abi.params[1].classes, [AbiClass::Sse]);
+        assert_eq!(abi.params[2].classes, [AbiClass::Sse]);
+        assert_eq!(abi.fixed_param_count, 3);
+    }
+
+    #[test]
+    fn sysv_abi_rejects_out_of_scope_large_vectors() {
+        let mut tcx = TyCtxt::new();
+        let v8si = tcx.intern(Ty::Vector { elem: tcx.int, lanes: 8, bytes: 32 });
+        let defs = IndexVec::new();
+
+        let err = sysv_param_abi(&tcx, &defs, v8si).unwrap_err();
+
+        assert!(err.to_string().contains("32-bit, 64-bit, and 128-bit vectors"));
     }
 
     #[test]
