@@ -394,6 +394,10 @@ fn verify_rvalue_typed(
             let _ = verify_operand_typed(body, tcx, hir, ap, at, errors);
             Some(InferredTy::Known(*ty))
         }
+        Rvalue::BuiltinBswap { value, ty, .. } => {
+            let _ = verify_operand_typed(body, tcx, hir, value, at, errors);
+            Some(InferredTy::Known(*ty))
+        }
         Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => {
             if !matches!(op, crate::BinOp::Add | crate::BinOp::Mul) {
                 errors.push(CfgError {

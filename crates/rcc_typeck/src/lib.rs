@@ -736,6 +736,49 @@ pub fn visit_expr(
                 HirExprKind::BuiltinExpect { value: value2, expected: expected2 };
             expr_id
         }
+        HirExprKind::BuiltinUnreachable => {
+            body.exprs[expr_id].ty = tcx.void;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinUnreachable;
+            expr_id
+        }
+        HirExprKind::BuiltinConstantP { expr } => {
+            let inner = visit_expr(expr, body, tcx, session, def_info);
+            let inner = rvalue_decayed(inner, body, tcx);
+            let is_const = {
+                let mut eval = ConstEval::new(tcx, Some(body));
+                eval.eval_scalar(inner).is_some()
+            };
+            body.exprs[expr_id].ty = tcx.int;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::IntConst(if is_const { 1 } else { 0 });
+            expr_id
+        }
+        HirExprKind::BuiltinBswap { bits, value } => {
+            let value = visit_expr(value, body, tcx, session, def_info);
+            let value = rvalue_decayed(value, body, tcx);
+            let result_ty = bswap_result_ty(tcx, bits);
+            if body.exprs[value].ty != tcx.error && !is_integer(tcx, body.exprs[value].ty) {
+                session
+                    .handler
+                    .struct_err(body.exprs[value].span, "bswap builtin operand must be integer")
+                    .code(rcc_errors::codes::E0083)
+                    .emit();
+            }
+            let value = coerce_to(value, result_ty, body, tcx, session).expr();
+            let folded = {
+                let mut eval = ConstEval::new(tcx, Some(body));
+                eval.eval_int(value).map(|v| bswap_const(bits, v))
+            };
+            body.exprs[expr_id].ty = result_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = if let Some(value) = folded {
+                HirExprKind::IntConst(value)
+            } else {
+                HirExprKind::BuiltinBswap { bits, value }
+            };
+            expr_id
+        }
         HirExprKind::Convert { operand, kind } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
             // Preserve the convert kind; just rewire the operand id and
@@ -2807,6 +2850,9 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinVaEnd { .. }
         | HirExprKind::BuiltinVaCopy { .. }
         | HirExprKind::BuiltinExpect { .. }
+        | HirExprKind::BuiltinUnreachable
+        | HirExprKind::BuiltinConstantP { .. }
+        | HirExprKind::BuiltinBswap { .. }
         | HirExprKind::BuiltinOverflow { .. }
         | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
@@ -3501,6 +3547,30 @@ fn push_pointer_convert(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExp
 /// True iff `t` is an integer type per C99 §6.2.5p17.
 fn is_integer(tcx: &TyCtxt, t: TyId) -> bool {
     matches!(tcx.get(t), Ty::Int { .. } | Ty::Enum(_))
+}
+
+fn bswap_result_ty(tcx: &TyCtxt, bits: u16) -> TyId {
+    match bits {
+        16 => tcx.ushort,
+        32 => tcx.uint,
+        64 => tcx.ulong_long,
+        _ => tcx.error,
+    }
+}
+
+fn bswap_const(bits: u16, value: i128) -> i128 {
+    let mask = (1u128 << u32::from(bits)) - 1;
+    #[allow(clippy::cast_sign_loss)]
+    let mut src = (value as u128) & mask;
+    let mut out = 0u128;
+    for _ in 0..(bits / 8) {
+        out = (out << 8) | (src & 0xff);
+        src >>= 8;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        out as i128
+    }
 }
 
 /// True iff `t` is a `_Complex` floating type per C99 §6.2.5p11.

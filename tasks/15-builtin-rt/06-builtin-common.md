@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-06: Common builtin functions
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-05, 05-35    **Milestone:** M6

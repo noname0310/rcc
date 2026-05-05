@@ -1783,6 +1783,13 @@ fn populate_switch_case_tables_in_expr(
             populate_switch_case_tables_in_expr(body, value, switch_depth, session);
             populate_switch_case_tables_in_expr(body, expected, switch_depth, session);
         }
+        HirExprKind::BuiltinUnreachable => {}
+        HirExprKind::BuiltinConstantP { expr } => {
+            populate_switch_case_tables_in_expr(body, expr, switch_depth, session);
+        }
+        HirExprKind::BuiltinBswap { value, .. } => {
+            populate_switch_case_tables_in_expr(body, value, switch_depth, session);
+        }
         HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
             populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
             populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
@@ -4302,6 +4309,103 @@ pub fn lower_expr(
                         body.exprs[id].id = id;
                         return id;
                     }
+                    "__builtin_unreachable" => {
+                        if args.is_empty() {
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.void,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::BuiltinUnreachable,
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        session
+                            .handler
+                            .struct_err(
+                                expr.span,
+                                "`__builtin_unreachable` requires exactly 0 arguments",
+                            )
+                            .emit();
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.error,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::IntConst(0),
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_constant_p" => {
+                        if args.len() != 1 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_constant_p` requires exactly 1 argument",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let inner =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.int,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinConstantP { expr: inner },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" => {
+                        let bits = match name.as_str() {
+                            "__builtin_bswap16" => 16,
+                            "__builtin_bswap32" => 32,
+                            "__builtin_bswap64" => 64,
+                            _ => unreachable!("filtered by match arm"),
+                        };
+                        if args.len() != 1 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    format!("{name} requires exactly 1 argument"),
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let value =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.error,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinBswap { bits, value },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
                     "__builtin_add_overflow" | "__builtin_mul_overflow"
                         if session.opts.gnu_builtin_libcalls =>
                     {
@@ -4441,7 +4545,11 @@ pub fn lower_expr(
                 lower_builtin_offsetof(ty, designators, expr.span, crate_, tcx, resolver, session);
             HirExprKind::IntConst(i128::from(value))
         }
-        rcc_ast::ExprKind::BuiltinTypesCompatible { .. } => HirExprKind::IntConst(0),
+        rcc_ast::ExprKind::BuiltinTypesCompatible { lhs, rhs } => {
+            let lhs_ty = lower_type_name(lhs, DeclScope::Block, tcx, resolver, crate_, session);
+            let rhs_ty = lower_type_name(rhs, DeclScope::Block, tcx, resolver, crate_, session);
+            HirExprKind::IntConst(if lhs_ty == rhs_ty { 1 } else { 0 })
+        }
         rcc_ast::ExprKind::StmtExpr(block) => {
             let (stmts, result) =
                 lower_stmt_expr_block(block, body, scope, crate_, tcx, resolver, session);

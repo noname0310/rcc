@@ -1047,6 +1047,13 @@ impl BodyBuilder {
                 self.collect_expr_labels(hir_body, *value, local_map, scopes);
                 self.collect_expr_labels(hir_body, *expected, local_map, scopes);
             }
+            HirExprKind::BuiltinUnreachable => {}
+            HirExprKind::BuiltinConstantP { expr } => {
+                self.collect_expr_labels(hir_body, *expr, local_map, scopes);
+            }
+            HirExprKind::BuiltinBswap { value, .. } => {
+                self.collect_expr_labels(hir_body, *value, local_map, scopes);
+            }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
                 self.collect_expr_labels(hir_body, *rhs, local_map, scopes);

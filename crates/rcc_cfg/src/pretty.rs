@@ -141,6 +141,9 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::BuiltinVaArg { ap, ty } => {
             format!("va_arg({}, {})", fmt_operand(ap), fmt_ty(tcx, *ty))
         }
+        Rvalue::BuiltinBswap { value, bits, .. } => {
+            format!("bswap{bits}({})", fmt_operand(value))
+        }
         Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => {
             let dst = dst.as_ref().map(fmt_operand).unwrap_or_else(|| "_".to_owned());
             format!(

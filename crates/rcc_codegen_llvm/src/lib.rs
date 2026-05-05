@@ -3102,12 +3102,28 @@ pub mod backend {
                     self.builder.build_load(len_llvm_ty, len_ptr, "len").map_err(builder_error)
                 }
                 Rvalue::BuiltinVaArg { ap, ty } => self.emit_va_arg(ap, *ty, locals, body),
+                Rvalue::BuiltinBswap { value, .. } => self.emit_builtin_bswap(value, locals, body),
                 Rvalue::CheckedOverflow { op, lhs, rhs, dst, ty } => self.emit_checked_overflow(
                     CheckedOverflowArgs { op: *op, lhs, rhs, dst: dst.as_ref(), ty: *ty },
                     locals,
                     body,
                 ),
             }
+        }
+
+        fn emit_builtin_bswap(
+            &self,
+            value: &Operand,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let value = self.emit_operand_value(value, locals, body)?;
+            let BasicValueEnum::IntValue(value) = value else {
+                return Err(CodegenError::Internal(
+                    "__builtin_bswap operand is not an integer".to_owned(),
+                ));
+            };
+            self.emit_bswap(value, "bswap").map(|value| value.as_basic_value_enum())
         }
 
         fn emit_checked_overflow(
@@ -10250,6 +10266,33 @@ mod tests {
         let body = local_unop_return_body(double_ty, double_ty, UnOp::FNeg);
         let ir = assert_codegen_fixture_verifies(&mut tcx, "__unop_fneg", double_ty, body);
         assert!(ir.contains(" fneg double"), "missing fneg in IR:\n{ir}");
+    }
+
+    /// `__builtin_bswap*` CFG rvalues lower to the LLVM bswap intrinsic.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn builtin_bswap_emits_llvm_intrinsic() {
+        let mut tcx = TyCtxt::new();
+        let uint_ty = tcx.uint;
+        let body = cfg_body(
+            uint_ty,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::BuiltinBswap {
+                            value: int_const(uint_ty, 0x01020304),
+                            bits: 32,
+                            ty: uint_ty,
+                        },
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__builtin_bswap32_ir", uint_ty, body);
+        assert!(ir.contains("llvm.bswap.i32"), "IR should call bswap intrinsic:\n{ir}");
     }
 
     /// Pointer arithmetic is expressed as typed GEP over the pointed-to

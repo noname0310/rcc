@@ -312,6 +312,9 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinVaEnd { .. }
             | HirExprKind::BuiltinVaCopy { .. }
             | HirExprKind::BuiltinExpect { .. }
+            | HirExprKind::BuiltinUnreachable
+            | HirExprKind::BuiltinConstantP { .. }
+            | HirExprKind::BuiltinBswap { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }
@@ -640,6 +643,9 @@ impl<'a> ConstEval<'a> {
                 // integer constant expression in the §6.6p6 sense.
                 ConvertKind::RealToComplex | ConvertKind::ComplexToReal => None,
             },
+            HirExprKind::BuiltinBswap { bits, value } => {
+                self.eval_int(value).map(|value| bswap_const(bits, value))
+            }
 
             // The remaining HIR kinds are not part of an integer
             // constant expression by C99 §6.6p3 (assignment, comma,
@@ -665,6 +671,8 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinVaEnd { .. }
             | HirExprKind::BuiltinVaCopy { .. }
             | HirExprKind::BuiltinExpect { .. }
+            | HirExprKind::BuiltinUnreachable
+            | HirExprKind::BuiltinConstantP { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }
@@ -907,6 +915,21 @@ fn int_rank_bits(rank: IntRank) -> u32 {
         IntRank::Int => 32,
         IntRank::Long => 64,
         IntRank::LongLong => 64,
+    }
+}
+
+fn bswap_const(bits: u16, value: i128) -> i128 {
+    let mask = (1u128 << u32::from(bits)) - 1;
+    #[allow(clippy::cast_sign_loss)]
+    let mut src = (value as u128) & mask;
+    let mut out = 0u128;
+    for _ in 0..(bits / 8) {
+        out = (out << 8) | (src & 0xff);
+        src >>= 8;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        out as i128
     }
 }
 

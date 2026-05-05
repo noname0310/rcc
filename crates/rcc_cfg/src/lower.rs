@@ -377,6 +377,23 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             let _ = lower_as_rvalue(builder, cx, *expected);
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
+        HirExprKind::BuiltinUnreachable => {
+            builder.emit_storage_deads_to_depth(0, span);
+            builder.terminate(Terminator { kind: TerminatorKind::Unreachable, span });
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
+        HirExprKind::BuiltinConstantP { expr } => {
+            // Typeck rewrites this builtin to an IntConst. Keep this arm
+            // tolerant so hand-built HIR fixtures do not panic.
+            let _ = lower_as_rvalue(builder, cx, *expr);
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
+        HirExprKind::BuiltinBswap { bits, value } => {
+            let value = lower_as_rvalue(builder, cx, *value);
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(builder, span, temp, Rvalue::BuiltinBswap { value, bits: *bits, ty });
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
         HirExprKind::Assign { lhs, rhs } => {
             if let Some(parts) = compound_assign_parts(cx, *lhs, *rhs) {
                 return lower_compound_assign(builder, cx, span, *lhs, parts);

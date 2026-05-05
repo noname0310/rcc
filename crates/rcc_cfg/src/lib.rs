@@ -365,6 +365,15 @@ pub enum Rvalue {
         /// Type of the value to extract.
         ty: TyId,
     },
+    /// GNU byte-swap builtin lowered to a target intrinsic by codegen.
+    BuiltinBswap {
+        /// Operand to byte-swap.
+        value: Operand,
+        /// Operation width in bits.
+        bits: u16,
+        /// Result type.
+        ty: TyId,
+    },
     /// GCC checked arithmetic builtin.
     CheckedOverflow {
         /// Checked operation. Only `Add` and `Mul` are valid here.

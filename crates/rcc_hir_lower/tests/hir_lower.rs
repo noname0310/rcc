@@ -4176,6 +4176,59 @@ fn regression_gate_builtin_offsetof_lowers_field_and_array_path() {
     );
 }
 
+#[test]
+fn common_builtins_fold_in_hir_and_typeck() {
+    let src = r#"
+        typedef int I;
+        int f(int x) {
+            return __builtin_types_compatible_p(I, int)
+                + 10 * __builtin_types_compatible_p(I, long)
+                + 100 * __builtin_constant_p(1 + 2)
+                + 1000 * __builtin_constant_p(x)
+                + __builtin_bswap32(0x01020304U);
+        }
+    "#;
+    let (hir, _tcx, cap, sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let f = def_named(&hir, &sess, "f");
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    for expected in [1, 0, 67_305_985] {
+        assert!(
+            body.exprs
+                .iter()
+                .any(|expr| matches!(expr.kind, HirExprKind::IntConst(v) if v == expected)),
+            "expected folded IntConst({expected}) in exprs={:?}",
+            body.exprs
+        );
+    }
+}
+
+#[test]
+fn runtime_bswap_survives_typeck_for_cfg_and_codegen() {
+    let src = "unsigned f(unsigned x) { return __builtin_bswap32(x); }";
+    let (hir, _tcx, cap, sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean fixture should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+
+    let f = def_named(&hir, &sess, "f");
+    let body = hir.bodies.get(&f.id).expect("missing f body");
+    assert!(
+        body.exprs
+            .iter()
+            .any(|expr| matches!(expr.kind, HirExprKind::BuiltinBswap { bits: 32, .. })),
+        "runtime bswap should remain a builtin node for CFG/codegen: {:?}",
+        body.exprs
+    );
+}
+
 fn assert_post_inc_stmt_targets_local(body: &Body, stmt: rcc_hir::HirStmtId, expected: Local) {
     let HirStmtKind::Expr(expr) = body.stmts[stmt].kind else {
         panic!("expected parameter-bound expression statement");

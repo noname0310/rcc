@@ -13,7 +13,7 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [03-stdarg-header](03-stdarg-header.md)
 - [x] [04-remaining-freestanding](04-remaining-freestanding.md)
 - [x] [05-builtin-va-functions](05-builtin-va-functions.md)
-- [ ] [06-builtin-common](06-builtin-common.md)
+- [x] [06-builtin-common](06-builtin-common.md)
 - [ ] [07-system-header-search](07-system-header-search.md)
 - [ ] [08-unit-tests](08-unit-tests.md)
 

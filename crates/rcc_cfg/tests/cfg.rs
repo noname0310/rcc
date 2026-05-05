@@ -538,6 +538,41 @@ fn float_compound_assignment_uses_float_cast_kinds() {
 }
 
 #[test]
+fn common_bswap_builtin_reaches_cfg() {
+    let lowered = lower_snippet(
+        "builtin_bswap_cfg",
+        "unsigned f(unsigned x) { return __builtin_bswap32(x); }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert!(
+        body.blocks.iter().any(|block| {
+            block.statements.iter().any(|stmt| {
+                matches!(
+                    stmt.kind,
+                    StatementKind::Assign { rvalue: Rvalue::BuiltinBswap { bits: 32, .. }, .. }
+                )
+            })
+        }),
+        "runtime __builtin_bswap32 should lower to a CFG bswap rvalue:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
+fn builtin_unreachable_terminates_cfg_block() {
+    let lowered =
+        lower_snippet("builtin_unreachable_cfg", "void f(void) { __builtin_unreachable(); }");
+    let body = &lowered.bodies[0].1;
+    assert!(
+        body.blocks
+            .iter()
+            .any(|block| matches!(block.terminator.kind, TerminatorKind::Unreachable)),
+        "__builtin_unreachable should emit an unreachable terminator:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn volatile_local_qualifier_reaches_cfg_metadata() {
     let lowered = lower_snippet(
         "volatile_local_metadata",
@@ -761,7 +796,9 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
             operand_contains_field_projection(lhs, expected)
                 || operand_contains_field_projection(rhs, expected)
         }
-        Rvalue::BuiltinVaArg { ap, .. } => operand_contains_field_projection(ap, expected),
+        Rvalue::BuiltinVaArg { ap, .. } | Rvalue::BuiltinBswap { value: ap, .. } => {
+            operand_contains_field_projection(ap, expected)
+        }
         Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
             operand_contains_field_projection(lhs, expected)
                 || operand_contains_field_projection(rhs, expected)
@@ -805,7 +842,9 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_contains_int_const(lhs, expected) || operand_contains_int_const(rhs, expected)
         }
-        Rvalue::BuiltinVaArg { ap, .. } => operand_contains_int_const(ap, expected),
+        Rvalue::BuiltinVaArg { ap, .. } | Rvalue::BuiltinBswap { value: ap, .. } => {
+            operand_contains_int_const(ap, expected)
+        }
         Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
             operand_contains_int_const(lhs, expected)
                 || operand_contains_int_const(rhs, expected)
@@ -1045,6 +1084,9 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         }
         Rvalue::BuiltinVaArg { ap, .. } => {
             assert_operand_valid(name, def, body, ap);
+        }
+        Rvalue::BuiltinBswap { value, .. } => {
+            assert_operand_valid(name, def, body, value);
         }
         Rvalue::CheckedOverflow { lhs, rhs, dst, .. } => {
             assert_operand_valid(name, def, body, lhs);

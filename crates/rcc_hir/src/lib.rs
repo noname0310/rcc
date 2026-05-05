@@ -642,6 +642,26 @@ pub enum HirExprKind {
         /// Expected value hint, evaluated and discarded.
         expected: HirExprId,
     },
+    /// GNU `__builtin_unreachable()`.
+    ///
+    /// Reaching this expression is undefined behavior; CFG lowering
+    /// terminates the current block with its unreachable terminator.
+    BuiltinUnreachable,
+    /// GNU `__builtin_constant_p(expr)`.
+    ///
+    /// Type checking rewrites this to an integer constant once `expr`
+    /// has been typed.
+    BuiltinConstantP {
+        /// Expression being queried for compile-time constness.
+        expr: HirExprId,
+    },
+    /// GNU `__builtin_bswap16/32/64`.
+    BuiltinBswap {
+        /// Width of the byte swap operation.
+        bits: u16,
+        /// Operand after integer conversion to the builtin result type.
+        value: HirExprId,
+    },
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).
