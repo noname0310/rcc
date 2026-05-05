@@ -268,6 +268,7 @@ struct JsonMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn crate_name_handles_windows_and_unix_paths() {
@@ -303,5 +304,84 @@ mod tests {
         let missing = dir.join("missing.json");
         let err = check_artifacts(&[&missing]).unwrap_err().to_string();
         assert!(err.contains("coverage artifact missing"));
+    }
+
+    #[test]
+    fn parses_json_groups_files_by_crate_and_renders_report() {
+        let root = temp_root("summary");
+        let json = root.join("coverage.json");
+        let root_s = root.to_string_lossy().replace('\\', "/");
+        fs::write(
+            &json,
+            format!(
+                r#"{{
+                    "data": [{{
+                        "files": [
+                            {{
+                                "filename": "{root_s}/xtask/src/main.rs",
+                                "summary": {{ "lines": {{ "count": 20, "covered": 15 }} }}
+                            }},
+                            {{
+                                "filename": "{root_s}/xtask/src/coverage.rs",
+                                "summary": {{ "lines": {{ "count": 30, "covered": 30 }} }}
+                            }},
+                            {{
+                                "filename": "{root_s}/crates/rcc_span/src/lib.rs",
+                                "summary": {{ "lines": {{ "count": 10, "covered": 9 }} }}
+                            }},
+                            {{
+                                "filename": "{root_s}/docs/coverage.md",
+                                "summary": {{ "lines": {{ "count": 100, "covered": 0 }} }}
+                            }}
+                        ],
+                        "totals": {{ "lines": {{ "count": 60, "covered": 54 }} }}
+                    }}]
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let summary = CoverageSummary::from_json_file(&json, &root).unwrap();
+        let xtask = summary.crates.get("xtask").copied().unwrap();
+        assert_eq!(xtask.count, 50);
+        assert_eq!(xtask.covered, 45);
+        assert_eq!(summary.crates.get("rcc_span").unwrap().covered, 9);
+
+        let report = summary.render_report();
+        assert!(report.contains("workspace lines: 90.00%"));
+        assert!(report.contains("| `xtask` | 90.00% (45/50) | 60.00% | ok |"));
+        summary.enforce_thresholds().unwrap();
+    }
+
+    #[test]
+    fn enforce_thresholds_reports_workspace_and_crate_failures() {
+        let summary = CoverageSummary {
+            workspace_lines: Metric { count: 100, covered: 79 },
+            crates: BTreeMap::from([
+                ("xtask".to_owned(), Metric { count: 100, covered: 59 }),
+                ("rcc_span".to_owned(), Metric { count: 100, covered: 90 }),
+            ]),
+        };
+
+        let err = summary.enforce_thresholds().unwrap_err().to_string();
+        assert!(err.contains("workspace line coverage 79.00% < 80.00%"));
+        assert!(err.contains("xtask line coverage 59.00% < 60.00%"));
+    }
+
+    #[test]
+    fn malformed_coverage_json_is_an_error() {
+        let root = temp_root("malformed");
+        let json = root.join("coverage.json");
+        fs::write(&json, "{ not json").unwrap();
+        let err = CoverageSummary::from_json_file(&json, &root).unwrap_err().to_string();
+        assert!(err.contains("parsing"));
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rcc-coverage-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

@@ -491,10 +491,93 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unpublishable_or_unversioned_distribution_manifest() {
+        let unpublishable = r#"
+            [package]
+            name = "rcc-compiler"
+            version = "0.0.1"
+            publish = false
+
+            [[bin]]
+            name = "rcc"
+
+            [dependencies]
+            rcc_driver = { version = "0.0.1", path = "../rcc_driver" }
+
+            [features]
+            default = ["llvm"]
+            llvm = ["rcc_driver/llvm"]
+        "#;
+        let err = validate_publish_manifest_text(unpublishable).unwrap_err().to_string();
+        assert!(err.contains("must be publishable"));
+
+        let missing_version = r#"
+            [package]
+            name = "rcc-compiler"
+            version = "0.0.1"
+
+            [[bin]]
+            name = "rcc"
+
+            [dependencies]
+            rcc_driver = { path = "../rcc_driver" }
+
+            [features]
+            default = ["llvm"]
+            llvm = ["rcc_driver/llvm"]
+        "#;
+        let err = validate_publish_manifest_text(missing_version).unwrap_err().to_string();
+        assert!(err.contains("must carry a version"));
+    }
+
+    #[test]
+    fn detects_release_binary_and_suite_tree() {
+        let root = temp_root("release-shape");
+        let exe = if cfg!(windows) { "rcc.exe" } else { "rcc" };
+        fs::create_dir_all(root.join("target/release")).unwrap();
+        fs::write(root.join("target/release").join(exe), b"").unwrap();
+        assert_eq!(release_rcc_binary(&root).unwrap(), root.join("target/release").join(exe));
+
+        for rel in [
+            "third_party/testsuites/c-testsuite/tests/single-exec",
+            "third_party/testsuites/chibicc/test",
+            "third_party/testsuites/tcc-tests2/tests/tests2",
+            "third_party/testsuites/llvm-test-suite/SingleSource/UnitTests",
+        ] {
+            fs::create_dir_all(root.join(rel)).unwrap();
+        }
+        assert!(conformance_suites_present(&root));
+    }
+
+    #[test]
+    fn render_summary_marks_hard_and_soft_failures() {
+        let results = vec![
+            GateResult::passed("fmt", "ok"),
+            GateResult::failed("coverage", "below threshold", true),
+            GateResult::failed("optional fuzz", "tool missing", false),
+            GateResult::skipped("registry package", "not requested"),
+        ];
+        let summary = render_summary(&results);
+        assert!(summary.contains("| fmt | pass | ok |"));
+        assert!(summary.contains("| coverage | fail | below threshold |"));
+        assert!(results[1].failed_hard());
+        assert!(!results[2].failed_hard());
+        assert!(!results[3].failed_hard());
+    }
+
+    #[test]
     fn formats_command_arguments_with_spaces() {
         assert_eq!(
             format_command("cargo", &["package", "--manifest-path", "path with spaces/Cargo.toml"]),
             "cargo package --manifest-path \"path with spaces/Cargo.toml\""
         );
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir =
+            env::temp_dir().join(format!("rcc-release-check-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

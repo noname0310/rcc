@@ -173,4 +173,32 @@ mod tests {
         assert_eq!(targets.last().unwrap().name, "rcc-compiler");
         assert!(targets_from_start(Some("missing")).is_err());
     }
+
+    #[test]
+    fn dry_run_publish_walks_selected_suffix_without_token() {
+        let opts = ReleasePublishOptions {
+            dry_run: true,
+            allow_dirty: true,
+            no_verify: true,
+            token_env: None,
+            start_at: Some("rcc_driver".to_owned()),
+        };
+
+        run(Path::new("."), &opts).unwrap();
+    }
+
+    #[test]
+    fn missing_token_env_is_reported_before_publish() {
+        let token_env = format!("RCC_TEST_MISSING_CARGO_TOKEN_{}", std::process::id());
+        let opts = ReleasePublishOptions {
+            dry_run: true,
+            allow_dirty: false,
+            no_verify: false,
+            token_env: Some(token_env.clone()),
+            start_at: Some("rcc_span".to_owned()),
+        };
+
+        let err = run(Path::new("."), &opts).unwrap_err().to_string();
+        assert!(err.contains(&format!("{token_env} must be set")));
+    }
 }
