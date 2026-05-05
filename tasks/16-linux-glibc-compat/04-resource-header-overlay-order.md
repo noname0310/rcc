@@ -20,8 +20,8 @@ silently replacing ordinary host headers.
 
 ## Acceptance
 
-- [ ] Include tracing shows the exact file chosen for every overlay candidate.
-- [ ] Small rcc shim headers can shadow selected problematic host headers.
-- [ ] Normal host headers remain discoverable after the shim layer.
-- [ ] A regression test proves a project `-I` include is not stolen by the
+- [x] Include tracing shows the exact file chosen for every overlay candidate.
+- [x] Small rcc shim headers can shadow selected problematic host headers.
+- [x] Normal host headers remain discoverable after the shim layer.
+- [x] A regression test proves a project `-I` include is not stolen by the
       resource directory.

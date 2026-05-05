@@ -20,9 +20,9 @@ hard-coding accidental project-specific behavior.
 
 ## Acceptance
 
-- [ ] `Session` or driver options preserve feature-test macros in the same path
+- [x] `Session` or driver options preserve feature-test macros in the same path
       as normal `-D` definitions.
-- [ ] `-pthread` implies `_REENTRANT` during preprocessing.
-- [ ] Tests cover macro visibility differences for at least `<unistd.h>`,
+- [x] `-pthread` implies `_REENTRANT` during preprocessing.
+- [x] Tests cover macro visibility differences for at least `<unistd.h>`,
       `<pthread.h>`, and `<features.h>` on WSL/Linux.
-- [ ] The behavior is documented in `docs/hosted-linux.md`.
+- [x] The behavior is documented in `docs/hosted-linux.md`.

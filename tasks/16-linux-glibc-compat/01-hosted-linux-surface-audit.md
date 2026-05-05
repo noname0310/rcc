@@ -20,9 +20,9 @@ already expose, with GNU coreutils as the primary glibc-heavy anchor.
 
 ## Acceptance
 
-- [ ] `real_world/hosted-linux-audit.md` lists every known hosted blocker with a
+- [x] `real_world/hosted-linux-audit.md` lists every known hosted blocker with a
       repro command or log path.
-- [ ] GNU coreutils has a dedicated section that names the first target utility.
-- [ ] Every compiler-owned blocker links to an existing or newly created task.
-- [ ] Runtime-owned symbols are explicitly marked as host libc/libm/libpthread
+- [x] GNU coreutils has a dedicated section that names the first target utility.
+- [x] Every compiler-owned blocker links to an existing or newly created task.
+- [x] Runtime-owned symbols are explicitly marked as host libc/libm/libpthread
       responsibilities, not rcc implementations.
