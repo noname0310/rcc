@@ -60,6 +60,10 @@ pub enum OptLevel {
 pub struct Options {
     /// `-I` include paths.
     pub include_paths: Vec<PathBuf>,
+    /// `-isystem` and target-default system include paths.
+    pub system_include_paths: Vec<PathBuf>,
+    /// Optional system root used to derive target-default include paths.
+    pub sysroot: Option<PathBuf>,
     /// Command-line `-D` macro definitions: `(name, value)`.
     pub cli_defines: Vec<(String, Option<String>)>,
     /// Command-line `-U` macro undefines, applied after `-D` and predefined macros.
@@ -264,6 +268,8 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             include_paths: Vec::new(),
+            system_include_paths: Vec::new(),
+            sysroot: None,
             cli_defines: Vec::new(),
             cli_undefines: Vec::new(),
             target: TargetInfo::baseline(),

@@ -54,6 +54,14 @@ pub struct Cli {
     #[arg(short = 'I', long = "include-path")]
     pub include_paths: Vec<PathBuf>,
 
+    /// System include path (`-isystem`). May repeat.
+    #[arg(long = "isystem", value_name = "DIR", action = ArgAction::Append)]
+    pub system_include_paths: Vec<PathBuf>,
+
+    /// Prefix target-default system include paths with this root.
+    #[arg(long = "sysroot", value_name = "DIR")]
+    pub sysroot: Option<PathBuf>,
+
     /// Command-line `-D` macro definitions: `NAME` or `NAME=VAL`.
     #[arg(short = 'D', long = "define", value_parser = parse_define)]
     pub defines: Vec<(String, Option<String>)>,
@@ -383,6 +391,14 @@ where
             if let Some(path) = text.strip_prefix("-MF").filter(|rest| !rest.is_empty()) {
                 return OsString::from(format!("--dependency-file={path}"));
             }
+            if let Some(path) = text.strip_prefix("-isystem").filter(|rest| !rest.is_empty()) {
+                let path = path.strip_prefix('=').unwrap_or(path);
+                return OsString::from(format!("--isystem={path}"));
+            }
+            if let Some(path) = text.strip_prefix("-isysroot").filter(|rest| !rest.is_empty()) {
+                let path = path.strip_prefix('=').unwrap_or(path);
+                return OsString::from(format!("--sysroot={path}"));
+            }
             if let Some(target) = text.strip_prefix("-MT").filter(|rest| !rest.is_empty()) {
                 return OsString::from(format!("--dependency-target={target}"));
             }
@@ -392,6 +408,8 @@ where
             match text.as_ref() {
                 "-mms-bitfields" => OsString::from("-fms-bitfields"),
                 "-std" => OsString::from("--std"),
+                "-isystem" => OsString::from("--isystem"),
+                "-isysroot" => OsString::from("--sysroot"),
                 "-ansi" => OsString::from("--ansi"),
                 "-MM" => OsString::from("--user-dependencies"),
                 "-MD" => OsString::from("--emit-dependencies"),

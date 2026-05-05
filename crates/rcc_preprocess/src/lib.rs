@@ -1068,7 +1068,10 @@ impl<'a> Preprocessor<'a> {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let include_paths = include::include_search_paths(&self.session.opts.include_paths);
+        let include_paths = include::include_search_paths(
+            &self.session.opts.include_paths,
+            &self.session.opts.system_include_paths,
+        );
         let mut has_include = |name: &str, system: bool, _span: Span| {
             include::resolve_header(name, system, &current_dir, &include_paths).is_some()
         };

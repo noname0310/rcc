@@ -5,8 +5,8 @@
 //!
 //! | Form            | Directories searched, in order                      |
 //! |-----------------|-----------------------------------------------------|
-//! | `#include "h"`  | the current translation unit's directory, `-I`, then rcc's builtin include root |
-//! | `#include <h>`  | `-I`, then rcc's builtin include root              |
+//! | `#include "h"`  | current file directory, rcc's builtin include root, `-I`, then system paths |
+//! | `#include <h>`  | rcc's builtin include root, `-I`, then system paths |
 //!
 //! The first existing file on that path wins; no file-system readdir is
 //! performed. A header whose string resolves to an absolute path bypasses
@@ -15,9 +15,11 @@
 //! this resolver and are deliberately out of scope here.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rcc_errors::{codes::E0021, Diagnostic, Label, Level};
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
+use rcc_session::{Os, TargetInfo};
 use rcc_span::{BytePos, FileId, Span};
 
 use crate::guard::detect_guard;
@@ -101,14 +103,105 @@ pub fn builtin_include_dir() -> PathBuf {
 /// `stddef.h` and `stdarg.h` resolve before host system headers. User-provided
 /// `-I` entries still handle project headers and non-resource headers after the
 /// compiler-owned surface.
-pub fn include_search_paths(user_paths: &[PathBuf]) -> Vec<PathBuf> {
+pub fn include_search_paths(user_paths: &[PathBuf], system_paths: &[PathBuf]) -> Vec<PathBuf> {
     let builtin = builtin_include_dir();
-    let mut paths = Vec::with_capacity(user_paths.len() + usize::from(builtin.is_dir()));
+    let mut paths =
+        Vec::with_capacity(user_paths.len() + system_paths.len() + usize::from(builtin.is_dir()));
     if builtin.is_dir() {
         paths.push(builtin);
     }
     paths.extend(user_paths.iter().cloned());
+    paths.extend(system_paths.iter().cloned());
     paths
+}
+
+/// Discover target-default system include directories.
+///
+/// The returned list contains only directories that exist on this host, so
+/// production preprocessing does not waste probes on impossible paths. Tests use
+/// the private candidate builder below to validate platform-specific path shapes
+/// without depending on the executing machine.
+pub fn discover_system_include_paths(target: &TargetInfo, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    system_include_candidates(target, sysroot).into_iter().filter(|path| path.is_dir()).fold(
+        Vec::new(),
+        |mut acc, path| {
+            if !acc.contains(&path) {
+                acc.push(path);
+            }
+            acc
+        },
+    )
+}
+
+fn system_include_candidates(target: &TargetInfo, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    match target.os {
+        Os::Linux => linux_system_include_candidates(target, sysroot),
+        Os::Darwin => darwin_system_include_candidates(sysroot),
+        Os::Windows => windows_system_include_candidates(sysroot),
+        Os::None => Vec::new(),
+    }
+}
+
+fn linux_system_include_candidates(target: &TargetInfo, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    ["/usr/include", "/usr/local/include"]
+        .into_iter()
+        .map(|path| rooted_unix_path(sysroot, path))
+        .chain(std::iter::once(rooted_unix_path(
+            sysroot,
+            &format!("/usr/include/{}", target.triple),
+        )))
+        .collect()
+}
+
+fn darwin_system_include_candidates(sysroot: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(root) = sysroot {
+        return vec![root.join("usr").join("include")];
+    }
+    let mut paths = Vec::new();
+    if let Some(sdk) = xcrun_sdk_path() {
+        paths.push(sdk.join("usr").join("include"));
+    }
+    paths.push(PathBuf::from("/usr/local/include"));
+    paths.push(PathBuf::from("/usr/include"));
+    paths
+}
+
+fn windows_system_include_candidates(sysroot: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(root) = sysroot {
+        return vec![root.join("include"), root.join("usr").join("include")];
+    }
+    env_include_paths()
+        .into_iter()
+        .chain([
+            PathBuf::from(r"C:\msys64\ucrt64\include"),
+            PathBuf::from(r"C:\msys64\mingw64\include"),
+            PathBuf::from(r"C:\msys64\clang64\include"),
+        ])
+        .collect()
+}
+
+fn rooted_unix_path(sysroot: Option<&Path>, absolute: &str) -> PathBuf {
+    let path = Path::new(absolute);
+    match sysroot {
+        Some(root) => root.join(path.strip_prefix("/").unwrap_or(path)),
+        None => path.to_path_buf(),
+    }
+}
+
+fn xcrun_sdk_path() -> Option<PathBuf> {
+    let output = Command::new("xcrun").arg("--show-sdk-path").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn env_include_paths() -> Vec<PathBuf> {
+    std::env::var_os("INCLUDE")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default()
 }
 
 /// Return `true` if `tokens` (a header's full pp-token stream, as
@@ -198,7 +291,10 @@ impl Preprocessor<'_> {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let include_paths = include_search_paths(&self.session.opts.include_paths);
+        let include_paths = include_search_paths(
+            &self.session.opts.include_paths,
+            &self.session.opts.system_include_paths,
+        );
 
         let Some(resolved) =
             resolve_header_with(name, is_system, &current_dir, &include_paths, |path| {
@@ -326,10 +422,12 @@ fn cannot_find_header(span: Span, name: &str, is_system: bool) -> Diagnostic {
             primary: true,
         }],
         notes: vec!["C99 §6.10.2: `\"...\"` searches the current file's directory first, \
-             then the command-line include paths; `<...>` searches only the \
-             include paths"
+             then the compiler, command-line, and system include paths; `<...>` skips the \
+             current file directory"
             .into()],
-        help: vec!["add the containing directory to the include path (e.g. `-I`)".into()],
+        help: vec![
+            "add the containing directory to the include path (e.g. `-I` or `-isystem`)".into()
+        ],
     }
 }
 
@@ -374,7 +472,7 @@ mod tests {
     use std::sync::Arc;
 
     use rcc_errors::{CaptureEmitter, Handler};
-    use rcc_session::{Options, Session};
+    use rcc_session::{Options, Session, TargetInfo, TargetTriple};
     use rcc_span::BytePos;
     use tempfile::TempDir;
 
@@ -453,6 +551,50 @@ mod tests {
     }
 
     #[test]
+    fn include_search_paths_place_builtin_before_user_and_system_paths() {
+        let user = PathBuf::from("__rcc_user_include__");
+        let system = PathBuf::from("__rcc_system_include__");
+        let paths =
+            include_search_paths(std::slice::from_ref(&user), std::slice::from_ref(&system));
+
+        assert_eq!(paths.first().map(PathBuf::as_path), Some(builtin_include_dir().as_path()));
+        let user_pos = paths.iter().position(|path| path == &user).expect("user include path");
+        let system_pos =
+            paths.iter().position(|path| path == &system).expect("system include path");
+        assert!(user_pos < system_pos, "-I paths must precede -isystem/default system paths");
+    }
+
+    #[test]
+    fn linux_sysroot_candidates_are_prefixed_in_documented_order() {
+        let target = TargetInfo::from_triple(&TargetTriple::new("x86_64-unknown-linux-gnu"))
+            .expect("supported linux target");
+        let root = PathBuf::from("/custom/root");
+        let paths = system_include_candidates(&target, Some(&root));
+
+        assert_eq!(
+            paths,
+            vec![
+                root.join("usr").join("include"),
+                root.join("usr").join("local").join("include"),
+                root.join("usr").join("include").join("x86_64-unknown-linux-gnu"),
+            ]
+        );
+    }
+
+    #[test]
+    fn discover_system_include_paths_filters_missing_candidates() {
+        let tmp = TempDir::new().unwrap();
+        let usr_include = tmp.path().join("usr").join("include");
+        fs::create_dir_all(&usr_include).unwrap();
+        let target = TargetInfo::from_triple(&TargetTriple::new("x86_64-unknown-linux-gnu"))
+            .expect("supported linux target");
+
+        let paths = discover_system_include_paths(&target, Some(tmp.path()));
+
+        assert_eq!(paths, vec![usr_include]);
+    }
+
+    #[test]
     fn absolute_path_bypasses_search() {
         let tmp = TempDir::new().unwrap();
         let abs = write_file(tmp.path(), "abs.h", "int abs;\n");
@@ -497,9 +639,17 @@ mod tests {
     /// itself is empty — tests only care about include resolution from
     /// its location.
     fn seed_session(dir: &Path, include_paths: Vec<PathBuf>) -> (Session, FileId, CaptureEmitter) {
+        seed_session_with_system_paths(dir, include_paths, Vec::new())
+    }
+
+    fn seed_session_with_system_paths(
+        dir: &Path,
+        include_paths: Vec<PathBuf>,
+        system_include_paths: Vec<PathBuf>,
+    ) -> (Session, FileId, CaptureEmitter) {
         let main_path = write_file(dir, "main.c", "");
         let cap = CaptureEmitter::new();
-        let opts = Options { include_paths, ..Options::default() };
+        let opts = Options { include_paths, system_include_paths, ..Options::default() };
         let sess = Session::with_handler(opts, Handler::with_emitter(Box::new(cap.clone())));
         let main_id = sess.source_map.write().unwrap().load_file(&main_path).expect("load main.c");
         (sess, main_id, cap)
@@ -576,6 +726,43 @@ mod tests {
         let tokens = Preprocessor::new(&mut sess).process_include("<ext.h>", true, span, main_id);
 
         assert!(!tokens.is_empty());
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn process_include_uses_system_include_paths_for_system_form() {
+        let src_dir = TempDir::new().unwrap();
+        let sys_dir = TempDir::new().unwrap();
+        write_file(sys_dir.path(), "sys-only.h", "int sys_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session_with_system_paths(src_dir.path(), Vec::new(), vec![sys_dir.path().into()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<sys-only.h>", true, span, main_id);
+
+        assert!(!tokens.is_empty());
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cli_include_paths_precede_system_include_paths_for_same_header() {
+        let src_dir = TempDir::new().unwrap();
+        let user_dir = TempDir::new().unwrap();
+        let sys_dir = TempDir::new().unwrap();
+        write_file(user_dir.path(), "shadow.h", "int user_shadow;\n");
+        write_file(sys_dir.path(), "shadow.h", "int system_shadow;\n");
+        let (mut sess, main_id, cap) = seed_session_with_system_paths(
+            src_dir.path(),
+            vec![user_dir.path().into()],
+            vec![sys_dir.path().into()],
+        );
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<shadow.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("user_shadow"), "{text}");
+        assert!(!text.contains("system_shadow"), "{text}");
         assert!(cap.diagnostics().is_empty());
     }
 

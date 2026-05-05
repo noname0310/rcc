@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -219,6 +220,53 @@ fn gnu_preprocessor_compat_flags_set_frontend_options() {
     assert!(opts.gnu_permissive_redefinition);
     assert!(opts.gnu_named_variadic);
     assert!(opts.gnu_permissive_paste);
+}
+
+#[test]
+fn isystem_spelling_maps_to_system_include_options() {
+    let first = PathBuf::from("first-system-include");
+    let second = PathBuf::from("second-system-include");
+    let joined = format!("-isystem{}", second.display());
+    let cli = Cli::try_parse_from([
+        OsString::from("rcc"),
+        OsString::from("-isystem"),
+        first.clone().into_os_string(),
+        OsString::from(joined),
+        OsString::from("hello.c"),
+    ])
+    .unwrap();
+    let opts = options_from_cli(&cli);
+
+    assert_eq!(cli.system_include_paths, vec![first.clone(), second.clone()]);
+    assert!(opts.system_include_paths.starts_with(&[first, second]));
+}
+
+#[test]
+fn sysroot_discovers_existing_linux_system_include_dirs_under_root() {
+    let root = tempfile::tempdir().unwrap();
+    for rel in [
+        Path::new("usr/include"),
+        Path::new("usr/local/include"),
+        Path::new("usr/include/x86_64-unknown-linux-gnu"),
+    ] {
+        fs::create_dir_all(root.path().join(rel)).unwrap();
+    }
+    let cli = Cli::try_parse_from([
+        OsString::from("rcc"),
+        OsString::from("--target=x86_64-unknown-linux-gnu"),
+        OsString::from("--sysroot"),
+        root.path().as_os_str().to_owned(),
+        OsString::from("hello.c"),
+    ])
+    .unwrap();
+    let opts = options_from_cli(&cli);
+
+    assert_eq!(opts.sysroot.as_deref(), Some(root.path()));
+    assert!(opts.system_include_paths.starts_with(&[
+        root.path().join("usr/include"),
+        root.path().join("usr/local/include"),
+        root.path().join("usr/include/x86_64-unknown-linux-gnu"),
+    ]));
 }
 
 #[test]

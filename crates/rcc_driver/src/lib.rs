@@ -268,11 +268,22 @@ fn is_supported_feature_flag(flag: &str) -> bool {
 fn emit_verbose_trace(cli: &Cli, opts: &Options) {
     eprintln!("rcc version {}", env!("CARGO_PKG_VERSION"));
     eprintln!("target: {}", opts.target.triple);
+    if let Some(sysroot) = &opts.sysroot {
+        eprintln!("sysroot: {}", sysroot.display());
+    }
     if opts.include_paths.is_empty() {
         eprintln!("include paths: <none>");
     } else {
         eprintln!("include paths:");
         for path in &opts.include_paths {
+            eprintln!("  {}", path.display());
+        }
+    }
+    if opts.system_include_paths.is_empty() {
+        eprintln!("system include paths: <none>");
+    } else {
+        eprintln!("system include paths:");
+        for path in &opts.system_include_paths {
             eprintln!("  {}", path.display());
         }
     }
@@ -419,11 +430,19 @@ fn compile_one_to_object(input: &Path, output: &Path, base_opts: &Options) -> Dr
 /// Convert parsed CLI flags into a `rcc_session::Options`.
 pub fn options_from_cli(cli: &Cli) -> Options {
     let (emit, output) = emit_and_output_from_cli(cli);
+    let target = cli.target.clone().unwrap_or_else(TargetInfo::host);
+    let mut system_include_paths = cli.system_include_paths.clone();
+    system_include_paths.extend(rcc_preprocess::include::discover_system_include_paths(
+        &target,
+        cli.sysroot.as_deref(),
+    ));
     Options {
         include_paths: cli.include_paths.clone(),
+        system_include_paths,
+        sysroot: cli.sysroot.clone(),
         cli_defines: cli.defines.clone(),
         cli_undefines: cli.undefines.clone(),
-        target: cli.target.clone().unwrap_or_else(TargetInfo::host),
+        target,
         emit,
         output,
         save_temps: cli.save_temps.clone(),

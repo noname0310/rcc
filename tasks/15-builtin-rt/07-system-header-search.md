@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-07: System header search path discovery
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-02    **Milestone:** M6
