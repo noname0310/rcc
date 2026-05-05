@@ -1,5 +1,7 @@
 # 16-12: Dlfcn And Runtime Linking
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-11-fcntl-dirent-stat-shims  
 **Milestone:** hosted-linux
@@ -18,7 +20,7 @@ projects that need `dlopen` or related APIs.
 
 ## Acceptance
 
-- [ ] A small `dlopen` smoke program compiles and links on Linux.
-- [ ] Driver link planning preserves explicit `-ldl`.
-- [ ] Missing-symbol diagnostics remain actionable.
-- [ ] Documentation states that the host runtime resolves these symbols.
+- [x] A small `dlopen` smoke program compiles and links on Linux.
+- [x] Driver link planning preserves explicit `-ldl`.
+- [x] Missing-symbol diagnostics remain actionable.
+- [x] Documentation states that the host runtime resolves these symbols.

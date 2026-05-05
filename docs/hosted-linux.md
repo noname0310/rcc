@@ -119,6 +119,14 @@ for compile-time field access and simple hosted smoke tests.  Treat it as a
 target-specific ABI surface: changes to field order, size, or timestamp storage
 need explicit target-layout coverage before they are broadened.
 
+`lib/rcc/include/dlfcn.h` is a declaration shim for hosted Linux dynamic-loader
+APIs.  It exposes `dlopen`, `dlsym`, `dlclose`, `dlerror`, `dladdr`, common
+`RTLD_*` flags, and `Dl_info`.  The implementation is intentionally external:
+the host runtime resolves these symbols during final linking.  Projects that
+still require a separate dynamic-loader library must pass `-ldl`; the driver
+preserves that explicit flag in the clang/lld-compatible link command and in
+missing-linker diagnostics.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc

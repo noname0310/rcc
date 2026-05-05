@@ -488,6 +488,44 @@ int inspect_path(const char *path) {
 }
 
 #[test]
+fn dlfcn_header_parses_and_typechecks_for_linux_target() {
+    let input = TempCFile::new(
+        "dlfcn-hosted",
+        r#"
+#include <dlfcn.h>
+
+int load_symbol(const char *path, const char *name) {
+    Dl_info info;
+    void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *symbol;
+    if (!handle)
+        return dlerror() ? 1 : 2;
+    symbol = dlsym(handle, name);
+    if (!symbol)
+        return 3;
+    if (dladdr(symbol, &info) == 0)
+        return 4;
+    dlclose(handle);
+    return info.dli_fname != 0 && dlsym(RTLD_DEFAULT, name) != 0 ? 0 : 5;
+}
+"#,
+    );
+    let output = input.sibling("hir");
+    let result = Command::new(rcc_bin())
+        .arg("--target=x86_64-unknown-linux-gnu")
+        .arg("--linux-gnu-hosted")
+        .arg("--emit=hir")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(output.exists(), "HIR output should be emitted after dlfcn header typecheck");
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");

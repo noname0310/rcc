@@ -99,6 +99,7 @@ fn cli_collects_common_linker_flags() {
     let cli = parse(&[
         "rcc",
         "-lm",
+        "-ldl",
         "-L/native/lib",
         "-Wl,--version-script=map.txt",
         "-shared",
@@ -109,7 +110,7 @@ fn cli_collects_common_linker_flags() {
     ]);
     let opts = options_from_cli(&cli);
 
-    assert_eq!(opts.link.libraries, ["m"]);
+    assert_eq!(opts.link.libraries, ["m", "dl"]);
     assert_eq!(opts.link.library_paths, [PathBuf::from("/native/lib")]);
     assert_eq!(opts.link.linker_args, ["-Wl,--version-script=map.txt"]);
     assert!(opts.link.shared);
@@ -128,7 +129,7 @@ fn pie_and_no_pie_are_mutually_exclusive() {
 #[test]
 fn link_command_forwards_options_to_clang_lld_driver() {
     let options = LinkOptions {
-        libraries: vec!["m".to_owned(), "pthread".to_owned()],
+        libraries: vec!["m".to_owned(), "pthread".to_owned(), "dl".to_owned()],
         library_paths: vec![PathBuf::from("/native/lib")],
         linker_args: vec!["-Wl,--version-script=map.txt".to_owned()],
         shared: true,
@@ -154,7 +155,23 @@ fn link_command_forwards_options_to_clang_lld_driver() {
     assert!(rendered.contains("-L/native/lib"), "{rendered}");
     assert!(rendered.contains("-lm"), "{rendered}");
     assert!(rendered.contains("-lpthread"), "{rendered}");
+    assert!(rendered.contains("-ldl"), "{rendered}");
     assert!(rendered.contains("-Wl,--version-script=map.txt"), "{rendered}");
+}
+
+#[test]
+fn link_command_preserves_explicit_ldl_once() {
+    let options = LinkOptions { libraries: vec!["dl".to_owned()], ..LinkOptions::default() };
+    let command = pipeline::LinkCommand::with_options(
+        PathBuf::from("clang"),
+        Path::new("input.o"),
+        Path::new("out"),
+        &options,
+    );
+    let rendered = command.render();
+
+    assert!(rendered.contains("-ldl"), "{rendered}");
+    assert_eq!(rendered.matches("-ldl").count(), 1, "{rendered}");
 }
 
 #[test]
@@ -178,7 +195,7 @@ fn missing_linker_error_includes_forwarded_flags() {
     let obj = TempFile::new("input.o", b"not an object");
     let output = TempFile::empty_path("a.out");
     let options = LinkOptions {
-        libraries: vec!["m".to_owned()],
+        libraries: vec!["m".to_owned(), "dl".to_owned()],
         linker_args: vec!["-Wl,--version-script=map.txt".to_owned()],
         ..LinkOptions::default()
     };
@@ -188,6 +205,7 @@ fn missing_linker_error_includes_forwarded_flags() {
             .unwrap_err();
 
     assert!(err.contains("-lm"), "{err}");
+    assert!(err.contains("-ldl"), "{err}");
     assert!(err.contains("-Wl,--version-script=map.txt"), "{err}");
 }
 
@@ -243,6 +261,37 @@ fn e2e_link_with_libm_when_enabled() {
     let link = LinkOptions { libraries: vec!["m".to_owned()], ..LinkOptions::default() };
 
     compile_with_link_options(&input.path, &output.path, link).expect("compile and link with -lm");
+
+    let status = Command::new(&output.path).status().expect("run linked executable");
+    assert_eq!(status.code(), Some(0));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn e2e_link_with_dlfcn_when_enabled() {
+    if std::env::var_os("RCC_RUN_LINK_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    assert!(llvm_backend_enabled_for_this_build(), "LLVM backend feature is required");
+
+    let input = TempCFile::new(
+        "dlfcn",
+        r#"
+#include <dlfcn.h>
+
+int main(void) {
+    void *handle = dlopen(0, RTLD_NOW | RTLD_LOCAL);
+    if (!handle)
+        return dlerror() ? 0 : 1;
+    dlclose(handle);
+    return 0;
+}
+"#,
+    );
+    let output = TempFile::empty_path("dlfcn-out");
+    let link = LinkOptions { libraries: vec!["dl".to_owned()], ..LinkOptions::default() };
+
+    compile_with_link_options(&input.path, &output.path, link).expect("compile and link with -ldl");
 
     let status = Command::new(&output.path).status().expect("run linked executable");
     assert_eq!(status.code(), Some(0));
