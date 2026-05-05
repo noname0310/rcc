@@ -112,6 +112,15 @@ These definitions are parse/type compatibility only.  They must not grow into a
 copy of glibc `sys/cdefs.h`, and they do not provide fortified libc behavior,
 symbol redirection, ABI dispatch, or runtime code.
 
+Raw GNU `__attribute__((...))` syntax is also parsed so hosted headers can keep
+their declaration shape.  The supported attribute table includes the glibc and
+gnulib annotations currently needed by the hosted probes: `nothrow`, `leaf`,
+`nonnull`, `pure`, `const`, `malloc`, `format`, `warn_unused_result`,
+`visibility`, `deprecated`, `aligned`, `packed`, `section`, `weak`,
+`alloc_size`, `alloc_align`, `access`, `copy`, and related spelling variants
+with leading/trailing double underscores.  Unknown attributes are recovered with
+W0033 instead of being silently treated as semantically supported.
+
 ## Current Probe Queue
 
 The phase-16 task tree is the authoritative hosted Linux queue:

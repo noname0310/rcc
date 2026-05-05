@@ -18,7 +18,7 @@ rcc-owned libc bodies.
 - [x] [03-feature-test-macro-model](03-feature-test-macro-model.md)
 - [x] [04-resource-header-overlay-order](04-resource-header-overlay-order.md)
 - [x] [05-glibc-common-macro-shims](05-glibc-common-macro-shims.md)
-- [ ] [06-gnu-header-attribute-tolerance](06-gnu-header-attribute-tolerance.md)
+- [x] [06-gnu-header-attribute-tolerance](06-gnu-header-attribute-tolerance.md)
 - [ ] [07-restrict-and-qualifier-aliases](07-restrict-and-qualifier-aliases.md)
 - [ ] [08-pthread-driver-flag](08-pthread-driver-flag.md)
 - [ ] [09-pthread-header-shim](09-pthread-header-shim.md)

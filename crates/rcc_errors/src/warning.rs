@@ -165,6 +165,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         category: WarningCategory::Default,
     },
     WarningRecord {
+        code: Some(codes::W0033),
+        names: &["unknown-attributes", "unknown-attribute", "unsupported-attributes"],
+        category: WarningCategory::Default,
+    },
+    WarningRecord {
         code: Some(codes::W0027),
         names: &["unused-function"],
         category: WarningCategory::Wall,

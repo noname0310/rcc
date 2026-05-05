@@ -1,5 +1,7 @@
 # 16-06: GNU Header Attribute Tolerance
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-05-glibc-common-macro-shims  
 **Milestone:** hosted-linux
@@ -19,7 +21,7 @@ semantically important facts and ignoring harmless annotations deliberately.
 
 ## Acceptance
 
-- [ ] Attribute parsing has table-driven tests for supported glibc attributes.
-- [ ] Ignored attributes are recorded or documented as no-op in rcc semantics.
-- [ ] Unsupported attributes produce a recoverable diagnostic, not parser drift.
-- [ ] Representative glibc declarations parse in hosted mode.
+- [x] Attribute parsing has table-driven tests for supported glibc attributes.
+- [x] Ignored attributes are recorded or documented as no-op in rcc semantics.
+- [x] Unsupported attributes produce a recoverable diagnostic, not parser drift.
+- [x] Representative glibc declarations parse in hosted mode.

@@ -123,6 +123,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0030, W0030_DESC),
     (W0031, W0031_DESC),
     (W0032, W0032_DESC),
+    (W0033, W0033_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -957,6 +958,10 @@ const W0031_DESC: &str = "unreachable code";
 /// Use of a declaration marked with GNU `deprecated`.
 pub const W0032: &str = "W0032";
 const W0032_DESC: &str = "deprecated declaration used";
+
+/// GNU attribute parsed but not modeled by rcc.
+pub const W0033: &str = "W0033";
+const W0033_DESC: &str = "unsupported GNU attribute ignored";
 
 #[cfg(test)]
 mod tests {

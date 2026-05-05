@@ -1549,3 +1549,19 @@ int main(void) {
 
 Remove the deprecated attribute from declarations that are still supported, or
 move callers to the replacement API before enabling stricter warning policy.
+
+## W0033 — unsupported GNU attribute ignored
+
+`rcc` parsed a GNU `__attribute__((...))` group but the attribute name is not in
+the supported table. The parser preserves the syntax and continues so later
+declarations do not drift, but no frontend, layout, or codegen semantics are
+attached to that attribute:
+
+```c
+int x __attribute__((vendor_only(1)));  // warning[W0033]: ignored
+```
+
+Common glibc declaration annotations such as `nothrow`, `leaf`, `nonnull`,
+`pure`, `const`, `malloc`, `format`, `warn_unused_result`, `visibility`, and
+`deprecated` are recognized. Add a new attribute deliberately before relying on
+its semantics.

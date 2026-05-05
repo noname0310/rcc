@@ -420,6 +420,66 @@ fn gnu_attribute_declarator_payloads_are_preserved() {
 }
 
 #[test]
+fn gnu_glibc_attribute_table_parses_without_unknown_attribute_warning() {
+    let cases = [
+        "__nothrow__",
+        "__leaf__",
+        "__nonnull__(1)",
+        "pure",
+        "const",
+        "__malloc__",
+        "format(printf, 1, 2)",
+        "warn_unused_result",
+        "visibility(\"default\")",
+        "deprecated(\"use replacement\")",
+        "alloc_size(1)",
+        "alloc_align(1)",
+        "access(read_only, 1)",
+        "copy(target)",
+    ];
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    for attr in cases {
+        let src = format!("extern int f(void) __attribute__(({attr}));");
+        let (_tu, diags, _sess) = parse_ok_with_session(&src, opts.clone());
+        assert!(
+            diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0033)),
+            "supported attribute {attr:?} emitted W0033: {diags:#?}"
+        );
+    }
+}
+
+#[test]
+fn gnu_unsupported_attribute_warns_but_recovers() {
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let src = "int x __attribute__((vendor_only(1))); int y;";
+    let (tu, diags, _sess) = parse_ok_with_session(src, opts);
+
+    assert_eq!(tu.decls.len(), 2);
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0033)),
+        "expected W0033 for unsupported attribute, got {diags:#?}"
+    );
+}
+
+#[test]
+fn representative_glibc_attribute_declarations_parse_in_hosted_mode() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    let src = r#"
+        extern int clock_gettime(int, void *)
+          __attribute__((__nothrow__, __leaf__, __nonnull__(2)));
+        extern void *malloc(unsigned long)
+          __attribute__((__malloc__, __alloc_size__(1), __warn_unused_result__));
+    "#;
+    let (tu, diags, _sess) = parse_ok_with_session(src, opts);
+
+    assert_eq!(tu.decls.len(), 2);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0033)),
+        "glibc attributes should be recognized: {diags:#?}"
+    );
+}
+
+#[test]
 fn gnu_attribute_record_field_enum_function_and_statement_sites_parse() {
     let src = r#"
         struct __attribute__((packed)) S {

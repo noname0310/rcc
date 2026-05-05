@@ -8,6 +8,52 @@ use crate::keywords::Keyword;
 use crate::token::TokenKind;
 use crate::Parser;
 
+const SUPPORTED_ATTRS: &[&str] = &[
+    "access",
+    "aligned",
+    "alloc_align",
+    "alloc_size",
+    "always_inline",
+    "artificial",
+    "assume_aligned",
+    "cold",
+    "const",
+    "copy",
+    "constructor",
+    "deprecated",
+    "destructor",
+    "fallthrough",
+    "flatten",
+    "format",
+    "format_arg",
+    "hot",
+    "leaf",
+    "malloc",
+    "may_alias",
+    "mode",
+    "ms_struct",
+    "no_instrument_function",
+    "noinline",
+    "nonnull",
+    "nothrow",
+    "noreturn",
+    "nonstring",
+    "packed",
+    "pure",
+    "returns_nonnull",
+    "returns_twice",
+    "scalar_storage_order",
+    "section",
+    "sentinel",
+    "transparent_union",
+    "unused",
+    "used",
+    "vector_size",
+    "visibility",
+    "warn_unused_result",
+    "weak",
+];
+
 pub(crate) fn peek_attribute(p: &Parser<'_>) -> bool {
     is_attribute_at(p, p.cursor)
 }
@@ -115,6 +161,12 @@ fn parse_attribute_item(p: &mut Parser<'_>) -> Option<Attribute> {
                 p.bump();
                 (sym, span)
             }
+            TokenKind::Keyword(kw) => {
+                let span = tok.span;
+                let sym = p.session.interner.intern(keyword_spelling(kw));
+                p.bump();
+                (sym, span)
+            }
             _ => {
                 p.session
                     .handler
@@ -140,7 +192,31 @@ fn parse_attribute_item(p: &mut Parser<'_>) -> Option<Attribute> {
     } else {
         (Vec::new(), name_span)
     };
+    warn_if_unsupported_attr(p, name, name_span);
     Some(Attribute { name, args, span: name_span.to(end) })
+}
+
+fn warn_if_unsupported_attr(p: &mut Parser<'_>, name: rcc_span::Symbol, span: Span) {
+    let raw = p.session.interner.get(name).to_owned();
+    if supported_attr(&raw) {
+        return;
+    }
+    p.session
+        .handler
+        .struct_warn(span, format!("unsupported GNU attribute `{raw}` ignored"))
+        .code(rcc_errors::codes::W0033)
+        .note("the attribute syntax was parsed and preserved, but rcc has no semantics for it")
+        .help("add the attribute to rcc's supported attribute table before relying on it")
+        .emit();
+}
+
+fn supported_attr(raw: &str) -> bool {
+    let normalized = normalize_attr_name(raw);
+    SUPPORTED_ATTRS.iter().any(|candidate| *candidate == normalized)
+}
+
+fn normalize_attr_name(raw: &str) -> &str {
+    raw.trim_matches('_')
 }
 
 fn parse_attribute_args(p: &mut Parser<'_>) -> (Vec<AttributeArg>, Span) {
