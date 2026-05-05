@@ -38,6 +38,9 @@ pub enum BuiltinMacro {
     /// `__LINE__` — expands to a decimal pp-number giving the current
     /// presumed physical line number (C99 §6.10.8p1).
     Line,
+    /// `__COUNTER__` — GCC/Clang extension expanding to a monotonic
+    /// decimal pp-number unique within the translation unit.
+    Counter,
 }
 
 /// Object-like vs function-like distinction.

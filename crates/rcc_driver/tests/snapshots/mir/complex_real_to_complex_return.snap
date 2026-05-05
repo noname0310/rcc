@@ -1,11 +1,10 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
-assertion_line: 35
 ---
 fn def#0() -> _Complex double {
   locals:
     _0: _Complex double;
-    _1: double param name#20;
+    _1: double param name#21;
     _2: _Complex double;
 
   bb0:

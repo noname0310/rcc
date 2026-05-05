@@ -39,6 +39,7 @@
 //!   [`rcc_session::Options::gnu_va_args_elision`] and is off by
 //!   default.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -96,6 +97,7 @@ pub fn expand_line(
     line: Vec<PpToken>,
     gnu_va_args_elision: bool,
     gnu_permissive_paste: bool,
+    counter: Option<&Cell<u32>>,
 ) -> Vec<PpToken> {
     let input: Vec<ExpToken> =
         line.into_iter().map(|t| ExpToken { tok: t, hide: FxHashSet::default() }).collect();
@@ -109,6 +111,7 @@ pub fn expand_line(
         va_args_sym,
         gnu_va_args_elision,
         gnu_permissive_paste,
+        counter,
     };
     exp.expand(input).into_iter().map(|et| et.tok).collect()
 }
@@ -128,6 +131,8 @@ struct Expander<'a> {
     gnu_va_args_elision: bool,
     /// Enable GNU-style permissive paste for pp-numbers.
     gnu_permissive_paste: bool,
+    /// Shared state for `__COUNTER__`.
+    counter: Option<&'a Cell<u32>>,
 }
 
 impl Expander<'_> {
@@ -772,6 +777,14 @@ impl Expander<'_> {
                 };
                 (PpTokenKind::PpNumber(PpNumberKind::Integer), line_no.to_string())
             }
+            BuiltinMacro::Counter => {
+                let n = self.counter.map(|counter| {
+                    let n = counter.get();
+                    counter.set(n.wrapping_add(1));
+                    n
+                });
+                (PpTokenKind::PpNumber(PpNumberKind::Integer), n.unwrap_or(0).to_string())
+            }
         };
         let len = text.len() as u32;
         let file_id = {
@@ -779,6 +792,7 @@ impl Expander<'_> {
             let label = match builtin {
                 BuiltinMacro::File => "<builtin:__FILE__>",
                 BuiltinMacro::Line => "<builtin:__LINE__>",
+                BuiltinMacro::Counter => "<builtin:__COUNTER__>",
             };
             sm.add_file(PathBuf::from(label), Arc::from(text))
         };
@@ -1141,6 +1155,7 @@ mod tests {
             line,
             elide,
             paste,
+            None,
         )
     }
 

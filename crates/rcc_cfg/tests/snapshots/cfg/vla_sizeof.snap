@@ -4,8 +4,8 @@ source: crates/rcc_cfg/tests/cfg.rs
 fn def#0() -> unsigned long {
   locals:
     _0: unsigned long;
-    _1: int param name#21;
-    _2: int[vla] name#22 vla_len=_3;
+    _1: int param name#22;
+    _2: int[vla] name#23 vla_len=_3;
     _3: unsigned long;
     _4: unsigned long;
     _5: unsigned long;

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,6 +82,8 @@ pub struct Preprocessor<'a> {
     pub diagnostic_warning_config: WarningConfig,
     /// Stack used by `#pragma GCC diagnostic push` / `pop`.
     pub diagnostic_warning_stack: Vec<WarningConfig>,
+    /// Expansion state for the `__COUNTER__` predefined extension.
+    pub counter: Cell<u32>,
     /// Set once [`Self::install_cli_defines`] + [`Self::install_predefined`]
     /// have seeded the macro table. `run()` is re-entered for every
     /// `#include`d file and must install those entries *exactly* once
@@ -115,6 +118,7 @@ impl<'a> Preprocessor<'a> {
             pragma_pack_stack: Vec::new(),
             diagnostic_warning_config,
             diagnostic_warning_stack: Vec::new(),
+            counter: Cell::new(0),
             predefined_installed: false,
             halted: false,
         }
@@ -240,6 +244,7 @@ impl<'a> Preprocessor<'a> {
             line,
             gnu_va_args_elision,
             gnu_permissive_paste,
+            Some(&self.counter),
         )
     }
 
@@ -400,6 +405,9 @@ impl<'a> Preprocessor<'a> {
     /// with [`MacroKind::Builtin`] and an empty replacement list; the
     /// expander synthesises their value at every use site from the
     /// invocation token's own span.
+    /// `__COUNTER__` follows the same path as a GCC/Clang extension,
+    /// using a translation-unit-local counter stored on the
+    /// preprocessor instance.
     ///
     /// `__func__` is intentionally not installed: C99 §6.4.2.2 makes
     /// it a predeclared identifier, not a macro; the parser is
@@ -422,6 +430,7 @@ impl<'a> Preprocessor<'a> {
         }
         self.install_builtin_predefined("__FILE__", BuiltinMacro::File);
         self.install_builtin_predefined("__LINE__", BuiltinMacro::Line);
+        self.install_builtin_predefined("__COUNTER__", BuiltinMacro::Counter);
     }
 
     fn install_target_predefined(&mut self) {
@@ -1102,7 +1111,8 @@ impl<'a> Preprocessor<'a> {
     ) -> Option<i128> {
         let sm_arc = Arc::clone(&self.session.source_map);
         let gnu_va_args_elision = self.session.opts.gnu_va_args_elision;
-        let options = if_eval::EvalOptions { gnu_va_args_elision, has_include };
+        let options =
+            if_eval::EvalOptions { gnu_va_args_elision, has_include, counter: Some(&self.counter) };
         match if_eval::eval_if(
             condition,
             &sm_arc,
@@ -1963,6 +1973,7 @@ mod run_tests {
             "__linux__",
             "__FILE__",
             "__LINE__",
+            "__COUNTER__",
         ]
         .iter()
         .map(|n| sess.interner.intern(n))
@@ -1984,10 +1995,51 @@ mod run_tests {
             "__linux__",
             "__FILE__",
             "__LINE__",
+            "__COUNTER__",
         ]) {
             let def = pp.macros.get(*sym).unwrap_or_else(|| panic!("{label} must be defined"));
             assert!(def.is_predefined, "{label} must carry is_predefined=true");
         }
+    }
+
+    #[test]
+    fn counter_macro_expands_monotonically() {
+        let (mut sess, id, cap) = seed("__COUNTER__ __COUNTER__ __COUNTER__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "012");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn counter_macro_shares_state_across_includes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let header = tmp.path().join("counter.h");
+        fs::write(&header, "__COUNTER__\n").expect("write header");
+        let main = tmp.path().join("main.c");
+        fs::write(&main, "__COUNTER__\n#include \"counter.h\"\n__COUNTER__\n").expect("write main");
+
+        let cap = CaptureEmitter::new();
+        let mut sess =
+            Session::with_handler(Options::default(), Handler::with_emitter(Box::new(cap.clone())));
+        let id = sess.source_map.write().unwrap().load_file(&main).expect("load main");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "012");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn counter_macro_advances_inside_if_expression() {
+        let src = "#if __COUNTER__ == 0\nyes\n#endif\n__COUNTER__\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "yes1");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
     }
 
     #[test]

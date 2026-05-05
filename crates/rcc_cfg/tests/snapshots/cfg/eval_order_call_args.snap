@@ -1,12 +1,11 @@
 ---
 source: crates/rcc_cfg/tests/cfg.rs
-assertion_line: 395
 ---
 fn def#1() -> int {
   locals:
     _0: int;
-    _1: int name#21;
-    _2: int name#22;
+    _1: int name#22;
+    _2: int name#23;
     _3: int;
 
   bb0:

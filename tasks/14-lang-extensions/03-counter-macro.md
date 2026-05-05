@@ -1,5 +1,7 @@
 # 14-03: `__COUNTER__` predefined macro
 
+> ✓ done — 2026-05-05
+
 **Phase:** 14-lang-extensions    **Depends on:** —    **Milestone:** M5
 
 ## Goal

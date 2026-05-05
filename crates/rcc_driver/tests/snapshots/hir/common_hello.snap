@@ -1,6 +1,5 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
-assertion_line: 35
 ---
 HirCrate {
     defs: IndexVec {
@@ -10,7 +9,7 @@ HirCrate {
                     0,
                 ),
                 name: Symbol(
-                    18,
+                    19,
                 ),
                 span: Span {
                     file: FileId(
@@ -47,7 +46,7 @@ HirCrate {
                     LocalDecl {
                         name: Some(
                             Symbol(
-                                20,
+                                21,
                             ),
                         ),
                         ty: TyId(

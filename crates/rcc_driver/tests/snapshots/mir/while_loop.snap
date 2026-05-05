@@ -1,12 +1,11 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
-assertion_line: 35
 ---
 fn def#0() -> int {
   locals:
     _0: int;
-    _1: int param name#19;
-    _2: int name#20;
+    _1: int param name#20;
+    _2: int name#21;
     _3: int;
     _4: int;
 

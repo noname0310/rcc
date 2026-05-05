@@ -32,6 +32,7 @@
 //! behind the live-branch check; the evaluator itself does not need
 //! to know.
 
+use std::cell::Cell;
 use std::sync::{Arc, RwLock};
 
 use rcc_errors::{codes::E0028, Diagnostic, Handler, Label, Level};
@@ -50,19 +51,21 @@ use crate::macros::MacroTable;
 pub type HasIncludeProbe<'a> = dyn FnMut(&str, bool, Span) -> bool + 'a;
 
 /// Optional extension hooks for `#if` / `#elif` evaluation.
-pub struct EvalOptions<'a> {
+pub struct EvalOptions<'probe, 'counter> {
     /// Enable GNU comma elision for variadic macro expansion while
     /// expanding the controlling expression.
     pub gnu_va_args_elision: bool,
     /// Probe for `__has_include`. `None` makes the operator evaluate to
     /// `0`, useful for direct unit tests of the core evaluator.
-    pub has_include: Option<&'a mut HasIncludeProbe<'a>>,
+    pub has_include: Option<&'probe mut HasIncludeProbe<'probe>>,
+    /// Shared expansion state for the `__COUNTER__` predefined macro.
+    pub counter: Option<&'counter Cell<u32>>,
 }
 
-impl EvalOptions<'_> {
+impl EvalOptions<'_, '_> {
     /// Strict C99 evaluation with no extension probes.
     pub fn strict() -> Self {
-        Self { gnu_va_args_elision: false, has_include: None }
+        Self { gnu_va_args_elision: false, has_include: None, counter: None }
     }
 }
 
@@ -90,7 +93,7 @@ pub fn eval_if(
     handler: &mut Handler,
     macros: &MacroTable,
     line_map: &LineMap,
-    mut options: EvalOptions<'_>,
+    mut options: EvalOptions<'_, '_>,
 ) -> Result<i128, Diagnostic> {
     // Span used for diagnostics pointing at "the whole expression"
     // when no specific token is to blame (e.g. empty condition).
@@ -121,6 +124,7 @@ pub fn eval_if(
         pre_expansion,
         options.gnu_va_args_elision,
         false,
+        options.counter,
     );
 
     // Step 3: replace any remaining identifier / keyword with `0`.
