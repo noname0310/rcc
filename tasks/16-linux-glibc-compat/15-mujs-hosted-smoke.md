@@ -1,5 +1,7 @@
 # 16-15: MuJS Hosted Smoke
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-14-glibc-system-header-parse-gate  
 **Milestone:** hosted-linux
@@ -18,8 +20,8 @@ hosted project regression before moving to GNU coreutils.
 
 ## Acceptance
 
-- [ ] `real_world/projects/07-mujs/plan.md` records upstream commit, commands,
+- [x] `real_world/projects/07-mujs/plan.md` records upstream commit, commands,
       and observed output.
-- [ ] A wrapper script rebuilds and runs the `print(1+2)` smoke.
-- [ ] `real_world/results.md` or equivalent dashboard records success.
-- [ ] The smoke is not allowed to hide compiler diagnostics with source edits.
+- [x] A wrapper script rebuilds and runs the `print(1+2)` smoke.
+- [x] `real_world/results.md` or equivalent dashboard records success.
+- [x] The smoke is not allowed to hide compiler diagnostics with source edits.

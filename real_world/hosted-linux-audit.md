@@ -16,7 +16,7 @@ and the selected linker driver.
 | LibTomMath | pass | `errno.h`, multi-input link scalability, platform guards | fixed by `tasks/15-builtin-rt/19-posix-errno-constants.md`, `tasks/10-driver/19-parallel-multi-input-object-builds.md`, `tasks/08-cfg/29-constant-condition-dead-branch-pruning.md` |
 | Lua | pass | `<stdlib.h>`, `-lm`, large hosted executable | fixed by `tasks/06-hir-lower/33-array-bound-ice-constants.md`, `tasks/15-builtin-rt/20-stdlib-exit-status-macros.md`, `tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md` |
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
-| MuJS | cloned, smoke artifacts present | math/stdio/stdlib hosted declarations, JavaScript executable | task `16-15-mujs-hosted-smoke.md` owns the reproducible probe |
+| MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
 | GNU coreutils | source cloned; bootstrap not run in tracked scripts yet | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-03` through `16-17`; first target utility is `src/true.c` |
 
@@ -137,9 +137,15 @@ workarounds.
 
 ### MuJS
 
-Current record: `real_world/projects/07-mujs/PROJECT.md`; local build artifacts
-exist under ignored `build/`.  The phase task `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md`
-owns turning this into a reproducible compile+run smoke.
+Current record: `real_world/projects/07-mujs/plan.md`; the reproducible command
+is:
+
+```sh
+bash real_world/projects/07-mujs/scripts/run-smoke.sh
+```
+
+The probe builds `main.c` + `one.c` with both host `cc` and `rcc`, links with
+`-lm`, runs `print(1+2)`, and compares output.
 
 Expected surfaces:
 
