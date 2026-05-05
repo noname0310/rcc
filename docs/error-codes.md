@@ -462,6 +462,24 @@ asm("nop" : "r"x);  // error[E0032]: missing operand expression parentheses
 The parser reports malformed inline asm locally, then recovers at the
 statement boundary so the enclosing block can continue parsing.
 
+## E0033 — malformed `_Pragma` operator
+
+C99 `_Pragma` must appear as `_Pragma("pragma tokens")`. The string
+literal is destringized and then processed as though it were the body
+of a `#pragma` directive.
+
+```c
+_Pragma(once)       // error[E0033]: expected string literal
+_Pragma "once"      // error[E0033]: expected `(`
+```
+
+Use a string literal and escape quotes that need to survive into the
+pragma body:
+
+```c
+_Pragma("GCC diagnostic ignored \"-Wunused-variable\"")
+```
+
 ## E0040 — integer literal too large
 
 The magnitude of an integer constant exceeds the range of `u128`, the

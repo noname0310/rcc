@@ -8,7 +8,7 @@ Preprocessor and parser extensions: pragmas, builtins, attributes, inline asm.
 
 ## Tasks (pick in order)
 
-- [ ] [01-pragma-operator](01-pragma-operator.md)
+- [x] [01-pragma-operator](01-pragma-operator.md)
 - [ ] [02-has-include](02-has-include.md)
 - [ ] [03-counter-macro](03-counter-macro.md)
 - [ ] [04-cli-undefine](04-cli-undefine.md)

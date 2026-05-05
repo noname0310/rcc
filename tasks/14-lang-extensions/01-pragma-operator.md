@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-01: `_Pragma` operator
 
 **Phase:** 14-lang-extensions    **Depends on:** —    **Milestone:** M5

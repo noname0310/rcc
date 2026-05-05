@@ -184,6 +184,7 @@ impl<'a> Preprocessor<'a> {
                 continue;
             }
             let expanded = self.expand_tokens(line);
+            let expanded = self.process_pragma_operators(expanded);
             let expanded = self.apply_pragma_pack(expanded);
             out.extend(expanded);
         }
@@ -240,6 +241,109 @@ impl<'a> Preprocessor<'a> {
             gnu_va_args_elision,
             gnu_permissive_paste,
         )
+    }
+
+    /// Execute and remove C99 `_Pragma("...")` operators from a
+    /// macro-expanded token stream.
+    ///
+    /// C99 §6.10.9 applies after macro replacement, so this cannot be
+    /// a lexer concern: a macro body may expand into `_Pragma(...)`.
+    /// The destringized literal body is tokenised as a virtual pragma
+    /// body and routed through the same dispatcher as `#pragma`.
+    fn process_pragma_operators(&mut self, tokens: Vec<PpToken>) -> Vec<PpToken> {
+        let mut out = Vec::with_capacity(tokens.len());
+        let mut i = 0;
+        while i < tokens.len() {
+            if !self.is_ident_text(&tokens[i], "_Pragma") {
+                out.push(tokens[i]);
+                i += 1;
+                continue;
+            }
+
+            match self.parse_pragma_operator(&tokens, i) {
+                Ok((body, span, next)) => {
+                    self.dispatch_pragma_operator_body(span, &body);
+                    i = next;
+                }
+                Err((diag, next)) => {
+                    self.session.handler.emit(&diag);
+                    i = next;
+                }
+            }
+        }
+        out
+    }
+
+    fn parse_pragma_operator(
+        &self,
+        tokens: &[PpToken],
+        start: usize,
+    ) -> Result<(String, Span, usize), (Box<rcc_errors::Diagnostic>, usize)> {
+        let op = tokens[start];
+        let fail = |label_span: Span, label: &str, next: usize| {
+            let end = next.saturating_sub(1).min(tokens.len().saturating_sub(1));
+            let whole = if end > start { op.span.to(tokens[end].span) } else { op.span };
+            (Box::new(malformed_pragma_operator(whole, label_span, label)), next)
+        };
+
+        let Some(open) = tokens.get(start + 1) else {
+            return Err(fail(op.span, "expected `(` after `_Pragma`", tokens.len()));
+        };
+        if !matches!(open.kind, PpTokenKind::Punct(Punct::LParen)) {
+            return Err(fail(
+                open.span,
+                "expected `(` after `_Pragma`",
+                recover_pragma_operator_end(tokens, start),
+            ));
+        }
+
+        let Some(lit) = tokens.get(start + 2) else {
+            return Err(fail(open.span, "expected string literal argument", tokens.len()));
+        };
+        if !matches!(lit.kind, PpTokenKind::StringLit { .. }) {
+            return Err(fail(
+                lit.span,
+                "expected string literal argument",
+                recover_pragma_operator_end(tokens, start),
+            ));
+        }
+
+        let Some(close) = tokens.get(start + 3) else {
+            return Err(fail(lit.span, "expected `)` after `_Pragma` argument", tokens.len()));
+        };
+        if !matches!(close.kind, PpTokenKind::Punct(Punct::RParen)) {
+            return Err(fail(
+                close.span,
+                "expected `)` after `_Pragma` argument",
+                recover_pragma_operator_end(tokens, start),
+            ));
+        }
+
+        let lit_text = self.token_text(lit);
+        let Some(body) = destringize_pragma_literal(&lit_text) else {
+            return Err(fail(lit.span, "malformed string literal argument", start + 4));
+        };
+        Ok((body, op.span.to(close.span), start + 4))
+    }
+
+    fn dispatch_pragma_operator_body(&mut self, span: Span, body: &str) {
+        let file_id = {
+            let mut sm = self.session.source_map.write().unwrap();
+            sm.add_file(PathBuf::from("<_Pragma>"), Arc::from(body.to_owned()))
+        };
+        let tokens = rcc_lexer::tokenize(file_id, body)
+            .filter(|tok| {
+                !matches!(
+                    tok.kind,
+                    PpTokenKind::Whitespace | PpTokenKind::Newline | PpTokenKind::Eof
+                )
+            })
+            .collect::<Vec<_>>();
+        self.dispatch_pragma_directive(span, &tokens, body);
+    }
+
+    fn is_ident_text(&self, token: &PpToken, expected: &str) -> bool {
+        token.kind == PpTokenKind::Ident && self.token_text(token) == expected
     }
 
     /// Install every CLI `-D NAME[=VALUE]` flag as an object-like
@@ -642,7 +746,10 @@ impl<'a> Preprocessor<'a> {
             // Bare `#pragma` (no body) — silently ignored, matching
             // gcc/clang. Nothing to warn about.
             None if tokens.is_empty() => {}
-            Some("once") | Some("STDC") => {}
+            Some("once") => {
+                self.pragma_once.insert(span.file, ());
+            }
+            Some("STDC") => {}
             Some("push_macro") => {
                 if let Some(name) = pragma_macro_name(tokens, src) {
                     self.push_macro_pragma(name);
@@ -1039,6 +1146,13 @@ fn is_directive_named(line: &[PpToken], src: &str, expected: &str) -> bool {
     &src[name_tok.span.lo.0 as usize..name_tok.span.hi.0 as usize] == expected
 }
 
+fn recover_pragma_operator_end(tokens: &[PpToken], start: usize) -> usize {
+    tokens[start + 1..]
+        .iter()
+        .position(|tok| matches!(tok.kind, PpTokenKind::Punct(Punct::RParen)))
+        .map_or(tokens.len(), |offset| start + 1 + offset + 1)
+}
+
 /// Whether a `#elif`'s controlling expression should be evaluated
 /// given the current stack. Mirrors the condition under which
 /// [`cond_stack::CondStack::on_elif`] would actually call its
@@ -1098,6 +1212,54 @@ fn error_directive(span: Span, message: &str) -> rcc_errors::Diagnostic {
              implementation to produce a diagnostic message"
             .into()],
         help: vec![],
+    }
+}
+
+fn destringize_pragma_literal(lit: &str) -> Option<String> {
+    let open = lit.find('"')?;
+    let close = lit.rfind('"')?;
+    if close <= open {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut chars = lit[open + 1..close].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some('"') => {
+                    chars.next();
+                    out.push('"');
+                }
+                Some('\\') => {
+                    chars.next();
+                    out.push('\\');
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
+fn malformed_pragma_operator(span: Span, label_span: Span, label: &str) -> rcc_errors::Diagnostic {
+    use rcc_errors::{codes::E0033, Diagnostic, Label, Level};
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0033),
+        message: "malformed _Pragma operator".into(),
+        labels: vec![
+            Label { span: label_span, message: label.into(), primary: true },
+            Label { span, message: "while parsing this `_Pragma` operator".into(), primary: false },
+        ],
+        notes: vec![
+            "C99 §6.10.9 requires `_Pragma` to be followed by a parenthesized string literal"
+                .into(),
+            "the string literal is destringized and processed as a `#pragma` directive".into(),
+        ],
+        help: vec!["write `_Pragma(\"once\")` or `_Pragma(\"GCC diagnostic push\")`".into()],
     }
 }
 
@@ -1324,7 +1486,7 @@ mod run_tests {
 
     use super::*;
     use rcc_errors::{
-        codes::{E0013, E0014, E0022, W0006},
+        codes::{E0013, E0014, E0022, E0033, W0006},
         CaptureEmitter, Handler, Level,
     };
     use rcc_lexer::PpNumberKind;
@@ -2449,6 +2611,60 @@ abort
         let out = pp.run(id);
         assert_eq!(joined_text(&pp, &out), "after");
         assert!(cap.diagnostics().is_empty(), "`#pragma once` must be silent in the dispatcher");
+    }
+
+    #[test]
+    fn pragma_operator_once_skips_second_include() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let header = tmp.path().join("once.h");
+        fs::write(&header, "_Pragma(\"once\")\nint once_marker;\n").expect("write header");
+        let main = tmp.path().join("main.c");
+        fs::write(&main, "#include \"once.h\"\n#include \"once.h\"\n").expect("write main");
+
+        let cap = CaptureEmitter::new();
+        let mut sess =
+            Session::with_handler(Options::default(), Handler::with_emitter(Box::new(cap.clone())));
+        let id = sess.source_map.write().unwrap().load_file(&main).expect("load main");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "intonce_marker;");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn pragma_operator_dispatches_gcc_diagnostic_push() {
+        let (mut sess, id, cap) = seed("_Pragma(\"GCC diagnostic push\")\nafter\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "after");
+        assert_eq!(pp.diagnostic_warning_stack.len(), 1);
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn pragma_operator_destringizes_quotes_and_backslashes() {
+        assert_eq!(
+            destringize_pragma_literal(r#""GCC diagnostic ignored \"-Wunused-variable\"""#),
+            Some(r#"GCC diagnostic ignored "-Wunused-variable""#.to_string())
+        );
+        assert_eq!(
+            destringize_pragma_literal(r#""path \\server\\share""#),
+            Some(r#"path \server\share"#.to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_pragma_operator_emits_e0033_and_recovers() {
+        let (mut sess, id, cap) = seed("_Pragma(once)\nafter\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "after");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "one E0033 expected, got {diags:?}");
+        assert_eq!(diags[0].code, Some(E0033));
     }
 
     #[test]

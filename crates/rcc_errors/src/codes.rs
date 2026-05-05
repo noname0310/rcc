@@ -65,6 +65,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0030, E0030_DESC),
     (E0031, E0031_DESC),
     (E0032, E0032_DESC),
+    (E0033, E0033_DESC),
     (E0040, E0040_DESC),
     (E0041, E0041_DESC),
     (E0060, E0060_DESC),
@@ -313,6 +314,10 @@ const E0031_DESC: &str = "malformed attribute syntax";
 /// Malformed GNU inline assembly syntax.
 pub const E0032: &str = "E0032";
 const E0032_DESC: &str = "malformed inline assembly syntax";
+
+/// Malformed C99 `_Pragma` preprocessing operator.
+pub const E0033: &str = "E0033";
+const E0033_DESC: &str = "malformed _Pragma operator";
 
 /// Integer literal is too large to fit in the widest representable type.
 ///
