@@ -1,5 +1,7 @@
 # 15-14: Missing hosted header files
 
+> ✓ done — 2026-05-05
+
 **Phase:** 15-builtin-rt    **Depends on:** 15-11    **Milestone:** real-world-03
 
 ## Goal
@@ -15,8 +17,7 @@ currently absent from `lib/rcc/include/`.
   system headers.
 
 ## Acceptance
-- Each new header has a small compile-only or compile/link fixture.
-- Headers contain declarations/types/macros only; no function bodies.
-- Any compiler support blocker becomes an explicit task before the header is
+- [x] Each new header has a small compile-only or compile/link fixture.
+- [x] Headers contain declarations/types/macros only; no function bodies.
+- [x] Any compiler support blocker becomes an explicit task before the header is
   marked complete.
-

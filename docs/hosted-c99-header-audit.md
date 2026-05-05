@@ -16,10 +16,16 @@ missing prototypes.
 Present:
 
 - `ctype.h`
+- `assert.h`
+- `errno.h`
 - `float.h`
+- `inttypes.h`
 - `iso646.h`
 - `limits.h`
+- `locale.h`
 - `math.h`
+- `setjmp.h`
+- `signal.h`
 - `stdarg.h`
 - `stdbool.h`
 - `stddef.h`
@@ -27,21 +33,15 @@ Present:
 - `stdio.h`
 - `stdlib.h`
 - `string.h`
+- `time.h`
 - `wchar.h`
+- `wctype.h`
 
 Absent hosted C99/C95 headers:
 
-- `assert.h`
 - `complex.h`
-- `errno.h`
 - `fenv.h`
-- `inttypes.h`
-- `locale.h`
-- `setjmp.h`
-- `signal.h`
 - `tgmath.h`
-- `time.h`
-- `wctype.h`
 
 `complex.h`, `fenv.h`, and `tgmath.h` need separate compiler-support review.
 The others can start as ABI-facing declaration shims.
@@ -76,6 +76,9 @@ because the float/long-double suffixed variants need a separate sweep.
 2. `15-15-math-classification-macros`
    - Add C99 math classification/comparison macros only with sound frontend
      semantics.
+3. `15-16-complex-fenv-tgmath-review`
+   - Review and either implement or explicitly block the remaining C99 hosted
+     headers that require compiler semantics beyond declarations.
 
 Completed:
 
@@ -87,6 +90,13 @@ Completed:
   - Swept double, float, and long-double C99 math function-family declarations.
   - Added a hosted math fixture linked with `-lm`.
   - Left classification/comparison macros as `15-15` instead of faking them.
+- `15-14-missing-hosted-header-files`
+  - Added minimal ABI-facing shims for `assert.h`, `errno.h`, `inttypes.h`,
+    `locale.h`, `setjmp.h`, `signal.h`, `time.h`, and `wctype.h`.
+  - Added a compile/link/run fixture covering representative declarations,
+    types, and macros.
+  - Left `complex.h`, `fenv.h`, and `tgmath.h` to `15-16` because they need
+    semantics review.
 
 ## Policy
 
