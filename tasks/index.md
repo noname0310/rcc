@@ -21,7 +21,7 @@ phase's `index.md` next.
 - [x] [12-fuzz-differential](12-fuzz-differential/index.md) — fuzz + csmith
 - [x] [13-quality](13-quality/index.md) — opt levels, benches, release
 - [x] [14-lang-extensions](14-lang-extensions/index.md) — preprocessor/parser extensions (pragmas, attributes, asm)
-- [~] [15-builtin-rt](15-builtin-rt/index.md) — target info, freestanding headers, builtins
+- [x] [15-builtin-rt](15-builtin-rt/index.md) — target info, freestanding headers, builtins
 
 ## Legend
 

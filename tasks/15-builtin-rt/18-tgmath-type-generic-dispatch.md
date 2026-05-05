@@ -1,5 +1,7 @@
 # 15-18: tgmath type-generic dispatch
 
+> ✓ done — 2026-05-05
+
 **Phase:** 15-builtin-rt    **Depends on:** 15-17    **Milestone:** real-world-03
 
 ## Goal
@@ -17,10 +19,9 @@ double-only macro aliases.
   function-family semantics allow.
 
 ## Acceptance
-- `sqrt(1.0F)`, `sqrt(1.0)`, and `sqrt(1.0L)` through `tgmath.h` call the
+- [x] `sqrt(1.0F)`, `sqrt(1.0)`, and `sqrt(1.0L)` through `tgmath.h` call the
   float, double, and long-double variants respectively.
-- Complex arguments dispatch to complex libm functions.
-- A fixture demonstrates mixed real/complex dispatch without changing original
+- [x] Complex arguments dispatch to complex libm functions.
+- [x] A fixture demonstrates mixed real/complex dispatch without changing original
   source code.
-- `tgmath.h` stays absent or explicitly blocked until these conditions are met.
-
+- [x] `tgmath.h` stays absent or explicitly blocked until these conditions are met.

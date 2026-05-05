@@ -222,6 +222,11 @@ impl DeprecatedWalker<'_, '_> {
                 self.visit_expr(*real);
                 self.visit_expr(*imag);
             }
+            HirExprKind::BuiltinTgmath { args, .. } => {
+                for arg in args {
+                    self.visit_expr(*arg);
+                }
+            }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.visit_expr(*lhs);
                 self.visit_expr(*rhs);
@@ -600,6 +605,11 @@ impl UsageWalker<'_> {
             HirExprKind::BuiltinComplex { real, imag } => {
                 self.visit_value_expr(*real);
                 self.visit_value_expr(*imag);
+            }
+            HirExprKind::BuiltinTgmath { args, .. } => {
+                for arg in args {
+                    self.visit_value_expr(*arg);
+                }
             }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.visit_value_expr(*lhs);

@@ -1078,6 +1078,11 @@ impl BodyBuilder {
                 self.collect_expr_labels(hir_body, *real, local_map, scopes);
                 self.collect_expr_labels(hir_body, *imag, local_map, scopes);
             }
+            HirExprKind::BuiltinTgmath { args, .. } => {
+                for arg in args {
+                    self.collect_expr_labels(hir_body, *arg, local_map, scopes);
+                }
+            }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
                 self.collect_expr_labels(hir_body, *rhs, local_map, scopes);

@@ -121,6 +121,29 @@ fn ptr_to(tcx: &mut TyCtxt, pointee: TyId) -> TyId {
     tcx.intern(Ty::Ptr(Qual::plain(pointee)))
 }
 
+fn function_ty(tcx: &mut TyCtxt, ret: TyId, params: Vec<TyId>) -> TyId {
+    tcx.intern(Ty::Func { ret, params, variadic: false, proto: true })
+}
+
+fn function_snapshot(name: Symbol, ty: TyId) -> DefSnapshot {
+    DefSnapshot {
+        name,
+        ty: Some(ty),
+        value_cat: ValueCat::LValue,
+        enumerator_value: None,
+        object_quals: rcc_hir::ObjectQuals::none(),
+        record_fields: None,
+    }
+}
+
+fn unwrap_callee_def(body: &Body, expr: HirExprId) -> Option<DefId> {
+    match body.exprs[expr].kind {
+        HirExprKind::DefRef(def) => Some(def),
+        HirExprKind::Convert { operand, .. } => unwrap_callee_def(body, operand),
+        _ => None,
+    }
+}
+
 fn hir_with_function_body(tcx: &mut TyCtxt, body: Body) -> HirCrate {
     let ret = tcx.int;
     let fn_ty = tcx.intern(Ty::Func { ret, params: Vec::new(), variadic: false, proto: true });
@@ -142,6 +165,60 @@ fn hir_with_function_body(tcx: &mut TyCtxt, body: Body) -> HirCrate {
     hir.defs[def_id].id = def_id;
     hir.bodies.insert(def_id, body);
     hir
+}
+
+#[test]
+fn tgmath_sqrt_dispatches_by_real_and_complex_argument_type() {
+    let mut tcx = TyCtxt::new();
+    let (mut session, cap) = Session::for_test();
+    let sqrt = session.interner.intern("sqrt");
+    let sqrtf = session.interner.intern("sqrtf");
+    let sqrtl = session.interner.intern("sqrtl");
+    let csqrt = session.interner.intern("csqrt");
+
+    let sqrt_def = DefId(10);
+    let sqrtf_def = DefId(11);
+    let sqrtl_def = DefId(12);
+    let csqrt_def = DefId(13);
+    let mut def_info = rcc_data_structures::FxHashMap::default();
+    let double = tcx.double;
+    let float = tcx.float;
+    let long_double = tcx.long_double;
+    let complex_double = tcx.complex_double;
+    def_info.insert(sqrt_def, function_snapshot(sqrt, function_ty(&mut tcx, double, vec![double])));
+    def_info.insert(sqrtf_def, function_snapshot(sqrtf, function_ty(&mut tcx, float, vec![float])));
+    def_info.insert(
+        sqrtl_def,
+        function_snapshot(sqrtl, function_ty(&mut tcx, long_double, vec![long_double])),
+    );
+    def_info.insert(
+        csqrt_def,
+        function_snapshot(csqrt, function_ty(&mut tcx, complex_double, vec![complex_double])),
+    );
+
+    for (arg_ty, expected_def) in [
+        (float, sqrtf_def),
+        (double, sqrt_def),
+        (long_double, sqrtl_def),
+        (complex_double, csqrt_def),
+    ] {
+        let mut body = Body::default();
+        let arg = push_local_ref(&mut body, arg_ty);
+        let call = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::BuiltinTgmath { name: sqrt, args: vec![arg] },
+        );
+        root_stmt(&mut body, call);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        let HirExprKind::Call { callee, .. } = body.exprs[call].kind else {
+            panic!("tgmath builtin should rewrite to a call, got {:?}", body.exprs[call].kind);
+        };
+        assert_eq!(unwrap_callee_def(&body, callee), Some(expected_def));
+    }
+    assert!(cap.diagnostics().is_empty());
 }
 
 fn const_ptr_to(tcx: &mut TyCtxt, pointee: TyId) -> TyId {
@@ -837,6 +914,7 @@ fn assignment_to_const_global_emits_e0080() {
     def_info.insert(
         def_id,
         DefSnapshot {
+            name: Symbol(0),
             ty: Some(tcx.int),
             value_cat: ValueCat::LValue,
             enumerator_value: None,
@@ -868,6 +946,7 @@ fn assignment_to_const_field_emits_e0080() {
     def_info.insert(
         record_def,
         DefSnapshot {
+            name: Symbol(0),
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
@@ -910,6 +989,7 @@ fn member_access_on_aggregate_rvalue_is_typed_as_rvalue_field() {
     def_info.insert(
         record_def,
         DefSnapshot {
+            name: Symbol(0),
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
@@ -926,6 +1006,7 @@ fn member_access_on_aggregate_rvalue_is_typed_as_rvalue_field() {
     def_info.insert(
         fn_def,
         DefSnapshot {
+            name: Symbol(0),
             ty: Some(fn_ty),
             value_cat: ValueCat::LValue,
             enumerator_value: None,

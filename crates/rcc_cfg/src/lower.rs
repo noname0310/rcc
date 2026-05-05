@@ -401,6 +401,14 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             push_assign(builder, span, temp, Rvalue::ComplexFromParts { real, imag, to: ty });
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
+        HirExprKind::BuiltinTgmath { args, .. } => {
+            // Typeck rewrites valid tgmath builtins to ordinary calls. Keep
+            // CFG lowering total for malformed hand-built HIR fixtures.
+            for arg in args {
+                let _ = lower_as_rvalue(builder, cx, *arg);
+            }
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
         HirExprKind::Assign { lhs, rhs } => {
             if let Some(parts) = compound_assign_parts(cx, *lhs, *rhs) {
                 return lower_compound_assign(builder, cx, span, *lhs, parts);

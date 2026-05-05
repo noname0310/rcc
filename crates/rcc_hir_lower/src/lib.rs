@@ -1794,6 +1794,11 @@ fn populate_switch_case_tables_in_expr(
             populate_switch_case_tables_in_expr(body, real, switch_depth, session);
             populate_switch_case_tables_in_expr(body, imag, switch_depth, session);
         }
+        HirExprKind::BuiltinTgmath { args, .. } => {
+            for arg in args {
+                populate_switch_case_tables_in_expr(body, arg, switch_depth, session);
+            }
+        }
         HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
             populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
             populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
@@ -4439,6 +4444,24 @@ pub fn lower_expr(
                             value_cat: ValueCat::RValue,
                             span: expr.span,
                             kind: HirExprKind::BuiltinComplex { real, imag },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    name if name.starts_with("__builtin_tgmath_") => {
+                        let family =
+                            name.strip_prefix("__builtin_tgmath_").expect("prefix checked above");
+                        let family = session.interner.intern(family);
+                        let args = args
+                            .iter()
+                            .map(|arg| lower_expr(arg, body, scope, crate_, tcx, resolver, session))
+                            .collect();
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.error,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinTgmath { name: family, args },
                         });
                         body.exprs[id].id = id;
                         return id;

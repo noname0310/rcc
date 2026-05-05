@@ -670,6 +670,18 @@ pub enum HirExprKind {
         /// Imaginary component.
         imag: HirExprId,
     },
+    /// `__builtin_tgmath_<name>(...)` — C99 `<tgmath.h>` type-generic
+    /// dispatch placeholder.
+    ///
+    /// HIR lowering preserves the family name and evaluated arguments; type
+    /// checking rewrites this node to a normal function call once argument
+    /// types are known.
+    BuiltinTgmath {
+        /// Type-generic function family, such as `sqrt` or `pow`.
+        name: Symbol,
+        /// Original call arguments.
+        args: Vec<HirExprId>,
+    },
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).

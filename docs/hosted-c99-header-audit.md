@@ -36,15 +36,17 @@ Present:
 - `stdlib.h`
 - `string.h`
 - `time.h`
+- `tgmath.h`
 - `wchar.h`
 - `wctype.h`
 
 Absent hosted C99/C95 headers:
 
-- `tgmath.h`
+- none
 
-`tgmath.h` remains absent by design. It requires expression-type dispatch across
-real and complex math families before a header shim would be sound.
+`tgmath.h` is implemented as compiler-owned type-generic dispatch. The header
+maps public C99 macro names to `__builtin_tgmath_<family>` calls; type checking
+then selects the visible real or complex libm declaration from expression types.
 
 ## Function declaration and macro coverage after `15-15`
 
@@ -83,7 +85,7 @@ because the float/long-double suffixed variants need a separate sweep.
    - Implemented `complex.h` after adding sound `I` / `_Complex_I` compiler
      support.
 5. `15-18-tgmath-type-generic-dispatch`
-   - Implement `tgmath.h` only after expression-type dispatch is available.
+   - Implemented `tgmath.h` after expression-type dispatch became available.
 
 Completed:
 
@@ -119,6 +121,14 @@ Completed:
     declarations.
   - Added a runtime fixture that constructs `2.0 + 3.0 * I` and verifies
     `creal` / `cimag`.
+- `15-18-tgmath-type-generic-dispatch`
+  - Added `tgmath.h` macros that lower to compiler-owned
+    `__builtin_tgmath_<family>` placeholders instead of unsafe double-only
+    aliases.
+  - Type checking rewrites those placeholders to ordinary calls to the selected
+    `f`, double, `l`, or complex libm variant.
+  - Added a runtime fixture covering real float/double/long-double dispatch and
+    complex dispatch through `sqrt`, `fabs`, `cimag`, and `creal`.
 
 ## Policy
 

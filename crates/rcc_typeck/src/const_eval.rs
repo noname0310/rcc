@@ -316,6 +316,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinConstantP { .. }
             | HirExprKind::BuiltinBswap { .. }
             | HirExprKind::BuiltinComplex { .. }
+            | HirExprKind::BuiltinTgmath { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }
@@ -675,6 +676,7 @@ impl<'a> ConstEval<'a> {
             | HirExprKind::BuiltinUnreachable
             | HirExprKind::BuiltinConstantP { .. }
             | HirExprKind::BuiltinComplex { .. }
+            | HirExprKind::BuiltinTgmath { .. }
             | HirExprKind::BuiltinOverflow { .. }
             | HirExprKind::BuiltinOverflowP { .. } => None,
         }

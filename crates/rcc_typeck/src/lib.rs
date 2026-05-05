@@ -46,7 +46,7 @@ pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
     // the (DefId, ty/value-cat-relevant) info up front so the per-body
     // walk does not have to borrow `hir.defs` while it holds `&mut hir.bodies[id]`.
     let def_info: rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot> =
-        hir.defs.iter_enumerated().map(|(id, def)| (id, def_snapshot(&def.kind))).collect();
+        hir.defs.iter_enumerated().map(|(id, def)| (id, def_snapshot(def))).collect();
 
     // `hir.bodies` is a HashMap; iterate over its keys via a snapshot to
     // avoid alias trouble between the keys-iterator and the per-body
@@ -203,6 +203,8 @@ fn fold_global_vector_initializer_value(
 /// borrow shape stays simple.
 #[derive(Clone, Debug)]
 pub struct DefSnapshot {
+    /// Source-level definition name.
+    pub name: Symbol,
     /// Type of the referenced object/function, or `None` if the kind has
     /// no associated type (records, enums — never the target of `DefRef`).
     pub ty: Option<TyId>,
@@ -236,10 +238,11 @@ pub struct FieldSnapshot {
     pub quals: ObjectQuals,
 }
 
-/// Read what we need from a `DefKind` for `DefRef` typing.
-fn def_snapshot(kind: &DefKind) -> DefSnapshot {
-    match kind {
+/// Read what we need from a `Def` for `DefRef` typing.
+fn def_snapshot(def: &rcc_hir::Def) -> DefSnapshot {
+    match &def.kind {
         DefKind::Function { ty, .. } => DefSnapshot {
+            name: def.name,
             ty: Some(*ty),
             // Function designator is an lvalue (C99 §6.3.2.1p4 says it
             // converts to a pointer-to-function — that conversion is the
@@ -250,6 +253,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             record_fields: None,
         },
         DefKind::Global { ty, quals, .. } => DefSnapshot {
+            name: def.name,
             ty: Some(*ty),
             value_cat: ValueCat::LValue,
             enumerator_value: None,
@@ -261,6 +265,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             // a different namespace). Pass through with the typedef's
             // alias type so the walker is total.
             DefSnapshot {
+                name: def.name,
                 ty: Some(*ty),
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -269,6 +274,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             }
         }
         DefKind::Enumerator { ty, value } => DefSnapshot {
+            name: def.name,
             ty: Some(*ty),
             value_cat: ValueCat::RValue,
             enumerator_value: Some(*value),
@@ -276,6 +282,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             record_fields: None,
         },
         DefKind::Record { fields, ms_bitfields, .. } => DefSnapshot {
+            name: def.name,
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
@@ -294,6 +301,7 @@ fn def_snapshot(kind: &DefKind) -> DefSnapshot {
             ),
         },
         DefKind::Enum { .. } => DefSnapshot {
+            name: def.name,
             ty: None,
             value_cat: ValueCat::RValue,
             enumerator_value: None,
@@ -581,6 +589,7 @@ pub fn visit_expr(
         }
         HirExprKind::DefRef(def_id) => {
             let snap = def_info.get(&def_id).cloned().unwrap_or(DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -812,6 +821,9 @@ pub fn visit_expr(
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::BuiltinComplex { real, imag };
             expr_id
+        }
+        HirExprKind::BuiltinTgmath { name, args } => {
+            type_tgmath_call(expr_id, name, args, body, tcx, session, def_info)
         }
         HirExprKind::Convert { operand, kind } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
@@ -2353,6 +2365,304 @@ fn type_call(
     expr_id
 }
 
+fn type_tgmath_call(
+    expr_id: HirExprId,
+    name: Symbol,
+    args: Vec<HirExprId>,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> HirExprId {
+    let family_name = session.interner.get(name).to_owned();
+    let Some(spec) = tgmath_spec(&family_name) else {
+        invalid_call(
+            session,
+            body.exprs[expr_id].span,
+            format!("unknown tgmath family `{family_name}`"),
+        );
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+        body.exprs[expr_id].kind = HirExprKind::IntConst(0);
+        return expr_id;
+    };
+
+    if args.len() != spec.arity {
+        invalid_call(
+            session,
+            body.exprs[expr_id].span,
+            format!(
+                "tgmath family `{family_name}` expects {} arguments, got {}",
+                spec.arity,
+                args.len()
+            ),
+        );
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+        body.exprs[expr_id].kind = HirExprKind::IntConst(0);
+        return expr_id;
+    }
+
+    let mut typed_args = Vec::with_capacity(args.len());
+    for arg in args {
+        let typed = visit_expr(arg, body, tcx, session, def_info);
+        let typed = rvalue_decayed(typed, body, tcx);
+        typed_args.push(typed);
+    }
+
+    let Some(selection) = select_tgmath_variant(spec, &typed_args, body, tcx, session) else {
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+        body.exprs[expr_id].kind = HirExprKind::BuiltinTgmath { name, args: typed_args };
+        return expr_id;
+    };
+
+    let callee_name = selection.callee_name();
+    let callee_sym = session.interner.intern(&callee_name);
+    let Some(callee_def) = def_info.iter().find_map(|(def_id, snap)| {
+        let is_function = snap.ty.is_some_and(|ty| matches!(tcx.get(ty), Ty::Func { .. }));
+        (snap.name == callee_sym && is_function).then_some(*def_id)
+    }) else {
+        invalid_call(
+            session,
+            body.exprs[expr_id].span,
+            format!("tgmath selected `{callee_name}`, but no declaration is visible"),
+        );
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+        body.exprs[expr_id].kind = HirExprKind::BuiltinTgmath { name, args: typed_args };
+        return expr_id;
+    };
+
+    let callee = body.exprs.push(HirExpr {
+        id: HirExprId(0),
+        ty: tcx.error,
+        value_cat: ValueCat::RValue,
+        span: body.exprs[expr_id].span,
+        kind: HirExprKind::DefRef(callee_def),
+    });
+    body.exprs[callee].id = callee;
+    let callee = visit_expr(callee, body, tcx, session, def_info);
+    let callee = rvalue_decayed(callee, body, tcx);
+
+    type_call(expr_id, callee, typed_args, body, tcx, session, def_info)
+}
+
+#[derive(Copy, Clone)]
+struct TgmathSpec {
+    arity: usize,
+    generic_args: &'static [usize],
+    real_base: Option<&'static str>,
+    complex_base: Option<&'static str>,
+}
+
+#[derive(Copy, Clone)]
+struct TgmathSelection {
+    base: &'static str,
+    rank: TgmathRank,
+}
+
+impl TgmathSelection {
+    fn callee_name(self) -> String {
+        match self.rank {
+            TgmathRank::F32 => format!("{}f", self.base),
+            TgmathRank::F64 => self.base.to_owned(),
+            TgmathRank::F80 => format!("{}l", self.base),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum TgmathRank {
+    F32,
+    F64,
+    F80,
+}
+
+fn tgmath_spec(name: &str) -> Option<TgmathSpec> {
+    let spec = match name {
+        "acos" => tg_unary("acos", Some("cacos")),
+        "asin" => tg_unary("asin", Some("casin")),
+        "atan" => tg_unary("atan", Some("catan")),
+        "acosh" => tg_unary("acosh", Some("cacosh")),
+        "asinh" => tg_unary("asinh", Some("casinh")),
+        "atanh" => tg_unary("atanh", Some("catanh")),
+        "cos" => tg_unary("cos", Some("ccos")),
+        "sin" => tg_unary("sin", Some("csin")),
+        "tan" => tg_unary("tan", Some("ctan")),
+        "cosh" => tg_unary("cosh", Some("ccosh")),
+        "sinh" => tg_unary("sinh", Some("csinh")),
+        "tanh" => tg_unary("tanh", Some("ctanh")),
+        "exp" => tg_unary("exp", Some("cexp")),
+        "log" => tg_unary("log", Some("clog")),
+        "sqrt" => tg_unary("sqrt", Some("csqrt")),
+        "fabs" => tg_unary("fabs", Some("cabs")),
+        "pow" => tg_binary("pow", Some("cpow")),
+        "atan2" => tg_binary("atan2", None),
+        "cbrt" => tg_unary("cbrt", None),
+        "ceil" => tg_unary("ceil", None),
+        "copysign" => tg_binary("copysign", None),
+        "erf" => tg_unary("erf", None),
+        "erfc" => tg_unary("erfc", None),
+        "exp2" => tg_unary("exp2", None),
+        "expm1" => tg_unary("expm1", None),
+        "fdim" => tg_binary("fdim", None),
+        "floor" => tg_unary("floor", None),
+        "fma" => TgmathSpec {
+            arity: 3,
+            generic_args: &[0, 1, 2],
+            real_base: Some("fma"),
+            complex_base: None,
+        },
+        "fmax" => tg_binary("fmax", None),
+        "fmin" => tg_binary("fmin", None),
+        "fmod" => tg_binary("fmod", None),
+        "hypot" => tg_binary("hypot", None),
+        "ilogb" => tg_unary("ilogb", None),
+        "lgamma" => tg_unary("lgamma", None),
+        "llrint" => tg_unary("llrint", None),
+        "llround" => tg_unary("llround", None),
+        "log10" => tg_unary("log10", None),
+        "log1p" => tg_unary("log1p", None),
+        "log2" => tg_unary("log2", None),
+        "logb" => tg_unary("logb", None),
+        "lrint" => tg_unary("lrint", None),
+        "lround" => tg_unary("lround", None),
+        "nearbyint" => tg_unary("nearbyint", None),
+        "nextafter" => tg_binary("nextafter", None),
+        "remainder" => tg_binary("remainder", None),
+        "rint" => tg_unary("rint", None),
+        "round" => tg_unary("round", None),
+        "tgamma" => tg_unary("tgamma", None),
+        "trunc" => tg_unary("trunc", None),
+        "frexp" => TgmathSpec {
+            arity: 2,
+            generic_args: &[0],
+            real_base: Some("frexp"),
+            complex_base: None,
+        },
+        "ldexp" => TgmathSpec {
+            arity: 2,
+            generic_args: &[0],
+            real_base: Some("ldexp"),
+            complex_base: None,
+        },
+        "modf" => {
+            TgmathSpec { arity: 2, generic_args: &[0], real_base: Some("modf"), complex_base: None }
+        }
+        "nexttoward" => TgmathSpec {
+            arity: 2,
+            generic_args: &[0],
+            real_base: Some("nexttoward"),
+            complex_base: None,
+        },
+        "remquo" => TgmathSpec {
+            arity: 3,
+            generic_args: &[0, 1],
+            real_base: Some("remquo"),
+            complex_base: None,
+        },
+        "scalbn" => TgmathSpec {
+            arity: 2,
+            generic_args: &[0],
+            real_base: Some("scalbn"),
+            complex_base: None,
+        },
+        "scalbln" => TgmathSpec {
+            arity: 2,
+            generic_args: &[0],
+            real_base: Some("scalbln"),
+            complex_base: None,
+        },
+        "carg" => tg_complex_unary("carg"),
+        "cimag" => tg_complex_unary("cimag"),
+        "conj" => tg_complex_unary("conj"),
+        "cproj" => tg_complex_unary("cproj"),
+        "creal" => tg_complex_unary("creal"),
+        _ => return None,
+    };
+    Some(spec)
+}
+
+fn tg_unary(real_base: &'static str, complex_base: Option<&'static str>) -> TgmathSpec {
+    TgmathSpec { arity: 1, generic_args: &[0], real_base: Some(real_base), complex_base }
+}
+
+fn tg_binary(real_base: &'static str, complex_base: Option<&'static str>) -> TgmathSpec {
+    TgmathSpec { arity: 2, generic_args: &[0, 1], real_base: Some(real_base), complex_base }
+}
+
+fn tg_complex_unary(complex_base: &'static str) -> TgmathSpec {
+    TgmathSpec { arity: 1, generic_args: &[0], real_base: None, complex_base: Some(complex_base) }
+}
+
+fn select_tgmath_variant(
+    spec: TgmathSpec,
+    args: &[HirExprId],
+    body: &Body,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> Option<TgmathSelection> {
+    let mut rank = TgmathRank::F32;
+    let mut saw_complex = false;
+    for &index in spec.generic_args {
+        let arg = args[index];
+        let ty = body.exprs[arg].ty;
+        let Some((arg_rank, is_complex)) = classify_tgmath_arg(tcx, ty) else {
+            invalid_call(
+                session,
+                body.exprs[arg].span,
+                "tgmath generic argument must have real or complex arithmetic type",
+            );
+            return None;
+        };
+        rank = rank.max(arg_rank);
+        saw_complex |= is_complex;
+    }
+
+    let base = if saw_complex {
+        match spec.complex_base {
+            Some(base) => base,
+            None => {
+                invalid_call(
+                    session,
+                    body.exprs[args[0]].span,
+                    "tgmath family does not accept complex arguments",
+                );
+                return None;
+            }
+        }
+    } else {
+        match spec.real_base {
+            Some(base) => base,
+            None => {
+                invalid_call(
+                    session,
+                    body.exprs[args[0]].span,
+                    "tgmath family requires a complex argument",
+                );
+                return None;
+            }
+        }
+    };
+
+    Some(TgmathSelection { base, rank })
+}
+
+fn classify_tgmath_arg(tcx: &TyCtxt, ty: TyId) -> Option<(TgmathRank, bool)> {
+    match tcx.get(ty) {
+        Ty::Float(FloatKind::F32) => Some((TgmathRank::F32, false)),
+        Ty::Float(FloatKind::F64) => Some((TgmathRank::F64, false)),
+        Ty::Float(FloatKind::F80) => Some((TgmathRank::F80, false)),
+        Ty::Complex(FloatKind::F32) => Some((TgmathRank::F32, true)),
+        Ty::Complex(FloatKind::F64) => Some((TgmathRank::F64, true)),
+        Ty::Complex(FloatKind::F80) => Some((TgmathRank::F80, true)),
+        Ty::Int { .. } | Ty::Enum(_) => Some((TgmathRank::F64, false)),
+        Ty::Error => Some((TgmathRank::F64, false)),
+        _ => None,
+    }
+}
+
 fn check_call_arity(
     actual: usize,
     expected: usize,
@@ -2926,6 +3236,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinConstantP { .. }
         | HirExprKind::BuiltinBswap { .. }
         | HirExprKind::BuiltinComplex { .. }
+        | HirExprKind::BuiltinTgmath { .. }
         | HirExprKind::BuiltinOverflow { .. }
         | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
@@ -5868,6 +6179,7 @@ mod tests {
         def_info.insert(
             record,
             DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -5930,6 +6242,7 @@ mod tests {
         def_info.insert(
             record,
             DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -5972,6 +6285,7 @@ mod tests {
         def_info.insert(
             record,
             DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -6038,6 +6352,7 @@ mod tests {
         def_info.insert(
             record,
             DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
@@ -6129,6 +6444,7 @@ mod tests {
         def_info.insert(
             record,
             DefSnapshot {
+                name: Symbol(0),
                 ty: None,
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,

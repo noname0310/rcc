@@ -25,7 +25,7 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [15-math-classification-macros](15-math-classification-macros.md)
 - [x] [16-complex-fenv-tgmath-review](16-complex-fenv-tgmath-review.md)
 - [x] [17-complex-header-imaginary-unit](17-complex-header-imaginary-unit.md)
-- [ ] [18-tgmath-type-generic-dispatch](18-tgmath-type-generic-dispatch.md)
+- [x] [18-tgmath-type-generic-dispatch](18-tgmath-type-generic-dispatch.md)
 
 ## Downstream
 
