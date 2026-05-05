@@ -38,7 +38,7 @@ CFG -> LLVM IR via inkwell: ABI, layout, intrinsics. Behind the `llvm` feature.
 - [x] [28-sysv-direct-aggregate-abi-classes](28-sysv-direct-aggregate-abi-classes.md)
 - [x] [29-aggregate-va-arg-lowering](29-aggregate-va-arg-lowering.md)
 - [x] [30-external-incomplete-array-globals](30-external-incomplete-array-globals.md)
-- [ ] [31-lua-parser-runtime-regression](31-lua-parser-runtime-regression.md)
+- [x] [31-lua-parser-runtime-regression](31-lua-parser-runtime-regression.md)
 
 ## Downstream
 

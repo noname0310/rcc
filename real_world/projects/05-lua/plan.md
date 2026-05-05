@@ -83,7 +83,7 @@ extensions so the probe remains a C99 target.
 | --- | --- | --- | --- | --- |
 | LUA-001 | `rcc --emit=llvm-ir lfunc.c` and related TUs | fixed array bounds using enum constants, casts, or `offsetof` were misclassified as VLAs | HIR constant-expression lowering bug | `tasks/06-hir-lower/33-array-bound-ice-constants.md` |
 | LUA-002 | `rcc ... loslib.c lua.c` | builtin `<stdlib.h>` lacked `EXIT_SUCCESS` and `EXIT_FAILURE` | hosted runtime header bug | `tasks/15-builtin-rt/20-stdlib-exit-status-macros.md` |
-| LUA-003 | `build/rcc/lua -e 'print(42)'` | interpreter links but reports `(command line):1: unexpected symbol`; empty chunks can segfault | runtime codegen/layout bug | `tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md` |
+| LUA-003 | `build/rcc/lua -e 'print(42)'` | fixed: union fields lowered with align-1 LLVM storage made containing structs too small, so `LexState` zero-init clobbered `firstchar` | LLVM record layout bug | `tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md` |
 
 ## Exit criteria
 
@@ -91,6 +91,6 @@ extensions so the probe remains a C99 target.
 - [x] Host baseline built
 - [x] Host baseline run recorded
 - [x] `rcc` build reaches linked interpreter
-- [ ] `rcc` runtime output matches host baseline
-- [ ] Compiler bugs have minimized regressions
-- [ ] `RESULTS.md` updated to pass
+- [x] `rcc` runtime output matches host baseline
+- [x] Compiler bugs have minimized regressions
+- [x] `RESULTS.md` updated to pass

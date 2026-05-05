@@ -7005,9 +7005,12 @@ pub mod backend {
             let Some(def_data) = self.hir.defs.get(def) else {
                 return false;
             };
-            let DefKind::Record { align_override, fields, .. } = &def_data.kind else {
+            let DefKind::Record { kind, align_override, fields, .. } = &def_data.kind else {
                 return false;
             };
+            if *kind == RecordKind::Union {
+                return true;
+            }
             align_override.is_some()
                 || fields.iter().any(|field| field.align_override.is_some())
                 || fields.iter().any(|field| field.bit_width.is_some())
@@ -9140,6 +9143,29 @@ mod tests {
         assert_eq!(
             lowered.print_to_string().to_string(),
             "%rcc.record.0 = type <{ i8, [7 x i8], i32, [4 x i8] }>"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_typecx_forces_explicit_layout_for_union_fields() {
+        let context = inkwell::context::Context::create();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let union =
+            record_def(&mut defs, RecordKind::Union, vec![field(tcx.long), field(tcx.double)]);
+        let union_ty = tcx.intern(Ty::Record(union));
+        let token =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(union_ty)]);
+        let token_ty = tcx.intern(Ty::Record(token));
+        let hir = hir_with_defs(defs);
+        let mut types = backend::TypeCx::new(&context, &tcx, &hir);
+
+        let lowered = types.basic_type_of(token_ty).unwrap();
+
+        assert_eq!(
+            lowered.print_to_string().to_string(),
+            "%rcc.record.1 = type <{ i32, [4 x i8], %rcc.record.0 }>"
         );
     }
 

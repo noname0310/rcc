@@ -10,7 +10,7 @@
 bash real_world/projects/05-lua/scripts/run-smoke.sh
 ```
 
-**Result:** blocked.
+**Result:** pass.
 
 - Host baseline: `gcc -std=c99 -Wall -Wextra`
 - Host stdout:
@@ -34,17 +34,17 @@ Lua 5.5.0  Copyright (C) 1994-2025 Lua.org, PUC-Rio
 build/rcc/lua -e 'print(_VERSION); print(6*7)'
 ```
 
-- `rcc` runtime result:
+- `rcc` runtime stdout:
 
 ```text
-(command line):1: unexpected symbol
+Lua 5.5
+42
 ```
 
-An empty chunk also reproduced a segmentation fault during manual triage:
-
-```sh
-build/rcc/lua -e ''
-```
+The previous runtime failure was reduced to an LLVM record layout bug in
+`tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md`: unions were lowered
+as align-1 byte arrays, so structs containing unions could be too small in LLVM
+IR and a large zero-init could clobber adjacent stack slots.
 
 ## Compiler bugs found
 
@@ -52,7 +52,7 @@ build/rcc/lua -e ''
 | --- | --- | --- |
 | LUA-001 | fixed in current worktree | HIR lowering tagged enum/cast/`offsetof` array bounds as VLAs |
 | LUA-002 | fixed in current worktree | builtin `<stdlib.h>` missed `EXIT_SUCCESS` / `EXIT_FAILURE` |
-| LUA-003 | open | linked Lua interpreter cannot execute a trivial chunk |
+| LUA-003 | fixed | union-in-struct LLVM layout clobbered a live stack parameter |
 
 ## Upstream source policy
 

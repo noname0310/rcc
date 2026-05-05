@@ -793,6 +793,66 @@ int main(void) {
     }
 
     #[test]
+    fn union_field_layout_does_not_clobber_live_parameter_slot() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping union field layout e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source(
+            "union_field_layout_stack_slot",
+            r#"
+union SemInfo {
+  long i;
+  double r;
+  void *p;
+};
+
+struct Token {
+  int token;
+  union SemInfo seminfo;
+};
+
+struct LexState {
+  int current;
+  int linenumber;
+  int lastline;
+  struct Token t;
+  struct Token lookahead;
+  void *fs;
+  void *L;
+  void *z;
+  void *buff;
+  void *h;
+  void *dyd;
+  void *source;
+  void *envn;
+  void *brkn;
+};
+
+int seen;
+
+void setinput(struct LexState *ls, int firstchar) {
+  seen = firstchar;
+  ls->current = firstchar;
+}
+
+int parser(int firstchar) {
+  struct LexState lexstate = {0};
+  setinput(&lexstate, firstchar);
+  return seen == 112 && lexstate.current == 112;
+}
+
+int main(void) {
+  return parser(112) ? 0 : 1;
+}
+"#,
+            b"",
+            0,
+        );
+    }
+
+    #[test]
     fn chibicc_function_abi_runtime_smoke() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping function ABI smoke: LLVM backend feature is disabled");
