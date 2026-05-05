@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_ast"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rcc_data_structures",
  "rcc_span",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_cfg"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "insta",
  "rcc_data_structures",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_cfg_transform"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rcc_cfg",
  "rcc_hir",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_codegen_llvm"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "inkwell",
  "insta",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_conformance"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_data_structures"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "indexmap",
  "rustc-hash",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_driver"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "clap",
  "criterion",
@@ -870,17 +870,16 @@ dependencies = [
 
 [[package]]
 name = "rcc_errors"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "ariadne",
  "insta",
- "rcc_session",
  "rcc_span",
 ]
 
 [[package]]
 name = "rcc_hir"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rcc_data_structures",
  "rcc_span",
@@ -889,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_hir_lower"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rcc_ast",
  "rcc_data_structures",
@@ -905,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_lexer"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -916,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_parse"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "criterion",
  "rcc_ast",
@@ -932,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_preprocess"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "criterion",
  "rcc_data_structures",
@@ -945,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "rcc_session"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "clap",
  "rcc_errors",
@@ -955,18 +954,18 @@ dependencies = [
 
 [[package]]
 name = "rcc_span"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rustc-hash",
 ]
 
 [[package]]
 name = "rcc_target"
-version = "0.0.1"
+version = "0.0.0"
 
 [[package]]
 name = "rcc_typeck"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "rcc_data_structures",
  "rcc_errors",
@@ -1518,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",

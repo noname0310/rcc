@@ -95,6 +95,33 @@ enum Cmd {
         #[arg(long)]
         registry_package: bool,
     },
+    /// Compute or apply a release version bump.
+    ReleaseBump {
+        /// Version component to bump: major, minor, or patch.
+        #[arg(value_parser = ["major", "minor", "patch"])]
+        bump: String,
+        /// Only print current/next/tag; do not edit files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Publish the internal crate graph and rcc-compiler distribution crate.
+    ReleasePublish {
+        /// Print cargo publish commands without running them.
+        #[arg(long)]
+        dry_run: bool,
+        /// Pass --allow-dirty to cargo publish.
+        #[arg(long)]
+        allow_dirty: bool,
+        /// Pass --no-verify to cargo publish.
+        #[arg(long)]
+        no_verify: bool,
+        /// Environment variable containing the crates.io token.
+        #[arg(long)]
+        token_env: Option<String>,
+        /// Resume publishing at this crate/package name.
+        #[arg(long)]
+        start_at: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -143,6 +170,23 @@ fn main() -> Result<()> {
                 registry_package,
             };
             xtask::release_check::run(&project_root(), &opts)
+        }
+        Cmd::ReleaseBump { bump, dry_run } => {
+            let bump = xtask::release_bump::BumpKind::parse(&bump)?;
+            xtask::release_bump::run(
+                &project_root(),
+                xtask::release_bump::ReleaseBumpOptions { bump, dry_run },
+            )
+        }
+        Cmd::ReleasePublish { dry_run, allow_dirty, no_verify, token_env, start_at } => {
+            let opts = xtask::release_publish::ReleasePublishOptions {
+                dry_run,
+                allow_dirty,
+                no_verify,
+                token_env,
+                start_at,
+            };
+            xtask::release_publish::run(&project_root(), &opts)
         }
     }
 }

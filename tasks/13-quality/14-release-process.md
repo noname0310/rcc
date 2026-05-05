@@ -1,10 +1,16 @@
 # 13-14: Release process
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-13    **Milestone:** M7
 
 ## Goal
 Create an automated release workflow for the `rcc` compiler after the
 release-candidate dry run passes.
+
+The initial crates.io upload uses version **`0.0.0`** because fuzzing is still
+active and this is a distribution-pipeline validation release, not a 1.0.0
+stability release.
 
 The crates.io package name is **`rcc-compiler`** because `rcc` is already
 taken. The installed binary remains **`rcc`**, so users install with:
@@ -27,7 +33,7 @@ binaries, publishes to crates.io, and uploads the binaries to GitHub Releases.
     - workspace/package versions,
     - publishable crate dependency versions,
     - `Cargo.lock`,
-    - `CHANGELOG.md` / release notes placeholders.
+  - `CHANGELOG.md` / release notes placeholders.
   - A release commit authored as
     `noname0310 <hjnam2014@gmail.com>`.
   - An annotated or signed tag `vX.Y.Z`.
@@ -37,6 +43,9 @@ binaries, publishes to crates.io, and uploads the binaries to GitHub Releases.
   - Binary upload to the GitHub Release.
   - `cargo publish` / `cargo publish --dry-run` for the publishable crates
     needed by `cargo install rcc-compiler`.
+  - CI publish uses the `CRATE_TOKEN` repository secret.
+  - Local validation publishes version `0.0.0`, installs
+    `rcc-compiler`, and executes the installed `rcc` binary.
   - Release notes include the frozen conformance dashboard, xfail policy,
     supported platforms, and known non-goals.
 - Out:
@@ -75,7 +84,7 @@ The rejected alternative remains documented for context:
 ## Deliverables
 - `CHANGELOG.md`.
 - Release workflow.
-- `docs/release-notes-v0.1.0.md`.
+- `docs/release-notes-v0.0.0.md`.
 - `docs/publishing.md` covering crates.io package ownership, required secrets,
   publish order, rollback/yank policy, and `cargo install rcc-compiler`.
 - Optional helper script or `xtask release-bump --major|--minor|--patch` used
@@ -97,6 +106,8 @@ The rejected alternative remains documented for context:
   - attaches `docs/conformance.md` / release notes snapshot.
 - Release notes explicitly list unsupported targets and extension-heavy
   exploratory suites.
+- Local `cargo install rcc-compiler --version 0.0.0 --force` succeeds and the
+  installed `rcc` can compile/link/run a hello-world program.
 - If crates.io publish fails after the GitHub Release is created, the workflow
   must fail loudly and document the manual recovery steps (delete draft
   release, delete tag if unpublished, or yank published crates if needed).

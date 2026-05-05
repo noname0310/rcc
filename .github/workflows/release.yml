@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver component to bump"
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      dry_run:
+        description: "Compute and verify without committing, tagging, publishing, or creating a release"
+        required: true
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev lld-18
+          echo "LLVM_SYS_181_PREFIX=/usr/lib/llvm-18" >> "$GITHUB_ENV"
+
+      - name: Fetch release suites
+        run: |
+          cargo xtask fetch-testsuites
+          cargo xtask fetch-testsuites --include-gpl --only tcc-tests2
+
+      - name: Build release driver for conformance
+        run: cargo build --release -p rcc_driver --bin rcc --features rcc_codegen_llvm/llvm
+
+      - name: Run release candidate gate
+        run: cargo xtask release-check
+
+      - name: Compute release version
+        id: version
+        shell: bash
+        run: |
+          cargo xtask release-bump "${{ inputs.bump }}" --dry-run | tee /tmp/rcc-release-version.txt
+          next="$(awk -F= '/^next=/{print $2}' /tmp/rcc-release-version.txt)"
+          tag="$(awk -F= '/^tag=/{print $2}' /tmp/rcc-release-version.txt)"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Stop after dry run
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "dry_run=true"
+          echo "next=${{ steps.version.outputs.next }}"
+          echo "tag=${{ steps.version.outputs.tag }}"
+
+      - name: Configure release git identity
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "noname0310"
+          git config user.email "hjnam2014@gmail.com"
+
+      - name: Apply release bump
+        if: ${{ !inputs.dry_run }}
+        run: cargo xtask release-bump "${{ inputs.bump }}"
+
+      - name: Commit and tag release
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git add Cargo.toml Cargo.lock crates/rcc_compiler_package/Cargo.toml CHANGELOG.md docs/
+          git commit -m "release: ${{ steps.version.outputs.tag }}"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "rcc ${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Publish crates
+        if: ${{ !inputs.dry_run }}
+        env:
+          CRATE_TOKEN: ${{ secrets.CRATE_TOKEN }}
+        run: cargo xtask release-publish --token-env CRATE_TOKEN
+
+      - name: Build release artifact
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cargo build --release -p rcc_driver --bin rcc --features rcc_codegen_llvm/llvm
+          mkdir -p dist/rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu
+          cp target/release/rcc dist/rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu/
+          cp README.md docs/conformance.md docs/platform-support.md dist/rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu/
+          tar -C dist -czf rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "rcc-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz" \
+            "docs/conformance.md" \
+            "docs/release-notes-${{ steps.version.outputs.tag }}.md" \
+            --title "rcc ${{ steps.version.outputs.tag }}" \
+            --notes-file "docs/release-notes-${{ steps.version.outputs.tag }}.md"

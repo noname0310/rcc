@@ -29,7 +29,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [11-toolchain-platform-matrix](11-toolchain-platform-matrix.md)
 - [x] [12-docs-consistency](12-docs-consistency.md)
 - [x] [13-release-candidate-dry-run](13-release-candidate-dry-run.md)
-- [ ] [14-release-process](14-release-process.md)
+- [x] [14-release-process](14-release-process.md)
 
 ## Downstream
 

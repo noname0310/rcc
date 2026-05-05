@@ -1,6 +1,6 @@
 [package]
 name = "rcc-compiler"
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
@@ -19,4 +19,4 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-rcc_driver = { version = "0.0.1", path = "../rcc_driver", default-features = false }
+rcc_driver = { version = "0.0.0", path = "../rcc_driver", default-features = false }

@@ -25,32 +25,32 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/noname/rcc"
-publish = false
+publish = true
 
 [workspace.dependencies]
 # Internal crates
-rcc_span             = { path = "crates/rcc_span" }
-rcc_errors           = { path = "crates/rcc_errors" }
-rcc_target           = { path = "crates/rcc_target" }
-rcc_session          = { path = "crates/rcc_session" }
-rcc_data_structures  = { path = "crates/rcc_data_structures" }
-rcc_lexer            = { path = "crates/rcc_lexer" }
-rcc_preprocess       = { path = "crates/rcc_preprocess" }
-rcc_ast              = { path = "crates/rcc_ast" }
-rcc_parse            = { path = "crates/rcc_parse" }
-rcc_hir              = { path = "crates/rcc_hir" }
-rcc_hir_lower        = { path = "crates/rcc_hir_lower" }
-rcc_typeck           = { path = "crates/rcc_typeck" }
-rcc_cfg              = { path = "crates/rcc_cfg" }
-rcc_cfg_transform    = { path = "crates/rcc_cfg_transform" }
-rcc_codegen_llvm     = { path = "crates/rcc_codegen_llvm" }
-rcc_driver           = { path = "crates/rcc_driver" }
-rcc_conformance      = { path = "crates/rcc_conformance" }
+rcc_span             = { version = "0.0.0", path = "crates/rcc_span" }
+rcc_errors           = { version = "0.0.0", path = "crates/rcc_errors" }
+rcc_target           = { version = "0.0.0", path = "crates/rcc_target" }
+rcc_session          = { version = "0.0.0", path = "crates/rcc_session" }
+rcc_data_structures  = { version = "0.0.0", path = "crates/rcc_data_structures" }
+rcc_lexer            = { version = "0.0.0", path = "crates/rcc_lexer" }
+rcc_preprocess       = { version = "0.0.0", path = "crates/rcc_preprocess" }
+rcc_ast              = { version = "0.0.0", path = "crates/rcc_ast" }
+rcc_parse            = { version = "0.0.0", path = "crates/rcc_parse" }
+rcc_hir              = { version = "0.0.0", path = "crates/rcc_hir" }
+rcc_hir_lower        = { version = "0.0.0", path = "crates/rcc_hir_lower" }
+rcc_typeck           = { version = "0.0.0", path = "crates/rcc_typeck" }
+rcc_cfg              = { version = "0.0.0", path = "crates/rcc_cfg" }
+rcc_cfg_transform    = { version = "0.0.0", path = "crates/rcc_cfg_transform" }
+rcc_codegen_llvm     = { version = "0.0.0", path = "crates/rcc_codegen_llvm" }
+rcc_driver           = { version = "0.0.0", path = "crates/rcc_driver" }
+rcc_conformance      = { version = "0.0.0", path = "crates/rcc_conformance" }
 
 # External
 rustc-hash  = "2"

@@ -14,4 +14,3 @@ ariadne = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-rcc_session = { workspace = true }
