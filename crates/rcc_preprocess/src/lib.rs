@@ -1036,7 +1036,24 @@ impl<'a> Preprocessor<'a> {
     /// branch so the stack state stays well-defined.
     fn eval_if_line(&mut self, line: &[PpToken], _src: &str) -> Option<bool> {
         let tail = &line[2..];
-        let raw = self.eval_conditional(tail)?;
+        let current_file = line[0].span.file;
+        let current_dir = {
+            let sm = self.session.source_map.read().unwrap();
+            sm.file(current_file)
+                .name
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        let mut include_paths = self.session.opts.include_paths.clone();
+        let builtin = include::builtin_include_dir();
+        if builtin.is_dir() {
+            include_paths.push(builtin);
+        }
+        let mut has_include = |name: &str, system: bool, _span: Span| {
+            include::resolve_header(name, system, &current_dir, &include_paths).is_some()
+        };
+        let raw = self.eval_conditional_with_has_include(tail, Some(&mut has_include))?;
         Some(raw != 0)
     }
 
@@ -1075,8 +1092,17 @@ impl<'a> Preprocessor<'a> {
     /// handler, and source map; extracted so task 04-14 can call it
     /// from the conditional-stack driver.
     pub fn eval_conditional(&mut self, condition: &[PpToken]) -> Option<i128> {
+        self.eval_conditional_with_has_include(condition, None)
+    }
+
+    fn eval_conditional_with_has_include<'probe>(
+        &mut self,
+        condition: &[PpToken],
+        has_include: Option<&'probe mut if_eval::HasIncludeProbe<'probe>>,
+    ) -> Option<i128> {
         let sm_arc = Arc::clone(&self.session.source_map);
         let gnu_va_args_elision = self.session.opts.gnu_va_args_elision;
+        let options = if_eval::EvalOptions { gnu_va_args_elision, has_include };
         match if_eval::eval_if(
             condition,
             &sm_arc,
@@ -1084,7 +1110,7 @@ impl<'a> Preprocessor<'a> {
             &mut self.session.handler,
             &self.macros,
             &self.line_overrides,
-            gnu_va_args_elision,
+            options,
         ) {
             Ok(v) => Some(v),
             Err(diag) => {
@@ -2153,6 +2179,46 @@ dead1
             "dead `#elif` must not evaluate its controlling expression: {:?}",
             cap.diagnostics()
         );
+    }
+
+    #[test]
+    fn has_include_system_header_takes_true_branch() {
+        let src = "#if __has_include(<stddef.h>)\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "yes");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn has_include_missing_angle_header_takes_false_branch() {
+        let src = "#if __has_include(<rcc_no_such_header_14_02.h>)\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "no");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn has_include_local_header_uses_include_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("existing_local.h"), "int not_loaded;\n").expect("write header");
+        let opts = Options { include_paths: vec![tmp.path().to_path_buf()], ..Options::default() };
+        let src = "#if __has_include(\"existing_local.h\")\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed_with_opts(opts, src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "yes");
+        assert!(
+            pp.session.source_dependencies().is_empty(),
+            "`__has_include` probes must not record include dependencies"
+        );
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
     }
 
     #[test]

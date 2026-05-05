@@ -1,5 +1,7 @@
 # 14-02: `__has_include` in preprocessor conditionals
 
+> ✓ done — 2026-05-05
+
 **Phase:** 14-lang-extensions    **Depends on:** 14-01    **Milestone:** M5
 
 ## Goal

@@ -42,6 +42,30 @@ use crate::expand::expand_line;
 use crate::line_map::LineMap;
 use crate::macros::MacroTable;
 
+/// Callback used by `__has_include` while evaluating `#if` / `#elif`.
+///
+/// The evaluator owns no include-search state; callers provide this
+/// side-effect-free probe so the expression parser stays independent
+/// from filesystem policy.
+pub type HasIncludeProbe<'a> = dyn FnMut(&str, bool, Span) -> bool + 'a;
+
+/// Optional extension hooks for `#if` / `#elif` evaluation.
+pub struct EvalOptions<'a> {
+    /// Enable GNU comma elision for variadic macro expansion while
+    /// expanding the controlling expression.
+    pub gnu_va_args_elision: bool,
+    /// Probe for `__has_include`. `None` makes the operator evaluate to
+    /// `0`, useful for direct unit tests of the core evaluator.
+    pub has_include: Option<&'a mut HasIncludeProbe<'a>>,
+}
+
+impl EvalOptions<'_> {
+    /// Strict C99 evaluation with no extension probes.
+    pub fn strict() -> Self {
+        Self { gnu_va_args_elision: false, has_include: None }
+    }
+}
+
 /// Evaluate the controlling expression of a `#if` or `#elif`
 /// directive and return its integer value as `i128`.
 ///
@@ -66,7 +90,7 @@ pub fn eval_if(
     handler: &mut Handler,
     macros: &MacroTable,
     line_map: &LineMap,
-    gnu_va_args_elision: bool,
+    mut options: EvalOptions<'_>,
 ) -> Result<i128, Diagnostic> {
     // Span used for diagnostics pointing at "the whole expression"
     // when no specific token is to blame (e.g. empty condition).
@@ -78,8 +102,14 @@ pub fn eval_if(
     // integer literal parser below) can read a real source slice.
     let zero_one = register_zero_one_file(source_map);
 
-    // Step 1: fold `defined NAME` / `defined(NAME)` before expansion.
+    // Step 1: fold pre-expansion-only operators before expansion.
     let pre_expansion = resolve_defined(tokens, source_map, macros, interner, zero_one)?;
+    let pre_expansion = match options.has_include.as_mut() {
+        Some(probe) => {
+            resolve_has_include(&pre_expansion, source_map, zero_one, Some(&mut **probe))?
+        }
+        None => resolve_has_include(&pre_expansion, source_map, zero_one, None)?,
+    };
 
     // Step 2: run the ordinary macro-expansion pipeline.
     let expanded = expand_line(
@@ -89,7 +119,7 @@ pub fn eval_if(
         macros,
         line_map,
         pre_expansion,
-        gnu_va_args_elision,
+        options.gnu_va_args_elision,
         false,
     );
 
@@ -191,6 +221,131 @@ fn resolve_defined(
         }
     }
     Ok(out)
+}
+
+/// Resolve `__has_include(<header>)` / `__has_include("header")` before
+/// ordinary identifier-to-zero conversion. This is a widely-supported
+/// extension rather than C99 proper, but it is deliberately scoped to
+/// preprocessor conditionals and has no side effects: the callback probes
+/// the include path without loading or recording the header.
+fn resolve_has_include(
+    tokens: &[PpToken],
+    source_map: &Arc<RwLock<SourceMap>>,
+    zero_one: ZeroOne,
+    mut probe: Option<&mut HasIncludeProbe<'_>>,
+) -> Result<Vec<PpToken>, Diagnostic> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok.kind == PpTokenKind::Ident && token_text_is(source_map, tok, "__has_include") {
+            let (query, end_idx) = parse_has_include_operand(tokens, i, source_map)?;
+            let found = probe
+                .as_deref_mut()
+                .map(|p| p(&query.name, query.system, tok.span.to(query.end_span)))
+                .unwrap_or(false);
+            let mut replacement = zero_one.synth(found);
+            replacement.leading_ws = tok.leading_ws;
+            replacement.at_line_start = tok.at_line_start;
+            out.push(replacement);
+            i = end_idx;
+        } else {
+            out.push(tok);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+struct HasIncludeOperand {
+    name: String,
+    system: bool,
+    end_span: Span,
+}
+
+fn parse_has_include_operand(
+    tokens: &[PpToken],
+    start: usize,
+    source_map: &Arc<RwLock<SourceMap>>,
+) -> Result<(HasIncludeOperand, usize), Diagnostic> {
+    let open = tokens.get(start + 1).ok_or_else(|| malformed_has_include(tokens[start].span))?;
+    if open.kind != PpTokenKind::Punct(Punct::LParen) {
+        return Err(malformed_has_include(open.span));
+    }
+    let first = tokens.get(start + 2).ok_or_else(|| malformed_has_include(open.span))?;
+    match first.kind {
+        PpTokenKind::HeaderName | PpTokenKind::StringLit { .. } => {
+            let close = tokens.get(start + 3).ok_or_else(|| malformed_has_include(first.span))?;
+            if close.kind != PpTokenKind::Punct(Punct::RParen) {
+                return Err(malformed_has_include(close.span));
+            }
+            let raw = {
+                let sm = source_map.read().unwrap();
+                token_span_text(&sm, first.span).to_owned()
+            };
+            let (name, system) = header_name_from_single_token(&raw, first.kind, first.span)?;
+            Ok((HasIncludeOperand { name, system, end_span: close.span }, start + 4))
+        }
+        PpTokenKind::Punct(Punct::Lt) => {
+            let mut name = String::new();
+            let mut idx = start + 3;
+            let end_span;
+            loop {
+                let tok = tokens.get(idx).ok_or_else(|| malformed_has_include(first.span))?;
+                match tok.kind {
+                    PpTokenKind::Punct(Punct::Gt) => {
+                        end_span = tok.span;
+                        break;
+                    }
+                    PpTokenKind::Punct(Punct::RParen) => {
+                        return Err(malformed_has_include(tok.span))
+                    }
+                    _ => {
+                        let sm = source_map.read().unwrap();
+                        name.push_str(token_span_text(&sm, tok.span));
+                    }
+                }
+                idx += 1;
+            }
+            let close = tokens.get(idx + 1).ok_or_else(|| malformed_has_include(end_span))?;
+            if close.kind != PpTokenKind::Punct(Punct::RParen) {
+                return Err(malformed_has_include(close.span));
+            }
+            if name.is_empty() {
+                return Err(malformed_has_include(first.span.to(end_span)));
+            }
+            Ok((HasIncludeOperand { name, system: true, end_span: close.span }, idx + 2))
+        }
+        _ => Err(malformed_has_include(first.span)),
+    }
+}
+
+fn header_name_from_single_token(
+    raw: &str,
+    kind: PpTokenKind,
+    span: Span,
+) -> Result<(String, bool), Diagnostic> {
+    match kind {
+        PpTokenKind::HeaderName if raw.starts_with('<') && raw.ends_with('>') => {
+            Ok((raw[1..raw.len() - 1].to_string(), true))
+        }
+        PpTokenKind::HeaderName if raw.starts_with('"') && raw.ends_with('"') => {
+            Ok((raw[1..raw.len() - 1].to_string(), false))
+        }
+        PpTokenKind::StringLit { .. } => {
+            let Some(open) = raw.find('"') else {
+                return Err(malformed_has_include(span));
+            };
+            let Some(close) = raw.rfind('"') else {
+                return Err(malformed_has_include(span));
+            };
+            if open == close {
+                return Err(malformed_has_include(span));
+            }
+            Ok((raw[open + 1..close].to_string(), false))
+        }
+        _ => Err(malformed_has_include(span)),
+    }
 }
 
 fn token_text_is(source_map: &Arc<RwLock<SourceMap>>, tok: PpToken, needle: &str) -> bool {
@@ -833,6 +988,24 @@ fn malformed_defined(span: Span) -> Diagnostic {
     }
 }
 
+fn malformed_has_include(span: Span) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0028),
+        message: "malformed `__has_include` operator".into(),
+        labels: vec![Label {
+            span,
+            message: "expected `__has_include(<header>)` or `__has_include(\"header\")`".into(),
+            primary: true,
+        }],
+        notes: vec![
+            "`__has_include` is supported as a preprocessor conditional extension in C99 mode"
+                .into(),
+        ],
+        help: vec![],
+    }
+}
+
 fn expr_error(span: Span, msg: String) -> Diagnostic {
     Diagnostic {
         level: Level::Error,
@@ -894,7 +1067,15 @@ mod tests {
     ) -> Result<i128, Diagnostic> {
         let sm_arc = Arc::clone(&sess.source_map);
         let line_map = LineMap::new();
-        eval_if(tokens, &sm_arc, &mut sess.interner, &mut sess.handler, macros, &line_map, false)
+        eval_if(
+            tokens,
+            &sm_arc,
+            &mut sess.interner,
+            &mut sess.handler,
+            macros,
+            &line_map,
+            EvalOptions::strict(),
+        )
     }
 
     // ── Literal arithmetic ────────────────────────────────────────
