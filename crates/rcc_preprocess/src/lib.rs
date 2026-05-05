@@ -2167,6 +2167,74 @@ mod run_tests {
         assert!(cap.diagnostics().is_empty());
     }
 
+    #[test]
+    fn freestanding_headers_use_lp64_target_macros() {
+        let (mut sess, id, cap) = seed(
+            "#include <stdint.h>\n\
+             INT64_C(7)\n\
+             UINT64_C(7)\n\
+             INTPTR_MAX\n\
+             UINTPTR_MAX\n\
+             #include <limits.h>\n\
+             LONG_MAX\n\
+             ULONG_MAX\n\
+             LLONG_MAX\n\
+             #include <float.h>\n\
+             LDBL_MANT_DIG\n",
+        );
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        let text = joined_text(&pp, &out);
+
+        assert!(text.contains("7L"), "stdint constants should use long on LP64: {text}");
+        assert!(text.contains("7UL"), "stdint constants should use unsigned long on LP64: {text}");
+        assert!(text.contains("9223372036854775807L"), "LP64 intptr/long max: {text}");
+        assert!(text.contains("18446744073709551615UL"), "LP64 uintptr/ulong max: {text}");
+        assert!(text.contains("9223372036854775807LL"), "long long max still exists: {text}");
+        assert!(text.ends_with("64"), "LP64 long double mantissa should be 64: {text}");
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn freestanding_headers_use_llp64_target_macros() {
+        let opts = rcc_session::Options {
+            target: rcc_session::TargetInfo::from_triple(&rcc_session::TargetTriple::new(
+                "x86_64-pc-windows-msvc",
+            ))
+            .unwrap(),
+            ..rcc_session::Options::default()
+        };
+        let (mut sess, id, cap) = seed_with_opts(
+            opts,
+            "#include <stdint.h>\n\
+             INT64_C(7)\n\
+             UINT64_C(7)\n\
+             INTPTR_MAX\n\
+             UINTPTR_MAX\n\
+             #include <limits.h>\n\
+             LONG_MAX\n\
+             ULONG_MAX\n\
+             LLONG_MAX\n\
+             #include <float.h>\n\
+             LDBL_MANT_DIG\n",
+        );
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        let text = joined_text(&pp, &out);
+
+        assert!(text.contains("7LL"), "stdint constants should use long long on LLP64: {text}");
+        assert!(
+            text.contains("7ULL"),
+            "stdint constants should use unsigned long long on LLP64: {text}"
+        );
+        assert!(text.contains("9223372036854775807LL"), "LLP64 intptr/llong max: {text}");
+        assert!(text.contains("18446744073709551615ULL"), "LLP64 uintptr max: {text}");
+        assert!(text.contains("2147483647L"), "LLP64 long max should remain 32-bit: {text}");
+        assert!(text.contains("4294967295UL"), "LLP64 unsigned long max: {text}");
+        assert!(text.ends_with("53"), "LLP64 long double mantissa should match double: {text}");
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    }
+
     // ── Conditional-compilation state machine (task 04-14) ──────────
 
     use rcc_errors::codes::{E0016, E0017, E0018};

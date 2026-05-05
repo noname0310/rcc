@@ -178,6 +178,45 @@ fn stddef_header_typechecks_without_backend() {
 }
 
 #[test]
+fn freestanding_headers_typecheck_without_backend() {
+    let input = TempCFile::new(
+        "freestanding-headers",
+        r#"
+        #include <stdint.h>
+        #include <stdbool.h>
+        #include <limits.h>
+        #include <float.h>
+        #include <iso646.h>
+
+        typedef char check_int32_size[(sizeof(int32_t) == 4) ? 1 : -1];
+        typedef char check_uintptr_size[(sizeof(uintptr_t) == sizeof(void *)) ? 1 : -1];
+        typedef char check_intmax_size[(sizeof(intmax_t) == 8) ? 1 : -1];
+
+        int f(void) {
+            bool b = true;
+            int_least8_t small = INT8_MIN;
+            uint_fast16_t fast = UINT_FAST16_MAX;
+            long long wide = LLONG_MAX;
+            float fe = FLT_EPSILON;
+            double dm = DBL_MAX;
+            long double le = LDBL_EPSILON;
+            return (b and (INT_MAX == 2147483647) and (FLT_RADIX == 2)
+                and (fe > 0.0f) and (dm > 1.0) and (le > 0.0L))
+                ? (int)(small + (int)fast + (int)wide)
+                : false;
+        }
+        "#,
+    );
+    let output = TempOutput::new("freestanding-headers");
+
+    compile_with(&input, vec![EmitKind::Hir], Some(output.path.clone()))
+        .expect("freestanding headers should parse, expand, and type-check without LLVM");
+
+    let hir = read(&output.path);
+    assert!(hir.contains("HirCrate"), "hir:\n{hir}");
+}
+
+#[test]
 fn backend_required_emit_does_not_flush_partial_stage_files_without_backend() {
     if llvm_backend_enabled_for_this_build() {
         return;
