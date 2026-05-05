@@ -41,7 +41,7 @@ Every emitted diagnostic should satisfy the applicable rows below:
 | `E0013`-`E0029`, `W0001`, `W0006` | preprocessor | preprocessor unit tests and chibicc preprocess fixtures |
 | `E0030`-`E0032`, `E0060`-`E0063`, `W0004`, `W0005`, `W0013`-`W0025` | parser | parser unit tests and driver UI parse snapshots |
 | `E0070`-`E0079`, `W0007`, `W0022`, `W0023`, `W0029` | HIR lowering | `rcc_hir_lower` / driver warning tests |
-| `E0080`-`E0084`, `E0087`, `E0088`, `W0008`-`W0012`, `W0026`-`W0028`, `W0030` | type checker / const evaluator | `rcc_typeck` and driver warning tests |
+| `E0080`-`E0084`, `E0087`, `E0088`, `W0008`-`W0012`, `W0026`-`W0028`, `W0030`, `W0031` | type checker / const evaluator | `rcc_typeck` and driver warning tests |
 | `E0085`, `E0086` | CFG/layout boundary | CFG and driver tests |
 
 ## Release Policy

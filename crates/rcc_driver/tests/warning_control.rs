@@ -486,3 +486,61 @@ fn sign_compare_suppression_and_promotion_are_honored() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0030));
 }
+
+#[test]
+fn wextra_emits_unreachable_code_warning_after_return() {
+    let (_, cap) = compile_warning_source(
+        "unreachable-return",
+        "int x;\nint main(void) { return 0; x = 1; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0031));
+    assert!(diags[0].message.contains("[-Wunreachable-code]"));
+}
+
+#[test]
+fn unreachable_detector_does_not_cross_if_branches() {
+    let (_, cap) = compile_warning_source(
+        "unreachable-if-branch",
+        "int x;\nint main(int n) { if (n) return 0; else x = 1; return x; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn preprocessor_disabled_dead_code_is_not_seen_by_unreachable_detector() {
+    let (_, cap) = compile_warning_source(
+        "unreachable-pp-disabled",
+        "int x;\nint main(void) { return 0;\n#if 0\nx = 1;\n#endif\n}\n",
+        &["-Wextra", "--emit=hir"],
+    );
+
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn unreachable_code_suppression_and_promotion_are_honored() {
+    let (_, suppressed) = compile_warning_source(
+        "unreachable-wno",
+        "int x;\nint main(void) { return 0; x = 1; }\n",
+        &["-Wextra", "-Wno-unreachable-code", "--emit=hir"],
+    );
+    assert!(suppressed.diagnostics().is_empty());
+
+    let (session, promoted) = compile_warning_source(
+        "unreachable-werror",
+        "int x;\nint main(void) { goto done; x = 1; done: return x; }\n",
+        &["-Werror=unreachable-code", "--emit=hir"],
+    );
+    let diags = promoted.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0031));
+}

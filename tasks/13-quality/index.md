@@ -18,7 +18,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [03c-unused-parameter-warning](03c-unused-parameter-warning.md)
 - [x] [03d-implicit-function-declaration-warning](03d-implicit-function-declaration-warning.md)
 - [x] [03e-sign-compare-warning](03e-sign-compare-warning.md)
-- [ ] [03f-unreachable-code-warning](03f-unreachable-code-warning.md)
+- [x] [03f-unreachable-code-warning](03f-unreachable-code-warning.md)
 - [ ] [04-diagnostic-pragmas](04-diagnostic-pragmas.md)
 - [ ] [05-restrict-noalias](05-restrict-noalias.md)
 - [ ] [06-coverage-threshold](06-coverage-threshold.md)

@@ -120,6 +120,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0028, W0028_DESC),
     (W0029, W0029_DESC),
     (W0030, W0030_DESC),
+    (W0031, W0031_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -937,6 +938,15 @@ const W0029_DESC: &str = "implicit function declaration";
 /// operand participate in an unsigned comparison.
 pub const W0030: &str = "W0030";
 const W0030_DESC: &str = "signed/unsigned comparison";
+
+/// Statement is syntactically unreachable after a local jump.
+///
+/// Emitted only when `-Wextra`, `-Wunreachable-code`, or
+/// `-Werror=unreachable-code` enables the diagnostic. The current detector is
+/// intentionally local to compound-block statement order and does not attempt
+/// full CFG reachability or constant-condition reasoning.
+pub const W0031: &str = "W0031";
+const W0031_DESC: &str = "unreachable code";
 
 #[cfg(test)]
 mod tests {

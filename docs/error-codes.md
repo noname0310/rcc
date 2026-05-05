@@ -1493,3 +1493,22 @@ int main(void) {
 Comparisons whose promoted operands have the same signedness do not warn.
 Adding an explicit cast that makes the operands match suppresses the
 diagnostic and documents the intended comparison domain.
+
+## W0031 — unreachable code
+
+A statement in the same compound block follows an unconditional local jump:
+`return`, `break`, `continue`, `goto`, or computed `goto`. This is an opt-in
+analysis warning enabled by `-Wextra`, `-Wunreachable-code`, or
+`-Werror=unreachable-code`:
+
+```c
+int x;
+int main(void) {
+    return 0;
+    x = 1;  // warning[W0031]: unreachable statement after return [-Wunreachable-code]
+}
+```
+
+The detector is intentionally syntactic. It does not perform full CFG
+reachability or constant-condition analysis, and labels / `case` / `default`
+boundaries stop a warning run because they can be jump targets.

@@ -13,6 +13,7 @@ use rcc_session::Session;
 pub fn check_warnings(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
     warn_unused_functions(session, tcx, hir);
     for body in hir.bodies.values() {
+        warn_unreachable_code_in_body(session, body);
         warn_unused_variables_in_body(session, tcx, body);
         warn_unused_parameters_in_body(session, tcx, body);
     }
@@ -85,6 +86,109 @@ fn warn_unused_parameters_in_body(session: &mut Session, tcx: &TyCtxt, body: &Bo
             .help("remove the parameter name, read it, cast it to void, or suppress with `-Wno-unused-parameter`")
             .emit();
     }
+}
+
+fn warn_unreachable_code_in_body(session: &mut Session, body: &Body) {
+    if !session.handler.warning_config().warning_enabled("unreachable-code") {
+        return;
+    }
+    let Some(root) = body.root else {
+        return;
+    };
+    UnreachableWalker { body, session }.visit_stmt(root);
+}
+
+struct UnreachableWalker<'a, 's> {
+    body: &'a Body,
+    session: &'s mut Session,
+}
+
+impl UnreachableWalker<'_, '_> {
+    fn visit_stmt(&mut self, stmt: HirStmtId) {
+        match &self.body.stmts[stmt].kind {
+            HirStmtKind::Block(stmts) => self.visit_block(stmts),
+            HirStmtKind::If { then_branch, else_branch, .. } => {
+                self.visit_stmt(*then_branch);
+                if let Some(else_branch) = else_branch {
+                    self.visit_stmt(*else_branch);
+                }
+            }
+            HirStmtKind::While { body, .. }
+            | HirStmtKind::DoWhile { body, .. }
+            | HirStmtKind::Switch { body, .. }
+            | HirStmtKind::Label { body, .. }
+            | HirStmtKind::Case { body, .. }
+            | HirStmtKind::Default { body } => self.visit_stmt(*body),
+            HirStmtKind::For { init, body, .. } => {
+                if let Some(init) = init {
+                    self.visit_stmt(*init);
+                }
+                self.visit_stmt(*body);
+            }
+            HirStmtKind::Expr(_)
+            | HirStmtKind::Goto(_)
+            | HirStmtKind::GotoComputed(_)
+            | HirStmtKind::Break
+            | HirStmtKind::Continue
+            | HirStmtKind::Return(_)
+            | HirStmtKind::LocalDecl { .. }
+            | HirStmtKind::Null => {}
+        }
+    }
+
+    fn visit_block(&mut self, stmts: &[HirStmtId]) {
+        let mut after_jump: Option<&'static str> = None;
+        let mut emitted_for_run = false;
+        for stmt in stmts {
+            if is_reachability_boundary(&self.body.stmts[*stmt].kind) {
+                after_jump = None;
+                emitted_for_run = false;
+                self.visit_stmt(*stmt);
+                continue;
+            }
+
+            if let Some(reason) = after_jump {
+                if !emitted_for_run && !matches!(self.body.stmts[*stmt].kind, HirStmtKind::Null) {
+                    self.emit_unreachable(*stmt, reason);
+                    emitted_for_run = true;
+                }
+                continue;
+            }
+
+            self.visit_stmt(*stmt);
+            after_jump = terminating_statement_reason(&self.body.stmts[*stmt].kind);
+            emitted_for_run = false;
+        }
+    }
+
+    fn emit_unreachable(&mut self, stmt: HirStmtId, reason: &'static str) {
+        self.session
+            .handler
+            .struct_warn(
+                self.body.stmts[stmt].span,
+                format!("unreachable statement after {reason} [-Wunreachable-code]"),
+            )
+            .code(codes::W0031)
+            .help("remove the statement or move it before the terminating jump")
+            .emit();
+    }
+}
+
+fn terminating_statement_reason(kind: &HirStmtKind) -> Option<&'static str> {
+    match kind {
+        HirStmtKind::Return(_) => Some("return"),
+        HirStmtKind::Break => Some("break"),
+        HirStmtKind::Continue => Some("continue"),
+        HirStmtKind::Goto(_) | HirStmtKind::GotoComputed(_) => Some("goto"),
+        _ => None,
+    }
+}
+
+fn is_reachability_boundary(kind: &HirStmtKind) -> bool {
+    matches!(
+        kind,
+        HirStmtKind::Label { .. } | HirStmtKind::Case { .. } | HirStmtKind::Default { .. }
+    )
 }
 
 #[derive(Debug)]

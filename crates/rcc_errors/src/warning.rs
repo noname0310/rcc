@@ -174,7 +174,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         names: &["sign-compare"],
         category: WarningCategory::Wextra,
     },
-    WarningRecord { code: None, names: &["unreachable-code"], category: WarningCategory::Wextra },
+    WarningRecord {
+        code: Some(codes::W0031),
+        names: &["unreachable-code"],
+        category: WarningCategory::Wextra,
+    },
     WarningRecord {
         code: Some(codes::W0028),
         names: &["unused-parameter"],
