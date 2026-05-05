@@ -46,6 +46,40 @@ docs/
   conformance.md
 ```
 
+## Install
+
+`rcc` is published on crates.io as **`rcc-compiler`** because the crate name
+`rcc` is already taken. The installed executable is still named `rcc`.
+
+The current crates.io release is `0.0.0`. This is an early distribution
+release, not a 1.0 stability release; fuzzing and conformance work remain
+active.
+
+The supported install path is Linux / WSL with LLVM 18 available:
+
+```bash
+# Example for Debian/Ubuntu/WSL after installing LLVM 18 from apt.llvm.org.
+export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18
+cargo install rcc-compiler --version 0.0.0
+rcc --version --verbose
+```
+
+Smoke test an installed compiler:
+
+```bash
+cat > /tmp/rcc-hello.c <<'EOF'
+int puts(const char *);
+int main(void) { puts("hello from rcc"); return 0; }
+EOF
+
+rcc /tmp/rcc-hello.c -O2 -o /tmp/rcc-hello
+/tmp/rcc-hello
+```
+
+Windows is currently supported as a development host for selected LLVM-C tests,
+but the release install target is still `x86_64-unknown-linux-gnu`; use WSL for
+the published `cargo install` path.
+
 ## Build
 
 The default configuration builds **without** LLVM so that contributors
