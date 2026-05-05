@@ -9,6 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
 
 use rcc_session::{EmitKind, LinkOptions, Options, Session, TargetInfo, WarningConfig};
 
@@ -370,17 +373,21 @@ fn compile_many_without_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
 }
 
 fn compile_many_to_default_objects(cli: &Cli, base_opts: &Options) -> DriverStatus {
-    let mut status = DriverStatus::SUCCESS;
-    for input in &cli.input {
-        let output = default_output_path(input, "o");
-        status = status.merge(compile_one_to_object(input, &output, base_opts));
-    }
-    status
+    let jobs = cli
+        .input
+        .iter()
+        .map(|input| ObjectJob { input: input.clone(), output: default_output_path(input, "o") })
+        .collect::<Vec<_>>();
+    merge_object_results(
+        &jobs,
+        compile_object_jobs(jobs.clone(), base_opts, driver_jobs(cli, jobs.len())),
+    )
 }
 
 fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
     let mut temps = TempObjects::default();
     let mut status = DriverStatus::SUCCESS;
+    let mut jobs = Vec::with_capacity(cli.input.len());
     for input in &cli.input {
         let output = match temps.alloc(input) {
             Ok(output) => output,
@@ -390,11 +397,14 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
                 continue;
             }
         };
-        let compile_status = compile_one_to_object(input, &output, base_opts);
+        jobs.push(ObjectJob { input: input.clone(), output });
+    }
+    let results = compile_object_jobs(jobs.clone(), base_opts, driver_jobs(cli, jobs.len()));
+    for (job, compile_status) in jobs.iter().zip(results) {
         if compile_status.exit_code == ExitCode::Success {
-            temps.keep(output);
+            temps.keep(job.output.clone());
         } else {
-            let _ = fs::remove_file(&output);
+            let _ = fs::remove_file(&job.output);
             status = status.merge(compile_status);
         }
     }
@@ -425,6 +435,100 @@ fn compile_one_to_object(input: &Path, output: &Path, base_opts: &Options) -> Dr
         eprintln!("rcc: {}: {msg}", input.display());
     }
     DriverStatus::from_compile_result(result, session.handler.has_errors())
+}
+
+#[derive(Clone)]
+struct ObjectJob {
+    input: PathBuf,
+    output: PathBuf,
+}
+
+fn compile_object_jobs(
+    jobs: Vec<ObjectJob>,
+    base_opts: &Options,
+    job_count: usize,
+) -> Vec<DriverStatus> {
+    if jobs.is_empty() {
+        return Vec::new();
+    }
+    if job_count <= 1 || jobs.len() == 1 {
+        return jobs
+            .iter()
+            .map(|job| compile_one_to_object(&job.input, &job.output, base_opts))
+            .collect();
+    }
+
+    let worker_count = job_count.min(jobs.len());
+    let jobs = Arc::new(jobs);
+    let next = Arc::new(AtomicUsize::new(0));
+    let (tx, rx) = mpsc::channel();
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let jobs = Arc::clone(&jobs);
+        let next = Arc::clone(&next);
+        let tx = tx.clone();
+        let base_opts = base_opts.clone();
+        workers.push(thread::spawn(move || loop {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            let Some(job) = jobs.get(index) else {
+                break;
+            };
+            let status = compile_one_to_object(&job.input, &job.output, &base_opts);
+            if tx.send((index, status)).is_err() {
+                break;
+            }
+        }));
+    }
+    drop(tx);
+
+    let mut results = vec![None; jobs.len()];
+    for (index, status) in rx {
+        results[index] = Some(status);
+    }
+
+    let mut worker_failed = false;
+    for worker in workers {
+        if worker.join().is_err() {
+            worker_failed = true;
+        }
+    }
+
+    if worker_failed {
+        eprintln!("rcc: internal driver worker panicked");
+    }
+
+    results
+        .into_iter()
+        .map(|status| status.unwrap_or(DriverStatus { exit_code: ExitCode::InfrastructureFailure }))
+        .collect()
+}
+
+fn merge_object_results(jobs: &[ObjectJob], results: Vec<DriverStatus>) -> DriverStatus {
+    let mut status = DriverStatus::SUCCESS;
+    for (job, compile_status) in jobs.iter().zip(results) {
+        if compile_status.exit_code != ExitCode::Success {
+            let _ = fs::remove_file(&job.output);
+        }
+        status = status.merge(compile_status);
+    }
+    status
+}
+
+fn driver_jobs(cli: &Cli, input_count: usize) -> usize {
+    if input_count <= 1 {
+        return 1;
+    }
+    let requested = cli
+        .jobs
+        .or_else(env_jobs)
+        .or_else(|| thread::available_parallelism().ok().map(std::num::NonZeroUsize::get))
+        .unwrap_or(1);
+    requested.clamp(1, input_count)
+}
+
+fn env_jobs() -> Option<usize> {
+    std::env::var("RCC_JOBS").ok()?.parse::<usize>().ok().filter(|jobs| *jobs > 0)
 }
 
 /// Convert parsed CLI flags into a `rcc_session::Options`.

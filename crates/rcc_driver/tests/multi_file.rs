@@ -40,6 +40,11 @@ fn parse(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).unwrap_or_else(|err| panic!("parse {args:?}: {err}"))
 }
 
+#[cfg(not(windows))]
+fn rcc_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_rcc"))
+}
+
 fn llvm_backend_enabled_for_this_build() -> bool {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap));
@@ -60,6 +65,10 @@ fn cli_accepts_multiple_input_files() {
 
     let compile_only = options_from_cli(&parse(&["rcc", "-c", "main.c", "util.c"]));
     assert_eq!(compile_only.output, None);
+
+    let parallel = parse(&["rcc", "-j", "2", "main.c", "util.c"]);
+    assert_eq!(parallel.jobs, Some(2));
+    assert!(Cli::try_parse_from(["rcc", "-j", "0", "main.c"]).is_err());
 }
 
 #[test]
@@ -71,7 +80,7 @@ fn compile_only_multiple_inputs_write_one_object_per_file_when_backend_enabled()
     let main = dir.file("main.c", "int main(void) { return 0; }\n");
     let util = dir.file("util.c", "int util(void) { return 1; }\n");
 
-    let cli = parse(&["rcc", "-c", main.to_str().unwrap(), util.to_str().unwrap()]);
+    let cli = parse(&["rcc", "-j", "2", "-c", main.to_str().unwrap(), util.to_str().unwrap()]);
     let code = run(cli);
 
     assert_eq!(code, 0);
@@ -88,7 +97,7 @@ fn compile_only_continues_after_one_file_errors_when_backend_enabled() {
     let good = dir.file("good.c", "int good(void) { return 0; }\n");
     let bad = dir.file("bad.c", "int bad(void) { return ; }\n");
 
-    let cli = parse(&["rcc", "-c", bad.to_str().unwrap(), good.to_str().unwrap()]);
+    let cli = parse(&["rcc", "-j2", "-c", bad.to_str().unwrap(), good.to_str().unwrap()]);
     let code = run(cli);
 
     assert_eq!(code, 1);
@@ -111,6 +120,8 @@ fn e2e_multi_file_link_when_enabled() {
 
     let cli = parse(&[
         "rcc",
+        "-j",
+        "2",
         "-o",
         output.to_str().unwrap(),
         main.to_str().unwrap(),
@@ -121,4 +132,28 @@ fn e2e_multi_file_link_when_enabled() {
     assert_eq!(code, 0);
     let status = Command::new(&output).status().expect("run linked program");
     assert_eq!(status.code(), Some(7));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn compile_only_parallel_success_is_quiet_when_backend_enabled() {
+    if !llvm_backend_enabled_for_this_build() {
+        return;
+    }
+    let dir = TempDir::new("quiet-parallel");
+    let main = dir.file("main.c", "int main(void) { return 0; }\n");
+    let util = dir.file("util.c", "int util(void) { return 1; }\n");
+
+    let output = Command::new(rcc_bin())
+        .arg("-j")
+        .arg("2")
+        .arg("-c")
+        .arg(&main)
+        .arg(&util)
+        .output()
+        .expect("run rcc -j2 -c");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(output.stderr.is_empty(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }

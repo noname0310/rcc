@@ -28,6 +28,7 @@
 - [x] [16-tool-discovery-and-verbose-trace](16-tool-discovery-and-verbose-trace.md)
 - [x] [17-response-files](17-response-files.md)
 - [x] [18-dependency-file-emission](18-dependency-file-emission.md)
+- [x] [19-parallel-multi-input-object-builds](19-parallel-multi-input-object-builds.md)
 
 ## Downstream
 

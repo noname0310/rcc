@@ -126,6 +126,10 @@ pub struct Cli {
     #[arg(short = 'v', long = "verbose", action = ArgAction::SetTrue)]
     pub verbose: bool,
 
+    /// Parallel compile jobs for multiple input files. Defaults to host parallelism.
+    #[arg(short = 'j', long = "jobs", value_name = "N", value_parser = parse_jobs)]
+    pub jobs: Option<usize>,
+
     /// GCC-style `-f<flag>` compatibility options.
     #[arg(short = 'f', value_name = "FLAG", action = ArgAction::Append)]
     pub feature_flags: Vec<String>,
@@ -370,6 +374,15 @@ fn advance_line_col(ch: char, line: &mut usize, col: &mut usize) {
         *col = 1;
     } else {
         *col += 1;
+    }
+}
+
+fn parse_jobs(text: &str) -> Result<usize, String> {
+    let jobs = text.parse::<usize>().map_err(|_| format!("invalid job count `{text}`"))?;
+    if jobs == 0 {
+        Err("job count must be at least 1".to_owned())
+    } else {
+        Ok(jobs)
     }
 }
 

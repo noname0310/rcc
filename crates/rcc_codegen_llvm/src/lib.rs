@@ -951,6 +951,7 @@ pub mod backend {
     use super::*;
 
     use std::cell::RefCell;
+    use std::sync::Once;
 
     use inkwell::attributes::{Attribute, AttributeLoc};
     use inkwell::basic_block::BasicBlock as LlvmBasicBlock;
@@ -997,6 +998,12 @@ pub mod backend {
 
     /// First supported backend target: Linux x86-64 SysV.
     pub const BASELINE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
+
+    static X86_TARGET_INIT: Once = Once::new();
+
+    fn initialize_x86_target() {
+        X86_TARGET_INIT.call_once(|| Target::initialize_x86(&InitializationConfig::default()));
+    }
 
     /// LLVM data layout for the first supported Linux x86-64 SysV target.
     pub const BASELINE_DATA_LAYOUT: &str =
@@ -1217,7 +1224,7 @@ pub mod backend {
         /// pipelines are owned by later driver/quality tasks.
         #[cfg(test)]
         pub fn run_mem2reg_for_tests(&self) -> Result<(), CodegenError> {
-            Target::initialize_x86(&InitializationConfig::default());
+            initialize_x86_target();
             let triple = TargetTriple::create(self.target_triple());
             let target = Target::from_triple(&triple).map_err(|err| {
                 CodegenError::Internal(format!(
@@ -1277,7 +1284,7 @@ pub mod backend {
         }
 
         fn target_machine(&self) -> Result<TargetMachine, CodegenError> {
-            Target::initialize_x86(&InitializationConfig::default());
+            initialize_x86_target();
             let triple = TargetTriple::create(self.target_triple());
             let target = Target::from_triple(&triple).map_err(|err| {
                 CodegenError::Internal(format!(
@@ -5826,7 +5833,7 @@ pub mod backend {
                 .builder
                 .build_indirect_call(fn_ty, asm_ptr, &args, "inline.asm")
                 .map_err(builder_error)?;
-            add_inline_asm_elementtype_attrs(&self.cx.context, call, &element_type_attrs)?;
+            add_inline_asm_elementtype_attrs(self.cx.context, call, &element_type_attrs)?;
             self.store_inline_asm_direct_outputs(call, &direct_outputs)
         }
 
