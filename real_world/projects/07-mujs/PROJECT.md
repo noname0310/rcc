@@ -10,7 +10,9 @@ Do not edit upstream `.c` or `.h` files. Any adaptation must live in this
 directory as wrapper scripts or build-script-only patches.
 
 Current target: compile `main.c` + `one.c`, link with host `libm`, and run a
-`print(1+2)` JavaScript smoke through both host and `rcc` binaries.
+multi-feature JavaScript smoke through both host and `rcc` binaries.  The smoke
+covers loops, closures, objects, arrays, JSON, regular expressions, strings,
+and math before comparing stdout byte-for-byte.
 
 Entry point:
 

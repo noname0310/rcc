@@ -150,7 +150,8 @@ bash real_world/projects/07-mujs/scripts/run-smoke.sh
 ```
 
 The probe builds `main.c` + `one.c` with both host `cc` and `rcc`, links with
-`-lm`, runs `print(1+2)`, and compares output.
+`-lm`, runs a generated JavaScript smoke covering loops, closures, objects,
+arrays, JSON, regular expressions, strings, and math, then compares output.
 
 Expected surfaces:
 

@@ -11,7 +11,7 @@ with larger build systems and more platform assumptions.
 | 04 | LibTomMath | <https://github.com/libtom/libtommath> | compile the library objects | run a small arithmetic smoke program | many translation units, integer-heavy code |
 | 05 | Lua | <https://www.lua.org/source/> | compile the Lua core library first, then the interpreter if reachable | run one small script if linkage works | real VM code, parser/runtime tables, portable C |
 | 06 | SQLite amalgamation | <https://www.sqlite.org/howtocompile.html> | compile `sqlite3.c` as an object before attempting shell linkage | run one in-memory query if shell/library linkage works | single huge translation unit, strong stress test |
-| 07 | MuJS | <https://mujs.com/introduction.html> | compile core objects only | run a tiny expression if executable linkage works | small embeddable JS engine, more complex control flow |
+| 07 | MuJS | <https://mujs.com/introduction.html> | compile core objects only | run a multi-feature JavaScript smoke if executable linkage works | small embeddable JS engine, more complex control flow |
 | 08 | QuickJS | <https://bellard.org/quickjs/> | compile selected core objects only | run a tiny expression only after GNU/platform blockers are resolved | hard target with GNU/platform assumptions |
 | 09 | GNU coreutils | <https://github.com/coreutils/coreutils> | host-bootstrap/configure first, then compile one small utility with `rcc` | run that utility against host output once linkage works | glibc/POSIX/GNU userland target with heavy gnulib and hosted-header assumptions |
 

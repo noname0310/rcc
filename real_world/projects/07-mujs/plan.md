@@ -35,16 +35,26 @@ rcc --target=x86_64-unknown-linux-gnu --linux-gnu-hosted -std=c99 -O2 \
     -I upstream upstream/main.c upstream/one.c -lm -o build/mujs-rcc
 ```
 
-It then runs both on:
+It then runs both on a generated JavaScript smoke that covers loops, closures,
+objects, arrays, JSON, regular expressions, strings, and math.  The final line
+is:
 
-```js
-print(1+2)
+```text
+mujs smoke ok
 ```
 
 Expected output:
 
 ```text
-3
+ok loop
+ok closure
+ok object
+ok array
+ok json
+ok regexp
+ok string
+ok math
+mujs smoke ok
 ```
 
 ## Current Result

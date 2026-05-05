@@ -27,7 +27,39 @@ if [ "${RCC_BUILD:-1}" != "0" ]; then
     ) >"$logs/cargo-build-rcc.stdout" 2>"$logs/cargo-build-rcc.stderr"
 fi
 
-printf 'print(1+2)\n' >"$build/smoke.js"
+cat >"$build/smoke.js" <<'JS'
+function assertEq(name, actual, expected) {
+    if (actual !== expected) {
+        print("FAIL " + name + ": " + actual + " !== " + expected);
+        throw new Error(name);
+    }
+    print("ok " + name);
+}
+
+var sum = 0;
+for (var i = 0; i < 10; ++i)
+    sum += i;
+assertEq("loop", sum, 45);
+
+function makeAdder(n) {
+    return function(x) { return n + x; };
+}
+assertEq("closure", makeAdder(5)(7), 12);
+
+var obj = { a: 1, b: 2 };
+assertEq("object", obj.a + obj.b, 3);
+
+var arr = [1, 2, 3];
+arr.push(4);
+assertEq("array", arr.join(","), "1,2,3,4");
+
+assertEq("json", JSON.parse("{\"x\":[1,2,3]}").x[2], 3);
+assertEq("regexp", /foo([0-9]+)/.exec("foo42")[1], "42");
+assertEq("string", "a,b,c".split(",").reverse().join(""), "cba");
+assertEq("math", Math.floor(Math.sin(Math.PI / 2) * 10), 10);
+
+print("mujs smoke ok");
+JS
 
 "$host_cc" \
     -std=c99 \
@@ -59,5 +91,5 @@ LLVM_SYS_181_PREFIX="$llvm_prefix" "$rcc" \
 diff -u "$artifacts/host-mujs-smoke.stdout" "$artifacts/rcc-mujs-smoke.stdout" \
     >"$logs/smoke-output.diff"
 
-grep -qx '3' "$artifacts/rcc-mujs-smoke.stdout"
+grep -qx 'mujs smoke ok' "$artifacts/rcc-mujs-smoke.stdout"
 cat "$artifacts/rcc-mujs-smoke.stdout"

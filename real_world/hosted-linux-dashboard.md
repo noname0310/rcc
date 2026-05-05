@@ -35,7 +35,7 @@ LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 \
 | Syntax/HIR | PASS | `rcc` compiles `main.c` and `one.c` under `--linux-gnu-hosted`. | none |
 | Object | PASS | LLVM backend emits objects for both translation units. | none |
 | Link | PASS | `-lm` is forwarded to the host linker driver. | none |
-| Runtime | PASS | Host and rcc outputs both print `3` for `print(1+2)`. | none |
+| Runtime | PASS | Host and rcc outputs match for loops, closures, objects, arrays, JSON, regexp, strings, and math; final line is `mujs smoke ok`. | none |
 
 Runtime ownership: MuJS function bodies are compiled from upstream sources by
 rcc; libc/libm behavior is supplied by the host.
