@@ -18,7 +18,7 @@ and the selected linker driver.
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
-| GNU coreutils | source cloned; bootstrap not run in tracked scripts yet | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-03` through `16-17`; first target utility is `src/true.c` |
+| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; utility host build blocked | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-13` through `16-17`; first target utility remains `src/true.c` |
 
 ## Classification Rules
 
@@ -179,13 +179,21 @@ Current record: `real_world/projects/09-gnu-coreutils/plan.md`.
 
 First target utility: `src/true.c`.
 
-Planned repro flow:
+Current repro flow:
 
 ```sh
 cd real_world/projects/09-gnu-coreutils
-# Task 16-16 owns the concrete bootstrap/configure command and generated logs.
-# Task 16-17 owns the first rcc compile command for src/true.c.
+bash scripts/prepare-local-bootstrap-tools.sh
+bash scripts/run-gnulib-config-probe.sh
 ```
+
+The generated config was observed at
+`build/gnulib-config-probe/build/lib/config.h`.  The first host oracle command
+is `make -C build/gnulib-config-probe/build -j2 src/true`, followed by
+`build/gnulib-config-probe/build/src/true`; on the current local WSL setup, the
+host build is blocked in `lib/hard-locale.c` by a generated gnulib include-chain
+issue around `SETLOCALE_NULL_MAX` / `setlocale_null_r`, recorded in ignored
+`logs/gnulib-config-probe/make-true.stderr`.
 
 Expected first surfaces:
 

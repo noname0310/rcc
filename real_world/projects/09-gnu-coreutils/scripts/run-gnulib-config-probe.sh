@@ -15,6 +15,12 @@ install_dir="$work_root/install"
 rcc="${RCC:-$repo_root/target/debug/rcc}"
 host_cc="${HOST_CC:-cc}"
 
+local_env="$project_dir/build/local-bootstrap-env.sh"
+if [ -f "$local_env" ]; then
+    # shellcheck source=/dev/null
+    . "$local_env"
+fi
+
 usage() {
     cat <<'USAGE'
 Usage: run-gnulib-config-probe.sh [--dry-run]

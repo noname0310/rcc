@@ -1,6 +1,6 @@
 # 09 -- GNU coreutils
 
-Status: cloned, gnulib config probe scripted; local bootstrap is environment-gated
+Status: bootstrap/configure scripted; generated config.h observed; utility host build blocked
 
 Source: <https://github.com/coreutils/coreutils>
 
@@ -22,6 +22,7 @@ expanding to more of `src/`.
 Probe entrypoint:
 
 ```sh
+bash real_world/projects/09-gnu-coreutils/scripts/prepare-local-bootstrap-tools.sh
 bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
 ```
 

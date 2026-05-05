@@ -39,6 +39,7 @@ GNU coreutils is a deliberately hard hosted-Linux target:
 The reproducible probe entrypoint is:
 
 ```sh
+bash real_world/projects/09-gnu-coreutils/scripts/prepare-local-bootstrap-tools.sh
 bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
 ```
 
@@ -47,6 +48,17 @@ worktree under `build/gnulib-config-probe/src`, bootstraps/configures into
 `build/gnulib-config-probe/build`, writes logs under
 `logs/gnulib-config-probe/`, and asks `rcc` to lower a wrapper translation unit
 that includes generated `config.h` and `src/system.h`.
+
+The exact host commands are encoded in the scripts:
+
+```sh
+git -c core.autocrlf=false clone --recurse-submodules upstream build/gnulib-config-probe/src
+(cd build/gnulib-config-probe/src && ./bootstrap --skip-po)
+(cd build/gnulib-config-probe/build && \
+  build/gnulib-config-probe/src/configure \
+    --disable-nls --without-gmp --without-selinux \
+    --prefix=build/gnulib-config-probe/install CC=cc)
+```
 
 For the first `rcc` compile, use this include order:
 
@@ -63,6 +75,38 @@ CRLF shell scripts on Windows, so the probe deliberately clones a fresh
 `core.autocrlf=false` worktree before bootstrap.  If bootstrap tools are
 missing, the script exits `77` and writes `logs/gnulib-config-probe/blocker.env`
 linked to `tasks/16-linux-glibc-compat/16-gnu-coreutils-bootstrap-probe.md`.
+On the current WSL machine, `prepare-local-bootstrap-tools.sh` extracts the
+needed Debian packages into ignored `build/local-tools/`; no sudo/system install
+is required.
+
+Observed generated config:
+
+- `build/gnulib-config-probe/build/lib/config.h`
+- `PACKAGE_STRING`: `GNU coreutils UNKNOWN`
+- representative generated macros: `HAVE_DIRENT_H=1`
+
+Host runtime oracle command for the first utility:
+
+```sh
+make -C real_world/projects/09-gnu-coreutils/build/gnulib-config-probe/build -j2 src/true
+real_world/projects/09-gnu-coreutils/build/gnulib-config-probe/build/src/true
+```
+
+Current host-build status: configure succeeds, but `make src/true` fails in the
+host compiler before producing the oracle binary.  The failure is recorded in
+`logs/gnulib-config-probe/make-true.stderr` and is not an `rcc` compiler
+failure: `lib/hard-locale.c` sees missing `SETLOCALE_NULL_MAX` /
+`setlocale_null_r` declarations from the generated gnulib include chain.  The
+next coreutils task must either resolve that host-build input issue or select a
+smaller generated-header probe before using the utility as an oracle.
+
+Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
+progresses into `src/system.h`/gnulib replacement headers and fails on missing
+hosted declarations/macros such as `fputs_unlocked`, `fwrite_unlocked`,
+`fchownat`, `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and
+`S_TYPEISTMO`.  These are compiler/header-surface inputs for
+`tasks/16-linux-glibc-compat/17-gnu-coreutils-single-utility-probe.md` and the
+header audit task, not broad xfails.
 
 ## Non-Goals
 
