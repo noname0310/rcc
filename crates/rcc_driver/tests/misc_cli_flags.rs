@@ -9,6 +9,8 @@ use rcc_session::OptLevel;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+const PTHREAD_RUNTIME_SMOKE: &str = include_str!("fixtures/pthread_runtime_smoke.c");
+
 struct TempCFile {
     path: PathBuf,
 }
@@ -350,25 +352,7 @@ int main(void) { return 0; }
 
 #[test]
 fn pthread_header_shim_parses_and_typechecks_for_linux_target() {
-    let input = TempCFile::new(
-        "pthread-header",
-        r#"
-#include <pthread.h>
-
-static void *worker(void *arg) {
-    return arg;
-}
-
-int main(void) {
-    pthread_t thread;
-    if (pthread_create(&thread, 0, worker, 0) != 0)
-        return 1;
-    if (pthread_join(thread, 0) != 0)
-        return 2;
-    return 0;
-}
-"#,
-    );
+    let input = TempCFile::new("pthread-header", PTHREAD_RUNTIME_SMOKE);
     let output = input.sibling("hir");
     let result = Command::new(rcc_bin())
         .arg("--target=x86_64-unknown-linux-gnu")

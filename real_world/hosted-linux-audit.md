@@ -173,6 +173,12 @@ Observed blockers:
 Runtime ownership: pthread, atomics implementation details, libc, and libm are
 host responsibilities.  `rcc` owns parsing declarations and passing link flags.
 
+The minimal pthread runtime smoke fixture lives at
+`crates/rcc_driver/tests/fixtures/pthread_runtime_smoke.c`.  It is compiled and
+run by `crates/rcc_driver/tests/linker_flags.rs` when `RCC_RUN_LINK_E2E=1`,
+proving that `-pthread` is a driver/linker contract and not an rcc-owned thread
+implementation.
+
 ### GNU coreutils
 
 Current record: `real_world/projects/09-gnu-coreutils/plan.md`.

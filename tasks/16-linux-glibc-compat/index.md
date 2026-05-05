@@ -30,7 +30,7 @@ rcc-owned libc bodies.
 - [x] [15-mujs-hosted-smoke](15-mujs-hosted-smoke.md)
 - [x] [16-gnu-coreutils-bootstrap-probe](16-gnu-coreutils-bootstrap-probe.md)
 - [x] [17-gnu-coreutils-single-utility-probe](17-gnu-coreutils-single-utility-probe.md)
-- [ ] [18-posix-thread-runtime-smoke](18-posix-thread-runtime-smoke.md)
+- [x] [18-posix-thread-runtime-smoke](18-posix-thread-runtime-smoke.md)
 - [ ] [19-header-shim-audit-docs](19-header-shim-audit-docs.md)
 - [ ] [20-real-world-glibc-dashboard](20-real-world-glibc-dashboard.md)
 - [ ] [21-gnu-include-next-directive](21-gnu-include-next-directive.md)

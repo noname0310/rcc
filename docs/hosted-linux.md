@@ -139,6 +139,20 @@ filesystem/POSIX declarations used by GNU coreutils, and pthread/dlfcn
 declarations used by QuickJS and dynamic-loading probes.  Failures must become
 specific compiler or header-surface tasks; the gate does not use broad xfails.
 
+The pthread runtime smoke fixture is
+`crates/rcc_driver/tests/fixtures/pthread_runtime_smoke.c`.  On Linux with the
+LLVM backend enabled, this gate compiles, links, and runs it through host
+pthread:
+
+```sh
+LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 RCC_RUN_LINK_E2E=1 \
+  cargo test -p rcc_driver --features rcc_codegen_llvm/llvm \
+  --test linker_flags e2e_link_with_pthread_when_enabled -- --nocapture
+```
+
+Non-Linux targets must reject `-pthread` clearly instead of silently compiling a
+program that cannot link against a pthread implementation.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc

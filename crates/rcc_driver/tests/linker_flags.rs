@@ -13,6 +13,9 @@ use rcc_session::{Options, Session};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(not(windows))]
+const PTHREAD_RUNTIME_SMOKE: &str = include_str!("fixtures/pthread_runtime_smoke.c");
+
 struct TempFile {
     path: PathBuf,
 }
@@ -217,27 +220,7 @@ fn e2e_link_with_pthread_when_enabled() {
     }
     assert!(llvm_backend_enabled_for_this_build(), "LLVM backend feature is required");
 
-    let input = TempCFile::new(
-        "pthread",
-        r#"
-#include <pthread.h>
-
-static int value;
-static void *worker(void *arg) {
-    value = arg ? 7 : 3;
-    return 0;
-}
-
-int main(void) {
-    pthread_t thread;
-    if (pthread_create(&thread, 0, worker, &value) != 0)
-        return 10;
-    if (pthread_join(thread, 0) != 0)
-        return 11;
-    return value == 7 ? 0 : 12;
-}
-"#,
-    );
+    let input = TempCFile::new("pthread", PTHREAD_RUNTIME_SMOKE);
     let output = TempFile::empty_path("pthread-out");
     let link = LinkOptions { pthread: true, ..LinkOptions::default() };
 
