@@ -52,6 +52,15 @@ docs/conformance.json
 reports/csmith/
 reports/release-check/
 
+# Real-world project probes. Source clones and build outputs are local inputs,
+# not vendored repository state. Keep the per-project metadata, plans, wrappers,
+# and build-script-only patch files checked in.
+real_world/projects/*/upstream/
+real_world/projects/*/build/
+real_world/projects/*/artifacts/
+real_world/projects/*/logs/
+real_world/projects/*/scratch/
+
 # The publish-only distribution crate is intentionally outside the workspace so
 # it does not introduce a second workspace `rcc` binary. Keep its generated
 # build artifacts local.
