@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-08: Builtin runtime integration tests
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-01 through 15-07    **Milestone:** M6

@@ -15,7 +15,7 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [05-builtin-va-functions](05-builtin-va-functions.md)
 - [x] [06-builtin-common](06-builtin-common.md)
 - [x] [07-system-header-search](07-system-header-search.md)
-- [ ] [08-unit-tests](08-unit-tests.md)
+- [x] [08-unit-tests](08-unit-tests.md)
 
 ## Downstream
 
