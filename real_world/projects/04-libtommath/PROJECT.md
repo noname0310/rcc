@@ -1,6 +1,6 @@
 # 04 — LibTomMath
 
-Status: not started
+Status: smoke-passed
 
 Source: <https://github.com/libtom/libtommath>
 
@@ -9,4 +9,3 @@ files. Do not edit upstream `.c` or `.h` files. Any adaptation must live in this
 directory as wrapper scripts or build-script-only patches.
 
 Initial target: compile library objects and one small arithmetic smoke program.
-
