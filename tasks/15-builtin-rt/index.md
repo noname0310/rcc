@@ -27,6 +27,7 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [17-complex-header-imaginary-unit](17-complex-header-imaginary-unit.md)
 - [x] [18-tgmath-type-generic-dispatch](18-tgmath-type-generic-dispatch.md)
 - [x] [19-posix-errno-constants](19-posix-errno-constants.md)
+- [x] [20-stdlib-exit-status-macros](20-stdlib-exit-status-macros.md)
 
 ## Downstream
 

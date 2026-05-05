@@ -6777,7 +6777,21 @@ fn eval_array_bound_as_i128(
             let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
             Some(i128::from(layout.align))
         }
+        rcc_ast::ExprKind::Ident(name) => {
+            let def_id = *resolver.ordinary.get(name)?;
+            match &crate_.defs.get(def_id)?.kind {
+                DefKind::Enumerator { value, .. } => Some(*value),
+                _ => None,
+            }
+        }
         rcc_ast::ExprKind::IntLit(lit) => i128::try_from(lit.value).ok(),
+        rcc_ast::ExprKind::CharLit(lit) => Some(i128::from(lit.value)),
+        rcc_ast::ExprKind::BuiltinOffsetof { ty, designators } => Some(i128::from(
+            lower_builtin_offsetof(ty, designators, expr.span, crate_, tcx, resolver, session),
+        )),
+        rcc_ast::ExprKind::Cast { expr: operand, .. } => {
+            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
+        }
         rcc_ast::ExprKind::Paren(inner) => {
             eval_array_bound_as_i128(inner, scope, typedef_scope, tcx, resolver, crate_, session)
         }

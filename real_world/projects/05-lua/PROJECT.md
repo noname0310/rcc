@@ -1,6 +1,6 @@
 # 05 — Lua
 
-Status: not started
+Status: blocked on rcc runtime codegen bug
 
 Source: <https://www.lua.org/source/>
 
@@ -11,3 +11,6 @@ build-script-only patches.
 
 Initial target: compile the Lua core library before attempting the interpreter.
 
+Current target: Lua 5.5.0 official tarball. The core library and interpreter
+compile/link with `rcc`; executing a Lua chunk is blocked by
+`tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md`.

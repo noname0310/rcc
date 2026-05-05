@@ -40,6 +40,7 @@ AST -> HIR: resolve every name, fold every declarator into a Ty, materialise com
 - [x] [30-file-scope-compound-literal-static-storage](30-file-scope-compound-literal-static-storage.md)
 - [x] [31-aggregate-brace-elision-cursor](31-aggregate-brace-elision-cursor.md)
 - [x] [32-string-literal-subaggregate-initializer](32-string-literal-subaggregate-initializer.md)
+- [x] [33-array-bound-ice-constants](33-array-bound-ice-constants.md)
 
 ## Downstream
 

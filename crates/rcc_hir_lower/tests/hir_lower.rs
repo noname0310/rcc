@@ -816,6 +816,65 @@ fn s6_7_5_sizeof_type_array_bound_is_fixed() {
 }
 
 #[test]
+fn s6_7_5_enum_constant_array_bound_is_fixed() {
+    let src = r#"
+        enum { N = 6 };
+        struct S { int a[N]; };
+        int f(struct S *s) { return s->a[5]; }
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let array_ty = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Record { fields, .. } if fields.len() == 1 => Some(fields[0].ty),
+            _ => None,
+        })
+        .expect("record field should be lowered");
+
+    match tcx.get(array_ty) {
+        Ty::Array { len: Some(6), is_vla: false, .. } => {}
+        other => panic!("enum constant bound should be fixed Array[6], got {other:?}"),
+    }
+    let layout = LayoutCx::with_defs(&tcx, &hir.defs).layout_of(array_ty).unwrap();
+    assert_eq!(layout.size, 24);
+}
+
+#[test]
+fn s6_7_5_cast_and_offsetof_array_bounds_are_fixed() {
+    let src = r#"
+        struct Base { char c; int value; };
+        struct S {
+            char padding[__builtin_offsetof(struct Base, value)];
+            char scratch[(int)(16 * sizeof(void*))];
+        };
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let fields = hir
+        .defs
+        .iter()
+        .filter_map(|def| match &def.kind {
+            DefKind::Record { fields, .. } if fields.len() == 2 => Some(fields),
+            _ => None,
+        })
+        .last()
+        .expect("struct S fields should be lowered");
+
+    match tcx.get(fields[0].ty) {
+        Ty::Array { len: Some(4), is_vla: false, .. } => {}
+        other => panic!("offsetof bound should be fixed Array[4], got {other:?}"),
+    }
+    match tcx.get(fields[1].ty) {
+        Ty::Array { len: Some(128), is_vla: false, .. } => {}
+        other => panic!("cast/sizeof bound should be fixed Array[128], got {other:?}"),
+    }
+}
+
+#[test]
 fn gnu_aligned_attribute_sets_record_layout_override() {
     let src = r#"
         typedef struct x { int a; int b; } __attribute__((aligned(32))) X;

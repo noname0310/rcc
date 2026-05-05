@@ -5,6 +5,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <wctype.h>
 
@@ -81,6 +82,8 @@ int main(void) {
     return 1;
   if (EINTR != 4 || EINVAL != 22 || ENOMEM != 12)
     return 13;
+  if (EXIT_SUCCESS != 0 || EXIT_FAILURE == 0 || RAND_MAX < 32767 || MB_CUR_MAX < 1)
+    return 14;
   if (errno != 0)
     return 2;
   if (parsed != (intmax_t)123 || unsigned_parsed != (uintmax_t)456)
