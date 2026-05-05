@@ -1534,3 +1534,18 @@ int main(void) {
 The detector is intentionally syntactic. It does not perform full CFG
 reachability or constant-condition analysis, and labels / `case` / `default`
 boundaries stop a warning run because they can be jump targets.
+
+## W0032 — deprecated declaration used
+
+A function or object declared with GNU `__attribute__((deprecated))` was
+referenced:
+
+```c
+__attribute__((deprecated)) int old_api(void);
+int main(void) {
+    return old_api();  // warning[W0032]: use of deprecated declaration `old_api`
+}
+```
+
+Remove the deprecated attribute from declarations that are still supported, or
+move callers to the replacement API before enabling stricter warning policy.

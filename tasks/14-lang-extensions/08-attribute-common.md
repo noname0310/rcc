@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-08: Common attribute semantics
 
 **Phase:** 14-lang-extensions    **Depends on:** 14-07    **Milestone:** M6

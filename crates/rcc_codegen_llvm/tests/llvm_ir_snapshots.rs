@@ -14,9 +14,13 @@ use rcc_session::{Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
 fn render(name: &str, src: &str) -> String {
+    render_with_options(name, src, Options::default())
+}
+
+fn render_with_options(name: &str, src: &str, opts: Options) -> String {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut session = Session::with_handler(Options::default(), handler);
+    let mut session = Session::with_handler(opts, handler);
     let file = session
         .source_map
         .write()
@@ -78,6 +82,25 @@ macro_rules! snap {
             insta::assert_snapshot!(render($name, $src), @$snapshot);
         });
     };
+}
+
+#[test]
+fn common_gnu_attrs_lower_to_llvm_ir() {
+    let ir = render_with_options(
+        "common_gnu_attrs",
+        r#"
+        __attribute__((noreturn, weak, visibility("hidden"), section(".text.fatal")))
+        void fatal(void) { for (;;) {} }
+        __attribute__((weak, visibility("hidden"), section(".data.rcc")))
+        int data;
+        "#,
+        Options { gnu_attributes: true, ..Options::default() },
+    );
+
+    assert!(ir.contains("define weak hidden void @fatal()"), "{ir}");
+    assert!(ir.contains("section \".text.fatal\""), "{ir}");
+    assert!(ir.contains("noreturn"), "{ir}");
+    assert!(ir.contains("@data = weak hidden global i32 0, section \".data.rcc\""), "{ir}");
 }
 
 #[test]

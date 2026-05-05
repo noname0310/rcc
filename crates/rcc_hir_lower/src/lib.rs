@@ -20,10 +20,11 @@ use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::OverflowOp;
 use rcc_hir::{
-    Body, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
+    Body, CommonAttrs, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
     GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
     HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl,
-    ObjectQuals, RecordKind, ScalarStorageOrder, SwitchCase, TyCtxt, TyId, ValueCat,
+    ObjectQuals, RecordKind, ScalarStorageOrder, SwitchCase, SymbolVisibility, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -246,6 +247,8 @@ fn lower_function_params(
             is_param: true,
             span: param.span,
         });
+        let attrs = lower_common_attrs(&param.specs, &param.declarator, session);
+        merge_local_attrs(body, local, attrs);
         if let Some(sym) = name {
             scope.insert(sym, Binding::Local(local));
         }
@@ -1891,6 +1894,7 @@ fn lower_block_decl(
                 &init_decl.declarator,
                 crate_,
                 resolver,
+                session,
             );
             scope.insert(name, Binding::Def(def_id));
             continue;
@@ -1951,6 +1955,8 @@ fn lower_block_decl(
             is_param: false,
             span: decl.span,
         });
+        let attrs = lower_common_attrs(&decl.specs, &init_decl.declarator, session);
+        merge_local_attrs(body, local, attrs);
         if !duplicate {
             scope.insert(name, Binding::Local(local));
         }
@@ -1995,6 +2001,7 @@ fn lower_block_decl(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_block_scope_extern_object_decl(
     name: Symbol,
     span: Span,
@@ -2003,13 +2010,16 @@ fn lower_block_scope_extern_object_decl(
     declarator: &Declarator,
     crate_: &mut HirCrate,
     resolver: &Resolver,
+    session: &mut Session,
 ) -> DefId {
+    let attrs = lower_common_attrs(specs, declarator, session);
     if let Some(def_id) = resolver
         .ordinary
         .get(&name)
         .copied()
         .filter(|id| matches!(crate_.defs[*id].kind, DefKind::Global { .. }))
     {
+        merge_def_attrs(crate_, def_id, attrs);
         return def_id;
     }
 
@@ -2025,6 +2035,7 @@ fn lower_block_scope_extern_object_decl(
         },
     });
     crate_.defs[def_id].id = def_id;
+    merge_def_attrs(crate_, def_id, attrs);
     def_id
 }
 
@@ -2072,6 +2083,8 @@ fn lower_block_scope_static_object_decl(
         },
     });
     crate_.defs[def_id].id = def_id;
+    let attrs = lower_common_attrs(specs, &init_decl.declarator, session);
+    merge_def_attrs(crate_, def_id, attrs);
     if let Some((_init, init_body)) = global_init {
         if !init_body.exprs.is_empty() {
             crate_.global_init_bodies.insert(def_id, init_body);
@@ -2123,6 +2136,8 @@ fn lower_block_scope_function_decl(
                 _ => false,
             };
         }
+        let attrs = lower_common_attrs(specs, declarator, session);
+        merge_def_attrs(crate_, def, attrs);
         return Some(def);
     }
 
@@ -2146,6 +2161,8 @@ fn lower_block_scope_function_decl(
         },
     });
     crate_.defs[def].id = def;
+    let attrs = lower_common_attrs(specs, declarator, session);
+    merge_def_attrs(crate_, def, attrs);
     Some(def)
 }
 
@@ -6985,6 +7002,7 @@ fn assign_def_ids(
                 // Function definition — extract name from declarator.
                 if let Some((name, _span)) = func_def.declarator.name {
                     let flags = function_decl_flags(&func_def.specs, &func_def.declarator, session);
+                    let attrs = lower_common_attrs(&func_def.specs, &func_def.declarator, session);
                     let id = if let Some(existing) = resolver
                         .ordinary
                         .get(&name)
@@ -7007,6 +7025,7 @@ fn assign_def_ids(
                             *no_instrument_function |= flags.no_instrument_function;
                         }
                         crate_.defs[existing].span = func_def.span;
+                        merge_def_attrs(crate_, existing, attrs);
                         existing
                     } else {
                         let id = crate_.defs.push(Def {
@@ -7024,6 +7043,7 @@ fn assign_def_ids(
                             },
                         });
                         crate_.defs[id].id = id;
+                        merge_def_attrs(crate_, id, attrs);
                         resolver.ordinary.insert(name, id);
                         id
                     };
@@ -7103,6 +7123,8 @@ fn assign_def_ids(
                         } else if is_function_decl {
                             let flags =
                                 function_decl_flags(&decl.specs, &init_decl.declarator, session);
+                            let attrs =
+                                lower_common_attrs(&decl.specs, &init_decl.declarator, session);
                             let id = if let Some(existing) =
                                 resolver.ordinary.get(&name).copied().filter(|id| {
                                     matches!(crate_.defs[*id].kind, DefKind::Function { .. })
@@ -7120,6 +7142,7 @@ fn assign_def_ids(
                                     *is_inline = flags.is_inline;
                                     *is_extern_inline = flags.is_extern_inline;
                                 }
+                                merge_def_attrs(crate_, existing, attrs);
                                 existing
                             } else {
                                 let id = crate_.defs.push(Def {
@@ -7137,6 +7160,7 @@ fn assign_def_ids(
                                     },
                                 });
                                 crate_.defs[id].id = id;
+                                merge_def_attrs(crate_, id, attrs);
                                 id
                             };
                             if !duplicate_in_decl {
@@ -7144,6 +7168,8 @@ fn assign_def_ids(
                             }
                         } else {
                             // Global variable (or extern declaration).
+                            let attrs =
+                                lower_common_attrs(&decl.specs, &init_decl.declarator, session);
                             let linkage = match decl.specs.storage {
                                 Some(StorageClass::Static) => Linkage::Internal,
                                 Some(StorageClass::Extern) => Linkage::External,
@@ -7153,6 +7179,7 @@ fn assign_def_ids(
                                 resolver.ordinary.get(&name).copied().filter(|id| {
                                     matches!(crate_.defs[*id].kind, DefKind::Global { .. })
                                 }) {
+                                merge_def_attrs(crate_, existing, attrs);
                                 existing
                             } else {
                                 let id = crate_.defs.push(Def {
@@ -7170,6 +7197,7 @@ fn assign_def_ids(
                                     },
                                 });
                                 crate_.defs[id].id = id;
+                                merge_def_attrs(crate_, id, attrs);
                                 id
                             };
                             if !duplicate_in_decl || is_global_object_decl {
@@ -7211,6 +7239,127 @@ fn attrs_contain_no_instrument_function(attrs: &[rcc_ast::Attribute], session: &
             "no_instrument_function" | "__no_instrument_function__"
         )
     })
+}
+
+fn lower_common_attrs(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &rcc_ast::Declarator,
+    session: &mut Session,
+) -> CommonAttrs {
+    let mut out = CommonAttrs::default();
+    for attr in specs.attrs.iter().chain(&declarator.attrs) {
+        lower_common_attr(attr, session, &mut out);
+    }
+    out
+}
+
+fn merge_def_attrs(crate_: &mut HirCrate, def: DefId, attrs: CommonAttrs) {
+    if attrs.is_empty() {
+        return;
+    }
+    crate_.def_attrs.entry(def).or_default().merge(attrs);
+}
+
+fn merge_local_attrs(body: &mut Body, local: Local, attrs: CommonAttrs) {
+    if attrs.is_empty() {
+        return;
+    }
+    body.local_attrs.entry(local).or_default().merge(attrs);
+}
+
+fn lower_common_attr(attr: &rcc_ast::Attribute, session: &mut Session, out: &mut CommonAttrs) {
+    let name = session.interner.get(attr.name).to_owned();
+    if attr_name_eq(&name, "noreturn") {
+        if expect_attr_arg_count(attr, 0, session) {
+            out.noreturn = true;
+        }
+    } else if attr_name_eq(&name, "unused") {
+        if expect_attr_arg_count(attr, 0, session) {
+            out.unused = true;
+        }
+    } else if attr_name_eq(&name, "deprecated") {
+        if expect_attr_arg_count(attr, 0, session) {
+            out.deprecated = true;
+        }
+    } else if attr_name_eq(&name, "weak") {
+        if expect_attr_arg_count(attr, 0, session) {
+            out.weak = true;
+        }
+    } else if attr_name_eq(&name, "visibility") {
+        if let Some(value) = attr_single_string_arg(attr, session) {
+            match value.as_slice() {
+                b"default" => out.visibility = Some(SymbolVisibility::Default),
+                b"hidden" => out.visibility = Some(SymbolVisibility::Hidden),
+                _ => emit_invalid_common_attr(
+                    attr.span,
+                    "visibility attribute expects \"default\" or \"hidden\"",
+                    session,
+                ),
+            }
+        }
+    } else if attr_name_eq(&name, "section") {
+        if let Some(value) = attr_single_string_arg(attr, session) {
+            match std::str::from_utf8(&value) {
+                Ok(section) if !section.is_empty() && !section.as_bytes().contains(&0) => {
+                    out.section = Some(session.interner.intern(section));
+                }
+                _ => emit_invalid_common_attr(
+                    attr.span,
+                    "section attribute expects a non-empty string literal without NUL bytes",
+                    session,
+                ),
+            }
+        }
+    }
+}
+
+fn attr_name_eq(name: &str, expected: &str) -> bool {
+    name == expected
+        || (name.starts_with("__")
+            && name.ends_with("__")
+            && name.len() == expected.len() + 4
+            && &name[2..name.len() - 2] == expected)
+        || (name.ends_with("__")
+            && name.len() == expected.len() + 2
+            && &name[..name.len() - 2] == expected)
+}
+
+fn expect_attr_arg_count(
+    attr: &rcc_ast::Attribute,
+    expected: usize,
+    session: &mut Session,
+) -> bool {
+    if attr.args.len() == expected {
+        return true;
+    }
+    emit_invalid_common_attr(
+        attr.span,
+        &format!("attribute expects {expected} argument(s)"),
+        session,
+    );
+    false
+}
+
+fn attr_single_string_arg(attr: &rcc_ast::Attribute, session: &mut Session) -> Option<Vec<u8>> {
+    if !expect_attr_arg_count(attr, 1, session) {
+        return None;
+    }
+    let [arg] = attr.args.as_slice() else {
+        return None;
+    };
+    let [token] = arg.tokens.as_slice() else {
+        emit_invalid_common_attr(attr.span, "attribute expects one string literal", session);
+        return None;
+    };
+    let rcc_ast::AttributeTokenKind::String(bytes) = &token.kind else {
+        emit_invalid_common_attr(attr.span, "attribute expects one string literal", session);
+        return None;
+    };
+    Some(bytes.clone())
+}
+
+fn emit_invalid_common_attr(span: Span, message: &str, session: &mut Session) {
+    session.handler.struct_err(span, message).code(rcc_errors::codes::E0061).emit();
 }
 
 fn is_file_scope_function_declarator(declarator: &Declarator) -> bool {
@@ -7418,6 +7567,8 @@ fn finalize_file_scope_def_types(
             if let Some(init) = &init_decl.init {
                 ty = complete_initializer_type(ty, init, tcx, crate_);
             }
+            let attrs = lower_common_attrs(&decl.specs, &init_decl.declarator, session);
+            merge_def_attrs(crate_, def_id, attrs);
             let has_explicit_init = init_decl.init.is_some();
             let global_init = if let Some(init) = &init_decl.init {
                 let mut init_body = Body::default();

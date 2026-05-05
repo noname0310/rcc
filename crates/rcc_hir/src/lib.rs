@@ -41,6 +41,8 @@ rcc_data_structures::new_index! {
 pub struct HirCrate {
     /// Every top-level definition in declaration order.
     pub defs: IndexVec<DefId, Def>,
+    /// GNU/common attributes keyed by top-level definition id.
+    pub def_attrs: FxHashMap<DefId, CommonAttrs>,
     /// Function bodies, keyed by the `DefId` of the enclosing function.
     pub bodies: FxHashMap<DefId, Body>,
     /// File-scope initializer expression bodies, keyed by the initialized
@@ -285,12 +287,61 @@ pub enum GlobalInitValue {
 pub struct Body {
     /// Every local in declaration order: `locals[0]` is the implicit return slot.
     pub locals: IndexVec<Local, LocalDecl>,
+    /// GNU/common attributes keyed by local id.
+    pub local_attrs: FxHashMap<Local, CommonAttrs>,
     /// Root statement (usually a compound statement).
     pub root: Option<HirStmtId>,
     /// Arena of statements.
     pub stmts: IndexVec<HirStmtId, HirStmt>,
     /// Arena of expressions.
     pub exprs: IndexVec<HirExprId, HirExpr>,
+}
+
+/// Common GNU attributes that survive beyond parsing.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CommonAttrs {
+    /// `__attribute__((noreturn))`.
+    pub noreturn: bool,
+    /// `__attribute__((unused))`.
+    pub unused: bool,
+    /// `__attribute__((deprecated))`.
+    pub deprecated: bool,
+    /// `__attribute__((visibility("...")))`.
+    pub visibility: Option<SymbolVisibility>,
+    /// `__attribute__((section("...")))`.
+    pub section: Option<Symbol>,
+    /// `__attribute__((weak))`.
+    pub weak: bool,
+}
+
+impl CommonAttrs {
+    /// Merge another attribute set, with later scalar values winning.
+    pub fn merge(&mut self, other: Self) {
+        self.noreturn |= other.noreturn;
+        self.unused |= other.unused;
+        self.deprecated |= other.deprecated;
+        if other.visibility.is_some() {
+            self.visibility = other.visibility;
+        }
+        if other.section.is_some() {
+            self.section = other.section;
+        }
+        self.weak |= other.weak;
+    }
+
+    /// True when all attributes are at their default value.
+    pub fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// External symbol visibility requested by GNU `visibility`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum SymbolVisibility {
+    /// Default target visibility.
+    Default,
+    /// Hidden ELF/Mach-O visibility.
+    Hidden,
 }
 
 rcc_data_structures::new_index! {

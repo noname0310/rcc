@@ -23,7 +23,7 @@ use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, ConvertKind, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId,
     HirExprKind, HirStmtKind, Layout, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp,
-    RecordKind, TyCtxt, TyId, ValueCat,
+    RecordKind, SymbolVisibility, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -905,6 +905,60 @@ fn gnu_aligned_attribute_sets_field_layout_override() {
     let outer_layout = LayoutCx::with_defs(&tcx, &hir.defs).record_layout_of(outer_ty).unwrap();
     assert_eq!(outer_layout.layout.align, 8);
     assert_eq!(outer_layout.fields[1].offset, 8);
+}
+
+#[test]
+fn gnu_common_function_attrs_lower_to_def_attrs() {
+    let src = r#"
+        __attribute__((noreturn, deprecated, visibility("hidden"), section(".text.hot"), weak))
+        void f(void);
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(!cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error));
+
+    let (def, _) = hir
+        .defs
+        .iter_enumerated()
+        .find(|(_, def)| matches!(def.kind, DefKind::Function { .. }))
+        .expect("function def");
+    let attrs = hir.def_attrs.get(&def).copied().expect("function attrs");
+    assert!(attrs.noreturn);
+    assert!(attrs.deprecated);
+    assert_eq!(attrs.visibility, Some(SymbolVisibility::Hidden));
+    assert!(attrs.section.is_some());
+    assert!(attrs.weak);
+}
+
+#[test]
+fn gnu_common_global_and_local_unused_attrs_lower() {
+    let src = r#"
+        int g __attribute__((unused, visibility("default"), section(".data.rcc")));
+        int main(void) {
+            int x __attribute__((unused));
+            return 0;
+        }
+    "#;
+    let opts = Options { gnu_attributes: true, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(!cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error));
+
+    let (global, _) = hir
+        .defs
+        .iter_enumerated()
+        .find(|(_, def)| matches!(def.kind, DefKind::Global { .. }))
+        .expect("global def");
+    let global_attrs = hir.def_attrs.get(&global).copied().expect("global attrs");
+    assert!(global_attrs.unused);
+    assert_eq!(global_attrs.visibility, Some(SymbolVisibility::Default));
+    assert!(global_attrs.section.is_some());
+
+    let body = hir.bodies.values().next().expect("main body");
+    assert!(
+        body.local_attrs.values().any(|attrs| attrs.unused),
+        "expected local `unused` attribute in {:#?}",
+        body.local_attrs
+    );
 }
 
 #[test]

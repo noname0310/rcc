@@ -11,6 +11,7 @@ use rcc_session::Session;
 
 /// Run typed-HIR warning checks.
 pub fn check_warnings(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
+    warn_deprecated_symbols(session, hir);
     warn_unused_functions(session, tcx, hir);
     for body in hir.bodies.values() {
         warn_unreachable_code_in_body(session, body);
@@ -25,6 +26,9 @@ fn warn_unused_functions(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
         let DefKind::Function { has_body: true, is_static: true, .. } = def.kind else {
             continue;
         };
+        if hir.def_attrs.get(&def_id).is_some_and(|attrs| attrs.unused) {
+            continue;
+        }
         if referenced.contains(&def_id) {
             continue;
         }
@@ -46,12 +50,208 @@ fn collect_referenced_defs(tcx: &TyCtxt, hir: &HirCrate) -> BTreeSet<DefId> {
     usage.def_refs
 }
 
+fn warn_deprecated_symbols(session: &mut Session, hir: &HirCrate) {
+    if hir.def_attrs.values().all(|attrs| !attrs.deprecated) {
+        return;
+    }
+    for body in hir.bodies.values() {
+        DeprecatedWalker { body, hir, session }.visit_body_root();
+    }
+    for (def, body) in &hir.global_init_bodies {
+        let mut walker = DeprecatedWalker { body, hir, session };
+        if let DefKind::Global { init: Some(init), .. } = &hir.defs[*def].kind {
+            for entry in &init.entries {
+                if let Some(expr) = entry.expr {
+                    walker.visit_expr(expr);
+                }
+            }
+        }
+    }
+}
+
+struct DeprecatedWalker<'a, 's> {
+    body: &'a Body,
+    hir: &'a HirCrate,
+    session: &'s mut Session,
+}
+
+impl DeprecatedWalker<'_, '_> {
+    fn visit_body_root(&mut self) {
+        if let Some(root) = self.body.root {
+            self.visit_stmt(root);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: HirStmtId) {
+        match &self.body.stmts[stmt].kind {
+            HirStmtKind::Block(stmts) => {
+                for stmt in stmts {
+                    self.visit_stmt(*stmt);
+                }
+            }
+            HirStmtKind::Expr(expr)
+            | HirStmtKind::GotoComputed(expr)
+            | HirStmtKind::Return(Some(expr)) => self.visit_expr(*expr),
+            HirStmtKind::If { cond, then_branch, else_branch } => {
+                self.visit_expr(*cond);
+                self.visit_stmt(*then_branch);
+                if let Some(else_branch) = else_branch {
+                    self.visit_stmt(*else_branch);
+                }
+            }
+            HirStmtKind::While { cond, body } | HirStmtKind::DoWhile { body, cond } => {
+                self.visit_expr(*cond);
+                self.visit_stmt(*body);
+            }
+            HirStmtKind::For { init, cond, step, body } => {
+                if let Some(init) = init {
+                    self.visit_stmt(*init);
+                }
+                if let Some(cond) = cond {
+                    self.visit_expr(*cond);
+                }
+                if let Some(step) = step {
+                    self.visit_expr(*step);
+                }
+                self.visit_stmt(*body);
+            }
+            HirStmtKind::Switch { cond, body, .. } => {
+                self.visit_expr(*cond);
+                self.visit_stmt(*body);
+            }
+            HirStmtKind::Label { body, .. }
+            | HirStmtKind::Case { body, .. }
+            | HirStmtKind::Default { body } => self.visit_stmt(*body),
+            HirStmtKind::LocalDecl { init: Some(init), .. } => self.visit_expr(*init),
+            HirStmtKind::Goto(_)
+            | HirStmtKind::Break
+            | HirStmtKind::Continue
+            | HirStmtKind::Return(None)
+            | HirStmtKind::LocalDecl { init: None, .. }
+            | HirStmtKind::Null => {}
+        }
+    }
+
+    fn visit_expr(&mut self, expr: HirExprId) {
+        match &self.body.exprs[expr].kind {
+            HirExprKind::DefRef(def) | HirExprKind::StringRef(def) => {
+                self.warn_if_deprecated(*def, expr)
+            }
+            HirExprKind::LocalRef(_)
+            | HirExprKind::IntLiteral { .. }
+            | HirExprKind::IntConst(_)
+            | HirExprKind::FloatConst(_)
+            | HirExprKind::SizeofType(_)
+            | HirExprKind::AlignofType(_)
+            | HirExprKind::LabelAddr(_)
+            | HirExprKind::BuiltinVaArea => {}
+            HirExprKind::Binary { lhs, rhs, .. }
+            | HirExprKind::Index { base: lhs, index: rhs }
+            | HirExprKind::Comma { lhs, rhs }
+            | HirExprKind::Assign { lhs, rhs } => {
+                self.visit_expr(*lhs);
+                self.visit_expr(*rhs);
+            }
+            HirExprKind::Unary { operand, .. }
+            | HirExprKind::Cast { operand, .. }
+            | HirExprKind::SizeofExpr(operand)
+            | HirExprKind::AlignofExpr(operand)
+            | HirExprKind::AddressOf(operand)
+            | HirExprKind::Deref(operand)
+            | HirExprKind::Convert { operand, .. } => self.visit_expr(*operand),
+            HirExprKind::Call { callee, args } => {
+                self.visit_expr(*callee);
+                for arg in args {
+                    self.visit_expr(*arg);
+                }
+            }
+            HirExprKind::StmtExpr { stmts, result } => {
+                for stmt in stmts {
+                    self.visit_stmt(*stmt);
+                }
+                if let Some(result) = result {
+                    self.visit_expr(*result);
+                }
+            }
+            HirExprKind::UnresolvedField { base, .. } | HirExprKind::Field { base, .. } => {
+                self.visit_expr(*base);
+            }
+            HirExprKind::CompoundLiteral { init_stmts, .. } => {
+                for stmt in init_stmts {
+                    self.visit_stmt(*stmt);
+                }
+            }
+            HirExprKind::VectorInit { lanes, .. } => {
+                for lane in lanes {
+                    self.visit_expr(*lane);
+                }
+            }
+            HirExprKind::Cond { cond, then_expr, else_expr } => {
+                self.visit_expr(*cond);
+                self.visit_expr(*then_expr);
+                self.visit_expr(*else_expr);
+            }
+            HirExprKind::OmittedCond { cond, else_expr } => {
+                self.visit_expr(*cond);
+                self.visit_expr(*else_expr);
+            }
+            HirExprKind::BuiltinVaArg { ap, .. } | HirExprKind::BuiltinVaEnd { ap } => {
+                self.visit_expr(*ap)
+            }
+            HirExprKind::BuiltinVaStart { ap, last_param } => {
+                self.visit_expr(*ap);
+                self.visit_expr(*last_param);
+            }
+            HirExprKind::BuiltinVaCopy { dst, src } => {
+                self.visit_expr(*dst);
+                self.visit_expr(*src);
+            }
+            HirExprKind::BuiltinExpect { value, expected } => {
+                self.visit_expr(*value);
+                self.visit_expr(*expected);
+            }
+            HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
+                self.visit_expr(*lhs);
+                self.visit_expr(*rhs);
+                self.visit_expr(*dst);
+            }
+            HirExprKind::BuiltinOverflowP { lhs, rhs, probe, .. } => {
+                self.visit_expr(*lhs);
+                self.visit_expr(*rhs);
+                self.visit_expr(*probe);
+            }
+        }
+    }
+
+    fn warn_if_deprecated(&mut self, def: DefId, use_expr: HirExprId) {
+        if !self.hir.def_attrs.get(&def).is_some_and(|attrs| attrs.deprecated) {
+            return;
+        }
+        let Some(def_data) = self.hir.defs.get(def) else {
+            return;
+        };
+        let name = self.session.interner.get(def_data.name).to_owned();
+        self.session
+            .handler
+            .struct_warn(
+                self.body.exprs[use_expr].span,
+                format!("use of deprecated declaration `{name}`"),
+            )
+            .code(codes::W0032)
+            .help("remove the use or update the declaration without `deprecated`")
+            .emit();
+    }
+}
+
 fn warn_unused_variables_in_body(session: &mut Session, tcx: &TyCtxt, body: &Body) {
     let mut usage = LocalUsage::new();
     UsageWalker { body, tcx, usage: &mut usage }.visit_reachable_body();
 
     for (local, decl) in body.locals.iter_enumerated() {
         if decl.is_param || decl.name.is_none() || decl.quals.is_volatile {
+            continue;
+        }
+        if body.local_attrs.get(&local).is_some_and(|attrs| attrs.unused) {
             continue;
         }
         if !usage.declared.contains(&local) || usage.read.contains(&local) {
@@ -73,6 +273,9 @@ fn warn_unused_parameters_in_body(session: &mut Session, tcx: &TyCtxt, body: &Bo
 
     for (local, decl) in body.locals.iter_enumerated() {
         if !decl.is_param || decl.name.is_none() || decl.quals.is_volatile {
+            continue;
+        }
+        if body.local_attrs.get(&local).is_some_and(|attrs| attrs.unused) {
             continue;
         }
         if usage.read.contains(&local) {

@@ -160,6 +160,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         category: WarningCategory::Wall,
     },
     WarningRecord {
+        code: Some(codes::W0032),
+        names: &["deprecated-declarations", "deprecated"],
+        category: WarningCategory::Default,
+    },
+    WarningRecord {
         code: Some(codes::W0027),
         names: &["unused-function"],
         category: WarningCategory::Wall,

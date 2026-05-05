@@ -13,6 +13,8 @@
 use rcc_cfg::Body;
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::IndexVec;
+#[cfg(feature = "llvm")]
+use rcc_hir::{CommonAttrs, SymbolVisibility};
 use rcc_hir::{Def, DefId, DefKind, FloatKind, HirCrate, Layout, LayoutError, Ty, TyCtxt, TyId};
 #[cfg(feature = "llvm")]
 use rcc_hir::{GlobalInit, GlobalInitDesignator, GlobalInitEntry, GlobalInitValue};
@@ -972,7 +974,7 @@ pub mod backend {
         FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
     use inkwell::OptimizationLevel;
-    use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+    use inkwell::{AddressSpace, FloatPredicate, GlobalVisibility, IntPredicate};
     use rcc_cfg::UnOp;
     use rcc_cfg::{
         BasicBlockId, BinOp, Body, CastKind, ConstKind, Operand, Place, Projection, Rvalue,
@@ -1695,7 +1697,7 @@ pub mod backend {
                 return Ok(function);
             }
 
-            let (name, ty, linkage) = {
+            let (name, ty, linkage, attrs) = {
                 let def_data = self.hir.defs.get(def).ok_or_else(|| {
                     CodegenError::Internal(format!("function definition {def:?} is missing"))
                 })?;
@@ -1710,13 +1712,17 @@ pub mod backend {
                 (
                     self.def_name(def_data),
                     *ty,
-                    function_linkage(
-                        *has_body,
-                        *is_static,
-                        *is_inline,
-                        *is_extern_inline,
-                        self.session.opts.gnu89_inline,
+                    common_attr_linkage(
+                        self.hir.def_attrs.get(&def).copied().unwrap_or_default(),
+                        function_linkage(
+                            *has_body,
+                            *is_static,
+                            *is_inline,
+                            *is_extern_inline,
+                            self.session.opts.gnu89_inline,
+                        ),
                     ),
+                    self.hir.def_attrs.get(&def).copied().unwrap_or_default(),
                 )
             };
             let fn_ty = self.type_cx().fn_type_of(ty)?;
@@ -1731,6 +1737,7 @@ pub mod backend {
                 }
             };
             self.apply_restrict_param_attrs(function, &abi, param_quals.as_deref())?;
+            self.apply_common_function_attrs(function, attrs);
             function.set_linkage(linkage);
             self.functions.insert(def, function);
             Ok(function)
@@ -1742,7 +1749,7 @@ pub mod backend {
                 return Ok(global);
             }
 
-            let (name, ty, linkage, needs_zero_initializer) = {
+            let (name, ty, linkage, attrs, needs_zero_initializer) = {
                 let def_data = self.hir.defs.get(def).ok_or_else(|| {
                     CodegenError::Internal(format!("global definition {def:?} is missing"))
                 })?;
@@ -1752,10 +1759,13 @@ pub mod backend {
                     )));
                 };
                 let llvm_linkage = global_linkage(*linkage);
+                let attrs = self.hir.def_attrs.get(&def).copied().unwrap_or_default();
+                let llvm_linkage = common_attr_linkage(attrs, llvm_linkage);
                 (
                     self.def_name(def_data),
                     *ty,
                     llvm_linkage,
+                    attrs,
                     init.is_some() || llvm_linkage != LlvmLinkage::External,
                 )
             };
@@ -1765,12 +1775,36 @@ pub mod backend {
                 .get_global(&name)
                 .unwrap_or_else(|| self.module.add_global(global_ty, None, &name));
             global.set_linkage(linkage);
+            self.apply_common_global_attrs(global, attrs);
             if needs_zero_initializer && global.get_initializer().is_none() {
                 let zero = global_ty.const_zero();
                 global.set_initializer(&zero);
             }
             self.globals.insert(def, global);
             Ok(global)
+        }
+
+        fn apply_common_function_attrs(&self, function: FunctionValue<'ctx>, attrs: CommonAttrs) {
+            if attrs.noreturn {
+                let kind = Attribute::get_named_enum_kind_id("noreturn");
+                let attr = self.context.create_enum_attribute(kind, 0);
+                function.add_attribute(AttributeLoc::Function, attr);
+            }
+            if let Some(section) = attrs.section {
+                function.set_section(Some(self.session.interner.get(section)));
+            }
+            if let Some(visibility) = attrs.visibility {
+                function.as_global_value().set_visibility(llvm_visibility(visibility));
+            }
+        }
+
+        fn apply_common_global_attrs(&self, global: GlobalValue<'ctx>, attrs: CommonAttrs) {
+            if let Some(section) = attrs.section {
+                global.set_section(Some(self.session.interner.get(section)));
+            }
+            if let Some(visibility) = attrs.visibility {
+                global.set_visibility(llvm_visibility(visibility));
+            }
         }
 
         /// Return the LLVM function previously declared for a HIR definition.
@@ -7598,6 +7632,21 @@ pub mod backend {
         match linkage {
             HirLinkage::Internal => LlvmLinkage::Internal,
             HirLinkage::External | HirLinkage::None => LlvmLinkage::External,
+        }
+    }
+
+    fn common_attr_linkage(attrs: CommonAttrs, fallback: LlvmLinkage) -> LlvmLinkage {
+        if attrs.weak {
+            LlvmLinkage::WeakAny
+        } else {
+            fallback
+        }
+    }
+
+    fn llvm_visibility(visibility: SymbolVisibility) -> GlobalVisibility {
+        match visibility {
+            SymbolVisibility::Default => GlobalVisibility::Default,
+            SymbolVisibility::Hidden => GlobalVisibility::Hidden,
         }
     }
 

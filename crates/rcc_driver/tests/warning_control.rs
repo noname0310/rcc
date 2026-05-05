@@ -190,6 +190,17 @@ fn read_or_volatile_local_suppresses_unused_variable_warning() {
 }
 
 #[test]
+fn gnu_unused_attribute_suppresses_unused_variable_warning() {
+    let (_, cap) = compile_warning_source(
+        "unused-variable-gnu-attr",
+        "int main(void) { int x __attribute__((unused)); return 0; }\n",
+        &["-Wall", "-fgnu-attributes", "--emit=hir"],
+    );
+
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
+#[test]
 fn writes_only_still_warns_for_unused_variable() {
     let (_, cap) = compile_warning_source(
         "unused-variable-write-only",
@@ -200,6 +211,20 @@ fn writes_only_still_warns_for_unused_variable() {
     let diags = cap.diagnostics();
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, Some(codes::W0026));
+}
+
+#[test]
+fn gnu_deprecated_attribute_warns_on_use() {
+    let (_, cap) = compile_warning_source(
+        "deprecated-gnu-attr",
+        "__attribute__((deprecated)) int old_api(void) { return 1; }\nint main(void) { return old_api(); }\n",
+        &["-fgnu-attributes", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, Some(codes::W0032));
+    assert!(diags[0].message.contains("deprecated declaration `old_api`"));
 }
 
 #[test]

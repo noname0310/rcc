@@ -1,5 +1,6 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 HirCrate {
     defs: IndexVec {
@@ -37,6 +38,7 @@ HirCrate {
         ],
         _marker: PhantomData<fn(rcc_hir::DefId) -> rcc_hir::DefId>,
     },
+    def_attrs: {},
     bodies: {
         DefId(
             0,
@@ -74,6 +76,7 @@ HirCrate {
                 ],
                 _marker: PhantomData<fn(rcc_hir::Local) -> rcc_hir::Local>,
             },
+            local_attrs: {},
             root: Some(
                 HirStmtId(
                     2,
