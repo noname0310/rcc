@@ -50,3 +50,10 @@ fuzz/artifacts/
 # Conformance reports
 docs/conformance.json
 reports/csmith/
+reports/release-check/
+
+# The publish-only distribution crate is intentionally outside the workspace so
+# it does not introduce a second workspace `rcc` binary. Keep its generated
+# build artifacts local.
+crates/rcc_compiler_package/Cargo.lock
+crates/rcc_compiler_package/target/

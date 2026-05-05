@@ -2,7 +2,7 @@
 resolver = "2"
 # Keep cargo-fuzz's sub-workspace separate: it requires nightly and a
 # different set of deps.
-exclude = ["fuzz"]
+exclude = ["fuzz", "crates/rcc_compiler_package"]
 members = [
     "crates/rcc_span",
     "crates/rcc_errors",

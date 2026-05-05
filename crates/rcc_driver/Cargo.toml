@@ -8,6 +8,11 @@ repository.workspace = true
 publish.workspace = true
 description = "Compiler driver (CLI + pipeline orchestration)"
 
+[features]
+default = []
+llvm = ["rcc_codegen_llvm/llvm"]
+llvm-windows-llvm-c = ["rcc_codegen_llvm/llvm-windows-llvm-c"]
+
 [[bin]]
 name = "rcc"
 path = "src/main.rs"

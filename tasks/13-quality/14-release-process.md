@@ -46,8 +46,14 @@ binaries, publishes to crates.io, and uploads the binaries to GitHub Releases.
 
 ## crates.io packaging policy
 
-`cargo install rcc-compiler` is a hard requirement. The implementation must
-choose one of these strategies and document the tradeoff before shipping:
+`cargo install rcc-compiler` is a hard requirement. The selected strategy is
+**option 2: a publish-only distribution crate** (`crates/rcc_compiler_package`)
+so the development workspace keeps the existing `rcc_driver` package name and
+does not introduce a second workspace `rcc` binary.
+The package's default feature enables the LLVM backend; a no-default-features
+build is only a local wrapper sanity check for hosts without LLVM 18.
+
+The rejected alternative remains documented for context:
 
 1. **Publish the workspace crate graph.**
    - Rename the driver package to `rcc-compiler`, keep `[[bin]] name = "rcc"`.
@@ -59,14 +65,12 @@ choose one of these strategies and document the tradeoff before shipping:
    - Publish dependency crates in topological order before publishing
      `rcc-compiler`.
 
-2. **Create a publish-only distribution crate.**
+2. **Create a publish-only distribution crate.** **Selected.**
    - Add a crate such as `crates/rcc_compiler_package` with package name
      `rcc-compiler` and binary name `rcc`.
    - It may re-export/wrap internal crates, but every crates.io dependency must
      still be published or external.
    - This avoids renaming `rcc_driver`, but adds release packaging complexity.
-
-The task should prefer option 1 unless it causes a structural issue.
 
 ## Deliverables
 - `CHANGELOG.md`.

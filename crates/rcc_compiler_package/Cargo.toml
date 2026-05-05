@@ -1,0 +1,22 @@
+[package]
+name = "rcc-compiler"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/noname/rcc"
+description = "Installable package for the rcc C99 compiler"
+publish = true
+
+[features]
+default = ["llvm"]
+llvm = ["rcc_driver/llvm"]
+llvm-windows-llvm-c = ["rcc_driver/llvm-windows-llvm-c"]
+
+[[bin]]
+name = "rcc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rcc_driver = { version = "0.0.1", path = "../rcc_driver", default-features = false }

@@ -74,6 +74,27 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         iterations: usize,
     },
+    /// Run local release-candidate gates and write logs under reports/.
+    ReleaseCheck {
+        /// Directory for command logs and summary.
+        #[arg(long, default_value = "reports/release-check/latest")]
+        report_dir: PathBuf,
+        /// Skip the LLVM-enabled workspace test gate.
+        #[arg(long)]
+        skip_llvm: bool,
+        /// Skip the cargo-llvm-cov coverage gate.
+        #[arg(long)]
+        skip_coverage: bool,
+        /// Skip the libFuzzer smoke gate.
+        #[arg(long)]
+        skip_fuzz: bool,
+        /// Skip the conformance dashboard refresh gate.
+        #[arg(long)]
+        skip_conformance: bool,
+        /// Run the crates.io-facing package archive check.
+        #[arg(long)]
+        registry_package: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -104,6 +125,24 @@ fn main() -> Result<()> {
         Cmd::BenchRuntime { rcc, host_cc, out, iterations } => {
             let opts = xtask::bench_runtime::BenchRuntimeOptions { rcc, host_cc, out, iterations };
             xtask::bench_runtime::run(&project_root(), &opts)
+        }
+        Cmd::ReleaseCheck {
+            report_dir,
+            skip_llvm,
+            skip_coverage,
+            skip_fuzz,
+            skip_conformance,
+            registry_package,
+        } => {
+            let opts = xtask::release_check::ReleaseCheckOptions {
+                report_dir,
+                skip_llvm,
+                skip_coverage,
+                skip_fuzz,
+                skip_conformance,
+                registry_package,
+            };
+            xtask::release_check::run(&project_root(), &opts)
         }
     }
 }

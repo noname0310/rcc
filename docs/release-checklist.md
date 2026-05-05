@@ -9,8 +9,9 @@ suites, or a long-running fuzz/differential budget.
 
 Run from the repository root unless noted.
 
-| # | Command | Status for task 13-12 | Notes |
+| # | Command | Status / owner | Notes |
 |---|---------|-----------------------|-------|
+| 0 | `cargo xtask release-check` | task 13-13 | Runs the local release-candidate gate suite, writes logs under `reports/release-check/`, and reports actionable skips for missing optional tools. It checks the publish-only wrapper without default features everywhere, and checks default LLVM install features when LLVM 18 is configured. Add `--registry-package` only after task 13-14 makes internal crates registry-resolvable. |
 | 1 | `git status --short` | run | Worktree audit before release commands. |
 | 2 | `cargo fmt --all --check` | run | Formatting gate. |
 | 3 | `cargo clippy --workspace --all-targets -- -D warnings` | run | Full workspace lint gate. |
@@ -21,7 +22,7 @@ Run from the repository root unless noted.
 
 ## Release Conformance Gates
 
-| # | Command | Status for task 13-12 | Notes |
+| # | Command | Status / owner | Notes |
 |---|---------|-----------------------|-------|
 | 8 | `cargo xtask fetch-testsuites` | manual: network fetch | Fetches permissive suites. CI runs this before test/conformance jobs. |
 | 9 | `cargo xtask fetch-testsuites --include-gpl --only tcc-tests2` | manual: network fetch | Fetches GPL test sources into the runner/local cache for execution only. |
@@ -32,7 +33,7 @@ Run from the repository root unless noted.
 
 ## Platform Smoke
 
-| # | Command | Status for task 13-12 | Notes |
+| # | Command | Status / owner | Notes |
 |---|---------|-----------------------|-------|
 | 14 | `cargo run --bin rcc -- --version --verbose` | run | Info-only tool discovery; does not require input. |
 | 15 | `cargo run --bin rcc -- --print-search-dirs` | run | Reports PATH search dirs and selected/missing tools. |
@@ -41,7 +42,7 @@ Run from the repository root unless noted.
 
 ## Performance And Fuzz Extensions
 
-| # | Command | Status for task 13-12 | Notes |
+| # | Command | Status / owner | Notes |
 |---|---------|-----------------------|-------|
 | 18 | `cargo bench -p rcc_lexer --bench lex -- --test` | run in task 13-10 | Fast Criterion compile check. |
 | 19 | `cargo bench -p rcc_preprocess --bench preprocess -- --test` | run in task 13-10 | Fast Criterion compile check. |
@@ -58,10 +59,10 @@ Run from the repository root unless noted.
 Task 13-14 owns the final release workflow. Its intended local/auth-sensitive
 steps are listed here for order only:
 
-| # | Command | Status for task 13-12 | Notes |
+| # | Command | Status / owner | Notes |
 |---|---------|-----------------------|-------|
-| 27 | `cargo package --workspace` | manual: packaging dry-run | Requires the publish/package metadata from task 13-14. |
-| 28 | `cargo publish -p rcc_driver --dry-run` | manual: crates.io dry-run | Uses the public crate name policy from task 13-14 (`rcc-compiler` if `rcc` is taken). |
+| 27 | `cargo xtask release-check --registry-package` | manual after internal publish graph exists | Runs the crates.io-facing package archive check for the publish-only `rcc-compiler` package. Before task 13-14 publishes or otherwise resolves internal crates, release-check reports this as an explicit skip. The package default feature enables LLVM so plain `cargo install rcc-compiler` produces a real compiler binary. |
+| 28 | `cargo publish --manifest-path crates/rcc_compiler_package/Cargo.toml --dry-run` | manual: crates.io dry-run | Auth/network-sensitive final dry-run for `cargo install rcc-compiler`; task 13-14 owns real publish. |
 | 29 | `gh run list --commit <SHA> --limit 20` | manual: after push | Confirms mandatory workflows for the exact release commit. |
 | 30 | `gh release create <tag> ...` | manual: final release | The workflow should upload built binaries automatically; direct CLI use is fallback only. |
 

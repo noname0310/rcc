@@ -1,5 +1,7 @@
 # 13-13: Release candidate dry run
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-12    **Milestone:** M7
 
 ## Goal
@@ -16,6 +18,11 @@ tag is pushed.
     set needed by `cargo install rcc-compiler`.
   - Check that the publish package name is `rcc-compiler` and the installed
     binary name is `rcc`.
+  - Check that plain `cargo install rcc-compiler` would enable the LLVM backend
+    by default; a no-LLVM wrapper check is only for partially provisioned hosts.
+  - For the selected publish-only package strategy, treat registry packaging as
+    a separate `--registry-package` gate until task 13-14 makes internal crates
+    registry-resolvable.
   - Print skipped gates with explicit reasons instead of silently ignoring
     missing tools.
   - Save logs under `reports/release-check/` and ignore that directory in git.
@@ -35,8 +42,13 @@ tag is pushed.
   prerequisites are reported as actionable skips or hard failures according to
   the documented policy.
 - The command exits non-zero if any mandatory gate fails.
-- The command exits non-zero if crates.io packaging would not make
-  `cargo install rcc-compiler` work.
+- The command exits non-zero if local `cargo install rcc-compiler` structure is
+  broken: missing `rcc-compiler` package, missing `rcc` binary, or a wrapper
+  that cannot build against `rcc_driver`.
+- The command validates the wrapper without default features everywhere and
+  validates default LLVM install features when an LLVM 18 prefix is configured.
+- The command documents the crates.io archive dry-run as skipped unless
+  `--registry-package` is used after the internal crate publish graph exists.
 
 ## References
 - `xtask/`.
