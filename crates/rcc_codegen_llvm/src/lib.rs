@@ -1769,7 +1769,7 @@ pub mod backend {
                     init.is_some() || llvm_linkage != LlvmLinkage::External,
                 )
             };
-            let global_ty = self.type_cx().basic_type_of(ty)?;
+            let global_ty = self.global_storage_type(ty, linkage, needs_zero_initializer)?;
             let global = self
                 .module
                 .get_global(&name)
@@ -1782,6 +1782,21 @@ pub mod backend {
             }
             self.globals.insert(def, global);
             Ok(global)
+        }
+
+        fn global_storage_type(
+            &self,
+            ty: TyId,
+            linkage: LlvmLinkage,
+            needs_zero_initializer: bool,
+        ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+            if !needs_zero_initializer && linkage == LlvmLinkage::External {
+                if let Ty::Array { elem, len: None, is_vla: false } = self.tcx.get(ty) {
+                    let elem_ty = self.type_cx().basic_type_of_qual(*elem)?;
+                    return Ok(elem_ty.array_type(0).into());
+                }
+            }
+            self.type_cx().basic_type_of(ty)
         }
 
         fn apply_common_function_attrs(&self, function: FunctionValue<'ctx>, attrs: CommonAttrs) {
@@ -8969,6 +8984,36 @@ mod tests {
         );
         assert_eq!(cx.global_decl(static_global).unwrap().get_linkage(), LlvmLinkage::Internal);
         assert_eq!(cx.global_decl(external_global).unwrap().get_linkage(), LlvmLinkage::External);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_external_incomplete_array_global_uses_zero_length_placeholder() {
+        use inkwell::module::Linkage as LlvmLinkage;
+
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let incomplete =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: None, is_vla: false });
+        let name = session.interner.intern("deflate_copyright");
+        let mut defs = IndexVec::new();
+        let global = global_def(&mut defs, name, incomplete, Linkage::External);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        cx.declare_all().unwrap();
+        cx.module().verify().unwrap();
+
+        let decl = cx.global_decl(global).unwrap();
+        assert_eq!(decl.get_linkage(), LlvmLinkage::External);
+        assert!(decl.get_initializer().is_none());
+        assert!(
+            cx.ir_text().contains("@deflate_copyright = external global [0 x i8]"),
+            "external incomplete arrays need an LLVM declaration type:\n{}",
+            cx.ir_text()
+        );
     }
 
     #[cfg(feature = "llvm")]
