@@ -150,6 +150,7 @@ EOF
     --emit=hir \
     -I "$config_dir" \
     -I "$build_dir/lib" \
+    -I "$build_dir/src" \
     -I "$src_work/lib" \
     -I "$src_work/src" \
     -I "$src_work/gl/lib" \

@@ -41,13 +41,16 @@ The reproducible probe entrypoint is:
 ```sh
 bash real_world/projects/09-gnu-coreutils/scripts/prepare-local-bootstrap-tools.sh
 bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
+bash real_world/projects/09-gnu-coreutils/scripts/run-true-probe.sh
 ```
 
 The script does not modify `upstream/`.  It creates an ignored LF-normalized
 worktree under `build/gnulib-config-probe/src`, bootstraps/configures into
 `build/gnulib-config-probe/build`, writes logs under
 `logs/gnulib-config-probe/`, and asks `rcc` to lower a wrapper translation unit
-that includes generated `config.h` and `src/system.h`.
+that includes generated `config.h` and `src/system.h`.  The `run-true-probe.sh`
+entrypoint then generates the minimal headers needed by `src/true.c` and writes
+its own logs under `logs/true-probe/`.
 
 The exact host commands are encoded in the scripts:
 
@@ -65,10 +68,12 @@ For the first `rcc` compile, use this include order:
 1. generated `config.h` directory: `build/gnulib-config-probe/build/lib`
    when present, otherwise `build/gnulib-config-probe/build`;
 2. generated gnulib replacement headers: `build/gnulib-config-probe/build/lib`;
-3. source replacement headers: `build/gnulib-config-probe/src/lib`;
-4. selected utility headers: `build/gnulib-config-probe/src/src`;
-5. gnulib source headers: `build/gnulib-config-probe/src/gl/lib`;
-6. project root fallback: `build/gnulib-config-probe/src`.
+3. generated utility headers such as `version.h`:
+   `build/gnulib-config-probe/build/src`;
+4. source replacement headers: `build/gnulib-config-probe/src/lib`;
+5. selected utility headers: `build/gnulib-config-probe/src/src`;
+6. gnulib source headers: `build/gnulib-config-probe/src/gl/lib`;
+7. project root fallback: `build/gnulib-config-probe/src`.
 
 Current local environment note: the checked-out ignored `upstream/` tree has
 CRLF shell scripts on Windows, so the probe deliberately clones a fresh
@@ -101,12 +106,22 @@ next coreutils task must either resolve that host-build input issue or select a
 smaller generated-header probe before using the utility as an oracle.
 
 Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
-progresses into `src/system.h`/gnulib replacement headers and fails on missing
-hosted declarations/macros such as `fputs_unlocked`, `fwrite_unlocked`,
-`fchownat`, `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and
-`S_TYPEISTMO`.  These are compiler/header-surface inputs for
-`tasks/16-linux-glibc-compat/17-gnu-coreutils-single-utility-probe.md` and the
-header audit task, not broad xfails.
+progresses into `src/system.h`/gnulib replacement headers.  The `src/true.c`
+probe now records the next concrete compiler-owned blockers:
+
+- `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`: generated
+  gnulib replacement headers use GNU `#include_next`.
+- `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md`:
+  `_GL_FUNCDECL_*` and `_GL_CXXALIAS_*` macro-expanded declarations currently
+  cascade into K&R parser diagnostics.
+- `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
+  hosted names such as `fputs_unlocked`, `fwrite_unlocked`, `fchownat`,
+  `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and `S_TYPEISTMO`
+  need small declaration/macro shims once the generated headers parse.
+- `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`: final
+  host-vs-rcc runtime comparison for `src/true`.
+
+These are compiler/header-surface inputs, not broad xfails.
 
 ## Non-Goals
 

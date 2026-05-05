@@ -1,6 +1,6 @@
 # 09 -- GNU coreutils
 
-Status: bootstrap/configure scripted; generated config.h observed; utility host build blocked
+Status: bootstrap/configure scripted; generated config.h observed; true.c probe scripted
 
 Source: <https://github.com/coreutils/coreutils>
 
@@ -24,8 +24,13 @@ Probe entrypoint:
 ```sh
 bash real_world/projects/09-gnu-coreutils/scripts/prepare-local-bootstrap-tools.sh
 bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
+bash real_world/projects/09-gnu-coreutils/scripts/run-true-probe.sh
 ```
 
-The script keeps cloned worktrees, generated `config.h`, wrapper sources, and
-logs under ignored `build/`, `scratch/`, and `logs/` directories.  It must not
-edit files under `upstream/`.
+The scripts keep cloned worktrees, generated headers, wrapper sources, and logs
+under ignored `build/`, `scratch/`, and `logs/` directories.  They must not edit
+files under `upstream/`.
+
+Current `src/true.c` status: `run-true-probe.sh` is repeatable and reaches
+generated gnulib replacement headers.  Remaining compiler-owned blockers are
+tracked by tasks 16-21 through 16-24, starting with GNU `#include_next`.

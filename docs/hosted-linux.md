@@ -184,6 +184,10 @@ The phase-16 task tree is the authoritative hosted Linux queue:
 - `tasks/16-linux-glibc-compat/14-glibc-system-header-parse-gate.md`
 - `tasks/16-linux-glibc-compat/16-gnu-coreutils-bootstrap-probe.md`
 - `tasks/16-linux-glibc-compat/17-gnu-coreutils-single-utility-probe.md`
+- `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`
+- `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md`
+- `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`
+- `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`
 
 Real-world project probes must not weaken source or runtime tests to hide
 compiler bugs.  A new hosted Linux failure is either a host-runtime
