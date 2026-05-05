@@ -544,3 +544,65 @@ fn unreachable_code_suppression_and_promotion_are_honored() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0031));
 }
+
+#[test]
+fn diagnostic_pragma_ignored_suppresses_later_warning() {
+    let (_, cap) = compile_warning_source(
+        "pragma-ignored",
+        "#pragma GCC diagnostic ignored \"-Wunused-variable\"\nint main(void) { int x; return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn diagnostic_pragma_push_pop_restores_warning_policy() {
+    let (_, cap) = compile_warning_source(
+        "pragma-push-pop",
+        concat!(
+            "#pragma GCC diagnostic ignored \"-Wunused-variable\"\n",
+            "#pragma GCC diagnostic push\n",
+            "#pragma GCC diagnostic warning \"-Wunused-variable\"\n",
+            "int first(void) { int x; return 0; }\n",
+            "#pragma GCC diagnostic pop\n",
+            "int second(void) { int y; return 0; }\n",
+        ),
+        &["-Wall", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0026));
+}
+
+#[test]
+fn diagnostic_pragma_error_promotes_later_warning() {
+    let (session, cap) = compile_warning_source(
+        "pragma-error",
+        "#pragma GCC diagnostic error \"-Wunused-variable\"\nint main(void) { int x; return 0; }\n",
+        &["--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0026));
+}
+
+#[test]
+fn malformed_diagnostic_pragma_emits_stable_warning() {
+    let (_, cap) = compile_warning_source(
+        "pragma-malformed",
+        "#pragma GCC diagnostic ignored unused-variable\nint main(void) { return 0; }\n",
+        &["--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0001));
+    assert!(diags[0].message.contains("malformed #pragma GCC diagnostic"));
+}

@@ -1,5 +1,7 @@
 # 13-04: Diagnostic pragmas
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-03    **Milestone:** M7
 
 ## Goal

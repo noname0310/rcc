@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rcc_data_structures::FxHashMap;
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_session::{Arch, DataModel, Endianness, Os, Session};
+use rcc_session::{Arch, DataModel, Endianness, Os, Session, WarningConfig};
 use rcc_span::{BytePos, FileId, Span, Symbol};
 
 pub mod cond_stack;
@@ -77,6 +77,10 @@ pub struct Preprocessor<'a> {
     pub pragma_pack: Option<u32>,
     /// Stack used by `#pragma pack(push, N)` / `#pragma pack(pop)`.
     pub pragma_pack_stack: Vec<Option<u32>>,
+    /// Current source-positioned warning policy for `#pragma GCC diagnostic`.
+    pub diagnostic_warning_config: WarningConfig,
+    /// Stack used by `#pragma GCC diagnostic push` / `pop`.
+    pub diagnostic_warning_stack: Vec<WarningConfig>,
     /// Set once [`Self::install_cli_defines`] + [`Self::install_predefined`]
     /// have seeded the macro table. `run()` is re-entered for every
     /// `#include`d file and must install those entries *exactly* once
@@ -97,6 +101,7 @@ pub struct Preprocessor<'a> {
 impl<'a> Preprocessor<'a> {
     /// Build a new preprocessor.
     pub fn new(session: &'a mut Session) -> Self {
+        let diagnostic_warning_config = session.opts.warning_config.clone();
         Self {
             session,
             macros: MacroTable::default(),
@@ -107,6 +112,8 @@ impl<'a> Preprocessor<'a> {
             line_overrides: LineMap::new(),
             pragma_pack: None,
             pragma_pack_stack: Vec::new(),
+            diagnostic_warning_config,
+            diagnostic_warning_stack: Vec::new(),
             predefined_installed: false,
             halted: false,
         }
@@ -645,11 +652,54 @@ impl<'a> Preprocessor<'a> {
                     self.pop_macro_pragma(name);
                 }
             }
+            Some("GCC") if is_gcc_diagnostic_candidate(tokens, src) => {
+                self.dispatch_gcc_diagnostic_pragma(span, tokens, src);
+            }
             Some("pack") if self.session.opts.gnu_pragma_pack => {
                 self.dispatch_pack_pragma(tokens, src);
             }
             _ => {
                 let diag = unknown_pragma(span, tokens, src);
+                self.session.handler.emit(&diag);
+            }
+        }
+    }
+
+    fn dispatch_gcc_diagnostic_pragma(&mut self, span: Span, tokens: &[PpToken], src: &str) {
+        match parse_gcc_diagnostic_pragma(tokens, src) {
+            Some(DiagnosticPragma::Push) => {
+                self.diagnostic_warning_stack.push(self.diagnostic_warning_config.clone());
+            }
+            Some(DiagnosticPragma::Pop) => {
+                self.diagnostic_warning_config = self
+                    .diagnostic_warning_stack
+                    .pop()
+                    .unwrap_or_else(|| self.session.opts.warning_config.clone());
+                self.session
+                    .handler
+                    .record_warning_config_at(span, self.diagnostic_warning_config.clone());
+            }
+            Some(DiagnosticPragma::Ignored(name)) => {
+                self.diagnostic_warning_config.disable_warning(name);
+                self.session
+                    .handler
+                    .record_warning_config_at(span, self.diagnostic_warning_config.clone());
+            }
+            Some(DiagnosticPragma::Warning(name)) => {
+                self.diagnostic_warning_config.enable_warning(name);
+                self.diagnostic_warning_config.demote_warning(name);
+                self.session
+                    .handler
+                    .record_warning_config_at(span, self.diagnostic_warning_config.clone());
+            }
+            Some(DiagnosticPragma::Error(name)) => {
+                self.diagnostic_warning_config.promote_warning(name);
+                self.session
+                    .handler
+                    .record_warning_config_at(span, self.diagnostic_warning_config.clone());
+            }
+            None => {
+                let diag = malformed_diagnostic_pragma(span, tokens, src);
                 self.session.handler.emit(&diag);
             }
         }
@@ -1066,6 +1116,61 @@ fn pragma_macro_name<'src>(tokens: &[PpToken], src: &'src str) -> Option<&'src s
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum DiagnosticPragma<'src> {
+    Push,
+    Pop,
+    Ignored(&'src str),
+    Warning(&'src str),
+    Error(&'src str),
+}
+
+fn is_gcc_diagnostic_candidate(tokens: &[PpToken], src: &str) -> bool {
+    matches!(tokens, [gcc, diagnostic, ..] if is_ident_text(gcc, src, "GCC")
+        && is_ident_text(diagnostic, src, "diagnostic"))
+}
+
+fn parse_gcc_diagnostic_pragma<'src>(
+    tokens: &[PpToken],
+    src: &'src str,
+) -> Option<DiagnosticPragma<'src>> {
+    let [gcc, diagnostic, action, rest @ ..] = tokens else {
+        return None;
+    };
+    if !is_ident_text(gcc, src, "GCC") || !is_ident_text(diagnostic, src, "diagnostic") {
+        return None;
+    }
+    if is_ident_text(action, src, "push") && rest.is_empty() {
+        return Some(DiagnosticPragma::Push);
+    }
+    if is_ident_text(action, src, "pop") && rest.is_empty() {
+        return Some(DiagnosticPragma::Pop);
+    }
+    let [name] = rest else {
+        return None;
+    };
+    let warning_name = pragma_warning_name(name, src)?;
+    if is_ident_text(action, src, "ignored") {
+        Some(DiagnosticPragma::Ignored(warning_name))
+    } else if is_ident_text(action, src, "warning") {
+        Some(DiagnosticPragma::Warning(warning_name))
+    } else if is_ident_text(action, src, "error") {
+        Some(DiagnosticPragma::Error(warning_name))
+    } else {
+        None
+    }
+}
+
+fn pragma_warning_name<'src>(token: &PpToken, src: &'src str) -> Option<&'src str> {
+    if !matches!(token.kind, PpTokenKind::StringLit { .. }) {
+        return None;
+    }
+    let raw = src.get(token.span.lo.0 as usize..token.span.hi.0 as usize)?;
+    raw.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .filter(|name| name.starts_with("-W") && name.len() > 2)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum PackPragma {
     Push(Option<u32>),
     Pop,
@@ -1139,6 +1244,33 @@ fn unknown_pragma(span: Span, tokens: &[PpToken], src: &str) -> rcc_errors::Diag
         labels: vec![Label { span: label_span, message: label_msg, primary: true }],
         notes: vec!["C99 §6.10.6: an implementation shall ignore any \
              pragma it does not recognise"
+            .into()],
+        help: vec![],
+    }
+}
+
+fn malformed_diagnostic_pragma(
+    span: Span,
+    tokens: &[PpToken],
+    src: &str,
+) -> rcc_errors::Diagnostic {
+    use rcc_errors::{codes::W0001, Diagnostic, Label, Level};
+    let label_span = tokens.get(2).map_or(span, |tok| tok.span);
+    let action = tokens
+        .get(2)
+        .and_then(|tok| src.get(tok.span.lo.0 as usize..tok.span.hi.0 as usize))
+        .unwrap_or("diagnostic");
+    Diagnostic {
+        level: Level::Warning,
+        code: Some(W0001),
+        message: "malformed #pragma GCC diagnostic directive — ignored".into(),
+        labels: vec![Label {
+            span: label_span,
+            message: format!("invalid diagnostic pragma action or argument `{action}`"),
+            primary: true,
+        }],
+        notes: vec!["supported forms are `push`, `pop`, `ignored \"-Wname\"`, \
+             `warning \"-Wname\"`, and `error \"-Wname\"`"
             .into()],
         help: vec![],
     }

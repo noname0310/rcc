@@ -6,6 +6,12 @@ use crate::builder::DiagnosticBuilder;
 use crate::emitter::Emitter;
 use crate::{Diagnostic, Level, WarningConfig};
 
+#[derive(Clone, Debug)]
+struct WarningConfigEvent {
+    span: Span,
+    config: WarningConfig,
+}
+
 /// Central diagnostic sink. Crates receive `&mut Handler` (usually through
 /// `Session`) and build diagnostics via [`DiagnosticBuilder`].
 pub struct Handler {
@@ -13,12 +19,19 @@ pub struct Handler {
     error_count: u32,
     warning_count: u32,
     warning_config: WarningConfig,
+    warning_config_events: Vec<WarningConfigEvent>,
 }
 
 impl Handler {
     /// Build a handler around a custom emitter.
     pub fn with_emitter(emitter: Box<dyn Emitter>) -> Self {
-        Self { emitter, error_count: 0, warning_count: 0, warning_config: WarningConfig::default() }
+        Self {
+            emitter,
+            error_count: 0,
+            warning_count: 0,
+            warning_config: WarningConfig::default(),
+            warning_config_events: Vec::new(),
+        }
     }
 
     /// Number of `Level::Error` or `Level::Bug` diagnostics emitted so far.
@@ -39,6 +52,7 @@ impl Handler {
     /// Replace the warning filtering/promotion policy.
     pub fn set_warning_config(&mut self, config: WarningConfig) {
         self.warning_config = config;
+        self.warning_config_events.clear();
     }
 
     /// Return the active warning filtering/promotion policy.
@@ -47,17 +61,32 @@ impl Handler {
         &self.warning_config
     }
 
+    /// Record a source-positioned warning policy update.
+    ///
+    /// Later warnings whose primary span is in the same file and starts after
+    /// `span` use this policy snapshot instead of the baseline command-line
+    /// policy. This is used for `#pragma GCC diagnostic ...`, whose effects
+    /// are source-order dependent but whose consumers often run in later
+    /// compiler phases.
+    pub fn record_warning_config_at(&mut self, span: Span, config: WarningConfig) {
+        self.warning_config_events.push(WarningConfigEvent { span, config });
+    }
+
     /// Low-level emit. Prefer the builder API.
     pub fn emit(&mut self, d: &Diagnostic) {
-        if d.level == Level::Warning && !self.warning_config.should_emit_warning(d.code) {
-            return;
-        }
-        if d.level == Level::Warning && self.warning_config.promotes_warning_to_error(d.code) {
-            let mut promoted = d.clone();
-            promoted.level = Level::Error;
-            self.error_count += 1;
-            self.emitter.emit(&promoted);
-            return;
+        let warning_config =
+            if d.level == Level::Warning { Some(self.warning_config_for(d).clone()) } else { None };
+        if let Some(config) = warning_config.as_ref() {
+            if !config.should_emit_warning(d.code) {
+                return;
+            }
+            if config.promotes_warning_to_error(d.code) {
+                let mut promoted = d.clone();
+                promoted.level = Level::Error;
+                self.error_count += 1;
+                self.emitter.emit(&promoted);
+                return;
+            }
         }
         match d.level {
             Level::Error | Level::Bug => self.error_count += 1,
@@ -80,5 +109,23 @@ impl Handler {
     /// Start a plain (unspanned) error.
     pub fn err(&mut self, msg: impl Into<String>) -> DiagnosticBuilder<'_> {
         DiagnosticBuilder::new(self, Level::Error, msg)
+    }
+
+    fn warning_config_for(&self, d: &Diagnostic) -> &WarningConfig {
+        let Some(primary) = d.labels.first().map(|label| label.span) else {
+            return &self.warning_config;
+        };
+        let mut selected = &self.warning_config;
+        let mut selected_pos = None;
+        for event in &self.warning_config_events {
+            if event.span.file == primary.file
+                && event.span.lo <= primary.lo
+                && selected_pos.is_none_or(|pos| event.span.lo >= pos)
+            {
+                selected = &event.config;
+                selected_pos = Some(event.span.lo);
+            }
+        }
+        selected
     }
 }

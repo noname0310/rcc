@@ -995,7 +995,7 @@ semantic check can be routed back to the responsible phase.
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not
-understand. `rcc` recognises two:
+understand. `rcc` recognises:
 
 - `#pragma once` — include-once header hint (handled at `#include`
   time by a raw pre-pass; accepted silently by the directive
@@ -1004,6 +1004,9 @@ understand. `rcc` recognises two:
   (`FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE`). Every `STDC`
   form is accepted silently; `rcc` does not currently act on any
   of them, but §6.10.6p2 explicitly allows that.
+- `#pragma GCC diagnostic ...` — source-positioned warning policy
+  controls (`push`, `pop`, `ignored`, `warning`, `error`). Malformed
+  diagnostic pragmas emit W0001 and are ignored.
 
 Any other pragma — including a bare `#pragma` with a single unknown
 identifier — emits W0001 and is ignored; compilation continues. A
@@ -1011,10 +1014,11 @@ totally empty `#pragma` (no body tokens) is silently dropped.
 
 ```c
 #pragma mystery          // warning[W0001]: unknown pragma `mystery`
-#pragma GCC diagnostic   // warning[W0001]: unknown pragma `GCC`
+#pragma GCC diagnostic ignored unused-variable  // warning[W0001]: malformed diagnostic pragma
 
 #pragma once             // accepted silently
 #pragma STDC FP_CONTRACT ON  // accepted silently
+#pragma GCC diagnostic ignored "-Wunused-variable"  // accepted
 ```
 
 W0001 does **not** count as an error for `Handler::has_errors`, so a

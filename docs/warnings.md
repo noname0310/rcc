@@ -23,6 +23,11 @@ leading `no-` only for control flags, replacing `_` with `-`, and lowercasing.
 For example, `-Wunused_parameter` and `-Wunused-parameter` address the same
 warning.
 
+Source files can also adjust policy from the point of a directive onward with
+`#pragma GCC diagnostic push`, `pop`, `ignored "-Wname"`, `warning "-Wname"`,
+and `error "-Wname"`. The pragma state is source-positioned so downstream
+parser/HIR/typeck warnings use the policy active at the diagnostic span.
+
 ## Default Warnings
 
 Default warnings are emitted when their phase encounters the condition unless
@@ -92,10 +97,8 @@ These warnings are opt-in analysis warnings. A detector must call
 Each warning detector must:
 
 - use the canonical names above for CLI control and tests;
-- skip opt-in analysis warning emission when
-  `WarningConfig::warning_enabled(name)` returns false;
-- promote through the normal handler path or an equivalent
-  `WarningConfig::named_warning_promoted_to_error(name)` check;
+- emit named warnings through `Handler` with a stable warning code so command
+  line flags and `#pragma GCC diagnostic` source-positioned policy both apply;
 - include the controlling spelling, such as `[-Wunused-variable]`, in the
   message, note, or help text;
 - add at least one regression test for enable, suppress, and promote behavior.

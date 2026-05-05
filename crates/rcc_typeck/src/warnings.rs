@@ -89,9 +89,6 @@ fn warn_unused_parameters_in_body(session: &mut Session, tcx: &TyCtxt, body: &Bo
 }
 
 fn warn_unreachable_code_in_body(session: &mut Session, body: &Body) {
-    if !session.handler.warning_config().warning_enabled("unreachable-code") {
-        return;
-    }
     let Some(root) = body.root else {
         return;
     };

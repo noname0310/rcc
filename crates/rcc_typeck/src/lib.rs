@@ -2026,9 +2026,6 @@ fn maybe_emit_sign_compare_warning(
     rhs_bit_width: Option<u32>,
     common: TyId,
 ) {
-    if !session.handler.warning_config().warning_enabled("sign-compare") {
-        return;
-    }
     let Some(lhs_signed) = promoted_integer_signedness(tcx, lhs_ty, lhs_bit_width) else {
         return;
     };

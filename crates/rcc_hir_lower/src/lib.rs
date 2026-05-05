@@ -642,22 +642,18 @@ fn lower_implicit_function_callee(
         return None;
     }
 
-    if session.handler.warning_config().warning_enabled("implicit-function-declaration") {
-        let ident_str = session.interner.get(ident).to_owned();
-        session
-            .handler
-            .struct_warn(
-                span,
-                format!(
-                    "implicit declaration of function `{ident_str}` [-Wimplicit-function-declaration]"
-                ),
-            )
-            .code(rcc_errors::codes::W0029)
-            .note(
-                "synthesizing a prototype-less `extern int` declaration for GNU/C89 compatibility",
-            )
-            .emit();
-    }
+    let ident_str = session.interner.get(ident).to_owned();
+    session
+        .handler
+        .struct_warn(
+            span,
+            format!(
+                "implicit declaration of function `{ident_str}` [-Wimplicit-function-declaration]"
+            ),
+        )
+        .code(rcc_errors::codes::W0029)
+        .note("synthesizing a prototype-less `extern int` declaration for GNU/C89 compatibility")
+        .emit();
 
     let ty =
         tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: false });
