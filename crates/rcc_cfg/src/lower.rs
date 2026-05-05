@@ -595,6 +595,9 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
         HirExprKind::DefRef(def) => {
             Place { base: Local(u32::MAX), projection: vec![Projection::Global(*def)] }
         }
+        HirExprKind::StringRef(def) => {
+            Place { base: Local(u32::MAX), projection: vec![Projection::Global(*def)] }
+        }
         HirExprKind::Deref(operand) => {
             // `*p` — evaluate `p` as an rvalue (it is a pointer
             // value), spill into a temp if it is not already a Place,
@@ -3389,6 +3392,53 @@ mod tests {
             other => panic!("expected Projection::Index(Copy(i)), got {other:?}"),
         }
         let _body = finish(builder);
+    }
+
+    /// String literals are lvalue arrays backed by synthetic globals.
+    /// `"ab"[1]` reaches CFG as `Index { base: ArrayToPtr(StringRef), ... }`.
+    #[test]
+    fn place_string_literal_index_uses_global_base() {
+        let mut tcx = TyCtxt::new();
+        let char_ty = tcx.char_;
+        let str_ty = tcx.intern(Ty::Array {
+            elem: rcc_hir::Qual::plain(char_ty),
+            len: Some(3),
+            is_vla: false,
+        });
+        let char_ptr_ty = tcx.intern(Ty::Ptr(rcc_hir::Qual::plain(char_ty)));
+        let string_def = rcc_hir::DefId::new(401);
+
+        let mut hir_body = HirBody::default();
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(tcx.int, DUMMY_SP);
+        let map = LocalMap::new();
+
+        let string =
+            push_expr(&mut hir_body, str_ty, ValueCat::LValue, HirExprKind::StringRef(string_def));
+        let decayed = push_expr(
+            &mut hir_body,
+            char_ptr_ty,
+            ValueCat::RValue,
+            HirExprKind::Convert { operand: string, kind: ConvertKind::ArrayToPtr },
+        );
+        let index = push_expr(&mut hir_body, tcx.int, ValueCat::RValue, HirExprKind::IntConst(1));
+        let subscript = push_expr(
+            &mut hir_body,
+            char_ty,
+            ValueCat::LValue,
+            HirExprKind::Index { base: decayed, index },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let place = lower_as_place(&mut builder, &cx, subscript);
+
+        assert_eq!(place.base, Local(u32::MAX), "string literal base must be global sentinel");
+        assert_eq!(place.projection.len(), 2);
+        assert!(matches!(place.projection[0], Projection::Global(def) if def == string_def));
+        assert!(matches!(
+            place.projection[1],
+            Projection::Index(Operand::Const(Const { kind: ConstKind::Int(1), .. }))
+        ));
     }
 
     /// 6. Nested projection: `p->field[2].x` lowers to a single
