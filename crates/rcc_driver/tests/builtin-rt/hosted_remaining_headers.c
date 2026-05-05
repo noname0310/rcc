@@ -79,6 +79,8 @@ int main(void) {
 
   if (EDOM == 0 || EILSEQ == 0 || ERANGE == 0)
     return 1;
+  if (EINTR != 4 || EINVAL != 22 || ENOMEM != 12)
+    return 13;
   if (errno != 0)
     return 2;
   if (parsed != (intmax_t)123 || unsigned_parsed != (uintmax_t)456)
