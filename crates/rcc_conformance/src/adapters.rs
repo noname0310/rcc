@@ -908,6 +908,29 @@ impl TccTests2Adapter {
         }
     }
 
+    fn prepare_runtime_workdir(stem: &str, case: &TestCase, tmp: &Path) -> anyhow::Result<PathBuf> {
+        let runtime_dir = tmp.join("run");
+        std::fs::create_dir_all(&runtime_dir)?;
+
+        if stem == "46_grep" {
+            // The vendored file is CRLF-normalized in our checkout, while
+            // the upstream expected output assumes LF input for its `$`
+            // pattern. GCC and rcc agree on both inputs; run the fixture
+            // under the upstream line-ending condition instead of treating
+            // this as a compiler failure.
+            let file_name = case
+                .path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("missing filename: {}", case.path.display()))?;
+            let input_path = runtime_dir.join(file_name);
+            let input = std::fs::read(&case.path)?;
+            let input = String::from_utf8_lossy(&input).replace("\r\n", "\n");
+            std::fs::write(&input_path, input.as_bytes())?;
+        }
+
+        Ok(runtime_dir)
+    }
+
     fn compile_flags() -> [&'static str; 21] {
         [
             "-w",
@@ -1009,42 +1032,59 @@ impl Adapter for TccTests2Adapter {
         }
 
         let mut exec = Command::new(&exe_path);
-        if stem == "46_grep" {
-            // The vendored file is CRLF-normalized in our checkout, while
-            // the upstream expected output assumes LF input for its `$`
-            // pattern. GCC and rcc agree on both inputs; run the fixture
-            // under the upstream line-ending condition instead of treating
-            // this as a compiler failure.
-            let file_name = case
-                .path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("missing filename: {}", case.path.display()))?;
-            let input_path = tmp.path().join(file_name);
-            let input = std::fs::read(&case.path)?;
-            let input = String::from_utf8_lossy(&input).replace("\r\n", "\n");
-            std::fs::write(&input_path, input.as_bytes())?;
-            exec.current_dir(tmp.path());
-        } else if let Some(dir) = case.path.parent() {
-            exec.current_dir(dir);
-        }
+        let runtime_dir = Self::prepare_runtime_workdir(&stem, case, tmp.path())?;
+        exec.current_dir(&runtime_dir);
         exec.args(Self::runtime_args(&stem, case));
-        let outcome = match run_with_timeout(&mut exec, TIMEOUT) {
+        match run_with_timeout(&mut exec, TIMEOUT) {
             Ok(o) if o.status.success() => {
                 let actual = Self::combined_output(&o);
-                Self::compare_outcome_for_stem(&stem, &actual, &expected_path)
+                Ok(Self::compare_outcome_for_stem(&stem, &actual, &expected_path))
             }
-            Ok(o) => Outcome::Fail {
+            Ok(o) => Ok(Outcome::Fail {
                 reason: format!(
                     "non-zero exit code: {}",
                     o.status.code().map_or_else(|| "killed by signal".into(), |c| c.to_string()),
                 ),
-            },
-            Err(e) => Outcome::Fail { reason: format!("execution failed: {e}") },
-        };
-        if let Some(dir) = case.path.parent() {
-            let _ = std::fs::remove_file(dir.join("fred.txt"));
+            }),
+            Err(e) => Ok(Outcome::Fail { reason: format!("execution failed: {e}") }),
         }
-        Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tcc_tests2_adapter_unit_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_workdir_is_temp_for_side_effecting_tests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let suite_dir = tmp.path().join("suite/tests/tests2");
+        std::fs::create_dir_all(&suite_dir).unwrap();
+        let case =
+            TestCase { id: "tcc-tests2::40_stdio".into(), path: suite_dir.join("40_stdio.c") };
+
+        let runtime_dir =
+            TccTests2Adapter::prepare_runtime_workdir("40_stdio", &case, tmp.path()).unwrap();
+        std::fs::write(runtime_dir.join("fred.txt"), b"hello\nhello\n").unwrap();
+
+        assert_ne!(runtime_dir, suite_dir);
+        assert!(runtime_dir.starts_with(tmp.path()));
+        assert!(!suite_dir.join("fred.txt").exists());
+    }
+
+    #[test]
+    fn grep_runtime_workdir_gets_lf_normalized_input_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let suite_dir = tmp.path().join("suite/tests/tests2");
+        std::fs::create_dir_all(&suite_dir).unwrap();
+        let path = suite_dir.join("46_grep.c");
+        std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+        let case = TestCase { id: "tcc-tests2::46_grep".into(), path };
+
+        let runtime_dir =
+            TccTests2Adapter::prepare_runtime_workdir("46_grep", &case, tmp.path()).unwrap();
+
+        assert_eq!(std::fs::read(runtime_dir.join("46_grep.c")).unwrap(), b"a\nb\n");
     }
 }
 
