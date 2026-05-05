@@ -465,6 +465,17 @@ pub enum HirStmtKind {
     Return(Option<HirExprId>),
     /// Local declaration with optional initializer.
     LocalDecl { local: Local, init: Option<HirExprId> },
+    /// One lowered initializer store into a local object or subobject.
+    ///
+    /// This is intentionally not an assignment expression: C permits
+    /// initializing `const` objects, while a later `=` assignment to the
+    /// same lvalue is constrained by C99 §6.5.16p2.
+    InitAssign {
+        /// Destination lvalue.
+        lhs: HirExprId,
+        /// Initializer value.
+        rhs: HirExprId,
+    },
     /// GNU inline assembly statement.
     InlineAsm(HirInlineAsm),
     /// `;`

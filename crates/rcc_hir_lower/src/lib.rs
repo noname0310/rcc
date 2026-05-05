@@ -1683,6 +1683,10 @@ fn populate_switch_case_tables_in_stmt(
         HirStmtKind::Expr(expr) => {
             populate_switch_case_tables_in_expr(body, expr, switch_depth, session);
         }
+        HirStmtKind::InitAssign { lhs, rhs } => {
+            populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
+        }
         HirStmtKind::InlineAsm(asm) => {
             for operand in asm.outputs.iter().chain(&asm.inputs) {
                 populate_switch_case_tables_in_expr(body, operand.expr, switch_depth, session);
@@ -1908,6 +1912,7 @@ fn collect_cases_for_switch(
             collect_cases_for_switch(body, inner, session, state);
         }
         HirStmtKind::Expr(_)
+        | HirStmtKind::InitAssign { .. }
         | HirStmtKind::InlineAsm(_)
         | HirStmtKind::Goto(_)
         | HirStmtKind::GotoComputed(_)
@@ -2194,7 +2199,7 @@ fn lower_block_decl(
         // on the LocalDecl so simple `int x = 5;` declarations still
         // produce exactly one statement. Aggregate (brace-enclosed)
         // initialisers are handled by `lower_initializer` below, which
-        // flattens them into a sequence of assignment statements per
+        // flattens them into a sequence of initializer stores per
         // C99 §6.7.8.
         let (init_expr, list_init) = match &init_decl.init {
             Some(init @ rcc_ast::Initializer::Expr(e))
@@ -2218,7 +2223,7 @@ fn lower_block_decl(
         out.push(stmt_id);
 
         // For brace-enclosed initialisers, flatten the list into a
-        // sequence of assignment statements appended to the current
+        // sequence of initializer store statements appended to the current
         // block. The target lvalue is a fresh `LocalRef` expression so
         // every assignment has its own HIR node.
         if let Some(init) = list_init {
@@ -2692,7 +2697,7 @@ fn string_literal_elements(lit: &rcc_ast::StringLiteral) -> Vec<i128> {
 }
 
 /// Flatten a brace-enclosed initialiser (`Initializer::List`) into a
-/// sequence of `HirStmtKind::Expr`-wrapped assignment statements.
+/// sequence of `HirStmtKind::InitAssign` statements.
 ///
 /// Semantics (C99 §6.7.8):
 /// - **Scalar target + `{ v }`** — treated as `target = v;` (§6.7.8p11).
@@ -3959,8 +3964,7 @@ fn push_int_const(value: i128, ty: TyId, span: Span, body: &mut Body) -> HirExpr
     id
 }
 
-/// Build an `Assign { lhs, rhs }` expression and wrap it in an
-/// `HirStmtKind::Expr` statement appended to `out`.
+/// Build an initializer store statement appended to `out`.
 fn emit_assign_stmt(
     lhs: HirExprId,
     rhs: HirExprId,
@@ -3968,21 +3972,11 @@ fn emit_assign_stmt(
     body: &mut Body,
     out: &mut Vec<HirStmtId>,
 ) {
-    // Assign expression carries the lhs type in HIR (typeck refines it
-    // later); we borrow it from the lhs node so the placeholder is at
-    // least the right shape.
-    let lhs_ty = body.exprs[lhs].ty;
-    let assign_id = body.exprs.push(HirExpr {
-        id: HirExprId(0),
-        ty: lhs_ty,
-        value_cat: ValueCat::RValue,
+    let stmt_id = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
         span,
-        kind: HirExprKind::Assign { lhs, rhs },
+        kind: HirStmtKind::InitAssign { lhs, rhs },
     });
-    body.exprs[assign_id].id = assign_id;
-
-    let stmt_id =
-        body.stmts.push(HirStmt { id: HirStmtId(0), span, kind: HirStmtKind::Expr(assign_id) });
     body.stmts[stmt_id].id = stmt_id;
     out.push(stmt_id);
 }
@@ -11955,7 +11949,7 @@ mod tests {
 
     // ── Initializer lowering (task 06-11) ───────────────────────────────
 
-    /// Helper: extract the assignment statements that follow a `LocalDecl`
+    /// Helper: extract the initializer stores that follow a `LocalDecl`
     /// inside a freshly-lowered Compound block. Returns (local id, vec of
     /// (lhs HirExprId, rhs HirExprId)) for assert convenience.
     fn collect_init_assigns(
@@ -11970,11 +11964,7 @@ mod tests {
         for sid in ids {
             match &body.stmts[*sid].kind {
                 HirStmtKind::LocalDecl { local: l, .. } => local = Some(*l),
-                HirStmtKind::Expr(eid) => {
-                    if let HirExprKind::Assign { lhs, rhs } = &body.exprs[*eid].kind {
-                        out.push((*lhs, *rhs));
-                    }
-                }
+                HirStmtKind::InitAssign { lhs, rhs } => out.push((*lhs, *rhs)),
                 _ => {}
             }
         }

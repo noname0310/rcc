@@ -922,6 +922,9 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::Expr(expr) => {
             let _ = lower_as_rvalue(builder, cx, *expr);
         }
+        HirStmtKind::InitAssign { lhs, rhs } => {
+            lower_init_assign(builder, cx, stmt.span, *lhs, *rhs);
+        }
         HirStmtKind::InlineAsm(asm) => {
             lower_inline_asm(builder, cx, stmt.span, asm);
         }
@@ -1980,6 +1983,21 @@ fn lower_statement_expression(
     value
 }
 
+fn lower_init_assign(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    lhs: HirExprId,
+    rhs: HirExprId,
+) {
+    let dest = lower_as_place(builder, cx, lhs);
+    let value = lower_as_rvalue(builder, cx, rhs);
+    builder.push(Statement {
+        kind: StatementKind::Assign { place: dest, rvalue: Rvalue::Use(value) },
+        span,
+    });
+}
+
 /// Lower a `HirStmtKind::LocalDecl { local, init }`.
 ///
 /// The CFG local has already been allocated by the body-builder pre-pass;
@@ -2148,15 +2166,12 @@ fn is_vla_ty(tcx: &TyCtxt, ty: TyId) -> bool {
     matches!(tcx.get(ty), Ty::Array { is_vla: true, .. })
 }
 
-/// `true` if `stmt_id` is `HirStmtKind::Expr(Assign { lhs, .. })` whose
+/// `true` if `stmt_id` is `HirStmtKind::InitAssign { lhs, .. }` whose
 /// `lhs` is an lvalue chain rooted at `hir_local`. Used by
 /// [`lower_block_stmts`] to bound the run of HIR-walker-emitted leaf
 /// assignments associated with the preceding aggregate `LocalDecl`.
 fn is_leaf_assign_for_hir_local(cx: &LowerCx<'_>, stmt_id: HirStmtId, hir_local: HirLocal) -> bool {
-    let HirStmtKind::Expr(expr_id) = cx.body.stmts[stmt_id].kind else {
-        return false;
-    };
-    let HirExprKind::Assign { lhs, .. } = cx.body.exprs[expr_id].kind else {
+    let HirStmtKind::InitAssign { lhs, .. } = cx.body.stmts[stmt_id].kind else {
         return false;
     };
     is_lvalue_rooted_at(cx, lhs, hir_local)
@@ -2166,10 +2181,7 @@ fn is_leaf_assign_for_hir_local(cx: &LowerCx<'_>, stmt_id: HirStmtId, hir_local:
 /// caller has already verified the lvalue root with
 /// [`is_leaf_assign_for_hir_local`].
 fn is_zero_const_assign(cx: &LowerCx<'_>, stmt_id: HirStmtId) -> bool {
-    let HirStmtKind::Expr(expr_id) = cx.body.stmts[stmt_id].kind else {
-        return false;
-    };
-    let HirExprKind::Assign { rhs, .. } = cx.body.exprs[expr_id].kind else {
+    let HirStmtKind::InitAssign { rhs, .. } = cx.body.stmts[stmt_id].kind else {
         return false;
     };
     is_zero_const_expr(cx, rhs)
@@ -5937,7 +5949,7 @@ mod tests {
         push_expr(body, elem_ty, ValueCat::LValue, HirExprKind::Index { base, index })
     }
 
-    /// Push `target = value` (as `HirStmtKind::Expr(Assign)`).
+    /// Push an initializer store `target = value`.
     fn assign_index_const_stmt(
         body: &mut HirBody,
         elem_ty: TyId,
@@ -5949,8 +5961,7 @@ mod tests {
         let base = local_ref_expr(body, local_ty, local);
         let lhs = index_expr(body, elem_ty, base, idx);
         let rhs = push_expr(body, elem_ty, ValueCat::RValue, HirExprKind::IntConst(value));
-        let assign = push_expr(body, elem_ty, ValueCat::RValue, HirExprKind::Assign { lhs, rhs });
-        push_stmt(body, HirStmtKind::Expr(assign))
+        push_stmt(body, HirStmtKind::InitAssign { lhs, rhs })
     }
 
     /// Push a `LocalDecl { local, init: None }` statement.

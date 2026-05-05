@@ -22,8 +22,8 @@ use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::ty::{Qual, Ty};
 use rcc_hir::{
     Body, ConvertKind, DefId, DefKind, GlobalInitDesignator, GlobalInitValue, HirCrate, HirExprId,
-    HirExprKind, HirStmtKind, Layout, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, OverflowOp,
-    RecordKind, SymbolVisibility, TyCtxt, TyId, ValueCat,
+    HirExprKind, HirStmt, HirStmtKind, Layout, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals,
+    OverflowOp, RecordKind, SymbolVisibility, TyCtxt, TyId, ValueCat,
 };
 use rcc_hir_lower::{
     apply_declarator, lower, lower_enum, lower_expr, lower_initializer, lower_record, lower_stmt,
@@ -1090,13 +1090,10 @@ fn gnu_vector_compound_literal_uses_vector_init_expression() {
         .expect("vector compound literal");
     assert!(
         init_stmts.iter().any(|stmt| match body.stmts[*stmt].kind {
-            HirStmtKind::Expr(expr) => match &body.exprs[expr].kind {
-                HirExprKind::Assign { lhs, rhs } => {
-                    matches!(body.exprs[*lhs].kind, HirExprKind::LocalRef(local) if local == literal_local)
-                        && matches!(&body.exprs[*rhs].kind, HirExprKind::VectorInit { lanes, .. } if lanes.len() == 4)
-                }
-                _ => false,
-            },
+            HirStmtKind::InitAssign { lhs, rhs } => {
+                matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(local) if local == literal_local)
+                    && matches!(&body.exprs[rhs].kind, HirExprKind::VectorInit { lanes, .. } if lanes.len() == 4)
+            }
             _ => false,
         }),
         "compound literal initializer should assign one VectorInit to its backing local"
@@ -1630,14 +1627,18 @@ fn hir_int_value(body: &Body, id: HirExprId) -> Option<i128> {
     }
 }
 
+fn init_assign_operands(stmt: &HirStmt) -> Option<(HirExprId, HirExprId)> {
+    match stmt.kind {
+        HirStmtKind::InitAssign { lhs, rhs } => Some((lhs, rhs)),
+        _ => None,
+    }
+}
+
 fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
     let mut writes = Vec::new();
     for stmt in body.stmts.iter() {
-        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = &body.exprs[assign].kind else {
-            continue;
-        };
-        let HirExprKind::Index { base, index } = &body.exprs[*lhs].kind else {
+        let Some((lhs, rhs)) = init_assign_operands(stmt) else { continue };
+        let HirExprKind::Index { base, index } = &body.exprs[lhs].kind else {
             continue;
         };
         if !matches!(&body.exprs[*base].kind, HirExprKind::LocalRef(l) if *l == local) {
@@ -1646,7 +1647,7 @@ fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
         let Some(i) = hir_int_value(body, *index) else {
             continue;
         };
-        let Some(v) = hir_int_value(body, *rhs) else {
+        let Some(v) = hir_int_value(body, rhs) else {
             continue;
         };
         writes.push((i, v));
@@ -1657,11 +1658,8 @@ fn local_array_int_writes(body: &Body, local: Local) -> Vec<(i128, i128)> {
 fn local_field_array_int_writes(body: &Body, local: Local, field_index: u32) -> Vec<(i128, i128)> {
     let mut writes = Vec::new();
     for stmt in body.stmts.iter() {
-        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = &body.exprs[assign].kind else {
-            continue;
-        };
-        let HirExprKind::Index { base, index } = &body.exprs[*lhs].kind else {
+        let Some((lhs, rhs)) = init_assign_operands(stmt) else { continue };
+        let HirExprKind::Index { base, index } = &body.exprs[lhs].kind else {
             continue;
         };
         let HirExprKind::Field { base: field_base, field_index: field } = &body.exprs[*base].kind
@@ -1677,7 +1675,7 @@ fn local_field_array_int_writes(body: &Body, local: Local, field_index: u32) -> 
         let Some(i) = hir_int_value(body, *index) else {
             continue;
         };
-        let Some(v) = hir_int_value(body, *rhs) else {
+        let Some(v) = hir_int_value(body, rhs) else {
             continue;
         };
         writes.push((i, v));
@@ -1722,12 +1720,8 @@ fn init_scalar_assigns_rhs_to_target() {
         &mut out,
     );
     assert_eq!(out.len(), 1);
-    let assign_expr = match body.stmts[out[0]].kind {
-        HirStmtKind::Expr(eid) => eid,
-        ref other => panic!("expected Expr stmt, got {other:?}"),
-    };
-    let HirExprKind::Assign { rhs, .. } = body.exprs[assign_expr].kind else {
-        panic!("expected Assign, got {:?}", body.exprs[assign_expr].kind);
+    let Some((_lhs, rhs)) = init_assign_operands(&body.stmts[out[0]]) else {
+        panic!("expected InitAssign stmt, got {:?}", body.stmts[out[0]].kind);
     };
     assert_eq!(hir_int_value(&body, rhs), Some(7));
 }
@@ -1765,8 +1759,7 @@ fn init_array_partial_zero_fills_tail() {
     assert_eq!(out.len(), 3);
     let mut idx_value: Vec<(i128, i128)> = Vec::new();
     for sid in &out {
-        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
+        let Some((lhs, rhs)) = init_assign_operands(&body.stmts[*sid]) else { continue };
         let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
         let Some(i) = hir_int_value(&body, index) else { continue };
         let Some(v) = hir_int_value(&body, rhs) else { continue };
@@ -1811,8 +1804,7 @@ fn init_array_designator_resets_cursor() {
     assert_eq!(out.len(), 3);
     let mut idx_value: Vec<(i128, i128)> = Vec::new();
     for sid in &out {
-        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = body.exprs[eid].kind else { continue };
+        let Some((lhs, rhs)) = init_assign_operands(&body.stmts[*sid]) else { continue };
         let HirExprKind::Index { index, .. } = body.exprs[lhs].kind else { continue };
         let Some(i) = hir_int_value(&body, index) else { continue };
         let Some(v) = hir_int_value(&body, rhs) else { continue };
@@ -1930,8 +1922,7 @@ fn init_record_per_field_assign() {
     assert!(out.len() >= 2, "expected at least two field assigns, got {}", out.len());
     let mut field_values: Vec<i128> = Vec::new();
     for sid in &out {
-        let HirStmtKind::Expr(eid) = body.stmts[*sid].kind else { continue };
-        let HirExprKind::Assign { rhs, .. } = body.exprs[eid].kind else { continue };
+        let Some((_lhs, rhs)) = init_assign_operands(&body.stmts[*sid]) else { continue };
         if let Some(v) = hir_int_value(&body, rhs) {
             field_values.push(v);
         }
@@ -2639,11 +2630,8 @@ fn snippet_compound_literal_preserves_type_part() {
     assert_eq!(literal_ty, tcx.int);
     assert_eq!(body.locals[literal_local].ty, tcx.int);
     assert_eq!(init_stmts.len(), 1);
-    let HirStmtKind::Expr(assign) = body.stmts[init_stmts[0]].kind else {
-        panic!("compound literal init must be an assignment expression statement");
-    };
-    let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
-        panic!("compound literal init statement must assign");
+    let Some((lhs, rhs)) = init_assign_operands(&body.stmts[init_stmts[0]]) else {
+        panic!("compound literal init must be an InitAssign statement");
     };
     assert!(matches!(body.exprs[lhs].kind, HirExprKind::LocalRef(l) if l == literal_local));
     assert_eq!(hir_int_value(body, rhs), Some(1));
@@ -2700,10 +2688,7 @@ fn snippet_compound_literal_record_initializer_reuses_initializer_walker() {
     assert_eq!(body.locals[literal_local].ty, literal_ty);
     assert!(
         init_stmts.iter().any(|stmt| {
-            let HirStmtKind::Expr(assign) = body.stmts[*stmt].kind else { return false };
-            let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
-                return false;
-            };
+            let Some((lhs, rhs)) = init_assign_operands(&body.stmts[*stmt]) else { return false };
             matches!(body.exprs[lhs].kind, HirExprKind::Field { base, field_index: 0 }
                 if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local))
                 && hir_int_value(body, rhs) == Some(1)
@@ -2730,10 +2715,7 @@ fn snippet_compound_literal_array_initializer_is_indexable() {
     }
     assert!(
         init_stmts.iter().any(|stmt| {
-            let HirStmtKind::Expr(assign) = body.stmts[*stmt].kind else { return false };
-            let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else {
-                return false;
-            };
+            let Some((lhs, rhs)) = init_assign_operands(&body.stmts[*stmt]) else { return false };
             matches!(body.exprs[lhs].kind, HirExprKind::Index { base, index }
                 if matches!(body.exprs[base].kind, HirExprKind::LocalRef(l) if l == literal_local)
                     && hir_int_value(body, index) == Some(1))
@@ -2753,8 +2735,7 @@ fn snippet_char_array_string_initializer_completes_length_and_writes_chars() {
     }
     let mut elems = Vec::new();
     for stmt in body.stmts.iter() {
-        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let Some((lhs, rhs)) = init_assign_operands(stmt) else { continue };
         let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
         if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
             continue;
@@ -2784,8 +2765,7 @@ fn snippet_local_struct_char_array_string_initializer_writes_subobject_chars() {
     let body = hir.bodies.values().next().expect("missing function body");
     let mut elems = Vec::new();
     for stmt in body.stmts.iter() {
-        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let Some((lhs, rhs)) = init_assign_operands(stmt) else { continue };
         let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
         let HirExprKind::Field { base: field_base, field_index: 0 } = body.exprs[base].kind else {
             continue;
@@ -2811,8 +2791,7 @@ fn snippet_wide_string_initializer_completes_wchar_array_by_codepoint() {
     }
     let mut elems = Vec::new();
     for stmt in body.stmts.iter() {
-        let HirStmtKind::Expr(assign) = stmt.kind else { continue };
-        let HirExprKind::Assign { lhs, rhs } = body.exprs[assign].kind else { continue };
+        let Some((lhs, rhs)) = init_assign_operands(stmt) else { continue };
         let HirExprKind::Index { base, index } = body.exprs[lhs].kind else { continue };
         if !matches!(body.exprs[base].kind, HirExprKind::LocalRef(Local(0))) {
             continue;
@@ -4260,6 +4239,7 @@ fn first_return_expr(body: &Body, stmt: rcc_hir::HirStmtId) -> Option<HirExprId>
             .and_then(|stmt| first_return_expr(body, stmt))
             .or_else(|| first_return_expr(body, *inner)),
         HirStmtKind::Expr(_)
+        | HirStmtKind::InitAssign { .. }
         | HirStmtKind::InlineAsm(_)
         | HirStmtKind::Goto(_)
         | HirStmtKind::GotoComputed(_)

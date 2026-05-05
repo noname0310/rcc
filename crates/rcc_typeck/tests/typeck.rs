@@ -1088,6 +1088,90 @@ fn assignment_to_array_object_emits_e0080() {
     assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
 }
 
+#[test]
+fn const_array_initializer_store_does_not_emit_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let arr_ty =
+        tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(3), is_vla: false });
+    let local = push_local_with_quals(
+        &mut body,
+        arr_ty,
+        rcc_hir::ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+    );
+    let decl = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::LocalDecl { local, init: None },
+    });
+    body.stmts[decl].id = decl;
+
+    let base = push_kind(&mut body, arr_ty, HirExprKind::LocalRef(local));
+    let index = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+    let lhs = push_kind(&mut body, tcx.char_, HirExprKind::Index { base, index });
+    let rhs = push_kind(&mut body, tcx.char_, HirExprKind::IntConst(b'h' as i128));
+    let init = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::InitAssign { lhs, rhs },
+    });
+    body.stmts[init].id = init;
+    let block = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::Block(vec![decl, init]),
+    });
+    body.stmts[block].id = block;
+    body.root = Some(block);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)),
+        "initializer stores into const arrays must not be checked as assignments: {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn ordinary_assignment_to_const_array_element_still_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let elem = Qual { ty: tcx.char_, is_const: true, is_volatile: false, is_restrict: false };
+    let arr_ty = tcx.intern(Ty::Array { elem, len: Some(3), is_vla: false });
+    let local = push_local(&mut body, arr_ty);
+    let decl = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::LocalDecl { local, init: None },
+    });
+    body.stmts[decl].id = decl;
+
+    let base = push_kind(&mut body, arr_ty, HirExprKind::LocalRef(local));
+    let index = push_kind(&mut body, tcx.int, HirExprKind::IntConst(0));
+    let lhs = push_kind(&mut body, tcx.char_, HirExprKind::Index { base, index });
+    let rhs = push_kind(&mut body, tcx.char_, HirExprKind::IntConst(b'x' as i128));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    let assign_stmt = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::Expr(assign),
+    });
+    body.stmts[assign_stmt].id = assign_stmt;
+    let block = body.stmts.push(HirStmt {
+        id: HirStmtId(0),
+        span: DUMMY_SP,
+        kind: HirStmtKind::Block(vec![decl, assign_stmt]),
+    });
+    body.stmts[block].id = block;
+    body.root = Some(block);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
 // ─── 9b. E0081 / E0082 — surfaced via is_assignable / pointer_convert ─────
 
 // E0081 (incompatible types in assignment) and E0082 (incompatible

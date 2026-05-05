@@ -402,6 +402,11 @@ fn visit_stmt_with_context(
             let e2 = visit_expr(e, body, tcx, session, def_info);
             HirStmtKind::Expr(e2)
         }
+        HirStmtKind::InitAssign { lhs, rhs } => {
+            let (lhs2, rhs2, _) =
+                type_assignment_operands(lhs, rhs, false, body, tcx, session, def_info);
+            HirStmtKind::InitAssign { lhs: lhs2, rhs: rhs2 }
+        }
         HirStmtKind::InlineAsm(mut asm) => {
             for output in &mut asm.outputs {
                 output.expr = visit_expr(output.expr, body, tcx, session, def_info);
@@ -521,6 +526,38 @@ fn visit_stmt_with_context(
         }
     };
     body.stmts[stmt_id].kind = new_kind;
+}
+
+fn type_assignment_operands(
+    lhs: HirExprId,
+    rhs: HirExprId,
+    require_modifiable_lvalue: bool,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> (HirExprId, HirExprId, TyId) {
+    let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
+    let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
+
+    if require_modifiable_lvalue {
+        // C99 §6.5.16p2: assignment-expression LHS must be modifiable.
+        check_modifiable_lvalue(session, tcx, body, def_info, lhs2);
+    } else {
+        // C99 §6.7.8 initializes an object; `const` qualification does not
+        // make the object uninitializable. Still require an actual lvalue so
+        // malformed lowered HIR does not silently pass.
+        check_assignment_lhs(session, body, lhs2);
+    }
+
+    let rhs2 = rvalue_decayed(rhs2, body, tcx);
+    let lhs_ty = body.exprs[lhs2].ty;
+    let rhs2 = match coerce_to(rhs2, lhs_ty, body, tcx, session) {
+        CoerceResult::Noop(expr) | CoerceResult::Converted(expr) | CoerceResult::Error(expr) => {
+            expr
+        }
+    };
+    (lhs2, rhs2, lhs_ty)
 }
 
 /// Type-check the expression at `expr_id`, recursing into its children
@@ -922,19 +959,8 @@ pub fn visit_expr(
             expr_id
         }
         HirExprKind::Assign { lhs, rhs } => {
-            let lhs2 = visit_expr(lhs, body, tcx, session, def_info);
-            let rhs2 = visit_expr(rhs, body, tcx, session, def_info);
-            // C99 §6.5.16p2: LHS must be a modifiable lvalue.
-            check_modifiable_lvalue(session, tcx, body, def_info, lhs2);
-            // RHS is an rvalue, decayed.
-            let rhs2 = rvalue_decayed(rhs2, body, tcx);
-            // Coerce RHS to LHS's type.
-            let lhs_ty = body.exprs[lhs2].ty;
-            let rhs2 = match coerce_to(rhs2, lhs_ty, body, tcx, session) {
-                CoerceResult::Noop(expr)
-                | CoerceResult::Converted(expr)
-                | CoerceResult::Error(expr) => expr,
-            };
+            let (lhs2, rhs2, lhs_ty) =
+                type_assignment_operands(lhs, rhs, true, body, tcx, session, def_info);
             body.exprs[expr_id].ty = lhs_ty;
             body.exprs[expr_id].value_cat = ValueCat::RValue;
             body.exprs[expr_id].kind = HirExprKind::Assign { lhs: lhs2, rhs: rhs2 };

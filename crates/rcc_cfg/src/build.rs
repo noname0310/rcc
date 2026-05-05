@@ -912,6 +912,10 @@ impl BodyBuilder {
             HirStmtKind::Expr(expr) => {
                 self.collect_expr_labels(hir_body, *expr, local_map, scopes);
             }
+            HirStmtKind::InitAssign { lhs, rhs } => {
+                self.collect_expr_labels(hir_body, *lhs, local_map, scopes);
+                self.collect_expr_labels(hir_body, *rhs, local_map, scopes);
+            }
             HirStmtKind::InlineAsm(asm) => {
                 for operand in asm.outputs.iter().chain(&asm.inputs) {
                     self.collect_expr_labels(hir_body, operand.expr, local_map, scopes);
