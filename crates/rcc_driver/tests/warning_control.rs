@@ -63,6 +63,45 @@ fn wall_and_pedantic_flags_are_recorded() {
 }
 
 #[test]
+fn wall_and_extra_enable_documented_warning_names() {
+    let wall = options_from_cli(&parse(&["rcc", "-Wall", "hello.c"]));
+    assert!(wall.warning_config.warning_enabled("unused-variable"));
+    assert!(wall.warning_config.warning_enabled("unused-function"));
+    assert!(wall.warning_config.warning_enabled("implicit-function-declaration"));
+    assert!(!wall.warning_config.warning_enabled("unused-parameter"));
+
+    let extra = options_from_cli(&parse(&["rcc", "-Wextra", "hello.c"]));
+    assert!(extra.warning_config.warning_enabled("unused-variable"));
+    assert!(extra.warning_config.warning_enabled("unused-parameter"));
+    assert!(extra.warning_config.warning_enabled("sign-compare"));
+    assert!(extra.warning_config.warning_enabled("unreachable-code"));
+}
+
+#[test]
+fn named_warning_controls_override_groups() {
+    let opts = options_from_cli(&parse(&["rcc", "-Wall", "-Wno-unused-variable", "hello.c"]));
+    assert!(!opts.warning_config.warning_enabled("unused-variable"));
+    assert!(opts.warning_config.warning_enabled("unused-function"));
+
+    let opts = options_from_cli(&parse(&["rcc", "-Wunused_parameter", "hello.c"]));
+    assert!(opts.warning_config.warning_enabled("unused-parameter"));
+}
+
+#[test]
+fn named_werror_controls_warning_names() {
+    let opts = options_from_cli(&parse(&[
+        "rcc",
+        "-Werror=unused-variable",
+        "-Wno-error=unused-function",
+        "hello.c",
+    ]));
+
+    assert!(opts.warning_config.named_warning_promoted_to_error("unused-variable"));
+    assert!(!opts.warning_config.named_warning_promoted_to_error("unused-function"));
+    assert!(!opts.warning_config.named_warning_promoted_to_error("unused-parameter"));
+}
+
+#[test]
 fn werror_promotes_pipeline_warning_to_error() {
     let (session, cap) = compile_warning_fixture(&["-Werror", "--emit=ast"]);
 

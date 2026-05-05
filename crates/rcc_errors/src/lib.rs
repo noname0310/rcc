@@ -18,7 +18,9 @@ mod warning;
 pub use builder::DiagnosticBuilder;
 pub use emitter::{include_chain_notes, CaptureEmitter, Emitter, StderrEmitter};
 pub use handler::Handler;
-pub use warning::WarningConfig;
+pub use warning::{
+    wall_warning_names, warning_category, wextra_warning_names, WarningCategory, WarningConfig,
+};
 
 /// Severity level of a `Diagnostic`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

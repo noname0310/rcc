@@ -10,6 +10,8 @@ the mechanical registry check in `cargo xtask check-error-codes`.
 - Every documented code must exist in the registry.
 - Every quoted diagnostic code in Rust source must exist in the registry.
 - The check covers both hard errors (`E`) and warnings (`W`).
+- Warning names, group membership, and detector contracts live in
+  `docs/warnings.md`.
 
 Command:
 
