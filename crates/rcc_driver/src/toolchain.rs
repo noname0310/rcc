@@ -59,6 +59,9 @@ impl CommandSpec {
         if options.static_link {
             args.push(OsString::from("-static"));
         }
+        if options.pthread {
+            args.push(OsString::from("-pthread"));
+        }
         match options.pie {
             Some(true) => args.push(OsString::from("-pie")),
             Some(false) => args.push(OsString::from("-no-pie")),

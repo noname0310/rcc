@@ -26,9 +26,9 @@ User `-D` definitions are appended after these defaults, so a project wrapper
 can intentionally choose a narrower feature level.  User `-U` flags still run
 after all definitions and may remove any of the defaults.
 
-`-pthread` installs `_REENTRANT=1` during preprocessing.  Linker-driver
-forwarding for pthread is tracked separately by
-`tasks/16-linux-glibc-compat/08-pthread-driver-flag.md`.
+`-pthread` installs `_REENTRANT=1` during preprocessing and forwards
+`-pthread` to the clang-compatible linker driver during final linking.  The
+flag is rejected for Windows targets instead of being silently ignored.
 
 ## Ownership Boundary
 

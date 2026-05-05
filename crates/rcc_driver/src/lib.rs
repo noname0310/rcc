@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use rcc_session::{EmitKind, LinkOptions, Options, Session, TargetInfo, WarningConfig};
+use rcc_session::{EmitKind, LinkOptions, Options, Os, Session, TargetInfo, WarningConfig};
 
 pub mod cli;
 mod deps;
@@ -124,6 +124,7 @@ fn classify_driver_error(message: &str) -> ExitCode {
         || message.starts_with("cannot specify -o")
         || message.starts_with("no input files")
         || message.starts_with("refusing to overwrite input file")
+        || message.starts_with("-pthread is unsupported")
     {
         ExitCode::Usage
     } else {
@@ -137,6 +138,10 @@ fn validate_driver_cli(cli: &Cli) -> Result<(), String> {
     }
     if cli.input.is_empty() && !(cli.show_version || cli.print_search_dirs) {
         return Err("no input files".to_owned());
+    }
+    let target = cli.target.clone().unwrap_or_else(TargetInfo::host);
+    if cli.pthread && matches!(target.os, Os::Windows) {
+        return Err("-pthread is unsupported for Windows targets".to_owned());
     }
     Ok(())
 }
@@ -744,6 +749,7 @@ fn link_options_from_cli(cli: &Cli) -> LinkOptions {
         library_paths: cli.library_paths.clone(),
         shared: cli.shared,
         static_link: cli.static_link,
+        pthread: cli.pthread,
         pie: cli.pie.then_some(true).or_else(|| cli.no_pie.then_some(false)),
         verbose: cli.verbose,
         ..LinkOptions::default()

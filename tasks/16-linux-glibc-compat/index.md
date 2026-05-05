@@ -20,7 +20,7 @@ rcc-owned libc bodies.
 - [x] [05-glibc-common-macro-shims](05-glibc-common-macro-shims.md)
 - [x] [06-gnu-header-attribute-tolerance](06-gnu-header-attribute-tolerance.md)
 - [x] [07-restrict-and-qualifier-aliases](07-restrict-and-qualifier-aliases.md)
-- [ ] [08-pthread-driver-flag](08-pthread-driver-flag.md)
+- [x] [08-pthread-driver-flag](08-pthread-driver-flag.md)
 - [ ] [09-pthread-header-shim](09-pthread-header-shim.md)
 - [ ] [10-posix-core-type-shims](10-posix-core-type-shims.md)
 - [ ] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md)

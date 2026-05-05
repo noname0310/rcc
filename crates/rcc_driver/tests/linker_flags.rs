@@ -104,6 +104,7 @@ fn cli_collects_common_linker_flags() {
         "-shared",
         "-static",
         "-no-pie",
+        "-pthread",
         "hello.c",
     ]);
     let opts = options_from_cli(&cli);
@@ -113,6 +114,7 @@ fn cli_collects_common_linker_flags() {
     assert_eq!(opts.link.linker_args, ["-Wl,--version-script=map.txt"]);
     assert!(opts.link.shared);
     assert!(opts.link.static_link);
+    assert!(opts.link.pthread);
     assert_eq!(opts.link.pie, Some(false));
     assert!(!opts.warning_config.warning_disabled("l,--version-script=map.txt"));
 }
@@ -156,6 +158,21 @@ fn link_command_forwards_options_to_clang_lld_driver() {
 }
 
 #[test]
+fn link_command_forwards_pthread_driver_flag_once() {
+    let options = LinkOptions { pthread: true, ..LinkOptions::default() };
+    let command = pipeline::LinkCommand::with_options(
+        PathBuf::from("clang"),
+        Path::new("input.o"),
+        Path::new("out"),
+        &options,
+    );
+    let rendered = command.render();
+
+    assert!(rendered.contains("-pthread"), "{rendered}");
+    assert_eq!(rendered.matches("-pthread").count(), 1, "{rendered}");
+}
+
+#[test]
 fn missing_linker_error_includes_forwarded_flags() {
     let linker = TempFile::empty_path("missing-cc");
     let obj = TempFile::new("input.o", b"not an object");
@@ -172,6 +189,47 @@ fn missing_linker_error_includes_forwarded_flags() {
 
     assert!(err.contains("-lm"), "{err}");
     assert!(err.contains("-Wl,--version-script=map.txt"), "{err}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn e2e_link_with_pthread_when_enabled() {
+    if std::env::var_os("RCC_RUN_LINK_E2E").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    assert!(llvm_backend_enabled_for_this_build(), "LLVM backend feature is required");
+
+    let input = TempCFile::new(
+        "pthread",
+        r#"
+typedef unsigned long pthread_t;
+extern int pthread_create(pthread_t *, const void *, void *(*)(void *), void *);
+extern int pthread_join(pthread_t, void **);
+
+static int value;
+static void *worker(void *arg) {
+    value = arg ? 7 : 3;
+    return 0;
+}
+
+int main(void) {
+    pthread_t thread;
+    if (pthread_create(&thread, 0, worker, &value) != 0)
+        return 10;
+    if (pthread_join(thread, 0) != 0)
+        return 11;
+    return value == 7 ? 0 : 12;
+}
+"#,
+    );
+    let output = TempFile::empty_path("pthread-out");
+    let link = LinkOptions { pthread: true, ..LinkOptions::default() };
+
+    compile_with_link_options(&input.path, &output.path, link)
+        .expect("compile and link with -pthread");
+
+    let status = Command::new(&output.path).status().expect("run linked executable");
+    assert_eq!(status.code(), Some(0));
 }
 
 #[cfg(not(windows))]

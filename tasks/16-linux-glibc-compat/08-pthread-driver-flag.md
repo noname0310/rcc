@@ -1,5 +1,7 @@
 # 16-08: Pthread Driver Flag
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-07-restrict-and-qualifier-aliases  
 **Milestone:** hosted-linux
@@ -19,7 +21,7 @@ compile-and-link contract used by Linux C compilers.
 
 ## Acceptance
 
-- [ ] `rcc -pthread -E` exposes `_REENTRANT`.
-- [ ] Link planning includes pthread support exactly once.
-- [ ] A pthread smoke program compiles, links, and runs on Linux.
-- [ ] Windows unsupported behavior is explicit and not a silent success.
+- [x] `rcc -pthread -E` exposes `_REENTRANT`.
+- [x] Link planning includes pthread support exactly once.
+- [x] A pthread smoke program compiles, links, and runs on Linux.
+- [x] Windows unsupported behavior is explicit and not a silent success.

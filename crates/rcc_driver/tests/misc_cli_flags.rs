@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rcc_driver::{options_from_cli, run, Cli, ExitCode};
+use rcc_driver::{options_from_cli, run, run_status, Cli, ExitCode};
 use rcc_session::OptLevel;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -268,6 +268,15 @@ fn pthread_flag_installs_reentrant_as_cli_define() {
 
     assert!(cli.pthread);
     assert!(opts.cli_defines.contains(&("_REENTRANT".to_owned(), Some("1".to_owned()))));
+    assert!(opts.link.pthread);
+}
+
+#[test]
+fn pthread_is_rejected_for_windows_targets() {
+    let cli = parse(&["rcc", "--target=x86_64-pc-windows-msvc", "-pthread", "hello.c"]);
+    let status = run_status(cli);
+
+    assert_eq!(status.exit_code, ExitCode::Usage);
 }
 
 #[cfg(target_os = "linux")]

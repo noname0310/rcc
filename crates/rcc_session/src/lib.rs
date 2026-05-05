@@ -391,6 +391,8 @@ pub struct LinkOptions {
     pub shared: bool,
     /// Request static linking (`-static`).
     pub static_link: bool,
+    /// Forward `-pthread` to the clang-compatible linker driver.
+    pub pthread: bool,
     /// PIE control: `Some(true)` => `-pie`, `Some(false)` => `-no-pie`.
     pub pie: Option<bool>,
     /// Print selected tools and subprocess command lines to stderr.
@@ -407,6 +409,7 @@ impl Default for LinkOptions {
             linker_args: Vec::new(),
             shared: false,
             static_link: false,
+            pthread: false,
             pie: None,
             verbose: false,
         }
