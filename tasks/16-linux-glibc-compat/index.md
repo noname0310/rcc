@@ -37,7 +37,7 @@ rcc-owned libc bodies.
 - [x] [22-gnulib-funcdecl-macro-surface](22-gnulib-funcdecl-macro-surface.md)
 - [x] [22a-gnu-extension-inline-header-functions](22a-gnu-extension-inline-header-functions.md)
 - [x] [23-coreutils-posix-declaration-sweep](23-coreutils-posix-declaration-sweep.md)
-- [ ] [24-coreutils-true-runtime-oracle](24-coreutils-true-runtime-oracle.md)
+- [x] [24-coreutils-true-runtime-oracle](24-coreutils-true-runtime-oracle.md)
 
 ## Downstream
 

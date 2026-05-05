@@ -22,7 +22,7 @@ phase's `index.md` next.
 - [x] [13-quality](13-quality/index.md) — opt levels, benches, release
 - [x] [14-lang-extensions](14-lang-extensions/index.md) — preprocessor/parser extensions (pragmas, attributes, asm)
 - [x] [15-builtin-rt](15-builtin-rt/index.md) — target info, freestanding headers, builtins
-- [ ] [16-linux-glibc-compat](16-linux-glibc-compat/index.md) — Linux glibc/POSIX hosted compatibility
+- [x] [16-linux-glibc-compat](16-linux-glibc-compat/index.md) — Linux glibc/POSIX hosted compatibility
 
 ## Legend
 

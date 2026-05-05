@@ -23,7 +23,7 @@ state.
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
-| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe now produces HIR and is blocked on runtime-oracle expansion | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | task `16-24`; first blocker is host-vs-rcc true object/link/runtime oracle |
+| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` direct TU oracle passes host-vs-rcc runtime comparison | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | fixed by tasks `16-21` through `16-24` |
 
 ## Classification Rules
 
@@ -228,7 +228,7 @@ Current `src/true.c` compiler-owned blockers:
 | generated `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` forms cascade into K&R parser diagnostics | macro-expanded declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md` |
 | GNU `__extension__ static __inline` glibc functions fail with an uncoded `expected ';' after declaration` diagnostic | GNU declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md` |
 | missing hosted declarations/macros such as `wcwidth`, unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | fixed by `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
-| no host-vs-rcc `true` runtime oracle yet | real-world runtime probe | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
+| no host-vs-rcc `true` runtime oracle yet | real-world runtime probe | fixed by `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 
 Fixed by `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`:
 generated gnulib replacement headers can now use GNU `#include_next`,
@@ -249,6 +249,15 @@ Fixed by `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
 `run-true-probe.sh` now writes `build/gnulib-config-probe/true.hir`; the
 remaining coreutils work is the host-vs-rcc object/link/runtime oracle in task
 16-24.
+
+Fixed by `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`:
+the probe compiles upstream `src/true.c` directly with host `cc` and `rcc`,
+links both objects against `scripts/true-oracle-support.c`, and observes exit
+status 0 with empty stdout/stderr for both binaries.  The full upstream
+`make src/true` attempt remains logged as `host-make-true.*` and currently
+exits 2 on `_GL_DT_NOTDIR` in `lib/file-has-acl.c`; it is a broader generated
+libcoreutils prerequisite, not a blocker for the direct translation-unit
+compiler oracle.
 
 ## Open Compiler-Owned Work Queue
 

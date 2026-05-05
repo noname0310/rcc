@@ -106,10 +106,14 @@ next coreutils task must either resolve that host-build input issue or select a
 smaller generated-header probe before using the utility as an oracle.
 
 Current `rcc` config-wrapper status: after generated `config.h` exists,
-`run-true-probe.sh` writes `build/gnulib-config-probe/true.hir`. The next
-concrete compiler-owned blocker is
-`tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`: build, link,
-and run a final host-vs-rcc runtime comparison for `src/true`.
+`run-true-probe.sh` writes `build/gnulib-config-probe/true.hir`, compiles
+upstream `src/true.c` to host and rcc objects, links both against the same
+probe-local support object, and runs both binaries. The observed result is
+host status 0, rcc status 0, empty stdout, and empty stderr.
+
+The full upstream `make src/true` path remains logged but is not the stable
+single-TU oracle yet: it currently exits 2 while building libcoreutils because
+`lib/file-has-acl.c` reaches an `_GL_DT_NOTDIR` generated prerequisite gap.
 
 These are compiler/header-surface inputs, not broad xfails.
 

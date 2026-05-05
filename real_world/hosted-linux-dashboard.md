@@ -17,7 +17,7 @@ Status legend:
 | Project | Header/config | Syntax/HIR | Object | Link | Runtime | Current blocker |
 | --- | --- | --- | --- | --- | --- | --- |
 | MuJS | PASS | PASS | PASS | PASS | PASS | none; smoke output matches host |
-| GNU coreutils `src/true` | PASS | PASS | TODO | BLOCKED | BLOCKED | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
+| GNU coreutils `src/true` | PASS | PASS | PASS | PASS | PASS | none; direct TU oracle exits 0 with empty stdout/stderr for host and rcc |
 
 ## MuJS
 
@@ -62,13 +62,15 @@ LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 \
 | Bootstrap/configure | PASS | `build/gnulib-config-probe/build/lib/config.h` was generated locally. | none |
 | Generated headers | PASS | `run-true-probe.sh` invokes make targets for `lib/configmake.h`, generated replacement headers, and `src/version.h`. | none |
 | Syntax/HIR | PASS | `run-true-probe.sh` writes `build/gnulib-config-probe/true.hir`; E0071/E0083 declaration gaps are gone from `logs/true-probe/rcc-true.stderr`. | none |
-| Object | TODO | Not attempted by the HIR-only probe. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
-| Link | BLOCKED | No rcc object exists yet; host `make src/true` is also blocked by generated gnulib input issues recorded by task 16-16. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
-| Runtime | BLOCKED | No host-vs-rcc `true` executable pair exists yet. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
+| Object | PASS | `run-true-probe.sh` writes `true-host.o` with host `cc` and `true-rcc.o` with `rcc --emit=obj`. | none |
+| Link | PASS | Both objects link against the same probe-local `true-oracle-support.o`; upstream sources are not modified. | none |
+| Runtime | PASS | `host-run.status` and `rcc-run.status` are both 0; stdout/stderr logs are empty and byte-identical. | none |
 
-The current compiler-owned queue is:
-
-1. `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`
+The current compiler-owned queue is empty for the first `src/true.c` runtime
+oracle.  The full upstream `make src/true` path is still logged separately and
+currently exits 2 on a generated libcoreutils prerequisite gap around
+`_GL_DT_NOTDIR` in `lib/file-has-acl.c`; that is not used as the stable
+single-TU compiler oracle.
 
 Runtime ownership: GNU coreutils runtime behavior comes from upstream sources
 plus host glibc/libpthread/libdl/libm.  rcc owns the compile pipeline and link
@@ -77,5 +79,5 @@ flag orchestration, not replacement libc bodies.
 ## Phase-16 gate
 
 Do not mark `tasks/index.md` phase 16 complete while any dashboard row is
-BLOCKED by a compiler-owned task.  At this snapshot the dashboard is current,
-but phase 16 stays open because task 16-24 is pending.
+BLOCKED by a compiler-owned task.  At this snapshot the dashboard is current
+and phase 16 is complete for the first hosted Linux oracle set.

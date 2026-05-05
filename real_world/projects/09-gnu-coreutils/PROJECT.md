@@ -31,9 +31,14 @@ The scripts keep cloned worktrees, generated headers, wrapper sources, and logs
 under ignored `build/`, `scratch/`, and `logs/` directories.  They must not edit
 files under `upstream/`.
 
-Current `src/true.c` status: `run-true-probe.sh` is repeatable and now writes
-`build/gnulib-config-probe/true.hir`. It gets past GNU `#include_next`,
-gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations, GNU
-`__extension__ static __inline` glibc header functions, and the first hosted
-declaration/macro sweep. Remaining compiler-owned work is task 16-24: build,
-link, and run a host-vs-rcc `src/true` oracle.
+Current `src/true.c` status: `run-true-probe.sh` is repeatable and passes the
+direct translation-unit runtime oracle. It writes `true.hir`, compiles
+`true-host.o` with host `cc`, compiles `true-rcc.o` with `rcc --emit=obj`,
+links both against the same probe-local support object, and observes exit
+status 0 with empty stdout/stderr from both binaries.
+
+The full upstream `make src/true` attempt is still logged separately and
+currently exits 2 while building libcoreutils because `lib/file-has-acl.c`
+reaches an `_GL_DT_NOTDIR` generated prerequisite gap. The stable compiler
+oracle intentionally targets the selected upstream translation unit without
+mutating upstream sources.
