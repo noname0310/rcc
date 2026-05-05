@@ -1621,6 +1621,17 @@ fn type_binary(
                     rhs_ty,
                     rhs_bit_width,
                 );
+                maybe_emit_sign_compare_warning(
+                    session,
+                    tcx,
+                    op,
+                    span,
+                    lhs_ty,
+                    lhs_bit_width,
+                    rhs_ty,
+                    rhs_bit_width,
+                    common,
+                );
                 // Equality on complex operands is well-formed; relational
                 // (`<` / `<=` / `>` / `>=`) on complex operands is not, but
                 // diagnostic enforcement of the §6.5.8 constraint is task
@@ -2001,6 +2012,56 @@ fn usual_arithmetic_with_bitfields(
     let a = integer_promotion(tcx, a, a_bit_width);
     let b = integer_promotion(tcx, b, b_bit_width);
     usual_arithmetic(tcx, a, b)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_emit_sign_compare_warning(
+    session: &mut Session,
+    tcx: &TyCtxt,
+    op: BinOp,
+    span: rcc_span::Span,
+    lhs_ty: TyId,
+    lhs_bit_width: Option<u32>,
+    rhs_ty: TyId,
+    rhs_bit_width: Option<u32>,
+    common: TyId,
+) {
+    if !session.handler.warning_config().warning_enabled("sign-compare") {
+        return;
+    }
+    let Some(lhs_signed) = promoted_integer_signedness(tcx, lhs_ty, lhs_bit_width) else {
+        return;
+    };
+    let Some(rhs_signed) = promoted_integer_signedness(tcx, rhs_ty, rhs_bit_width) else {
+        return;
+    };
+    if lhs_signed == rhs_signed {
+        return;
+    }
+    if !matches!(*tcx.get(common), Ty::Int { signed: false, .. }) {
+        return;
+    }
+
+    session
+        .handler
+        .struct_warn(
+            span,
+            format!(
+                "comparison of signed and unsigned integer expressions with `{}` [-Wsign-compare]",
+                binop_symbol(op)
+            ),
+        )
+        .code(rcc_errors::codes::W0030)
+        .help("cast one operand explicitly if the unsigned comparison is intended")
+        .emit();
+}
+
+fn promoted_integer_signedness(tcx: &TyCtxt, ty: TyId, bit_width: Option<u32>) -> Option<bool> {
+    let promoted = integer_promotion(tcx, ty, bit_width);
+    match *tcx.get(promoted) {
+        Ty::Int { signed, .. } => Some(signed),
+        _ => None,
+    }
 }
 
 fn member_base_record(body: &Body, tcx: &TyCtxt, base: HirExprId) -> Option<rcc_hir::DefId> {

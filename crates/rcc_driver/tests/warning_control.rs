@@ -420,3 +420,69 @@ fn werror_promotes_gnu_implicit_function_declaration_warning() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0029));
 }
+
+#[test]
+fn wextra_emits_sign_compare_warning() {
+    let (_, cap) = compile_warning_source(
+        "sign-compare",
+        "int main(void) { int i = -1; unsigned u = 1; return i < u; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0030));
+    assert!(diags[0].message.contains("[-Wsign-compare]"));
+}
+
+#[test]
+fn named_sign_compare_warning_can_be_enabled_without_wextra() {
+    let (_, cap) = compile_warning_source(
+        "sign-compare-named",
+        "int main(void) { int i = -1; unsigned u = 1; return i == u; }\n",
+        &["-Wsign-compare", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, Some(codes::W0030));
+}
+
+#[test]
+fn same_signed_or_explicitly_cast_comparisons_do_not_warn() {
+    let (_, same_signed) = compile_warning_source(
+        "sign-compare-same-signed",
+        "int main(void) { int i = -1; int j = 1; return i < j; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+    assert!(same_signed.diagnostics().is_empty());
+
+    let (_, explicit_cast) = compile_warning_source(
+        "sign-compare-cast",
+        "int main(void) { int i = -1; unsigned u = 1; return (unsigned)i < u; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+    assert!(explicit_cast.diagnostics().is_empty());
+}
+
+#[test]
+fn sign_compare_suppression_and_promotion_are_honored() {
+    let (_, suppressed) = compile_warning_source(
+        "sign-compare-wno",
+        "int main(void) { int i = -1; unsigned u = 1; return i < u; }\n",
+        &["-Wextra", "-Wno-sign-compare", "--emit=hir"],
+    );
+    assert!(suppressed.diagnostics().is_empty());
+
+    let (session, promoted) = compile_warning_source(
+        "sign-compare-werror",
+        "int main(void) { int i = -1; unsigned u = 1; return i < u; }\n",
+        &["-Werror=sign-compare", "--emit=hir"],
+    );
+    let diags = promoted.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0030));
+}

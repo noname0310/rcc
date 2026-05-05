@@ -17,7 +17,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [03b-unused-function-warning](03b-unused-function-warning.md)
 - [x] [03c-unused-parameter-warning](03c-unused-parameter-warning.md)
 - [x] [03d-implicit-function-declaration-warning](03d-implicit-function-declaration-warning.md)
-- [ ] [03e-sign-compare-warning](03e-sign-compare-warning.md)
+- [x] [03e-sign-compare-warning](03e-sign-compare-warning.md)
 - [ ] [03f-unreachable-code-warning](03f-unreachable-code-warning.md)
 - [ ] [04-diagnostic-pragmas](04-diagnostic-pragmas.md)
 - [ ] [05-restrict-noalias](05-restrict-noalias.md)

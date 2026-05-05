@@ -1474,3 +1474,22 @@ int main(void) {
 The warning is controlled by `-Wall`, `-Wimplicit-function-declaration`, and
 `-Werror=implicit-function-declaration`. Use a real prototype to keep strict
 C99 semantics and avoid the compatibility path.
+
+## W0030 — signed/unsigned comparison
+
+A comparison mixes signed and unsigned integer operands and the usual
+arithmetic conversions make the comparison use an unsigned common type. This is
+an opt-in analysis warning enabled by `-Wextra`, `-Wsign-compare`, or
+`-Werror=sign-compare`:
+
+```c
+int main(void) {
+    int i = -1;
+    unsigned u = 1;
+    return i < u;  // warning[W0030]: comparison of signed and unsigned integer expressions with `<` [-Wsign-compare]
+}
+```
+
+Comparisons whose promoted operands have the same signedness do not warn.
+Adding an explicit cast that makes the operands match suppresses the
+diagnostic and documents the intended comparison domain.

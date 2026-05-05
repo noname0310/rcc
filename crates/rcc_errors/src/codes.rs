@@ -119,6 +119,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0027, W0027_DESC),
     (W0028, W0028_DESC),
     (W0029, W0029_DESC),
+    (W0030, W0030_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -927,6 +928,15 @@ const W0028_DESC: &str = "unused function parameter";
 /// `-Werror=implicit-function-declaration` enables the diagnostic.
 pub const W0029: &str = "W0029";
 const W0029_DESC: &str = "implicit function declaration";
+
+/// Comparison mixes signed and unsigned integer operands.
+///
+/// Emitted only when `-Wextra`, `-Wsign-compare`, or
+/// `-Werror=sign-compare` enables the diagnostic. The type checker reports
+/// this when integer promotions and usual arithmetic conversions make a signed
+/// operand participate in an unsigned comparison.
+pub const W0030: &str = "W0030";
+const W0030_DESC: &str = "signed/unsigned comparison";
 
 #[cfg(test)]
 mod tests {
