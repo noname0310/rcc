@@ -173,6 +173,10 @@ pub struct Cli {
     /// Opt into Linux glibc/POSIX hosted compatibility policy without enabling GNU syntax by default.
     #[arg(long = "linux-gnu-hosted", action = ArgAction::SetTrue)]
     pub linux_gnu_hosted: bool,
+
+    /// Define `_REENTRANT` for preprocessing; linker behavior is owned by the pthread task.
+    #[arg(long = "pthread", action = ArgAction::SetTrue)]
+    pub pthread: bool,
 }
 
 impl Cli {
@@ -438,6 +442,7 @@ where
                 "-static" => OsString::from("--static"),
                 "-pie" => OsString::from("--pie"),
                 "-no-pie" => OsString::from("--no-pie"),
+                "-pthread" => OsString::from("--pthread"),
                 _ => arg,
             }
         })

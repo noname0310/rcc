@@ -540,11 +540,13 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         &target,
         cli.sysroot.as_deref(),
     ));
+    let cli_defines = cli_defines_from_cli(cli);
+
     Options {
         include_paths: cli.include_paths.clone(),
         system_include_paths,
         sysroot: cli.sysroot.clone(),
-        cli_defines: cli.defines.clone(),
+        cli_defines,
         cli_undefines: cli.undefines.clone(),
         target,
         emit,
@@ -646,6 +648,23 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             )
         }),
     }
+}
+
+fn cli_defines_from_cli(cli: &Cli) -> Vec<(String, Option<String>)> {
+    let mut defines = Vec::new();
+    if cli.linux_gnu_hosted {
+        defines.extend([
+            ("_GNU_SOURCE".to_owned(), Some("1".to_owned())),
+            ("_DEFAULT_SOURCE".to_owned(), Some("1".to_owned())),
+            ("_POSIX_C_SOURCE".to_owned(), Some("200809L".to_owned())),
+            ("_XOPEN_SOURCE".to_owned(), Some("700".to_owned())),
+        ]);
+    }
+    if cli.pthread {
+        defines.push(("_REENTRANT".to_owned(), Some("1".to_owned())));
+    }
+    defines.extend(cli.defines.clone());
+    defines
 }
 
 fn dependency_options_from_cli(cli: &Cli) -> rcc_session::DependencyOptions {

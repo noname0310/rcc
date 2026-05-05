@@ -12,6 +12,24 @@ not mean "accept every GNU C extension".  GNU syntax remains behind the existing
 feature flags such as `-fgnu-attributes`, `-fgnu-typeof`, `-fgnu-inline-asm`,
 and `-fgnu-implicit-function-declaration`.
 
+In this mode the driver installs feature-test macros through the same path as
+ordinary command-line `-D` definitions:
+
+| Macro | Default value |
+| --- | --- |
+| `_GNU_SOURCE` | `1` |
+| `_DEFAULT_SOURCE` | `1` |
+| `_POSIX_C_SOURCE` | `200809L` |
+| `_XOPEN_SOURCE` | `700` |
+
+User `-D` definitions are appended after these defaults, so a project wrapper
+can intentionally choose a narrower feature level.  User `-U` flags still run
+after all definitions and may remove any of the defaults.
+
+`-pthread` installs `_REENTRANT=1` during preprocessing.  Linker-driver
+forwarding for pthread is tracked separately by
+`tasks/16-linux-glibc-compat/08-pthread-driver-flag.md`.
+
 ## Ownership Boundary
 
 `rcc` owns:

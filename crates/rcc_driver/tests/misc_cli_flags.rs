@@ -236,6 +236,77 @@ fn linux_gnu_hosted_flag_sets_policy_without_gnu_syntax_flags() {
 }
 
 #[test]
+fn linux_gnu_hosted_installs_feature_test_macros_as_cli_defines() {
+    let cli = parse(&[
+        "rcc",
+        "--linux-gnu-hosted",
+        "-D_POSIX_C_SOURCE=199309L",
+        "-U_GNU_SOURCE",
+        "hello.c",
+    ]);
+    let opts = options_from_cli(&cli);
+
+    assert_eq!(
+        opts.cli_defines,
+        vec![
+            ("_GNU_SOURCE".to_owned(), Some("1".to_owned())),
+            ("_DEFAULT_SOURCE".to_owned(), Some("1".to_owned())),
+            ("_POSIX_C_SOURCE".to_owned(), Some("200809L".to_owned())),
+            ("_XOPEN_SOURCE".to_owned(), Some("700".to_owned())),
+            ("_POSIX_C_SOURCE".to_owned(), Some("199309L".to_owned())),
+        ]
+    );
+    assert_eq!(opts.cli_undefines, vec!["_GNU_SOURCE".to_owned()]);
+}
+
+#[test]
+fn pthread_flag_installs_reentrant_as_cli_define() {
+    let cli = parse(&["rcc", "-pthread", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(cli.pthread);
+    assert!(opts.cli_defines.contains(&("_REENTRANT".to_owned(), Some("1".to_owned()))));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_gnu_hosted_headers_see_feature_test_macros() {
+    let input = TempCFile::new(
+        "linux-hosted-headers",
+        r#"
+#include <features.h>
+#ifndef _GNU_SOURCE
+#error missing _GNU_SOURCE
+#endif
+#ifndef __USE_GNU
+#error missing __USE_GNU
+#endif
+#include <unistd.h>
+#if !defined(_POSIX_C_SOURCE) || _POSIX_C_SOURCE < 200809L
+#error missing POSIX.1-2008 feature level
+#endif
+#include <pthread.h>
+#ifndef _REENTRANT
+#error missing _REENTRANT
+#endif
+int marker;
+"#,
+    );
+    let output = input.sibling("i");
+    let result = Command::new(rcc_bin())
+        .arg("--linux-gnu-hosted")
+        .arg("-pthread")
+        .arg("-E")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");
