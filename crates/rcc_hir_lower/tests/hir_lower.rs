@@ -861,7 +861,7 @@ fn s6_7_5_cast_and_offsetof_array_bounds_are_fixed() {
             DefKind::Record { fields, .. } if fields.len() == 2 => Some(fields),
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("struct S fields should be lowered");
 
     match tcx.get(fields[0].ty) {
