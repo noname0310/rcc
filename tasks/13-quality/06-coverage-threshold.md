@@ -1,5 +1,7 @@
 # 13-06: Coverage threshold and llvm-cov hygiene
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 12-05    **Milestone:** M7
 
 ## Goal

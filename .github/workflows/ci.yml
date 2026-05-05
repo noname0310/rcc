@@ -80,11 +80,16 @@ jobs:
         run: |
           cargo xtask fetch-testsuites
           cargo xtask fetch-testsuites --include-gpl --only tcc-tests2
-      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Run coverage gate
+        run: cargo xtask coverage --lcov lcov.info --json target/coverage/coverage-summary.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage
-          path: lcov.info
+          path: |
+            lcov.info
+            target/coverage/coverage-summary.json
+            target/coverage/coverage-report.txt
 
   fuzz-smoke:
     name: fuzz smoke (lexer)

@@ -21,7 +21,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [03f-unreachable-code-warning](03f-unreachable-code-warning.md)
 - [x] [04-diagnostic-pragmas](04-diagnostic-pragmas.md)
 - [x] [05-restrict-noalias](05-restrict-noalias.md)
-- [ ] [06-coverage-threshold](06-coverage-threshold.md)
+- [x] [06-coverage-threshold](06-coverage-threshold.md)
 - [ ] [07-conformance-release-freeze](07-conformance-release-freeze.md)
 - [ ] [08-fuzz-regression-artifacts](08-fuzz-regression-artifacts.md)
 - [ ] [09-ci-green-matrix](09-ci-green-matrix.md)

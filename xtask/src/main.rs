@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 mod fetch;
 mod manifest;
@@ -35,6 +36,18 @@ enum Cmd {
         /// Git range in the form OLD..NEW.
         range: String,
     },
+    /// Run cargo-llvm-cov and enforce the documented coverage thresholds.
+    Coverage {
+        /// LCOV artifact path to create.
+        #[arg(long, default_value = "lcov.info")]
+        lcov: PathBuf,
+        /// JSON summary artifact path to create.
+        #[arg(long, default_value = "target/coverage/coverage-summary.json")]
+        json: PathBuf,
+        /// Re-check an existing JSON summary and artifact paths without running tests.
+        #[arg(long)]
+        check_only: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -55,6 +68,9 @@ fn main() -> Result<()> {
         }
         Cmd::CheckErrorCodes => xtask::check_error_codes::run(&project_root()),
         Cmd::XfailReport { range } => xtask::xfail_report::run(&project_root(), &range),
+        Cmd::Coverage { lcov, json, check_only } => {
+            xtask::coverage::run(&project_root(), &lcov, &json, check_only)
+        }
     }
 }
 

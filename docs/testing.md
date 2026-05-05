@@ -27,7 +27,8 @@ integration    ─▶  driver-level `tests/ui`, snapshot, end-to-end
 | `rcc_codegen_llvm`    | `FileCheck`-style `// CHECK:` matching on `CodegenArtifact::ir_text`. |
 | `rcc_conformance`     | Report serialisation round trip; `xfail.toml` parser. |
 
-Coverage target per crate: **80 %** (`cargo llvm-cov`, enforced by CI).
+Coverage gate: **80 % workspace line coverage**, plus crate-level baselines in
+[`coverage.md`](coverage.md), enforced by `cargo xtask coverage` in CI.
 
 ## Boundary tests
 
@@ -83,7 +84,8 @@ CI budgets:
 4. `cargo test --workspace --features rcc_codegen_llvm/llvm` (Linux LLVM path)
    or, on Windows with the official LLVM 18 archive,
    `cargo test -p rcc_codegen_llvm --features llvm-windows-llvm-c --test llvm_ir_snapshots -- --test-threads=1`.
-5. `cargo llvm-cov --workspace` — coverage uploaded; threshold enforced.
+5. `cargo xtask coverage` — runs `cargo llvm-cov`, uploads LCOV/JSON/text
+   artifacts on success and failure, and enforces the documented thresholds.
 6. 30-second `cargo fuzz run lex` smoke.
 7. `cargo xtask fetch-testsuites` + conformance run against
    **c-testsuite** + the milestone-appropriate **chibicc** subset.
