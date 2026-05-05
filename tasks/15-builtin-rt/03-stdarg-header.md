@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-03: Compiler-provided `stdarg.h`
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-01, 15-05    **Milestone:** M5

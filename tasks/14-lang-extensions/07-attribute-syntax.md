@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-07: `__attribute__` semantic validation
 
 **Phase:** 14-lang-extensions    **Depends on:** 05-38    **Milestone:** M5

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-05: `__builtin_va_*` functions
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-01    **Milestone:** M5

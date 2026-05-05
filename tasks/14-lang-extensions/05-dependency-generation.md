@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-05: Dependency file generation (`-M` / `-MM` / `-MF` / `-MT`)
 
 **Phase:** 14-lang-extensions    **Depends on:** —    **Milestone:** M6

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-06: Target-dependent predefined macros
 
 **Phase:** 14-lang-extensions    **Depends on:** 15-01    **Milestone:** M6
