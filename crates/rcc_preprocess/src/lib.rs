@@ -175,6 +175,7 @@ impl<'a> Preprocessor<'a> {
         let tokens: Vec<PpToken> = rcc_lexer::tokenize(root, &src).collect();
 
         let mut out: Vec<PpToken> = Vec::new();
+        let mut pending_text: Vec<PpToken> = Vec::new();
         let mut ls = line_stream::LineStream::new(tokens.into_iter());
         let mut cond = cond_stack::CondStack::new();
         while let Some(line) = ls.next_line() {
@@ -186,6 +187,7 @@ impl<'a> Preprocessor<'a> {
                 break;
             }
             if is_directive_line(&line) {
+                self.flush_pending_text(&mut pending_text, &mut out);
                 // Null directive (`#` alone): no side effect, no output.
                 if line.len() == 1 {
                     continue;
@@ -194,13 +196,12 @@ impl<'a> Preprocessor<'a> {
                 continue;
             }
             if !cond.is_active() {
+                self.flush_pending_text(&mut pending_text, &mut out);
                 continue;
             }
-            let expanded = self.expand_tokens(line);
-            let expanded = self.process_pragma_operators(expanded);
-            let expanded = self.apply_pragma_pack(expanded);
-            out.extend(expanded);
+            pending_text.extend(line);
         }
+        self.flush_pending_text(&mut pending_text, &mut out);
 
         // Unterminated `#if` / `#ifdef` / `#ifndef` at end of file.
         // One diagnostic per still-open frame, each labelled at its
@@ -218,6 +219,16 @@ impl<'a> Preprocessor<'a> {
         }
 
         out
+    }
+
+    fn flush_pending_text(&mut self, pending_text: &mut Vec<PpToken>, out: &mut Vec<PpToken>) {
+        if pending_text.is_empty() {
+            return;
+        }
+        let expanded = self.expand_tokens(std::mem::take(pending_text));
+        let expanded = self.process_pragma_operators(expanded);
+        let expanded = self.apply_pragma_pack(expanded);
+        out.extend(expanded);
     }
 
     /// Entry point for expanding a single pre-tokenised token into its
@@ -1779,6 +1790,24 @@ mod run_tests {
         let mut pp = Preprocessor::new(&mut sess);
         let out = pp.run(id);
         assert_eq!(joined_text(&pp, &out), "314");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn run_expands_function_like_macro_invocation_across_lines() {
+        // C99 macro invocation argument lists are token sequences, not
+        // single physical lines. zlib's `Assert(a,\n"msg")` relies on
+        // this for debug macros whose replacement list is empty.
+        let src =
+            "#define Assert(cond,msg)\nvoid f(void) {\nAssert (1,\n        \"msg\");\nint x;\n}\n";
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        let text = joined_text(&pp, &out);
+
+        assert!(!text.contains("Assert"), "macro name must be consumed: {text}");
+        assert!(!text.contains("\"msg\""), "macro arguments must be consumed: {text}");
+        assert!(text.contains("intx"), "tokens after the macro invocation must remain: {text}");
         assert!(cap.diagnostics().is_empty());
     }
 

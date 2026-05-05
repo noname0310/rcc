@@ -29,6 +29,7 @@ Full C99 (S)6.10 preprocessor: macros (hide-set), conditionals, #include, predef
 - [x] [19-fuzz-target](19-fuzz-target.md)
 - [x] [20-gnu-extensions](20-gnu-extensions.md)
 - [x] [21-macro-expanded-line-directive](21-macro-expanded-line-directive.md)
+- [x] [22-multiline-function-macro-invocation](22-multiline-function-macro-invocation.md)
 
 ## Downstream
 
