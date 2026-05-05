@@ -1,5 +1,7 @@
 # 15-15: Math classification and comparison macros
 
+> ✓ done — 2026-05-05
+
 **Phase:** 15-builtin-rt    **Depends on:** 15-13    **Milestone:** real-world-03
 
 ## Goal
@@ -17,7 +19,6 @@ runtime behavior in the declaration shim.
   the macro expansion needs it.
 
 ## Acceptance
-- Add compile/link/run fixtures covering classification and comparison macros.
-- If builtin lowering is required, add it before exposing the macros.
-- Do not define these macros as arbitrary constants merely to unblock a project.
-
+- [x] Add compile/link/run fixtures covering classification and comparison macros.
+- [x] If builtin lowering is required, add it before exposing the macros.
+- [x] Do not define these macros as arbitrary constants merely to unblock a project.

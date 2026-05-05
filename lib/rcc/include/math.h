@@ -4,6 +4,54 @@
 typedef float float_t;
 typedef double double_t;
 
+#define FP_NAN 0
+#define FP_INFINITE 1
+#define FP_ZERO 2
+#define FP_SUBNORMAL 3
+#define FP_NORMAL 4
+
+#define HUGE_VAL 1e999
+#define HUGE_VALF 1e999F
+#define HUGE_VALL 1e999L
+#define INFINITY HUGE_VALF
+#define NAN (0.0F / 0.0F)
+
+extern int __fpclassify(double);
+extern int __fpclassifyf(float);
+extern int __fpclassifyl(long double);
+extern int __signbit(double);
+extern int __signbitf(float);
+extern int __signbitl(long double);
+extern int finite(double);
+extern int finitef(float);
+extern int finitel(long double);
+extern int isinf(double);
+extern int isinff(float);
+extern int isinfl(long double);
+extern int isnan(double);
+extern int isnanf(float);
+extern int isnanl(long double);
+
+#define __rcc_math_select(x, double_fn, float_fn, long_double_fn)                                 \
+    (sizeof(x) == sizeof(float)                                                                  \
+            ? float_fn((float)(x))                                                               \
+            : (sizeof(x) == sizeof(long double) ? long_double_fn((long double)(x))                \
+                                                : double_fn((double)(x))))
+
+#define fpclassify(x) __rcc_math_select((x), __fpclassify, __fpclassifyf, __fpclassifyl)
+#define isfinite(x) __rcc_math_select((x), finite, finitef, finitel)
+#define isinf(x) __rcc_math_select((x), isinf, isinff, isinfl)
+#define isnan(x) __rcc_math_select((x), isnan, isnanf, isnanl)
+#define isnormal(x) (fpclassify(x) == FP_NORMAL)
+#define signbit(x) __rcc_math_select((x), __signbit, __signbitf, __signbitl)
+
+#define isgreater(x, y) ((x) > (y))
+#define isgreaterequal(x, y) ((x) >= (y))
+#define isless(x, y) ((x) < (y))
+#define islessequal(x, y) ((x) <= (y))
+#define islessgreater(x, y) (((x) < (y)) || ((x) > (y)))
+#define isunordered(x, y) (isnan(x) || isnan(y))
+
 extern double acos(double);
 extern double asin(double);
 extern double atan(double);

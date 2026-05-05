@@ -89,7 +89,7 @@ mod linux {
         let cap = CaptureEmitter::new();
         let handler = Handler::with_emitter(Box::new(cap));
         let mut link = LinkOptions::default();
-        if fixture.name == "hosted_math_decls" {
+        if matches!(fixture.name.as_str(), "hosted_math_decls" | "hosted_math_classification") {
             link.libraries.push("m".to_owned());
         }
         let mut session = Session::with_handler(

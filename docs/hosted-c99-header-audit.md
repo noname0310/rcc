@@ -46,7 +46,7 @@ Absent hosted C99/C95 headers:
 `complex.h`, `fenv.h`, and `tgmath.h` need separate compiler-support review.
 The others can start as ABI-facing declaration shims.
 
-## Function declaration coverage after `15-13`
+## Function declaration and macro coverage after `15-15`
 
 This table counts only representative C99 function names in already-present
 headers. It does not count required types/macros, and it undercounts `<math.h>`
@@ -58,7 +58,7 @@ because the float/long-double suffixed variants need a separate sweep.
 | `string.h` | 22 | 22 | none |
 | `stdlib.h` | 36 | 36 | none |
 | `stdio.h` | 46 | 46 | none |
-| `math.h` | 171 | 171 | none for function declarations; classification/comparison macros remain task `15-15` |
+| `math.h` | 171 | 171 | none for function declarations; classification/comparison macros added in `15-15` |
 
 ## Real-world hits so far
 
@@ -97,6 +97,12 @@ Completed:
     types, and macros.
   - Left `complex.h`, `fenv.h`, and `tgmath.h` to `15-16` because they need
     semantics review.
+- `15-15-math-classification-macros`
+  - Added C99 `math.h` classification and comparison macros using target
+    libm/libc classification symbols and C comparison semantics.
+  - Added `FP_*`, `HUGE_VAL*`, `INFINITY`, and `NAN` definitions without
+    arbitrary integer stand-ins.
+  - Added a compile/link/run fixture linked with `-lm`.
 
 ## Policy
 
