@@ -19,7 +19,7 @@ use std::process::Command;
 
 use rcc_errors::{codes::E0021, Diagnostic, Label, Level};
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_session::{Os, TargetInfo};
+use rcc_session::{Arch, Environment, Os, TargetInfo};
 use rcc_span::{BytePos, FileId, Span};
 
 use crate::guard::detect_guard;
@@ -146,11 +146,28 @@ fn linux_system_include_candidates(target: &TargetInfo, sysroot: Option<&Path>) 
     ["/usr/include", "/usr/local/include"]
         .into_iter()
         .map(|path| rooted_unix_path(sysroot, path))
-        .chain(std::iter::once(rooted_unix_path(
-            sysroot,
-            &format!("/usr/include/{}", target.triple),
-        )))
+        .chain(
+            linux_multiarch_include_names(target)
+                .into_iter()
+                .map(move |name| rooted_unix_path(sysroot, &format!("/usr/include/{name}"))),
+        )
         .collect()
+}
+
+fn linux_multiarch_include_names(target: &TargetInfo) -> Vec<String> {
+    let mut names = Vec::new();
+    if matches!(target.env, Environment::Gnu) {
+        let debian_name = match target.arch {
+            Arch::X86_64 => Some("x86_64-linux-gnu"),
+            Arch::Aarch64 => Some("aarch64-linux-gnu"),
+            Arch::I386 => Some("i386-linux-gnu"),
+        };
+        if let Some(name) = debian_name {
+            names.push(name.to_owned());
+        }
+    }
+    names.push(target.triple.to_string());
+    names
 }
 
 fn darwin_system_include_candidates(sysroot: Option<&Path>) -> Vec<PathBuf> {
@@ -609,9 +626,24 @@ mod tests {
             vec![
                 root.join("usr").join("include"),
                 root.join("usr").join("local").join("include"),
+                root.join("usr").join("include").join("x86_64-linux-gnu"),
                 root.join("usr").join("include").join("x86_64-unknown-linux-gnu"),
             ]
         );
+    }
+
+    #[test]
+    fn linux_multiarch_candidates_include_debian_gnu_name_before_raw_triple() {
+        let target = TargetInfo::from_triple(&TargetTriple::new("aarch64-unknown-linux-gnu"))
+            .expect("supported linux target");
+        let root = PathBuf::from("/custom/root");
+        let paths = system_include_candidates(&target, Some(&root));
+
+        let debian = root.join("usr").join("include").join("aarch64-linux-gnu");
+        let raw = root.join("usr").join("include").join("aarch64-unknown-linux-gnu");
+        let debian_pos = paths.iter().position(|path| path == &debian).expect("debian path");
+        let raw_pos = paths.iter().position(|path| path == &raw).expect("raw triple path");
+        assert!(debian_pos < raw_pos, "Debian multiarch path must precede raw LLVM triple path");
     }
 
     #[test]

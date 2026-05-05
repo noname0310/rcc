@@ -16,6 +16,8 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [06-builtin-common](06-builtin-common.md)
 - [x] [07-system-header-search](07-system-header-search.md)
 - [x] [08-unit-tests](08-unit-tests.md)
+- [x] [09-linux-multiarch-include-discovery](09-linux-multiarch-include-discovery.md)
+- [x] [10-ctype-hosted-declarations](10-ctype-hosted-declarations.md)
 
 ## Downstream
 
