@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 16-04: Resource Header Overlay Order
 
 **Phase:** 16-linux-glibc-compat  

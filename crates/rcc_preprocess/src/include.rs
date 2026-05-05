@@ -5,8 +5,8 @@
 //!
 //! | Form            | Directories searched, in order                      |
 //! |-----------------|-----------------------------------------------------|
-//! | `#include "h"`  | current file directory, rcc's builtin include root, `-I`, then system paths |
-//! | `#include <h>`  | rcc's builtin include root, `-I`, then system paths |
+//! | `#include "h"`  | current file directory, `-I`, rcc's resource include root, then system paths |
+//! | `#include <h>`  | `-I`, rcc's resource include root, then system paths |
 //!
 //! The first existing file on that path wins; no file-system readdir is
 //! performed. A header whose string resolves to an absolute path bypasses
@@ -103,18 +103,18 @@ pub fn builtin_include_dir() -> PathBuf {
 
 /// Complete include search path for system-header probes.
 ///
-/// The compiler resource directory comes first so freestanding shims such as
-/// `stddef.h` and `stdarg.h` resolve before host system headers. User-provided
-/// `-I` entries still handle project headers and non-resource headers after the
-/// compiler-owned surface.
+/// User `-I` entries come first so project-owned headers are never stolen by
+/// rcc's resource directory. The compiler resource directory comes next so
+/// selected shims such as `stddef.h` and `stdarg.h` still resolve before host
+/// system headers.
 pub fn include_search_paths(user_paths: &[PathBuf], system_paths: &[PathBuf]) -> Vec<PathBuf> {
     let builtin = builtin_include_dir();
     let mut paths =
         Vec::with_capacity(user_paths.len() + system_paths.len() + usize::from(builtin.is_dir()));
+    paths.extend(user_paths.iter().cloned());
     if builtin.is_dir() {
         paths.push(builtin);
     }
-    paths.extend(user_paths.iter().cloned());
     paths.extend(system_paths.iter().cloned());
     paths
 }
@@ -461,7 +461,7 @@ fn cannot_find_header(span: Span, name: &str, is_system: bool) -> Diagnostic {
             primary: true,
         }],
         notes: vec!["C99 §6.10.2: `\"...\"` searches the current file's directory first, \
-             then the compiler, command-line, and system include paths; `<...>` skips the \
+             then command-line, compiler-resource, and system include paths; `<...>` skips the \
              current file directory"
             .into()],
         help: vec![
@@ -609,17 +609,110 @@ mod tests {
     }
 
     #[test]
-    fn include_search_paths_place_builtin_before_user_and_system_paths() {
+    fn include_search_paths_place_user_before_builtin_before_system_paths() {
         let user = PathBuf::from("__rcc_user_include__");
         let system = PathBuf::from("__rcc_system_include__");
         let paths =
             include_search_paths(std::slice::from_ref(&user), std::slice::from_ref(&system));
 
-        assert_eq!(paths.first().map(PathBuf::as_path), Some(builtin_include_dir().as_path()));
         let user_pos = paths.iter().position(|path| path == &user).expect("user include path");
+        let builtin_pos = paths
+            .iter()
+            .position(|path| path == &builtin_include_dir())
+            .expect("builtin include path");
         let system_pos =
             paths.iter().position(|path| path == &system).expect("system include path");
-        assert!(user_pos < system_pos, "-I paths must precede -isystem/default system paths");
+        assert!(user_pos < builtin_pos, "-I paths must precede compiler resource headers");
+        assert!(
+            builtin_pos < system_pos,
+            "compiler resource headers must precede -isystem/default system paths"
+        );
+    }
+
+    #[test]
+    fn project_i_header_precedes_compiler_resource_for_system_form() {
+        let src_dir = TempDir::new().unwrap();
+        let inc_dir = TempDir::new().unwrap();
+        write_file(inc_dir.path(), "stddef.h", "int user_stddef_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session(src_dir.path(), vec![inc_dir.path().to_path_buf()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<stddef.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("user_stddef_marker"), "project -I header must win: {text}");
+        assert!(!text.contains("size_t"), "resource stddef.h must not steal project -I: {text}");
+        assert!(cap.diagnostics().is_empty(), "project system include must not diagnose");
+        let deps = sess.source_dependencies();
+        assert!(
+            deps.iter().any(|dep| dep.path == inc_dir.path().join("stddef.h")),
+            "dependency trace must record the exact selected -I header: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_current_dir_precedes_project_i_and_resource_headers() {
+        let src_dir = TempDir::new().unwrap();
+        let inc_dir = TempDir::new().unwrap();
+        write_file(src_dir.path(), "stddef.h", "int local_stddef_marker;\n");
+        write_file(inc_dir.path(), "stddef.h", "int user_stddef_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session(src_dir.path(), vec![inc_dir.path().to_path_buf()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("\"stddef.h\"", false, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("local_stddef_marker"), "quoted local header must win: {text}");
+        assert!(!text.contains("user_stddef_marker"), "{text}");
+        assert!(!text.contains("size_t"), "{text}");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn compiler_resource_header_precedes_host_system_header() {
+        let src_dir = TempDir::new().unwrap();
+        let sys_dir = TempDir::new().unwrap();
+        write_file(sys_dir.path(), "stddef.h", "int host_stddef_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session_with_system_paths(src_dir.path(), Vec::new(), vec![sys_dir.path().into()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<stddef.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("size_t"), "resource stddef.h must define size_t: {text}");
+        assert!(
+            !text.contains("host_stddef_marker"),
+            "compiler shim must shadow host system header: {text}"
+        );
+        assert!(cap.diagnostics().is_empty(), "resource system include must not diagnose");
+        let deps = sess.source_dependencies();
+        assert!(
+            deps.iter().any(|dep| dep.path == builtin_include_dir().join("stddef.h")),
+            "dependency trace must record exact resource header: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn host_system_header_remains_discoverable_after_resource_layer() {
+        let src_dir = TempDir::new().unwrap();
+        let sys_dir = TempDir::new().unwrap();
+        let header_path = write_file(sys_dir.path(), "host-only.h", "int host_only_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session_with_system_paths(src_dir.path(), Vec::new(), vec![sys_dir.path().into()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<host-only.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("host_only_marker"), "host-only system header must be found: {text}");
+        assert!(cap.diagnostics().is_empty());
+        assert!(
+            sess.source_dependencies().iter().any(|dep| dep.path == header_path && dep.system),
+            "dependency trace must record exact host system header"
+        );
     }
 
     #[test]
@@ -860,26 +953,6 @@ mod tests {
                 "{header} must be recorded as a system dependency: {deps:?}"
             );
         }
-    }
-
-    #[test]
-    fn compiler_builtin_headers_precede_cli_include_paths_for_system_form() {
-        let src_dir = TempDir::new().unwrap();
-        let inc_dir = TempDir::new().unwrap();
-        write_file(inc_dir.path(), "stddef.h", "int user_stddef_marker;\n");
-        let (mut sess, main_id, cap) =
-            seed_session(src_dir.path(), vec![inc_dir.path().to_path_buf()]);
-        let span = dummy_span(main_id);
-        let tokens =
-            Preprocessor::new(&mut sess).process_include("<stddef.h>", true, span, main_id);
-        let text = joined_token_text(&sess, &tokens);
-
-        assert!(text.contains("size_t"), "builtin stddef.h must define size_t: {text}");
-        assert!(
-            !text.contains("user_stddef_marker"),
-            "compiler resource header must win over same-named -I system header: {text}"
-        );
-        assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
     }
 
     #[test]

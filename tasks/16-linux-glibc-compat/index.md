@@ -16,7 +16,7 @@ rcc-owned libc bodies.
 - [x] [01-hosted-linux-surface-audit](01-hosted-linux-surface-audit.md)
 - [x] [02-compat-mode-and-policy](02-compat-mode-and-policy.md)
 - [x] [03-feature-test-macro-model](03-feature-test-macro-model.md)
-- [ ] [04-resource-header-overlay-order](04-resource-header-overlay-order.md)
+- [x] [04-resource-header-overlay-order](04-resource-header-overlay-order.md)
 - [ ] [05-glibc-common-macro-shims](05-glibc-common-macro-shims.md)
 - [ ] [06-gnu-header-attribute-tolerance](06-gnu-header-attribute-tolerance.md)
 - [ ] [07-restrict-and-qualifier-aliases](07-restrict-and-qualifier-aliases.md)

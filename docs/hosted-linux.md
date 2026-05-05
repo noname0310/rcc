@@ -39,7 +39,8 @@ forwarding for pthread is tracked separately by
   `_POSIX_C_SOURCE`, `_DEFAULT_SOURCE`, and `_REENTRANT`;
 - small declaration shims for headers that are too glibc-internal for the
   current parser surface;
-- include ordering between compiler-provided shims and host headers;
+- include ordering between project headers, compiler-provided shims, and host
+  headers;
 - forwarding hosted link flags such as `-lm`, `-pthread`, and `-ldl` to the
   selected clang-compatible linker driver.
 
@@ -76,6 +77,18 @@ The hosted Linux mode is allowed to add compiler-owned declaration shims under
 `lib/rcc/include/`.  These files must stay small and targeted.  They may define
 common glibc declaration macros or expose POSIX type/function declarations, but
 they must not copy large glibc, musl, or Linux kernel headers wholesale.
+
+Header lookup keeps project code in control:
+
+| Include form | Search order |
+| --- | --- |
+| `#include "h"` | current file directory, project `-I`, `lib/rcc/include`, `-isystem` / host defaults |
+| `#include <h>` | project `-I`, `lib/rcc/include`, `-isystem` / host defaults |
+
+This lets a project deliberately provide its own header through `-I`, while
+still allowing selected rcc shims to shadow problematic host system headers
+when no project header is present.  Normal host headers remain reachable after
+the shim layer.
 
 When a shim declares a function such as `pthread_create`, `dlopen`,
 `clock_gettime`, `malloc`, or `printf`, that declaration only lets the frontend
