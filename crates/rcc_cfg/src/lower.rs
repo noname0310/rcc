@@ -29,8 +29,9 @@ use rcc_hir::{
 use rcc_span::Span;
 
 use crate::{
-    BasicBlockId, BinOp, BodyBuilder, CastKind, Const, ConstKind, Local, Operand, Place,
-    Projection, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, UnOp,
+    BasicBlockId, BinOp, BodyBuilder, CastKind, Const, ConstKind, InlineAsm, InlineAsmArg,
+    InlineAsmInput, InlineAsmOutput, Local, Operand, Place, Projection, Rvalue, Statement,
+    StatementKind, Terminator, TerminatorKind, UnOp,
 };
 
 /// Translation table from HIR local ids to CFG local ids.
@@ -889,6 +890,9 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
         HirStmtKind::Expr(expr) => {
             let _ = lower_as_rvalue(builder, cx, *expr);
         }
+        HirStmtKind::InlineAsm(asm) => {
+            lower_inline_asm(builder, cx, stmt.span, asm);
+        }
         HirStmtKind::If { cond, then_branch, else_branch } => {
             lower_if(builder, cx, stmt.span, *cond, *then_branch, *else_branch);
         }
@@ -974,6 +978,69 @@ pub fn lower_stmt(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id: HirStmtI
             builder.goto(loop_ctx.cont_target, stmt.span);
         }
     }
+}
+
+fn lower_inline_asm(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    asm: &rcc_hir::HirInlineAsm,
+) {
+    let outputs = asm
+        .outputs
+        .iter()
+        .map(|output| {
+            let place = lower_as_place(builder, cx, output.expr);
+            InlineAsmOutput {
+                constraint: output.constraint.clone(),
+                place,
+                ty: cx.body.exprs[output.expr].ty,
+                indirect: inline_asm_constraint_is_memory(&output.constraint),
+            }
+        })
+        .collect();
+    let inputs = asm
+        .inputs
+        .iter()
+        .map(|input| {
+            let ty = cx.body.exprs[input.expr].ty;
+            let arg = if inline_asm_constraint_is_memory(&input.constraint) {
+                let value = lower_as_rvalue(builder, cx, input.expr);
+                InlineAsmArg::Address(operand_to_place(builder, cx, value, span))
+            } else {
+                InlineAsmArg::Value(lower_as_rvalue(builder, cx, input.expr))
+            };
+            InlineAsmInput { constraint: input.constraint.clone(), arg, ty }
+        })
+        .collect();
+
+    builder.push(Statement {
+        kind: StatementKind::InlineAsm(InlineAsm {
+            template: asm.template.clone(),
+            volatile: asm.quals.volatile || asm.outputs.is_empty() || !asm.clobbers.is_empty(),
+            outputs,
+            inputs,
+            clobbers: asm.clobbers.clone(),
+        }),
+        span,
+    });
+}
+
+fn inline_asm_constraint_is_memory(constraint: &str) -> bool {
+    constraint
+        .split(',')
+        .filter_map(|alternative| inline_asm_constraint_core(alternative).chars().next())
+        .any(|class| class == 'm')
+}
+
+fn inline_asm_constraint_core(mut constraint: &str) -> &str {
+    if matches!(constraint.as_bytes().first(), Some(b'=') | Some(b'+')) {
+        constraint = &constraint[1..];
+    }
+    while matches!(constraint.as_bytes().first(), Some(b'&' | b'%' | b'?' | b'!' | b'*')) {
+        constraint = &constraint[1..];
+    }
+    constraint
 }
 
 /// When the current block is already terminated, scan the statement

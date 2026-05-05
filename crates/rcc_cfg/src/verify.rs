@@ -9,8 +9,8 @@ use std::fmt;
 use rcc_hir::{DefId, DefKind, HirCrate, Ty, TyCtxt, TyId};
 
 use crate::{
-    BasicBlockId, Body, ConstKind, Local, Operand, Place, Projection, Rvalue, StatementKind,
-    TerminatorKind,
+    BasicBlockId, Body, ConstKind, InlineAsmArg, Local, Operand, Place, Projection, Rvalue,
+    StatementKind, TerminatorKind,
 };
 
 /// One CFG verifier error.
@@ -177,6 +177,30 @@ fn verify_blocks(
                     let src = verify_rvalue_typed(body, tcx, hir, rvalue, at.clone(), errors);
                     if let (Some(dst), Some(src)) = (dst, src) {
                         verify_type_match(tcx, dst, src, at, errors);
+                    }
+                }
+                StatementKind::InlineAsm(asm) => {
+                    for output in &asm.outputs {
+                        let _ =
+                            verify_place_typed(body, tcx, hir, &output.place, at.clone(), errors);
+                    }
+                    for input in &asm.inputs {
+                        match &input.arg {
+                            InlineAsmArg::Value(operand) => {
+                                let _ = verify_operand_typed(
+                                    body,
+                                    tcx,
+                                    hir,
+                                    operand,
+                                    at.clone(),
+                                    errors,
+                                );
+                            }
+                            InlineAsmArg::Address(place) => {
+                                let _ =
+                                    verify_place_typed(body, tcx, hir, place, at.clone(), errors);
+                            }
+                        }
                     }
                 }
                 StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {

@@ -20,7 +20,7 @@ phase's `index.md` next.
 - [x] [11-conformance](11-conformance/index.md) — KPI cells per milestone
 - [x] [12-fuzz-differential](12-fuzz-differential/index.md) — fuzz + csmith
 - [x] [13-quality](13-quality/index.md) — opt levels, benches, release
-- [ ] [14-lang-extensions](14-lang-extensions/index.md) — preprocessor/parser extensions (pragmas, attributes, asm)
+- [x] [14-lang-extensions](14-lang-extensions/index.md) — preprocessor/parser extensions (pragmas, attributes, asm)
 - [ ] [15-builtin-rt](15-builtin-rt/index.md) — target info, freestanding headers, builtins
 
 ## Legend

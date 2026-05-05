@@ -49,6 +49,16 @@ fn fmt_stmt(tcx: &TyCtxt, stmt: &Statement) -> String {
         StatementKind::Assign { place, rvalue } => {
             format!("{} = {};", fmt_place(place), fmt_rvalue(tcx, rvalue))
         }
+        StatementKind::InlineAsm(asm) => {
+            let mut constraints = asm
+                .outputs
+                .iter()
+                .map(|output| output.constraint.as_str())
+                .chain(asm.inputs.iter().map(|input| input.constraint.as_str()))
+                .collect::<Vec<_>>();
+            constraints.extend(asm.clobbers.iter().map(String::as_str));
+            format!("asm {:?} [{}];", asm.template, constraints.join(", "))
+        }
         StatementKind::StorageLive(local) => format!("StorageLive({});", fmt_local(*local)),
         StatementKind::StorageDead(local) => format!("StorageDead({});", fmt_local(*local)),
         StatementKind::Nop => "nop;".to_string(),

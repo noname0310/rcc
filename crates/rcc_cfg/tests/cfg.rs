@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use rcc_cfg::{
     build_bodies, pretty::dump_body, verify::verify_body_with_hir, BasicBlockId, Body, CastKind,
-    Const, ConstKind, Operand, Place, Projection, Rvalue, StatementKind, TerminatorKind,
+    Const, ConstKind, InlineAsmArg, Operand, Place, Projection, Rvalue, StatementKind,
+    TerminatorKind,
 };
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, HirCrate, Local, Ty, TyCtxt, TyId};
@@ -694,6 +695,19 @@ fn body_contains_field_projection(body: &Body, expected: u32) -> bool {
                 place_contains_field_projection(place, expected)
                     || rvalue_contains_field_projection(rvalue, expected)
             }
+            StatementKind::InlineAsm(asm) => {
+                asm.outputs
+                    .iter()
+                    .any(|output| place_contains_field_projection(&output.place, expected))
+                    || asm.inputs.iter().any(|input| match &input.arg {
+                        InlineAsmArg::Value(operand) => {
+                            operand_contains_field_projection(operand, expected)
+                        }
+                        InlineAsmArg::Address(place) => {
+                            place_contains_field_projection(place, expected)
+                        }
+                    })
+            }
             StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop => {
                 false
             }
@@ -853,6 +867,21 @@ fn assert_body_invariants(name: &str, def: DefId, body: &Body) {
                 StatementKind::Assign { place, rvalue } => {
                     assert_place_valid(name, def, body, place);
                     assert_rvalue_valid(name, def, body, rvalue);
+                }
+                StatementKind::InlineAsm(asm) => {
+                    for output in &asm.outputs {
+                        assert_place_valid(name, def, body, &output.place);
+                    }
+                    for input in &asm.inputs {
+                        match &input.arg {
+                            InlineAsmArg::Value(operand) => {
+                                assert_operand_valid(name, def, body, operand);
+                            }
+                            InlineAsmArg::Address(place) => {
+                                assert_place_valid(name, def, body, place);
+                            }
+                        }
+                    }
                 }
                 StatementKind::StorageLive(local) => {
                     assert_local_valid(name, def, body, *local);

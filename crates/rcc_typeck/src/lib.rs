@@ -394,6 +394,26 @@ fn visit_stmt_with_context(
             let e2 = visit_expr(e, body, tcx, session, def_info);
             HirStmtKind::Expr(e2)
         }
+        HirStmtKind::InlineAsm(mut asm) => {
+            for output in &mut asm.outputs {
+                output.expr = visit_expr(output.expr, body, tcx, session, def_info);
+                if body.exprs[output.expr].value_cat != rcc_hir::ValueCat::LValue {
+                    session
+                        .handler
+                        .struct_err(
+                            body.exprs[output.expr].span,
+                            "inline asm output operand must be an lvalue",
+                        )
+                        .code(rcc_errors::codes::E0032)
+                        .emit();
+                }
+            }
+            for input in &mut asm.inputs {
+                let expr = visit_expr(input.expr, body, tcx, session, def_info);
+                input.expr = rvalue_decayed(expr, body, tcx);
+            }
+            HirStmtKind::InlineAsm(asm)
+        }
         HirStmtKind::If { cond, then_branch, else_branch } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
             // Controlling expression must be scalar; convert lvalue-to-rvalue

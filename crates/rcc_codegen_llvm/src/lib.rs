@@ -967,18 +967,18 @@ pub mod backend {
     use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target};
     use inkwell::targets::{TargetData, TargetMachine, TargetTriple};
     use inkwell::types::{
-        AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
+        AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
     };
     use inkwell::values::{
         BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FloatValue,
         FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
     use inkwell::OptimizationLevel;
-    use inkwell::{AddressSpace, FloatPredicate, GlobalVisibility, IntPredicate};
+    use inkwell::{AddressSpace, FloatPredicate, GlobalVisibility, InlineAsmDialect, IntPredicate};
     use rcc_cfg::UnOp;
     use rcc_cfg::{
-        BasicBlockId, BinOp, Body, CastKind, ConstKind, Operand, Place, Projection, Rvalue,
-        Statement, StatementKind, TerminatorKind,
+        BasicBlockId, BinOp, Body, CastKind, ConstKind, InlineAsm, InlineAsmArg, Operand, Place,
+        Projection, Rvalue, Statement, StatementKind, TerminatorKind,
     };
     use rcc_hir::{
         DefKind, FloatKind, IntRank, Linkage as HirLinkage, Local, ObjectQuals, Qual, RecordKind,
@@ -5539,6 +5539,7 @@ pub mod backend {
                     let value = self.emit_rvalue_value(rvalue)?;
                     self.cx.emit_store_place(place, value, &self.locals, self.body)
                 }
+                StatementKind::InlineAsm(asm) => self.emit_inline_asm_statement(asm),
                 StatementKind::StorageLive(local) => self.cx.emit_storage_live(
                     *local,
                     &mut self.locals,
@@ -5635,6 +5636,135 @@ pub mod backend {
                 Rvalue::BuiltinVaArea => self.emit_va_area(),
                 _ => self.cx.emit_rvalue_value(rvalue, &self.locals, self.body),
             }
+        }
+
+        fn emit_inline_asm_statement(&mut self, asm: &InlineAsm) -> Result<(), CodegenError> {
+            let mut constraints = Vec::new();
+            let mut args = Vec::new();
+            let mut param_types = Vec::new();
+            let mut direct_outputs = Vec::new();
+            let mut element_type_attrs = Vec::new();
+
+            for output in &asm.outputs {
+                constraints.push(llvm_inline_asm_output_constraint(output.constraint.as_str()));
+                if output.indirect {
+                    let param_idx = inline_asm_param_index(args.len())?;
+                    let addr = self.cx.emit_place_addr(&output.place, &self.locals, self.body)?;
+                    args.push(addr.as_basic_value_enum().into());
+                    param_types.push(addr.get_type().into());
+                    let element_ty = self.cx.type_cx().basic_type_of(output.ty)?;
+                    element_type_attrs.push((param_idx, element_ty));
+                } else {
+                    direct_outputs.push(output);
+                }
+            }
+
+            for input in &asm.inputs {
+                constraints.push(llvm_inline_asm_input_constraint(input.constraint.as_str()));
+                let (value, element_ty) = match &input.arg {
+                    InlineAsmArg::Value(operand) => (self.emit_operand_value(operand)?, None),
+                    InlineAsmArg::Address(place) => {
+                        let addr = self
+                            .cx
+                            .emit_place_addr(place, &self.locals, self.body)?
+                            .as_basic_value_enum();
+                        let element_ty = self.cx.type_cx().basic_type_of(input.ty)?;
+                        (addr, Some(element_ty))
+                    }
+                };
+                let param_idx = inline_asm_param_index(args.len())?;
+                param_types.push(value.get_type().into());
+                args.push(value.into());
+                if let Some(element_ty) = element_ty {
+                    element_type_attrs.push((param_idx, element_ty));
+                }
+            }
+
+            constraints.extend(asm.clobbers.iter().map(|clobber| {
+                format!("~{{{}}}", clobber.trim_matches(|ch| ch == '{' || ch == '}'))
+            }));
+
+            let ret_ty = self.inline_asm_return_type(&direct_outputs)?;
+            let fn_ty = match ret_ty {
+                None => self.cx.context.void_type().fn_type(&param_types, false),
+                Some(ret_ty) => ret_ty.fn_type(&param_types, false),
+            };
+            let asm_ptr = self.cx.context.create_inline_asm(
+                fn_ty,
+                asm.template.clone(),
+                constraints.join(","),
+                asm.volatile,
+                false,
+                Some(InlineAsmDialect::ATT),
+                false,
+            );
+            let call = self
+                .cx
+                .builder
+                .build_indirect_call(fn_ty, asm_ptr, &args, "inline.asm")
+                .map_err(builder_error)?;
+            add_inline_asm_elementtype_attrs(&self.cx.context, call, &element_type_attrs)?;
+            self.store_inline_asm_direct_outputs(call, &direct_outputs)
+        }
+
+        fn inline_asm_return_type(
+            &self,
+            direct_outputs: &[&rcc_cfg::InlineAsmOutput],
+        ) -> Result<Option<BasicTypeEnum<'ctx>>, CodegenError> {
+            match direct_outputs.len() {
+                0 => Ok(None),
+                1 => self.cx.type_cx().basic_type_of(direct_outputs[0].ty).map(Some),
+                _ => {
+                    let fields = direct_outputs
+                        .iter()
+                        .map(|output| self.cx.type_cx().basic_type_of(output.ty))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Some(self.cx.context.struct_type(&fields, false).into()))
+                }
+            }
+        }
+
+        fn store_inline_asm_direct_outputs(
+            &self,
+            call: CallSiteValue<'ctx>,
+            direct_outputs: &[&rcc_cfg::InlineAsmOutput],
+        ) -> Result<(), CodegenError> {
+            if direct_outputs.is_empty() {
+                return Ok(());
+            }
+
+            let value = call.try_as_basic_value().left().ok_or_else(|| {
+                CodegenError::Internal(
+                    "inline asm direct output did not produce a value".to_owned(),
+                )
+            })?;
+            if direct_outputs.len() == 1 {
+                return self.cx.emit_store_place(
+                    &direct_outputs[0].place,
+                    value,
+                    &self.locals,
+                    self.body,
+                );
+            }
+
+            let BasicValueEnum::StructValue(values) = value else {
+                return Err(CodegenError::Internal(format!(
+                    "inline asm multi-output call produced non-struct value {:?}",
+                    value.get_type()
+                )));
+            };
+            for (idx, output) in direct_outputs.iter().enumerate() {
+                let idx = u32::try_from(idx).map_err(|_| {
+                    CodegenError::Internal("inline asm output index overflowed".to_owned())
+                })?;
+                let field = self
+                    .cx
+                    .builder
+                    .build_extract_value(values, idx, "inline.asm.out")
+                    .map_err(builder_error)?;
+                self.cx.emit_store_place(&output.place, field, &self.locals, self.body)?;
+            }
+            Ok(())
         }
 
         #[allow(unsafe_code)]
@@ -6397,6 +6527,67 @@ pub mod backend {
             out |= byte << ((bytes - 1 - idx) * 8);
         }
         Ok(out)
+    }
+
+    fn llvm_inline_asm_output_constraint(constraint: &str) -> String {
+        if inline_asm_constraint_is_memory(constraint) {
+            let marker =
+                constraint.chars().next().filter(|ch| *ch == '+' || *ch == '=').unwrap_or('=');
+            format!("{marker}*{}", inline_asm_constraint_core(constraint))
+        } else {
+            constraint.to_owned()
+        }
+    }
+
+    fn llvm_inline_asm_input_constraint(constraint: &str) -> String {
+        if inline_asm_constraint_is_memory(constraint) {
+            format!("*{}", inline_asm_constraint_core(constraint))
+        } else {
+            constraint.to_owned()
+        }
+    }
+
+    fn add_inline_asm_elementtype_attrs<'ctx>(
+        context: &Context,
+        call: CallSiteValue<'ctx>,
+        attrs: &[(u32, BasicTypeEnum<'ctx>)],
+    ) -> Result<(), CodegenError> {
+        if attrs.is_empty() {
+            return Ok(());
+        }
+        let kind = Attribute::get_named_enum_kind_id("elementtype");
+        if kind == 0 {
+            return Err(CodegenError::Internal(
+                "LLVM does not expose the elementtype attribute".to_owned(),
+            ));
+        }
+        for (param, ty) in attrs {
+            let attr = context.create_type_attribute(kind, ty.as_any_type_enum());
+            call.add_attribute(AttributeLoc::Param(*param), attr);
+        }
+        Ok(())
+    }
+
+    fn inline_asm_param_index(index: usize) -> Result<u32, CodegenError> {
+        u32::try_from(index)
+            .map_err(|_| CodegenError::Internal("inline asm parameter index overflowed".to_owned()))
+    }
+
+    fn inline_asm_constraint_is_memory(constraint: &str) -> bool {
+        constraint
+            .split(',')
+            .filter_map(|alternative| inline_asm_constraint_core(alternative).chars().next())
+            .any(|class| class == 'm')
+    }
+
+    fn inline_asm_constraint_core(mut constraint: &str) -> &str {
+        if matches!(constraint.as_bytes().first(), Some(b'=') | Some(b'+')) {
+            constraint = &constraint[1..];
+        }
+        while matches!(constraint.as_bytes().first(), Some(b'&' | b'%' | b'?' | b'!' | b'*')) {
+            constraint = &constraint[1..];
+        }
+        constraint
     }
 
     fn builder_error(error: impl std::fmt::Display) -> CodegenError {

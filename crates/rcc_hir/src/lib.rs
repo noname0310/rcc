@@ -383,6 +383,41 @@ pub struct HirStmt {
     pub kind: HirStmtKind,
 }
 
+/// GNU inline assembly statement after name and operand lowering.
+#[derive(Debug, Clone)]
+pub struct HirInlineAsm {
+    /// Qualifiers written after `asm`.
+    pub quals: HirInlineAsmQuals,
+    /// Decoded assembly template text.
+    pub template: String,
+    /// Output operands in source order.
+    pub outputs: Vec<HirInlineAsmOperand>,
+    /// Input operands in source order.
+    pub inputs: Vec<HirInlineAsmOperand>,
+    /// Decoded clobber strings in source order.
+    pub clobbers: Vec<String>,
+}
+
+/// GNU inline assembly qualifiers that affect downstream lowering.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HirInlineAsmQuals {
+    /// `volatile` / `__volatile__`.
+    pub volatile: bool,
+    /// `inline` / `__inline__`.
+    pub inline: bool,
+}
+
+/// One GNU inline assembly operand after expression lowering.
+#[derive(Debug, Clone)]
+pub struct HirInlineAsmOperand {
+    /// Optional symbolic operand name from `[name]`.
+    pub name: Option<Symbol>,
+    /// Decoded constraint string.
+    pub constraint: String,
+    /// Operand expression.
+    pub expr: HirExprId,
+}
+
 /// HIR statement kind. Mirrors `rcc_ast::StmtKind` but with resolved ids.
 #[derive(Debug, Clone)]
 pub enum HirStmtKind {
@@ -430,6 +465,8 @@ pub enum HirStmtKind {
     Return(Option<HirExprId>),
     /// Local declaration with optional initializer.
     LocalDecl { local: Local, init: Option<HirExprId> },
+    /// GNU inline assembly statement.
+    InlineAsm(HirInlineAsm),
     /// `;`
     Null,
 }

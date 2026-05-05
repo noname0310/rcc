@@ -3097,10 +3097,21 @@ fn inline_asm_extended_operands_validate_and_lower_side_effects() {
     );
 
     let body = hir.bodies.values().next().expect("function body");
-    assert!(
-        body.exprs.iter().any(|expr| matches!(expr.kind, HirExprKind::Assign { .. })),
-        "matching output/input constraint should lower to side-effect assignment"
-    );
+    let asm = body
+        .stmts
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            HirStmtKind::InlineAsm(asm) => Some(asm),
+            _ => None,
+        })
+        .expect("inline asm should be preserved for CFG/codegen");
+    assert_eq!(asm.template, "mov %1, %0");
+    assert!(asm.quals.volatile);
+    assert_eq!(asm.outputs.len(), 1);
+    assert_eq!(asm.outputs[0].constraint, "=r");
+    assert_eq!(asm.inputs.len(), 1);
+    assert_eq!(asm.inputs[0].constraint, "0");
+    assert_eq!(asm.clobbers, ["cc", "memory"]);
 }
 
 #[test]
@@ -4196,6 +4207,7 @@ fn first_return_expr(body: &Body, stmt: rcc_hir::HirStmtId) -> Option<HirExprId>
             .and_then(|stmt| first_return_expr(body, stmt))
             .or_else(|| first_return_expr(body, *inner)),
         HirStmtKind::Expr(_)
+        | HirStmtKind::InlineAsm(_)
         | HirStmtKind::Goto(_)
         | HirStmtKind::GotoComputed(_)
         | HirStmtKind::Break

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-10: Inline assembly codegen
 
 **Phase:** 14-lang-extensions    **Depends on:** 14-09    **Milestone:** M7 (stretch goal)

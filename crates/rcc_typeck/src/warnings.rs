@@ -92,6 +92,11 @@ impl DeprecatedWalker<'_, '_> {
             HirStmtKind::Expr(expr)
             | HirStmtKind::GotoComputed(expr)
             | HirStmtKind::Return(Some(expr)) => self.visit_expr(*expr),
+            HirStmtKind::InlineAsm(asm) => {
+                for operand in asm.outputs.iter().chain(&asm.inputs) {
+                    self.visit_expr(operand.expr);
+                }
+            }
             HirStmtKind::If { cond, then_branch, else_branch } => {
                 self.visit_expr(*cond);
                 self.visit_stmt(*then_branch);
@@ -326,6 +331,7 @@ impl UnreachableWalker<'_, '_> {
                 self.visit_stmt(*body);
             }
             HirStmtKind::Expr(_)
+            | HirStmtKind::InlineAsm(_)
             | HirStmtKind::Goto(_)
             | HirStmtKind::GotoComputed(_)
             | HirStmtKind::Break
@@ -429,6 +435,11 @@ impl UsageWalker<'_> {
                 }
             }
             HirStmtKind::Expr(expr) => self.visit_value_expr(*expr),
+            HirStmtKind::InlineAsm(asm) => {
+                for operand in asm.outputs.iter().chain(&asm.inputs) {
+                    self.visit_value_expr(operand.expr);
+                }
+            }
             HirStmtKind::If { cond, then_branch, else_branch } => {
                 self.visit_value_expr(*cond);
                 self.visit_stmt(*then_branch);

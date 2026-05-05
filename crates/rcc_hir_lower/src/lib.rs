@@ -21,10 +21,10 @@ use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::OverflowOp;
 use rcc_hir::{
     Body, CommonAttrs, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
-    GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt,
-    HirStmtId, HirStmtKind, IntLiteralBase, IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl,
-    ObjectQuals, RecordKind, ScalarStorageOrder, SwitchCase, SymbolVisibility, TyCtxt, TyId,
-    ValueCat,
+    GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirInlineAsm,
+    HirInlineAsmOperand, HirInlineAsmQuals, HirStmt, HirStmtId, HirStmtKind, IntLiteralBase,
+    IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, RecordKind,
+    ScalarStorageOrder, SwitchCase, SymbolVisibility, TyCtxt, TyId, ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -1315,57 +1315,49 @@ fn lower_inline_asm_stmt(
 ) -> HirStmtKind {
     validate_inline_asm(asm, session);
 
-    let mut stmts = Vec::new();
-    let mut consumed_inputs = vec![false; asm.inputs.len()];
-
-    for (output_idx, output) in asm.outputs.iter().enumerate() {
-        let constraint = asm_constraint_text(&output.constraint);
-        if let Some(input_idx) = matching_inline_asm_input(output_idx, &asm.inputs) {
-            consumed_inputs[input_idx] = true;
-            if constraint.is_some_and(asm_constraint_is_write_only) {
-                let lhs = lower_expr(&output.expr, body, scope, crate_, tcx, resolver, session);
-                let rhs = lower_expr(
-                    &asm.inputs[input_idx].expr,
-                    body,
-                    scope,
-                    crate_,
-                    tcx,
-                    resolver,
-                    session,
-                );
-                let assign = push_hir_expr(
-                    body,
-                    tcx.error,
-                    ValueCat::RValue,
-                    asm.span,
-                    HirExprKind::Assign { lhs, rhs },
-                );
-                stmts.push(push_hir_stmt(body, asm.span, HirStmtKind::Expr(assign)));
-                continue;
+    let template = inline_asm_string_text(&asm.template, asm.span, session, "inline asm template")
+        .unwrap_or_default()
+        .to_owned();
+    let outputs = asm
+        .outputs
+        .iter()
+        .map(|operand| {
+            let expr = lower_expr(&operand.expr, body, scope, crate_, tcx, resolver, session);
+            HirInlineAsmOperand {
+                name: operand.name.map(|(name, _)| name),
+                constraint: asm_constraint_text(&operand.constraint).unwrap_or_default().to_owned(),
+                expr,
             }
-        }
+        })
+        .collect();
+    let inputs = asm
+        .inputs
+        .iter()
+        .map(|operand| {
+            let expr = lower_expr(&operand.expr, body, scope, crate_, tcx, resolver, session);
+            HirInlineAsmOperand {
+                name: operand.name.map(|(name, _)| name),
+                constraint: asm_constraint_text(&operand.constraint).unwrap_or_default().to_owned(),
+                expr,
+            }
+        })
+        .collect();
+    let clobbers = asm
+        .clobbers
+        .iter()
+        .filter_map(|clobber| {
+            inline_asm_string_text(clobber, asm.span, session, "inline asm clobber")
+                .map(str::to_owned)
+        })
+        .collect();
 
-        // For read/write operands (`+r`, `+m`) and unsupported output-only
-        // shapes, at least preserve operand evaluation. The empty asm forms
-        // in the gcc-torture cluster then become no-ops with correct side
-        // effects instead of disappearing before CFG lowering.
-        let expr = lower_expr(&output.expr, body, scope, crate_, tcx, resolver, session);
-        stmts.push(push_hir_stmt(body, output.span, HirStmtKind::Expr(expr)));
-    }
-
-    for (idx, input) in asm.inputs.iter().enumerate() {
-        if consumed_inputs[idx] {
-            continue;
-        }
-        let expr = lower_expr(&input.expr, body, scope, crate_, tcx, resolver, session);
-        stmts.push(push_hir_stmt(body, input.span, HirStmtKind::Expr(expr)));
-    }
-
-    if stmts.is_empty() {
-        HirStmtKind::Null
-    } else {
-        HirStmtKind::Block(stmts)
-    }
+    HirStmtKind::InlineAsm(HirInlineAsm {
+        quals: HirInlineAsmQuals { volatile: asm.quals.volatile, inline: asm.quals.inline },
+        template,
+        outputs,
+        inputs,
+        clobbers,
+    })
 }
 
 fn validate_inline_asm(asm: &rcc_ast::InlineAsm, session: &mut Session) {
@@ -1613,40 +1605,8 @@ fn emit_inline_asm_semantic_error(span: Span, message: &str, session: &mut Sessi
     session.handler.struct_err(span, message).code(rcc_errors::codes::E0032).emit();
 }
 
-fn matching_inline_asm_input(
-    output_idx: usize,
-    inputs: &[rcc_ast::InlineAsmOperand],
-) -> Option<usize> {
-    let expected = output_idx.to_string();
-    inputs
-        .iter()
-        .position(|input| asm_constraint_text(&input.constraint).is_some_and(|c| c == expected))
-}
-
 fn asm_constraint_text(lit: &rcc_ast::StringLiteral) -> Option<&str> {
     std::str::from_utf8(&lit.bytes).ok()
-}
-
-fn asm_constraint_is_write_only(constraint: &str) -> bool {
-    constraint.starts_with('=')
-}
-
-fn push_hir_expr(
-    body: &mut Body,
-    ty: TyId,
-    value_cat: ValueCat,
-    span: Span,
-    kind: HirExprKind,
-) -> HirExprId {
-    let id = body.exprs.push(HirExpr { id: HirExprId(0), ty, value_cat, span, kind });
-    body.exprs[id].id = id;
-    id
-}
-
-fn push_hir_stmt(body: &mut Body, span: Span, kind: HirStmtKind) -> HirStmtId {
-    let id = body.stmts.push(HirStmt { id: HirStmtId(0), span, kind });
-    body.stmts[id].id = id;
-    id
 }
 
 fn populate_switch_case_tables(body: &mut Body, root: HirStmtId, session: &mut Session) {
@@ -1722,6 +1682,11 @@ fn populate_switch_case_tables_in_stmt(
         }
         HirStmtKind::Expr(expr) => {
             populate_switch_case_tables_in_expr(body, expr, switch_depth, session);
+        }
+        HirStmtKind::InlineAsm(asm) => {
+            for operand in asm.outputs.iter().chain(&asm.inputs) {
+                populate_switch_case_tables_in_expr(body, operand.expr, switch_depth, session);
+            }
         }
         HirStmtKind::GotoComputed(expr) => {
             populate_switch_case_tables_in_expr(body, expr, switch_depth, session);
@@ -1927,6 +1892,7 @@ fn collect_cases_for_switch(
             collect_cases_for_switch(body, inner, session, state);
         }
         HirStmtKind::Expr(_)
+        | HirStmtKind::InlineAsm(_)
         | HirStmtKind::Goto(_)
         | HirStmtKind::GotoComputed(_)
         | HirStmtKind::Break

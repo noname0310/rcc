@@ -85,11 +85,62 @@ pub struct Statement {
     pub span: Span,
 }
 
+/// GNU inline assembly statement lowered to CFG operands and places.
+#[derive(Debug, Clone)]
+pub struct InlineAsm {
+    /// Decoded assembly template.
+    pub template: String,
+    /// Whether LLVM must preserve the call as side-effecting.
+    pub volatile: bool,
+    /// Output operands in source order.
+    pub outputs: Vec<InlineAsmOutput>,
+    /// Input operands in source order.
+    pub inputs: Vec<InlineAsmInput>,
+    /// Clobber strings in source order.
+    pub clobbers: Vec<String>,
+}
+
+/// One inline assembly output operand.
+#[derive(Debug, Clone)]
+pub struct InlineAsmOutput {
+    /// GCC-style constraint string.
+    pub constraint: String,
+    /// Destination storage.
+    pub place: Place,
+    /// Destination C type.
+    pub ty: TyId,
+    /// True for memory outputs that are passed by address and do not appear in
+    /// the direct LLVM return value.
+    pub indirect: bool,
+}
+
+/// One inline assembly input operand.
+#[derive(Debug, Clone)]
+pub struct InlineAsmInput {
+    /// GCC-style constraint string.
+    pub constraint: String,
+    /// Lowered operand value or address.
+    pub arg: InlineAsmArg,
+    /// Operand C type before address lowering.
+    pub ty: TyId,
+}
+
+/// Operand payload passed to LLVM inline asm.
+#[derive(Debug, Clone)]
+pub enum InlineAsmArg {
+    /// Pass a scalar value.
+    Value(Operand),
+    /// Pass the address of a memory operand.
+    Address(Place),
+}
+
 /// Statement discriminant.
 #[derive(Debug, Clone)]
 pub enum StatementKind {
     /// `place = rvalue`.
     Assign { place: Place, rvalue: Rvalue },
+    /// GNU inline assembly statement.
+    InlineAsm(InlineAsm),
     /// Mark a local as live. Must dominate every use.
     StorageLive(Local),
     /// Mark a local as dead. Reads after this are UB.

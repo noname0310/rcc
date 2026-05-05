@@ -104,6 +104,40 @@ fn common_gnu_attrs_lower_to_llvm_ir() {
 }
 
 #[test]
+fn inline_asm_volatile_nop_lowers_to_call_asm() {
+    let ir = render_with_options(
+        "inline_asm_volatile_nop",
+        r#"void f(void) { __asm__ volatile ("nop"); }"#,
+        Options { gnu_inline_asm: true, ..Options::default() },
+    );
+
+    assert!(ir.contains(r#"call void asm sideeffect "nop", ""()"#), "{ir}");
+}
+
+#[test]
+fn inline_asm_register_output_lowers_to_result_store() {
+    let ir = render_with_options(
+        "inline_asm_register_output",
+        r#"int f(int in) { int out; __asm__ volatile ("mov $1, $0" : "=r"(out) : "r"(in)); return out; }"#,
+        Options { gnu_inline_asm: true, ..Options::default() },
+    );
+
+    assert!(ir.contains(r#"asm sideeffect "mov $1, $0", "=r,r""#), "{ir}");
+    assert!(ir.contains("store i32 %inline.asm"), "{ir}");
+}
+
+#[test]
+fn inline_asm_memory_input_uses_indirect_constraint() {
+    let ir = render_with_options(
+        "inline_asm_memory_input",
+        r#"void f(int *p) { __asm__ volatile ("" : : "m"(*p) : "memory"); }"#,
+        Options { gnu_inline_asm: true, ..Options::default() },
+    );
+
+    assert!(ir.contains(r#"asm sideeffect "", "*m,~{memory}""#), "{ir}");
+}
+
+#[test]
 fn function_return() {
     snap!("function_return", "int f(void) { return 42; }", @r###"
     ; ModuleID = '<llvm-ir/function_return>'

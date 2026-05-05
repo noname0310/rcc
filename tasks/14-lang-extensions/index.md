@@ -17,7 +17,7 @@ Preprocessor and parser extensions: pragmas, builtins, attributes, inline asm.
 - [x] [07-attribute-syntax](07-attribute-syntax.md)
 - [x] [08-attribute-common](08-attribute-common.md)
 - [x] [09-inline-asm-syntax](09-inline-asm-syntax.md)
-- [ ] [10-inline-asm-codegen](10-inline-asm-codegen.md)
+- [x] [10-inline-asm-codegen](10-inline-asm-codegen.md)
 
 ## Downstream
 
