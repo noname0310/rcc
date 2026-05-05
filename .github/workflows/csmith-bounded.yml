@@ -1,20 +1,6 @@
-name: Csmith Bounded Differential
+name: Csmith Bounded Differential (manual)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/csmith-bounded.yml"
-      - "crates/rcc_codegen_llvm/**"
-      - "crates/rcc_driver/**"
-      - "crates/rcc_cfg/**"
-      - "crates/rcc_cfg_transform/**"
-      - "crates/rcc_hir/**"
-      - "crates/rcc_hir_lower/**"
-      - "crates/rcc_typeck/**"
-      - "crates/rcc_parse/**"
-      - "crates/rcc_preprocess/**"
-      - "crates/rcc_conformance/**"
   workflow_dispatch:
     inputs:
       max_duration_secs:

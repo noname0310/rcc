@@ -103,12 +103,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run 30s fuzz smoke test
         run: |
-          if [ -d fuzz ]; then
-            cd fuzz
-            cargo +nightly fuzz run lex --target x86_64-unknown-linux-gnu -- -max_total_time=30
-          else
-            echo "fuzz directory not present yet; skipping"
-          fi
+          mkdir -p fuzz/artifacts/lex-smoke
+          cd fuzz
+          cargo +nightly fuzz run lex --target x86_64-unknown-linux-gnu -- \
+            -max_total_time=30 \
+            -artifact_prefix="artifacts/lex-smoke/" \
+            -print_final_stats=1
+      - name: Upload fuzz smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-lex
+          path: fuzz/artifacts/lex-smoke
+          if-no-files-found: warn
+          retention-days: 14
 
   conformance:
     name: conformance (release dashboard)

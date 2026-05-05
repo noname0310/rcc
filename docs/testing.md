@@ -73,8 +73,8 @@ code.
 CI budgets:
 - per-commit: 30 s fuzz smoke on `lex` (see `.github/workflows/ci.yml`).
 - extended fuzz: 30 minute lexer/parser/preprocessor gates on relevant path
-  changes or manual dispatch, plus bounded csmith differential runs through
-  `.github/workflows/csmith-bounded.yml`.
+  changes or manual dispatch. The bounded csmith differential workflow is
+  manual exploratory bug discovery, not a mandatory release gate.
 
 ## CI gates (see `.github/workflows/ci.yml`)
 
@@ -92,3 +92,4 @@ CI budgets:
 
 Each milestone (M1..M7 in the plan) tightens gate 7 with a concrete
 pass-rate target (see [`conformance.md`](conformance.md)).
+The mandatory/manual GitHub Actions split is documented in [`ci.md`](ci.md).

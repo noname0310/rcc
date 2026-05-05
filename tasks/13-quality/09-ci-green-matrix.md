@@ -1,5 +1,7 @@
 # 13-09: Mandatory CI green matrix
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-08    **Milestone:** M7
 
 ## Goal
