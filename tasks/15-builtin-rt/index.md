@@ -20,8 +20,9 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [10-ctype-hosted-declarations](10-ctype-hosted-declarations.md)
 - [x] [11-hosted-c99-header-audit](11-hosted-c99-header-audit.md)
 - [x] [12-hosted-core-declaration-sweep](12-hosted-core-declaration-sweep.md)
-- [ ] [13-hosted-math-declaration-sweep](13-hosted-math-declaration-sweep.md)
+- [x] [13-hosted-math-declaration-sweep](13-hosted-math-declaration-sweep.md)
 - [ ] [14-missing-hosted-header-files](14-missing-hosted-header-files.md)
+- [ ] [15-math-classification-macros](15-math-classification-macros.md)
 
 ## Downstream
 

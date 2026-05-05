@@ -46,7 +46,7 @@ Absent hosted C99/C95 headers:
 `complex.h`, `fenv.h`, and `tgmath.h` need separate compiler-support review.
 The others can start as ABI-facing declaration shims.
 
-## Function declaration coverage after `15-12`
+## Function declaration coverage after `15-13`
 
 This table counts only representative C99 function names in already-present
 headers. It does not count required types/macros, and it undercounts `<math.h>`
@@ -58,7 +58,7 @@ because the float/long-double suffixed variants need a separate sweep.
 | `string.h` | 22 | 22 | none |
 | `stdlib.h` | 36 | 36 | none |
 | `stdio.h` | 46 | 46 | none |
-| `math.h` | 18 | 57 | `acosh`, `asinh`, `atan2`, `atanh`, `cbrt`, `copysign`, `erf`, `erfc`, `exp2`, `expm1`, `fdim`, `fma`, `fmax`, `fmin`, `fmod`, `frexp`, `hypot`, `ilogb`, `ldexp`, `lgamma`, `llrint`, `llround`, `log1p`, `log2`, `logb`, `lrint`, `lround`, `modf`, `nan`, `nearbyint`, `nextafter`, `nexttoward`, `remainder`, `remquo`, `rint`, `scalbln`, `scalbn`, `tgamma`, `trunc` |
+| `math.h` | 171 | 171 | none for function declarations; classification/comparison macros remain task `15-15` |
 
 ## Real-world hits so far
 
@@ -69,14 +69,13 @@ because the float/long-double suffixed variants need a separate sweep.
 
 ## Task split
 
-1. `15-13-hosted-math-declaration-sweep`
-   - Sweep missing double math declarations.
-   - Add float/long-double variants where frontend support is already sound.
-   - Link tests with `-lm`.
-2. `15-14-missing-hosted-header-files`
+1. `15-14-missing-hosted-header-files`
    - Add minimal shims for absent hosted headers.
    - Split out `complex.h`, `fenv.h`, and `tgmath.h` when compiler support is
      required.
+2. `15-15-math-classification-macros`
+   - Add C99 math classification/comparison macros only with sound frontend
+     semantics.
 
 Completed:
 
@@ -84,6 +83,10 @@ Completed:
   - Swept `stdio.h`, `stdlib.h`, and `string.h`.
   - Kept the implementation declaration-only.
   - Added a representative compile/link/run fixture.
+- `15-13-hosted-math-declaration-sweep`
+  - Swept double, float, and long-double C99 math function-family declarations.
+  - Added a hosted math fixture linked with `-lm`.
+  - Left classification/comparison macros as `15-15` instead of faking them.
 
 ## Policy
 

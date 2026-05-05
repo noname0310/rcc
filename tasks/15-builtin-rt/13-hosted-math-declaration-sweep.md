@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-13: Hosted math declaration sweep
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-11    **Milestone:** real-world-03
@@ -14,8 +16,7 @@ function-family declarations needed by real-world numeric libraries.
 - Out: implementing libm bodies and complex math.
 
 ## Acceptance
-- Add a hosted math fixture linked with `-lm`.
-- The fixture covers at least one function from each newly added family.
-- If a macro cannot be represented safely yet, document the blocker and add the
+- [x] Add a hosted math fixture linked with `-lm`.
+- [x] The fixture covers at least one function from each newly added family.
+- [x] If a macro cannot be represented safely yet, document the blocker and add the
   compiler task instead of faking the macro.
-

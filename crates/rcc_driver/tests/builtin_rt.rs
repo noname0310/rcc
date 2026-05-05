@@ -12,7 +12,7 @@ mod linux {
 
     use rcc_driver::pipeline;
     use rcc_errors::{CaptureEmitter, Handler};
-    use rcc_session::{Options, Session};
+    use rcc_session::{LinkOptions, Options, Session};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -88,8 +88,12 @@ mod linux {
     fn compile_fixture(fixture: &Fixture, exe: &Path) -> Result<(), String> {
         let cap = CaptureEmitter::new();
         let handler = Handler::with_emitter(Box::new(cap));
+        let mut link = LinkOptions::default();
+        if fixture.name == "hosted_math_decls" {
+            link.libraries.push("m".to_owned());
+        }
         let mut session = Session::with_handler(
-            Options { output: Some(exe.to_path_buf()), ..Options::default() },
+            Options { output: Some(exe.to_path_buf()), link, ..Options::default() },
             handler,
         );
         pipeline::compile(&mut session, &fixture.c_path)
