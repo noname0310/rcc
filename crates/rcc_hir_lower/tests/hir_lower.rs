@@ -3080,6 +3080,109 @@ fn snippet_va_area_rejects_non_variadic_function() {
 }
 
 #[test]
+fn inline_asm_extended_operands_validate_and_lower_side_effects() {
+    let src = r#"
+        int f(int in) {
+            int out;
+            asm volatile ("mov %1, %0" : "=r"(out) : "0"(in) : "cc", "memory");
+            return out;
+        }
+    "#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        !diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0032)),
+        "valid x86-64 inline asm should pass validation: {diags:?}"
+    );
+
+    let body = hir.bodies.values().next().expect("function body");
+    assert!(
+        body.exprs.iter().any(|expr| matches!(expr.kind, HirExprKind::Assign { .. })),
+        "matching output/input constraint should lower to side-effect assignment"
+    );
+}
+
+#[test]
+fn inline_asm_rejects_output_without_write_marker() {
+    let src = r#"int f(int x) { asm("" : "r"(x)); return x; }"#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0032)
+                && d.message.contains("output inline asm constraint")
+        }),
+        "expected output constraint error: {diags:?}"
+    );
+}
+
+#[test]
+fn inline_asm_rejects_missing_matching_output() {
+    let src = r#"int f(int x) { asm("" : : "1"(x)); return x; }"#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0032)
+                && d.message.contains("does not name an output operand")
+        }),
+        "expected matching constraint error: {diags:?}"
+    );
+}
+
+#[test]
+fn inline_asm_rejects_duplicate_symbolic_operand_names() {
+    let src = r#"
+        int f(int a, int b) {
+            asm("" : [x] "=r"(a) : [x] "r"(b));
+            return a;
+        }
+    "#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0032)
+                && d.message.contains("duplicate inline asm operand name")
+        }),
+        "expected duplicate operand name error: {diags:?}"
+    );
+}
+
+#[test]
+fn inline_asm_rejects_unsupported_target_constraint() {
+    let src = r#"int f(int x) { asm("" : "=foo"(x)); return x; }"#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0032)
+                && d.message.contains("unsupported output inline asm constraint")
+        }),
+        "expected unsupported constraint policy error: {diags:?}"
+    );
+}
+
+#[test]
+fn inline_asm_goto_policy_is_explicit() {
+    let src = r#"int f(void) { asm goto ("nop"); return 0; }"#;
+    let opts = Options { gnu_inline_asm: true, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0032) && d.message.contains("asm goto")
+        }),
+        "expected asm goto policy error: {diags:?}"
+    );
+}
+
+#[test]
 fn snippet_global_char_array_string_initializer_has_static_payload() {
     let (hir, tcx) = lower_snippet("char s[] = \"hi\";");
     let def = hir.defs.iter().find(|d| matches!(d.kind, DefKind::Global { .. })).unwrap();

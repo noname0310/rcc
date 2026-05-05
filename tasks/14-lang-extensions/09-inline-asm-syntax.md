@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 14-09: Inline assembly semantic validation
 
 **Phase:** 14-lang-extensions    **Depends on:** 05-39    **Milestone:** M7 (stretch goal)

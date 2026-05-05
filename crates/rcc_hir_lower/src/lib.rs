@@ -1313,6 +1313,8 @@ fn lower_inline_asm_stmt(
     resolver: &mut Resolver,
     session: &mut Session,
 ) -> HirStmtKind {
+    validate_inline_asm(asm, session);
+
     let mut stmts = Vec::new();
     let mut consumed_inputs = vec![false; asm.inputs.len()];
 
@@ -1364,6 +1366,251 @@ fn lower_inline_asm_stmt(
     } else {
         HirStmtKind::Block(stmts)
     }
+}
+
+fn validate_inline_asm(asm: &rcc_ast::InlineAsm, session: &mut Session) {
+    if asm.quals.goto {
+        session
+            .handler
+            .struct_err(asm.span, "GNU `asm goto` is parsed but not supported yet")
+            .code(rcc_errors::codes::E0032)
+            .help("remove `goto` or wait for the LLVM inline-asm codegen task")
+            .emit();
+    }
+
+    validate_inline_asm_operand_names(asm, session);
+
+    for (idx, output) in asm.outputs.iter().enumerate() {
+        validate_inline_asm_constraint(
+            &output.constraint,
+            output.span,
+            InlineAsmOperandRole::Output { index: idx },
+            asm.outputs.len(),
+            session,
+        );
+    }
+    for input in &asm.inputs {
+        validate_inline_asm_constraint(
+            &input.constraint,
+            input.span,
+            InlineAsmOperandRole::Input,
+            asm.outputs.len(),
+            session,
+        );
+    }
+    for clobber in &asm.clobbers {
+        validate_inline_asm_clobber(clobber, asm.span, session);
+    }
+}
+
+fn validate_inline_asm_operand_names(asm: &rcc_ast::InlineAsm, session: &mut Session) {
+    let mut seen = FxHashMap::default();
+    for operand in asm.outputs.iter().chain(&asm.inputs) {
+        let Some((name, span)) = operand.name else {
+            continue;
+        };
+        if let Some(previous) = seen.insert(name, span) {
+            let name = session.interner.get(name);
+            session
+                .handler
+                .struct_err(span, format!("duplicate inline asm operand name `{name}`"))
+                .code(rcc_errors::codes::E0032)
+                .label(previous, "first operand with this name")
+                .emit();
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum InlineAsmOperandRole {
+    Output { index: usize },
+    Input,
+}
+
+fn validate_inline_asm_constraint(
+    lit: &rcc_ast::StringLiteral,
+    span: Span,
+    role: InlineAsmOperandRole,
+    output_count: usize,
+    session: &mut Session,
+) {
+    let Some(text) = inline_asm_string_text(lit, span, session, "inline asm constraint") else {
+        return;
+    };
+    if text.is_empty() {
+        emit_inline_asm_semantic_error(span, "inline asm constraint cannot be empty", session);
+        return;
+    }
+
+    for alternative in text.split(',') {
+        if alternative.is_empty() {
+            emit_inline_asm_semantic_error(
+                span,
+                "inline asm constraint contains an empty alternative",
+                session,
+            );
+            continue;
+        }
+        validate_inline_asm_constraint_alternative(alternative, span, role, output_count, session);
+    }
+}
+
+fn validate_inline_asm_constraint_alternative(
+    alternative: &str,
+    span: Span,
+    role: InlineAsmOperandRole,
+    output_count: usize,
+    session: &mut Session,
+) {
+    let (marker, mut rest) = match role {
+        InlineAsmOperandRole::Output { .. } => match alternative.as_bytes().first().copied() {
+            Some(b'=') | Some(b'+') => (alternative.as_bytes()[0] as char, &alternative[1..]),
+            _ => {
+                emit_inline_asm_semantic_error(
+                    span,
+                    "output inline asm constraint must start with `=` or `+`",
+                    session,
+                );
+                return;
+            }
+        },
+        InlineAsmOperandRole::Input => {
+            if matches!(alternative.as_bytes().first(), Some(b'=') | Some(b'+')) {
+                emit_inline_asm_semantic_error(
+                    span,
+                    "input inline asm constraint cannot start with `=` or `+`",
+                    session,
+                );
+                return;
+            }
+            ('\0', alternative)
+        }
+    };
+
+    while matches!(rest.as_bytes().first(), Some(b'&' | b'%' | b'?' | b'!' | b'*')) {
+        rest = &rest[1..];
+    }
+
+    if rest.is_empty() {
+        emit_inline_asm_semantic_error(
+            span,
+            "inline asm constraint is missing a register, memory, immediate, or matching operand",
+            session,
+        );
+        return;
+    }
+
+    if rest.chars().all(|ch| ch.is_ascii_digit()) {
+        validate_inline_asm_matching_constraint(rest, span, role, output_count, session);
+        return;
+    }
+
+    let Some(first) = rest.chars().next() else {
+        return;
+    };
+    if inline_asm_constraint_class(first).is_some() {
+        return;
+    }
+
+    let kind = match role {
+        InlineAsmOperandRole::Output { .. } => "output",
+        InlineAsmOperandRole::Input => "input",
+    };
+    let hint = if marker == '+' {
+        "supported read/write output constraints include `+r` and `+m`"
+    } else {
+        "supported constraints include generic `r`, `m`, `g`, `i`, `n`, `X`, matching digits, and common x86-64 `a/b/c/d/S/D` registers"
+    };
+    session
+        .handler
+        .struct_err(span, format!("unsupported {kind} inline asm constraint `{alternative}`"))
+        .code(rcc_errors::codes::E0032)
+        .help(hint)
+        .emit();
+}
+
+fn validate_inline_asm_matching_constraint(
+    digits: &str,
+    span: Span,
+    role: InlineAsmOperandRole,
+    output_count: usize,
+    session: &mut Session,
+) {
+    let Ok(index) = digits.parse::<usize>() else {
+        emit_inline_asm_semantic_error(
+            span,
+            "inline asm matching constraint index is too large",
+            session,
+        );
+        return;
+    };
+    match role {
+        InlineAsmOperandRole::Output { index: output_index } => {
+            emit_inline_asm_semantic_error(
+                span,
+                &format!("output operand {output_index} cannot use matching constraint `{digits}`"),
+                session,
+            );
+        }
+        InlineAsmOperandRole::Input if index >= output_count => {
+            emit_inline_asm_semantic_error(
+                span,
+                &format!("matching constraint `{digits}` does not name an output operand"),
+                session,
+            );
+        }
+        InlineAsmOperandRole::Input => {}
+    }
+}
+
+#[derive(Copy, Clone)]
+enum InlineAsmConstraintClass {
+    Register,
+    Memory,
+    Immediate,
+    Generic,
+}
+
+fn inline_asm_constraint_class(ch: char) -> Option<InlineAsmConstraintClass> {
+    match ch {
+        'r' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D' => Some(InlineAsmConstraintClass::Register),
+        'm' => Some(InlineAsmConstraintClass::Memory),
+        'i' | 'n' => Some(InlineAsmConstraintClass::Immediate),
+        'g' | 'X' => Some(InlineAsmConstraintClass::Generic),
+        _ => None,
+    }
+}
+
+fn validate_inline_asm_clobber(lit: &rcc_ast::StringLiteral, span: Span, session: &mut Session) {
+    let Some(text) = inline_asm_string_text(lit, span, session, "inline asm clobber") else {
+        return;
+    };
+    if text.is_empty() {
+        emit_inline_asm_semantic_error(span, "inline asm clobber cannot be empty", session);
+    }
+}
+
+fn inline_asm_string_text<'a>(
+    lit: &'a rcc_ast::StringLiteral,
+    span: Span,
+    session: &mut Session,
+    what: &str,
+) -> Option<&'a str> {
+    if lit.bytes.contains(&0) {
+        emit_inline_asm_semantic_error(span, &format!("{what} cannot contain NUL bytes"), session);
+        return None;
+    }
+    match std::str::from_utf8(&lit.bytes) {
+        Ok(text) => Some(text),
+        Err(_) => {
+            emit_inline_asm_semantic_error(span, &format!("{what} must be UTF-8 text"), session);
+            None
+        }
+    }
+}
+
+fn emit_inline_asm_semantic_error(span: Span, message: &str, session: &mut Session) {
+    session.handler.struct_err(span, message).code(rcc_errors::codes::E0032).emit();
 }
 
 fn matching_inline_asm_input(
