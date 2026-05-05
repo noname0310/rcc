@@ -5,6 +5,9 @@ system's C runtime and libraries for the actual symbols, while `rcc` ships a
 small compiler-provided include directory with declarations that the frontend can
 parse and type-check.
 
+The current declaration coverage audit lives in
+[`docs/hosted-c99-header-audit.md`](hosted-c99-header-audit.md).
+
 The files under `lib/rcc/include/` are therefore ABI-facing declaration shims,
 not libc implementations. They should contain only the C99 declarations needed
 by current conformance fixtures and compiler-owned builtins. Adding a prototype

@@ -18,6 +18,10 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [08-unit-tests](08-unit-tests.md)
 - [x] [09-linux-multiarch-include-discovery](09-linux-multiarch-include-discovery.md)
 - [x] [10-ctype-hosted-declarations](10-ctype-hosted-declarations.md)
+- [x] [11-hosted-c99-header-audit](11-hosted-c99-header-audit.md)
+- [x] [12-hosted-core-declaration-sweep](12-hosted-core-declaration-sweep.md)
+- [ ] [13-hosted-math-declaration-sweep](13-hosted-math-declaration-sweep.md)
+- [ ] [14-missing-hosted-header-files](14-missing-hosted-header-files.md)
 
 ## Downstream
 

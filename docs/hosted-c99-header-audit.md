@@ -1,0 +1,99 @@
+# Hosted C99 Header Audit
+
+Date: 2026-05-05
+
+`rcc` does not implement libc. The headers under `lib/rcc/include/` are
+declaration shims so the frontend can parse, type-check, lower, and call symbols
+provided by the target host libc or libm.
+
+This audit exists because real-world probes started finding missing declarations
+one at a time. That is the wrong loop: declaration coverage should be swept by
+header family, then real-world probes should expose compiler bugs beyond simple
+missing prototypes.
+
+## Current header files
+
+Present:
+
+- `ctype.h`
+- `float.h`
+- `iso646.h`
+- `limits.h`
+- `math.h`
+- `stdarg.h`
+- `stdbool.h`
+- `stddef.h`
+- `stdint.h`
+- `stdio.h`
+- `stdlib.h`
+- `string.h`
+- `wchar.h`
+
+Absent hosted C99/C95 headers:
+
+- `assert.h`
+- `complex.h`
+- `errno.h`
+- `fenv.h`
+- `inttypes.h`
+- `locale.h`
+- `setjmp.h`
+- `signal.h`
+- `tgmath.h`
+- `time.h`
+- `wctype.h`
+
+`complex.h`, `fenv.h`, and `tgmath.h` need separate compiler-support review.
+The others can start as ABI-facing declaration shims.
+
+## Function declaration coverage after `15-12`
+
+This table counts only representative C99 function names in already-present
+headers. It does not count required types/macros, and it undercounts `<math.h>`
+because the float/long-double suffixed variants need a separate sweep.
+
+| Header | Current | Expected representative set | Missing |
+| --- | ---: | ---: | --- |
+| `ctype.h` | 14 | 14 | none |
+| `string.h` | 22 | 22 | none |
+| `stdlib.h` | 36 | 36 | none |
+| `stdio.h` | 46 | 46 | none |
+| `math.h` | 18 | 57 | `acosh`, `asinh`, `atan2`, `atanh`, `cbrt`, `copysign`, `erf`, `erfc`, `exp2`, `expm1`, `fdim`, `fma`, `fmax`, `fmin`, `fmod`, `frexp`, `hypot`, `ilogb`, `ldexp`, `lgamma`, `llrint`, `llround`, `log1p`, `log2`, `logb`, `lrint`, `lround`, `modf`, `nan`, `nearbyint`, `nextafter`, `nexttoward`, `remainder`, `remquo`, `rint`, `scalbln`, `scalbn`, `tgamma`, `trunc` |
+
+## Real-world hits so far
+
+| Project | Missing surface | Resolution path |
+| --- | --- | --- |
+| `inih` | `ctype.h` missed `isspace` | fixed by `15-10` as the complete C99 ctype set |
+| `cJSON` | `stdlib.h` missed `strtod`; `stdio.h` missed `sscanf` | fixed as part of the `15-12` hosted core declaration sweep |
+
+## Task split
+
+1. `15-13-hosted-math-declaration-sweep`
+   - Sweep missing double math declarations.
+   - Add float/long-double variants where frontend support is already sound.
+   - Link tests with `-lm`.
+2. `15-14-missing-hosted-header-files`
+   - Add minimal shims for absent hosted headers.
+   - Split out `complex.h`, `fenv.h`, and `tgmath.h` when compiler support is
+     required.
+
+Completed:
+
+- `15-12-hosted-core-declaration-sweep`
+  - Swept `stdio.h`, `stdlib.h`, and `string.h`.
+  - Kept the implementation declaration-only.
+  - Added a representative compile/link/run fixture.
+
+## Policy
+
+Do not copy system headers into the repository. Do not add function bodies.
+Do not add POSIX/GNU declarations unless a real-world project exposes them and
+the extension is explicitly classified.
+
+The pass condition for these headers is not "all libc exists in rcc"; it is:
+
+- the frontend can parse and type-check standard hosted C99 declarations;
+- linking remains delegated to the target libc/libm;
+- real-world probes stop failing on simple missing C99 prototypes and start
+  exposing actual compiler behavior bugs.
