@@ -37,6 +37,7 @@ Typed HIR -> MIR-style CFG: basic blocks, terminators, short-circuit lowering, V
 - [x] [27-aggregate-rvalue-field-lowering](27-aggregate-rvalue-field-lowering.md)
 - [x] [28-string-literal-index-place](28-string-literal-index-place.md)
 - [x] [29-constant-condition-dead-branch-pruning](29-constant-condition-dead-branch-pruning.md)
+- [x] [30-constant-if-dead-label-continuation](30-constant-if-dead-label-continuation.md)
 
 ## Downstream
 

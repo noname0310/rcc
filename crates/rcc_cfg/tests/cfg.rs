@@ -690,6 +690,35 @@ fn side_effectful_lhs_and_constant_false_rhs_keeps_lhs_call_only() {
     );
 }
 
+#[test]
+fn constant_false_if_still_lowers_goto_target_label() {
+    let lowered = lower_snippet(
+        "constant_false_if_still_lowers_goto_target_label",
+        r#"
+void *volatile sink;
+int f(int limit) {
+  int n = 0;
+  if (0) {
+  lab:;
+  }
+  int x[n % 1000 + 1];
+  sink = x;
+  n++;
+  if (n < limit)
+    goto lab;
+  return n;
+}
+"#,
+    );
+    let body = &lowered.bodies[0].1;
+    let label = body.labels.values().copied().next().expect("expected one label");
+    assert!(
+        !matches!(body.blocks[label].terminator.kind, TerminatorKind::Unreachable),
+        "goto target label must fall through to the post-if continuation:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
 fn lower_snippet(name: &str, src: &str) -> Lowered {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));

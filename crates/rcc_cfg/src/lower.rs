@@ -1146,11 +1146,9 @@ fn lower_if(
 ) {
     let cond_op = lower_condition_operand(builder, cx, span, cond);
     if let Some(cond_is_true) = const_operand_truth(&cond_op) {
-        if cond_is_true {
-            lower_stmt(builder, cx, then_branch);
-        } else if let Some(else_branch) = else_branch {
-            lower_stmt(builder, cx, else_branch);
-        }
+        let live_branch = if cond_is_true { Some(then_branch) } else { else_branch };
+        let dead_branch = if cond_is_true { else_branch } else { Some(then_branch) };
+        lower_const_if(builder, cx, span, live_branch, dead_branch);
         return;
     }
 
@@ -1219,6 +1217,175 @@ fn lower_if(
                 }
             }
         }
+    }
+}
+
+fn lower_const_if(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    live_branch: Option<HirStmtId>,
+    dead_branch: Option<HirStmtId>,
+) {
+    let dead_has_label = dead_branch.is_some_and(|stmt| stmt_contains_label(cx.body, stmt));
+    if !dead_has_label {
+        if let Some(live_branch) = live_branch {
+            lower_stmt(builder, cx, live_branch);
+        }
+        return;
+    }
+
+    let continuation = builder.new_block();
+    if let Some(live_branch) = live_branch {
+        lower_stmt(builder, cx, live_branch);
+        if !builder.is_current_terminated() {
+            builder.goto(continuation, span);
+        }
+    } else if !builder.is_current_terminated() {
+        builder.goto(continuation, span);
+    }
+
+    if let Some(dead_branch) = dead_branch {
+        lower_stmt_in_dead_code(builder, cx, dead_branch);
+        if !builder.is_current_terminated() {
+            builder.goto(continuation, span);
+        }
+    }
+
+    builder.switch_to(continuation);
+}
+
+fn stmt_contains_label(body: &HirBody, stmt_id: HirStmtId) -> bool {
+    match &body.stmts[stmt_id].kind {
+        HirStmtKind::Label { .. } => true,
+        HirStmtKind::Block(stmts) => stmts.iter().any(|stmt| stmt_contains_label(body, *stmt)),
+        HirStmtKind::If { cond, then_branch, else_branch } => {
+            expr_contains_label(body, *cond)
+                || stmt_contains_label(body, *then_branch)
+                || else_branch.is_some_and(|stmt| stmt_contains_label(body, stmt))
+        }
+        HirStmtKind::While { cond, body: stmt } => {
+            expr_contains_label(body, *cond) || stmt_contains_label(body, *stmt)
+        }
+        HirStmtKind::DoWhile { body: stmt, cond } => {
+            stmt_contains_label(body, *stmt) || expr_contains_label(body, *cond)
+        }
+        HirStmtKind::For { init, cond, step, body: stmt } => {
+            init.is_some_and(|init| stmt_contains_label(body, init))
+                || cond.is_some_and(|cond| expr_contains_label(body, cond))
+                || step.is_some_and(|step| expr_contains_label(body, step))
+                || stmt_contains_label(body, *stmt)
+        }
+        HirStmtKind::Switch { cond, body: stmt, .. } => {
+            expr_contains_label(body, *cond) || stmt_contains_label(body, *stmt)
+        }
+        HirStmtKind::Case { body: stmt, .. } | HirStmtKind::Default { body: stmt } => {
+            stmt_contains_label(body, *stmt)
+        }
+        HirStmtKind::Expr(expr) | HirStmtKind::GotoComputed(expr) => {
+            expr_contains_label(body, *expr)
+        }
+        HirStmtKind::InitAssign { lhs, rhs } => {
+            expr_contains_label(body, *lhs) || expr_contains_label(body, *rhs)
+        }
+        HirStmtKind::InlineAsm(asm) => asm
+            .outputs
+            .iter()
+            .chain(&asm.inputs)
+            .any(|operand| expr_contains_label(body, operand.expr)),
+        HirStmtKind::Return(Some(expr)) => expr_contains_label(body, *expr),
+        HirStmtKind::Return(None)
+        | HirStmtKind::Null
+        | HirStmtKind::LocalDecl { .. }
+        | HirStmtKind::Goto(_)
+        | HirStmtKind::Break
+        | HirStmtKind::Continue => false,
+    }
+}
+
+fn expr_contains_label(body: &HirBody, expr_id: HirExprId) -> bool {
+    match &body.exprs[expr_id].kind {
+        HirExprKind::Binary { lhs, rhs, .. }
+        | HirExprKind::Comma { lhs, rhs }
+        | HirExprKind::Assign { lhs, rhs } => {
+            expr_contains_label(body, *lhs) || expr_contains_label(body, *rhs)
+        }
+        HirExprKind::Unary { operand, .. }
+        | HirExprKind::Convert { operand, .. }
+        | HirExprKind::Cast { operand, .. }
+        | HirExprKind::SizeofExpr(operand)
+        | HirExprKind::AlignofExpr(operand)
+        | HirExprKind::AddressOf(operand)
+        | HirExprKind::Deref(operand) => expr_contains_label(body, *operand),
+        HirExprKind::Call { callee, args } => {
+            expr_contains_label(body, *callee)
+                || args.iter().any(|arg| expr_contains_label(body, *arg))
+        }
+        HirExprKind::StmtExpr { stmts, result } => {
+            stmts.iter().any(|stmt| stmt_contains_label(body, *stmt))
+                || result.is_some_and(|expr| expr_contains_label(body, expr))
+        }
+        HirExprKind::UnresolvedField { base, .. } | HirExprKind::Field { base, .. } => {
+            expr_contains_label(body, *base)
+        }
+        HirExprKind::Index { base, index } => {
+            expr_contains_label(body, *base) || expr_contains_label(body, *index)
+        }
+        HirExprKind::CompoundLiteral { init_stmts, .. } => {
+            init_stmts.iter().any(|stmt| stmt_contains_label(body, *stmt))
+        }
+        HirExprKind::VectorInit { lanes, .. } => {
+            lanes.iter().any(|lane| expr_contains_label(body, *lane))
+        }
+        HirExprKind::Cond { cond, then_expr, else_expr } => {
+            expr_contains_label(body, *cond)
+                || expr_contains_label(body, *then_expr)
+                || expr_contains_label(body, *else_expr)
+        }
+        HirExprKind::OmittedCond { cond, else_expr } => {
+            expr_contains_label(body, *cond) || expr_contains_label(body, *else_expr)
+        }
+        HirExprKind::BuiltinVaArg { ap, .. } | HirExprKind::BuiltinVaEnd { ap } => {
+            expr_contains_label(body, *ap)
+        }
+        HirExprKind::BuiltinVaStart { ap, last_param } => {
+            expr_contains_label(body, *ap) || expr_contains_label(body, *last_param)
+        }
+        HirExprKind::BuiltinVaCopy { dst, src } => {
+            expr_contains_label(body, *dst) || expr_contains_label(body, *src)
+        }
+        HirExprKind::BuiltinExpect { value, expected } => {
+            expr_contains_label(body, *value) || expr_contains_label(body, *expected)
+        }
+        HirExprKind::BuiltinConstantP { expr } => expr_contains_label(body, *expr),
+        HirExprKind::BuiltinBswap { value, .. } => expr_contains_label(body, *value),
+        HirExprKind::BuiltinComplex { real, imag } => {
+            expr_contains_label(body, *real) || expr_contains_label(body, *imag)
+        }
+        HirExprKind::BuiltinTgmath { args, .. } => {
+            args.iter().any(|arg| expr_contains_label(body, *arg))
+        }
+        HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
+            expr_contains_label(body, *lhs)
+                || expr_contains_label(body, *rhs)
+                || expr_contains_label(body, *dst)
+        }
+        HirExprKind::BuiltinOverflowP { lhs, rhs, probe, .. } => {
+            expr_contains_label(body, *lhs)
+                || expr_contains_label(body, *rhs)
+                || expr_contains_label(body, *probe)
+        }
+        HirExprKind::IntLiteral { .. }
+        | HirExprKind::IntConst(_)
+        | HirExprKind::FloatConst(_)
+        | HirExprKind::StringRef(_)
+        | HirExprKind::LocalRef(_)
+        | HirExprKind::DefRef(_)
+        | HirExprKind::LabelAddr(_)
+        | HirExprKind::BuiltinVaArea
+        | HirExprKind::BuiltinUnreachable
+        | HirExprKind::SizeofType(_)
+        | HirExprKind::AlignofType(_) => false,
     }
 }
 
