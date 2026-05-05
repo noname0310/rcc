@@ -95,6 +95,23 @@ When a shim declares a function such as `pthread_create`, `dlopen`,
 type-check a call.  The implementation is resolved by the host linker and
 runtime libraries.
 
+## Header Shim Inventory
+
+Each hosted shim must have a source failure, a semantic status, and a removal
+criterion.  "Declaration only" means rcc owns the type/prototype/macro surface
+needed by the frontend; the function body remains host-owned.
+
+| Header or group | Kind | Source failure / owner | Semantic status | Removal criterion |
+| --- | --- | --- | --- | --- |
+| `sys/cdefs.h` | glibc annotation macros | QuickJS and coreutils host headers used `__THROW`, `__nonnull`, `__wur`, `__attr_*`, and related declaration annotations | declaration-shape macro erasure only; no fortified libc, symbol redirection, C++ linkage, or ABI dispatch | remove individual macros when parser can preserve the real host header forms directly |
+| `bits/rcc-posix-types.h`, `sys/types.h` | opaque/scalar POSIX typedefs | QuickJS and coreutils required `pid_t`, `uid_t`, `gid_t`, `mode_t`, `off_t`, `ssize_t`, clock/time names | LP64 glibc-oriented typedef surface; target-layout sensitive | replace with target-info-backed system-header parsing or per-target generated declarations |
+| `unistd.h`, `signal.h`, `time.h` | POSIX declarations and constants | inih/cJSON/Lua/MuJS plus coreutils needed process, sleep, signal, and time prototypes | declaration only; runtime belongs to host libc | remove a declaration when host headers parse cleanly and tests still lower with `--linux-gnu-hosted` |
+| `fcntl.h`, `dirent.h`, `sys/stat.h`, `sys/time.h`, `sys/wait.h` | filesystem/process declarations, macros, and selected layout-known structs | GNU coreutils filesystem probes reached `open`, `fstat`, `DIR`, `struct dirent`, `struct stat`, wait/status macros | declarations plus selected LP64 struct fields; no syscall wrappers | shrink when coreutils can use host/generated headers without shim gaps |
+| `pthread.h` | pthread declaration shim | QuickJS and pthread smoke tests required `pthread_create`, `pthread_join`, mutex/cond/key declarations | declaration plus ABI-sized opaque storage placeholders; host libpthread owns behavior | replace with host header parsing once glibc attributes, typedefs, and layout requirements are handled |
+| `dlfcn.h` | dynamic loader declaration shim | QuickJS/plugin probes and task 16-12 required `dlopen`, `dlsym`, `dlclose`, `dlerror`, `Dl_info`, and `RTLD_*` | declaration/constants only; host libc/libdl owns behavior | remove when host `<dlfcn.h>` parses under the same target policy |
+| `errno.h` | errno macro declarations/constants | LibTomMath and coreutils probes needed POSIX errno constants beyond C99 `EDOM`/`ERANGE` | constants plus host errno accessor declaration; storage is host-owned | narrow constants when project probes no longer reference them or host header parses |
+| `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `math.h`, `locale.h`, `wchar.h`, `wctype.h`, `fenv.h`, `complex.h`, `tgmath.h` | hosted C/POSIX declaration surface | inih, cJSON, Lua, MuJS, and upcoming coreutils probes need libc/libm declarations while rcc cannot yet parse all host headers | declarations/macros only; libc/libm bodies are linked from host | keep only declarations justified by conformance or real-world probes; prefer parser fixes over broad libc copying |
+
 `lib/rcc/include/pthread.h` is a declaration shim for hosted Linux projects. It
 declares common pthread entry points such as `pthread_create`, `pthread_join`,
 mutex/condition-variable basics, thread-specific storage, and attribute helpers.

@@ -31,7 +31,7 @@ rcc-owned libc bodies.
 - [x] [16-gnu-coreutils-bootstrap-probe](16-gnu-coreutils-bootstrap-probe.md)
 - [x] [17-gnu-coreutils-single-utility-probe](17-gnu-coreutils-single-utility-probe.md)
 - [x] [18-posix-thread-runtime-smoke](18-posix-thread-runtime-smoke.md)
-- [ ] [19-header-shim-audit-docs](19-header-shim-audit-docs.md)
+- [x] [19-header-shim-audit-docs](19-header-shim-audit-docs.md)
 - [ ] [20-real-world-glibc-dashboard](20-real-world-glibc-dashboard.md)
 - [ ] [21-gnu-include-next-directive](21-gnu-include-next-directive.md)
 - [ ] [22-gnulib-funcdecl-macro-surface](22-gnulib-funcdecl-macro-surface.md)

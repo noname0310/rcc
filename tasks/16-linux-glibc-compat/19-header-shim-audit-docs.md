@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 16-19: Header Shim Audit Docs
 
 **Phase:** 16-linux-glibc-compat  
@@ -19,8 +21,23 @@ not drift into maintaining a private libc.
 
 ## Acceptance
 
-- [ ] Each shim has an owner, source failure, and semantic status.
-- [ ] The docs distinguish declarations, macros, opaque types, and layout-known
+- [x] Each shim has an owner, source failure, and semantic status.
+- [x] The docs distinguish declarations, macros, opaque types, and layout-known
       structs.
-- [ ] Runtime ownership is consistently assigned to host libraries.
-- [ ] Future agents can decide whether to add a shim or fix the parser.
+- [x] Runtime ownership is consistently assigned to host libraries.
+- [x] Future agents can decide whether to add a shim or fix the parser.
+
+## Result
+
+`docs/hosted-linux.md` now has a `Header Shim Inventory` table.  Each hosted
+shim group records:
+
+- kind: declaration, macro, opaque type, scalar typedef, or layout-known struct;
+- source failure / owner: the real-world or conformance probe that justified it;
+- semantic status: what rcc owns versus what host libc/libm/libpthread/libdl
+  owns;
+- removal criterion: when a parser/header fix can shrink or remove the shim.
+
+The table intentionally groups ordinary C99 declaration headers separately from
+glibc/POSIX-specific overlays so future agents can tell whether a failure needs
+a small shim, a parser fix, or a runtime/linker change.
