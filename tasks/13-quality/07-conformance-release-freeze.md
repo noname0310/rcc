@@ -1,5 +1,7 @@
 # 13-07: Conformance release freeze
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 11-19, 13-06    **Milestone:** M7
 
 ## Goal

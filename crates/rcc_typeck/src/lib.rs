@@ -1658,26 +1658,11 @@ fn type_binary(
     body.exprs[expr_id].value_cat = ValueCat::RValue;
     body.exprs[expr_id].kind = HirExprKind::Binary { op, lhs: lhs_final, rhs: rhs_final };
 
-    let result_precision = match op {
-        BinOp::Add
-        | BinOp::Sub
-        | BinOp::Mul
-        | BinOp::Div
-        | BinOp::Rem
-        | BinOp::BitAnd
-        | BinOp::BitXor
-        | BinOp::BitOr => merge_bitfield_precision(lhs_precision, rhs_precision),
-        BinOp::Shl | BinOp::Shr => lhs_precision,
-        BinOp::Lt
-        | BinOp::Le
-        | BinOp::Gt
-        | BinOp::Ge
-        | BinOp::Eq
-        | BinOp::Ne
-        | BinOp::LogAnd
-        | BinOp::LogOr => None,
-    };
-    apply_bitfield_precision(body, tcx, expr_id, result_ty, result_precision)
+    // Bit-field precision belongs to the lvalue-to-rvalue read of the field,
+    // not to the full expression result after integer promotion / usual
+    // arithmetic. Re-applying the field width to `s.ullb - 100` would turn the
+    // signed promoted result back into a 35-bit unsigned modulo value.
+    apply_bitfield_precision(body, tcx, expr_id, result_ty, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1974,20 +1959,6 @@ fn apply_bitfield_precision(
         push_bitfield_precision(body, expr, ty, precision)
     } else {
         expr
-    }
-}
-
-fn merge_bitfield_precision(
-    lhs: Option<BitfieldPrecision>,
-    rhs: Option<BitfieldPrecision>,
-) -> Option<BitfieldPrecision> {
-    match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => Some(BitfieldPrecision {
-            width: lhs.width.max(rhs.width),
-            signed: lhs.signed && rhs.signed,
-        }),
-        (Some(precision), None) | (None, Some(precision)) => Some(precision),
-        (None, None) => None,
     }
 }
 
@@ -5878,7 +5849,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_expression_wraps_wide_unsigned_bitfield_operand_precision() {
+    fn binary_expression_applies_wide_bitfield_precision_to_operand_only() {
         let mut tcx = TyCtxt::new();
         let (mut session, _cap) = Session::for_test();
         let u40 = session.interner.intern("u40");
@@ -5951,20 +5922,11 @@ mod tests {
             } if got_member == member
         ));
 
-        let root = root_expr(&body);
-        let HirExprKind::Convert {
-            operand: result_operand,
-            kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
-        } = body.exprs[root].kind
-        else {
-            panic!("expected result bit-field precision wrapper, got {:?}", body.exprs[root].kind);
-        };
-        assert_eq!(result_operand, bin);
-        assert_eq!(body.exprs[root].ty, body.exprs[bin].ty);
+        assert_eq!(root_expr(&body), bin, "binary result must keep the promoted arithmetic type");
     }
 
     #[test]
-    fn shift_expression_wraps_wide_bitfield_result_precision() {
+    fn shift_expression_applies_wide_bitfield_precision_to_lhs_only() {
         let mut tcx = TyCtxt::new();
         let (mut session, _cap) = Session::for_test();
         let u40 = session.interner.intern("u40");
@@ -6015,19 +5977,17 @@ mod tests {
         check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
 
         assert!(!session.handler.has_errors());
-        let root = root_expr(&body);
-        let HirExprKind::Convert {
-            operand: result_operand,
-            kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
-        } = body.exprs[root].kind
-        else {
-            panic!(
-                "expected shift result bit-field precision wrapper, got {:?}",
-                body.exprs[root].kind
-            );
+        assert_eq!(root_expr(&body), bin, "shift result must keep the promoted lhs type");
+        let HirExprKind::Binary { lhs, .. } = body.exprs[bin].kind else {
+            panic!("expected binary expression");
         };
-        assert_eq!(result_operand, bin);
-        assert_eq!(body.exprs[root].ty, body.exprs[bin].ty);
+        assert!(matches!(
+            body.exprs[lhs].kind,
+            HirExprKind::Convert {
+                kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+                ..
+            }
+        ));
     }
 
     #[test]

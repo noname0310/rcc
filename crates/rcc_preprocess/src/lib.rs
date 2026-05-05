@@ -57,11 +57,11 @@ pub struct Preprocessor<'a> {
     pub pragma_once: FxHashMap<FileId, ()>,
     /// Files currently being expanded through recursive `#include`.
     ///
-    /// Include guards and `#pragma once` are only detectable after a
-    /// file has been processed at least once. A direct or indirect
-    /// include cycle can therefore recur before those caches populate;
-    /// this active set is the recursion brake for that case.
+    /// C preprocessors permit finite conditional self-inclusion patterns such
+    /// as TinyCC's bit-field fixture, so this set is bookkeeping only; the
+    /// recursion brake is the separate include-depth limit.
     pub active_includes: FxHashMap<FileId, ()>,
+    include_depth: usize,
     /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
     /// snapshots. These pragmas are not part of C99, but system headers
     /// and conformance fixtures commonly use them as benign state-saving
@@ -108,6 +108,7 @@ impl<'a> Preprocessor<'a> {
             include_guards: FxHashMap::default(),
             pragma_once: FxHashMap::default(),
             active_includes: FxHashMap::default(),
+            include_depth: 0,
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
             pragma_pack: None,

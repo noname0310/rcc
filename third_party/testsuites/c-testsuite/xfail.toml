@@ -7,16 +7,16 @@
 
 [[xfail]]
 id     = "c-testsuite::00046"
-reason = "14-lang-extensions: anonymous struct/union members are outside C99 parser scope"
+reason = "non-C99: anonymous struct/union members are compatibility extensions outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00050"
-reason = "14-lang-extensions: anonymous union member inside struct is outside C99 parser scope"
+reason = "non-C99: anonymous union member inside struct is outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00216"
-reason = "14-lang-extensions: empty aggregate extension and anonymous aggregate members are outside C99 parser scope"
+reason = "non-C99: empty aggregate extension and anonymous aggregate members are outside C99 parser scope"
 
 [[xfail]]
 id     = "c-testsuite::00219"
-reason = "C11 _Generic is outside the C99 parser scope"
+reason = "non-C99: C11 _Generic is outside the C99 parser scope"

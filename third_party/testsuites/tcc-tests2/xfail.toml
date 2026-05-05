@@ -7,36 +7,36 @@
 
 [[xfail]]
 id = "tcc-tests2::60_errors_and_warnings"
-reason = "TinyCC -dt diagnostic test mode expects TCC-formatted compiler diagnostics, not C99 runtime conformance"
+reason = "external-suite drift: TinyCC -dt diagnostic test mode expects TCC-formatted compiler diagnostics, not C99 runtime conformance"
 
 [[xfail]]
 id = "tcc-tests2::70_floating_point_literals"
-reason = "TinyCC-only binary floating constants under __TINYC__ are outside rcc's C99 target; C99 decimal and hex floating literals pass (see docs/tcc-binary-floating-literals.md)"
+reason = "non-C99: TinyCC-only binary floating constants under __TINYC__ are outside rcc's C99 target; C99 decimal and hex floating literals pass (see docs/tcc-binary-floating-literals.md)"
 
 [[xfail]]
 id = "tcc-tests2::76_dollars_in_identifiers"
-reason = "TinyCC/GNU dollar identifiers are outside C99 and not supported by rcc"
+reason = "non-C99: TinyCC/GNU dollar identifiers are outside C99 and not supported by rcc"
 
 [[xfail]]
 id = "tcc-tests2::80_flexarray"
-reason = "fixture initializes a flexible array member, which GCC rejects under -std=c99 -pedantic-errors; legal C99 flexible-array objects are supported"
+reason = "non-C99: fixture initializes a flexible array member, which GCC rejects under -std=c99 -pedantic-errors; legal C99 flexible-array objects are supported"
 
 [[xfail]]
 id = "tcc-tests2::83_utf8_in_identifiers"
-reason = "raw UTF-8 identifiers are a TinyCC/PCC extension; rcc currently requires C99 identifier spelling"
+reason = "non-C99: raw UTF-8 identifiers are a TinyCC/PCC extension; rcc currently requires C99 identifier spelling"
 
 [[xfail]]
 id = "tcc-tests2::85_asm-outside-function"
-reason = "file-scope GNU assembly is outside C99 and not implemented"
+reason = "non-C99: file-scope GNU assembly is outside C99 and not implemented"
 
 [[xfail]]
 id = "tcc-tests2::90_struct-init"
-reason = "fixture uses GNU empty structs, empty initializer lists, and global compound-literal initializers"
+reason = "non-C99: fixture uses GNU empty structs, empty initializer lists, and global compound-literal initializers"
 
 [[xfail]]
 id = "tcc-tests2::94_generic"
-reason = "C11 _Generic is outside the C99 language target"
+reason = "non-C99: C11 _Generic is outside the C99 language target"
 
 [[xfail]]
 id = "tcc-tests2::96_nodata_wanted"
-reason = "TinyCC -dt data-section diagnostic mode is not an rcc feature"
+reason = "external-suite drift: TinyCC -dt data-section diagnostic mode is not an rcc feature"

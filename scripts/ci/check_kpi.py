@@ -2,8 +2,9 @@
 """Check conformance KPI targets for the current milestone.
 
 Reads docs/conformance.json and docs/milestone.txt, then verifies that
-every required suite meets its pass-rate threshold.  Exits non-zero on
-any violation so CI can gate merges.
+every required suite has zero non-xfailed failures and meets its
+pass-rate threshold.  Exits non-zero on any violation so CI can gate
+commits.
 
 Pass-rate formula: (pass + xfail) / discovered * 100
 """
@@ -27,7 +28,12 @@ KPI: dict[str, dict[str, float]] = {
     "M4": {"c-testsuite": 70.0},
     "M5": {"c-testsuite": 80.0},
     "M6": {"c-testsuite": 95.0, "gcc-torture": 60.0},
-    "M7": {"c-testsuite": 95.0, "gcc-torture": 70.0},
+    "M7": {
+        "c-testsuite": 100.0,
+        "chibicc": 100.0,
+        "tcc-tests2": 95.0,
+        "llvm-test-suite": 100.0,
+    },
 }
 
 
@@ -60,6 +66,11 @@ def pass_rate(suite: dict) -> float:
     return passing / discovered * 100.0
 
 
+def failing_cases(suite: dict) -> list[str]:
+    cases = suite.get("cases", {})
+    return sorted(name for name, c in cases.items() if c.get("status") == "fail")
+
+
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent.parent
     milestone_path = repo / "docs" / "milestone.txt"
@@ -84,6 +95,14 @@ def main() -> int:
         if suite is None:
             failures.append(
                 f"  {suite_name}: MISSING from report (need >= {threshold:.1f}%)"
+            )
+            continue
+        fail = failing_cases(suite)
+        if fail:
+            failures.append(
+                f"  {suite_name}: {len(fail)} non-xfailed failure(s): "
+                + ", ".join(fail[:10])
+                + (" ..." if len(fail) > 10 else "")
             )
             continue
         actual = pass_rate(suite)

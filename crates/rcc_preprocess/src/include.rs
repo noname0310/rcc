@@ -24,6 +24,8 @@ use crate::guard::detect_guard;
 use crate::macros::{MacroDef, MacroKind};
 use crate::Preprocessor;
 
+const MAX_INCLUDE_DEPTH: usize = 64;
+
 /// Resolve `name` against C99 §6.10.2 search rules.
 ///
 /// `name` is the header filename with the surrounding `"..."` / `<...>`
@@ -221,11 +223,6 @@ impl Preprocessor<'_> {
             },
         };
 
-        if self.active_includes.contains_key(&new_file) {
-            self.session.handler.emit(&recursive_include(directive_span, &resolved));
-            return Vec::new();
-        }
-
         // `#pragma once` fast path: a previous inclusion marked this
         // file as include-once, so any further inclusion is an
         // unconditional no-op. Checked ahead of the `#ifndef` guard
@@ -246,8 +243,19 @@ impl Preprocessor<'_> {
             }
         }
 
+        if self.include_depth >= MAX_INCLUDE_DEPTH {
+            self.session.handler.emit(&include_depth_exceeded(
+                directive_span,
+                &resolved,
+                MAX_INCLUDE_DEPTH,
+            ));
+            return Vec::new();
+        }
+
         self.active_includes.insert(new_file, ());
+        self.include_depth += 1;
         let tokens = self.run(new_file);
+        self.include_depth -= 1;
         self.active_includes.remove(&new_file);
 
         // First-inclusion fingerprinting: scan for both the
@@ -328,19 +336,19 @@ fn cannot_load_header(span: Span, path: &Path, err: &std::io::Error) -> Diagnost
     }
 }
 
-fn recursive_include(span: Span, path: &Path) -> Diagnostic {
+fn include_depth_exceeded(span: Span, path: &Path, limit: usize) -> Diagnostic {
     Diagnostic {
         level: Level::Error,
         code: Some(E0021),
-        message: format!("recursive include of `{}`", path.display()),
+        message: format!("include nesting exceeds {limit} while loading `{}`", path.display()),
         labels: vec![Label {
             span,
-            message: "this header is already being expanded".into(),
+            message: "this include would exceed the maximum include nesting depth".into(),
             primary: true,
         }],
         notes: vec![
-            "include guards and `#pragma once` only take effect after the first inclusion \
-             finishes; direct include cycles must be rejected while the file is active"
+            "finite conditional self-inclusion is allowed, but unbounded include cycles must be \
+             stopped before they overflow the compiler stack"
                 .into(),
         ],
         help: vec!["break the include cycle or add a guard around the recursive include".into()],
@@ -608,9 +616,9 @@ mod tests {
 
         assert!(!out.is_empty(), "tokens after the recursive include should still recover");
         let diags = cap.diagnostics();
-        assert_eq!(diags.len(), 1, "expected one recursive-include diagnostic: {diags:?}");
+        assert_eq!(diags.len(), 1, "expected one include-depth diagnostic: {diags:?}");
         assert_eq!(diags[0].code, Some(E0021));
-        assert!(diags[0].message.contains("recursive include"));
+        assert!(diags[0].message.contains("include nesting exceeds"));
     }
 
     #[test]
