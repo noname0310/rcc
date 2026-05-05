@@ -95,6 +95,23 @@ When a shim declares a function such as `pthread_create`, `dlopen`,
 type-check a call.  The implementation is resolved by the host linker and
 runtime libraries.
 
+## Common Glibc Annotation Macros
+
+`lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc
+annotation macro shims used by hosted Linux headers:
+
+| Macro family | rcc behavior |
+| --- | --- |
+| `__BEGIN_DECLS`, `__END_DECLS` | expands to nothing; C++ linkage is not modeled |
+| `__THROW`, `__THROWNL`, `__NTH`, `__NTHNL` | strips exception/nothrow annotations while preserving the declarator |
+| `__nonnull`, `__wur`, `__attribute_malloc__` | strips function declaration annotations |
+| `__attribute_alloc_size__`, `__attr_access`, `__attr_dealloc` | strips allocation/access annotations |
+| `__P`, `__PMT` | preserves the prototype argument list |
+
+These definitions are parse/type compatibility only.  They must not grow into a
+copy of glibc `sys/cdefs.h`, and they do not provide fortified libc behavior,
+symbol redirection, ABI dispatch, or runtime code.
+
 ## Current Probe Queue
 
 The phase-16 task tree is the authoritative hosted Linux queue:

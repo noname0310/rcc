@@ -307,6 +307,37 @@ int marker;
 }
 
 #[test]
+fn glibc_cdefs_coreutils_style_annotations_parse_after_expansion() {
+    let input = TempCFile::new(
+        "glibc-cdefs-annotations",
+        r#"
+#include <sys/cdefs.h>
+
+__BEGIN_DECLS
+extern int one(const char *) __THROW __nonnull ((1)) __wur;
+extern void *two(unsigned long)
+  __THROW __attribute_malloc__ __attribute_alloc_size__ ((1));
+extern int __NTH(three (int));
+__END_DECLS
+
+int main(void) { return 0; }
+"#,
+    );
+    let output = input.sibling("ast");
+    let result = Command::new(rcc_bin())
+        .arg("--linux-gnu-hosted")
+        .arg("--emit=ast")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(output.exists(), "AST output should be emitted after successful parsing");
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");

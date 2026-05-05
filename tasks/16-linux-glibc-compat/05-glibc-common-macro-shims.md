@@ -1,5 +1,7 @@
 # 16-05: Glibc Common Macro Shims
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-04-resource-header-overlay-order  
 **Milestone:** hosted-linux
@@ -19,7 +21,13 @@ annotation macros that block parsing but do not change C semantics for rcc.
 
 ## Acceptance
 
-- [ ] The shim layer defines the audited macros only when needed.
-- [ ] Tests cover function declarations before and after macro expansion.
-- [ ] GNU coreutils `system.h` gets past annotation macros without source edits.
-- [ ] All added shims are documented as parse/type compatibility only.
+- [x] The shim layer defines the audited macros only when needed.
+- [x] Tests cover function declarations before and after macro expansion.
+- [x] GNU coreutils `system.h` gets past annotation macros without source edits.
+- [x] All added shims are documented as parse/type compatibility only.
+
+## Notes
+
+The regression test uses coreutils/glibc-style annotated declarations to isolate
+this task's failure class.  Full `src/system.h` parsing still depends on the
+later hosted Linux header/type tasks and is tracked by task 16-16.

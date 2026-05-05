@@ -2275,6 +2275,39 @@ mod run_tests {
         assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
     }
 
+    #[test]
+    fn glibc_cdefs_annotation_macros_expand_to_declarator_compatible_tokens() {
+        let src = r#"
+#include <sys/cdefs.h>
+__BEGIN_DECLS
+extern int one(const char *) __THROW __nonnull ((1)) __wur;
+extern void *two(unsigned long)
+  __THROW __attribute_malloc__ __attribute_alloc_size__ ((1));
+extern int __NTH(three (int));
+__END_DECLS
+"#;
+        let (mut sess, id, cap) = seed(src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        let text = joined_text(&pp, &out);
+
+        assert!(text.contains("externintone(constchar*);"), "expanded text: {text}");
+        assert!(text.contains("externvoid*two(unsignedlong);"), "expanded text: {text}");
+        assert!(text.contains("externintthree(int);"), "expanded text: {text}");
+        for removed in [
+            "__BEGIN_DECLS",
+            "__END_DECLS",
+            "__THROW",
+            "__nonnull",
+            "__wur",
+            "__attribute_malloc__",
+            "__attribute_alloc_size__",
+        ] {
+            assert!(!text.contains(removed), "{removed} leaked through: {text}");
+        }
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    }
+
     // ── Conditional-compilation state machine (task 04-14) ──────────
 
     use rcc_errors::codes::{E0016, E0017, E0018};
