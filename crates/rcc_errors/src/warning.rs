@@ -171,7 +171,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
     },
     WarningRecord { code: None, names: &["sign-compare"], category: WarningCategory::Wextra },
     WarningRecord { code: None, names: &["unreachable-code"], category: WarningCategory::Wextra },
-    WarningRecord { code: None, names: &["unused-parameter"], category: WarningCategory::Wextra },
+    WarningRecord {
+        code: Some(codes::W0028),
+        names: &["unused-parameter"],
+        category: WarningCategory::Wextra,
+    },
 ];
 
 /// Canonical warning names enabled by `-Wall`.

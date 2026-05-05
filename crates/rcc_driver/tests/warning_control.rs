@@ -275,3 +275,67 @@ fn wno_and_werror_unused_function_are_honored() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0027));
 }
+
+#[test]
+fn wextra_emits_unused_parameter_warning() {
+    let (_, cap) = compile_warning_source(
+        "unused-parameter",
+        "int f(int x) { return 0; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0028));
+    assert!(diags[0].message.contains("[-Wunused-parameter]"));
+}
+
+#[test]
+fn wall_alone_does_not_emit_unused_parameter_warning() {
+    let (_, cap) = compile_warning_source(
+        "unused-parameter-wall",
+        "int f(int x) { return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn read_or_void_cast_parameter_suppresses_unused_parameter_warning() {
+    let (_, read_cap) = compile_warning_source(
+        "unused-parameter-read",
+        "int f(int x) { return x; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+    assert!(read_cap.diagnostics().is_empty());
+
+    let (_, void_cast_cap) = compile_warning_source(
+        "unused-parameter-void-cast",
+        "int f(int x) { (void)x; return 0; }\n",
+        &["-Wextra", "--emit=hir"],
+    );
+    assert!(void_cast_cap.diagnostics().is_empty());
+}
+
+#[test]
+fn wno_and_werror_unused_parameter_are_honored() {
+    let (_, suppressed) = compile_warning_source(
+        "unused-parameter-wno",
+        "int f(int x) { return 0; }\n",
+        &["-Wextra", "-Wno-unused-parameter", "--emit=hir"],
+    );
+    assert!(suppressed.diagnostics().is_empty());
+
+    let (session, promoted) = compile_warning_source(
+        "unused-parameter-werror",
+        "int f(int x) { return 0; }\n",
+        &["-Werror=unused-parameter", "--emit=hir"],
+    );
+    let diags = promoted.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0028));
+}

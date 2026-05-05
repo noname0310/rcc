@@ -85,7 +85,7 @@ These warnings are opt-in analysis warnings. A detector must call
 |------|-------|
 | `sign-compare` | `tasks/13-quality/03e-sign-compare-warning.md` |
 | `unreachable-code` | `tasks/13-quality/03f-unreachable-code-warning.md` |
-| `unused-parameter` | `tasks/13-quality/03c-unused-parameter-warning.md` |
+| `unused-parameter` (`W0028`) | `tasks/13-quality/03c-unused-parameter-warning.md` |
 
 ## Detector Contract
 

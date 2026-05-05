@@ -117,6 +117,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0025, W0025_DESC),
     (W0026, W0026_DESC),
     (W0027, W0027_DESC),
+    (W0028, W0028_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -908,6 +909,13 @@ const W0026_DESC: &str = "unused local variable";
 /// `-Werror=unused-function` enables the `unused-function` analysis warning.
 pub const W0027: &str = "W0027";
 const W0027_DESC: &str = "unused static function";
+
+/// Function parameter declared but never read.
+///
+/// Emitted only when `-Wextra`, `-Wunused-parameter`, or
+/// `-Werror=unused-parameter` enables the `unused-parameter` analysis warning.
+pub const W0028: &str = "W0028";
+const W0028_DESC: &str = "unused function parameter";
 
 #[cfg(test)]
 mod tests {

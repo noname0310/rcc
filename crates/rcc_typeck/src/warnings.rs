@@ -14,6 +14,7 @@ pub fn check_warnings(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
     warn_unused_functions(session, tcx, hir);
     for body in hir.bodies.values() {
         warn_unused_variables_in_body(session, tcx, body);
+        warn_unused_parameters_in_body(session, tcx, body);
     }
 }
 
@@ -61,6 +62,27 @@ fn warn_unused_variables_in_body(session: &mut Session, tcx: &TyCtxt, body: &Bod
             .struct_warn(decl.span, format!("unused variable `{name}` [-Wunused-variable]"))
             .code(codes::W0026)
             .help("remove the variable, read it, or suppress with `-Wno-unused-variable`")
+            .emit();
+    }
+}
+
+fn warn_unused_parameters_in_body(session: &mut Session, tcx: &TyCtxt, body: &Body) {
+    let mut usage = LocalUsage::new();
+    UsageWalker { body, tcx, usage: &mut usage }.visit_reachable_body();
+
+    for (local, decl) in body.locals.iter_enumerated() {
+        if !decl.is_param || decl.name.is_none() || decl.quals.is_volatile {
+            continue;
+        }
+        if usage.read.contains(&local) {
+            continue;
+        }
+        let name = session.interner.get(decl.name.expect("checked above"));
+        session
+            .handler
+            .struct_warn(decl.span, format!("unused parameter `{name}` [-Wunused-parameter]"))
+            .code(codes::W0028)
+            .help("remove the parameter name, read it, cast it to void, or suppress with `-Wno-unused-parameter`")
             .emit();
     }
 }
@@ -360,11 +382,20 @@ mod tests {
     use rcc_session::{Session, WarningConfig};
     use rcc_span::DUMMY_SP;
 
-    use super::{warn_unused_functions, warn_unused_variables_in_body};
+    use super::{
+        warn_unused_functions, warn_unused_parameters_in_body, warn_unused_variables_in_body,
+    };
 
     fn enable_wall(session: &mut Session) {
         let mut config = WarningConfig::default();
         config.enable_wall();
+        session.opts.warning_config = config.clone();
+        session.handler.set_warning_config(config);
+    }
+
+    fn enable_extra(session: &mut Session) {
+        let mut config = WarningConfig::default();
+        config.enable_extra();
         session.opts.warning_config = config.clone();
         session.handler.set_warning_config(config);
     }
@@ -416,6 +447,22 @@ mod tests {
         let decl = push_stmt(&mut body, HirStmtKind::LocalDecl { local, init: None });
         body.root = Some(push_stmt(&mut body, HirStmtKind::Block(vec![decl])));
         (body, tcx, local)
+    }
+
+    fn one_parameter_body(session: &mut Session) -> (Body, TyCtxt, Local) {
+        let tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let x = session.interner.intern("x");
+        let param = body.locals.push(LocalDecl {
+            name: Some(x),
+            ty: tcx.int,
+            quals: ObjectQuals::none(),
+            vla_len: None,
+            is_param: true,
+            span: DUMMY_SP,
+        });
+        body.root = Some(push_stmt(&mut body, HirStmtKind::Block(Vec::new())));
+        (body, tcx, param)
     }
 
     fn push_function_def(
@@ -558,6 +605,43 @@ mod tests {
         stmts.push(stmt);
 
         warn_unused_functions(&mut session, &tcx, &hir);
+
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn warns_for_unread_parameter_under_extra() {
+        let (mut session, cap) = Session::for_test();
+        enable_extra(&mut session);
+        let (body, tcx, _) = one_parameter_body(&mut session);
+
+        warn_unused_parameters_in_body(&mut session, &tcx, &body);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].level, Level::Warning);
+        assert_eq!(diags[0].code, Some(codes::W0028));
+        assert!(diags[0].message.contains("[-Wunused-parameter]"));
+    }
+
+    #[test]
+    fn parameter_read_suppresses_warning() {
+        let (mut session, cap) = Session::for_test();
+        enable_extra(&mut session);
+        let (mut body, tcx, param) = one_parameter_body(&mut session);
+        let param_ref = push_local_ref(&mut body, param, tcx.int);
+        let read = push_expr(
+            &mut body,
+            tcx.int,
+            HirExprKind::Convert { operand: param_ref, kind: rcc_hir::ConvertKind::LvalueToRvalue },
+        );
+        let ret = push_stmt(&mut body, HirStmtKind::Return(Some(read)));
+        let HirStmtKind::Block(stmts) = &mut body.stmts[body.root.unwrap()].kind else {
+            panic!("root is block");
+        };
+        stmts.push(ret);
+
+        warn_unused_parameters_in_body(&mut session, &tcx, &body);
 
         assert!(cap.diagnostics().is_empty());
     }

@@ -1443,3 +1443,16 @@ int main(void) { return 0; }
 
 External-linkage functions are not diagnosed because another translation unit
 may reference them.
+
+## W0028 — unused function parameter
+
+A named function parameter was never read. This is an opt-in analysis warning
+enabled by `-Wextra`, `-Wunused-parameter`, or
+`-Werror=unused-parameter`:
+
+```c
+int f(int x) { return 0; }  // warning[W0028]: unused parameter `x` [-Wunused-parameter]
+```
+
+`-Wall` alone does not enable this warning. Reading the parameter or explicitly
+casting it to `void` suppresses the diagnostic.
