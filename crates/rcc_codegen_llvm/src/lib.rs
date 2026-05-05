@@ -1721,6 +1721,7 @@ pub mod backend {
             };
             let fn_ty = self.type_cx().fn_type_of(ty)?;
             let abi = sysv_fn_abi(self.tcx, &self.hir.defs, ty)?;
+            let param_quals = self.function_body_param_quals(def);
             let function = match self.module.get_function(&name) {
                 Some(function) => function,
                 None => {
@@ -1729,6 +1730,7 @@ pub mod backend {
                     function
                 }
             };
+            self.apply_restrict_param_attrs(function, &abi, param_quals.as_deref())?;
             function.set_linkage(linkage);
             self.functions.insert(def, function);
             Ok(function)
@@ -1784,6 +1786,11 @@ pub mod backend {
         /// Return all declared functions keyed by HIR definition id.
         pub fn function_decls(&self) -> &FxHashMap<DefId, FunctionValue<'ctx>> {
             &self.functions
+        }
+
+        fn function_body_param_quals(&self, def: DefId) -> Option<Vec<ObjectQuals>> {
+            let body = self.hir.bodies.get(&def)?;
+            Some(body.locals.iter().filter(|decl| decl.is_param).map(|decl| decl.quals).collect())
         }
 
         /// Return all declared globals keyed by HIR definition id.
@@ -1872,6 +1879,52 @@ pub mod backend {
                             self.context.create_enum_attribute(align_kind, u64::from(*align));
                         function.add_attribute(AttributeLoc::Param(param_index), attr);
                         param_index = param_index.checked_add(1).ok_or_else(|| {
+                            CodegenError::Internal("function parameter index overflowed".to_owned())
+                        })?;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        fn apply_restrict_param_attrs(
+            &self,
+            function: FunctionValue<'ctx>,
+            abi: &FnAbi,
+            param_quals: Option<&[ObjectQuals]>,
+        ) -> Result<(), CodegenError> {
+            let noalias_kind = Attribute::get_named_enum_kind_id("noalias");
+            let noalias = self.context.create_enum_attribute(noalias_kind, 0);
+            let mut llvm_index = u32::try_from(abi.ret.llvm_param_count()).map_err(|_| {
+                CodegenError::Internal("function parameter index overflowed".to_owned())
+            })?;
+
+            for (source_index, param) in abi.params.iter().enumerate() {
+                match &param.kind {
+                    AbiParamKind::Direct(units) => {
+                        if units.len() == 1
+                            && param_quals
+                                .and_then(|quals| quals.get(source_index))
+                                .is_some_and(|quals| quals.is_restrict)
+                            && matches!(self.tcx.get(param.source), Ty::Ptr(_))
+                        {
+                            function.add_attribute(AttributeLoc::Param(llvm_index), noalias);
+                        }
+                        llvm_index = llvm_index
+                            .checked_add(u32::try_from(units.len()).map_err(|_| {
+                                CodegenError::Internal(
+                                    "function parameter index overflowed".to_owned(),
+                                )
+                            })?)
+                            .ok_or_else(|| {
+                                CodegenError::Internal(
+                                    "function parameter index overflowed".to_owned(),
+                                )
+                            })?;
+                    }
+                    AbiParamKind::Indirect { .. } => {
+                        llvm_index = llvm_index.checked_add(1).ok_or_else(|| {
                             CodegenError::Internal("function parameter index overflowed".to_owned())
                         })?;
                     }

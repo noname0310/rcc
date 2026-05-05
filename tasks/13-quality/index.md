@@ -20,7 +20,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [03e-sign-compare-warning](03e-sign-compare-warning.md)
 - [x] [03f-unreachable-code-warning](03f-unreachable-code-warning.md)
 - [x] [04-diagnostic-pragmas](04-diagnostic-pragmas.md)
-- [ ] [05-restrict-noalias](05-restrict-noalias.md)
+- [x] [05-restrict-noalias](05-restrict-noalias.md)
 - [ ] [06-coverage-threshold](06-coverage-threshold.md)
 - [ ] [07-conformance-release-freeze](07-conformance-release-freeze.md)
 - [ ] [08-fuzz-regression-artifacts](08-fuzz-regression-artifacts.md)

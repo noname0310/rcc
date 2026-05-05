@@ -1,5 +1,7 @@
 # 13-05: `restrict` -> LLVM `noalias`
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 06-26, 09-07, 09-13    **Milestone:** M7
 
 ## Goal

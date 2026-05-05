@@ -193,6 +193,53 @@ fn static_linkage_is_internal_for_globals_and_functions() {
 }
 
 #[test]
+fn restrict_pointer_parameters_emit_noalias() {
+    assert_checked(
+        "restrict_pointer_params",
+        r#"
+        // CHECK: define void @copy(ptr noalias %0, ptr noalias %1)
+        // CHECK: load i32, ptr %deref_load
+        // CHECK: store i32 %load
+        void copy(int * restrict dst, int * restrict src) {
+            *dst = *src;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn non_restrict_pointer_parameters_do_not_emit_noalias() {
+    assert_checked(
+        "plain_pointer_params",
+        r#"
+        // CHECK: define void @copy(ptr %0, ptr %1)
+        // CHECK-NOT: noalias
+        // CHECK: entry:
+        void copy(int *dst, int *src) {
+            *dst = *src;
+        }
+        "#,
+    );
+}
+
+#[test]
+fn restrict_noalias_is_not_applied_to_abi_expanded_neighbors() {
+    assert_checked(
+        "restrict_with_expanded_param",
+        r#"
+        // CHECK: %rcc.record.0 = type { i64, i64 }
+        // CHECK: define void @touch(ptr noalias %0, i64 %1, i64 %2, ptr %3)
+        // CHECK-NOT: i64 noalias
+        // CHECK: entry:
+        struct Pair { long a; long b; };
+        void touch(int * restrict p, struct Pair pair, int *q) {
+            *p = *q + (int)pair.a;
+        }
+        "#,
+    );
+}
+
+#[test]
 fn aggregate_assignment_uses_mem_intrinsics() {
     assert_checked(
         "aggregate_mem_intrinsics",

@@ -4152,6 +4152,19 @@ fn regression_gate_distinguishes_const_pointer_object_from_pointer_to_const() {
 }
 
 #[test]
+fn regression_gate_restrict_pointer_parameter_preserves_object_qualifier() {
+    let (hir, tcx) = lower_snippet("void f(int * restrict p, int *q) { }");
+    let body = hir.bodies.values().next().expect("missing function body");
+    let params = body.locals.iter().filter(|local| local.is_param).collect::<Vec<_>>();
+    assert_eq!(params.len(), 2);
+
+    assert!(params[0].quals.is_restrict, "`restrict` must qualify the pointer parameter object");
+    assert!(!params[1].quals.is_restrict);
+    assert!(matches!(tcx.get(params[0].ty), Ty::Ptr(_)));
+    assert!(matches!(tcx.get(params[1].ty), Ty::Ptr(_)));
+}
+
+#[test]
 fn regression_gate_sizeof_type_and_compound_literal_keep_type_names() {
     let (hir, tcx) = lower_snippet(
         "struct S { int x; }; typedef struct S S; void f(void) { sizeof(S); (S){ .x = 1 }; }",
