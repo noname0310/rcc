@@ -1,5 +1,7 @@
 # 16-09: Pthread Header Shim
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-08-pthread-driver-flag  
 **Milestone:** hosted-linux
@@ -18,8 +20,8 @@ projects while still linking to host libpthread/glibc.
 
 ## Acceptance
 
-- [ ] A minimal program using `pthread_create` and `pthread_join` compiles.
-- [ ] The same program links and runs with `rcc -pthread` on Linux.
-- [ ] The shim does not conflict with host `<pthread.h>` when the host header is
+- [x] A minimal program using `pthread_create` and `pthread_join` compiles.
+- [x] The same program links and runs with `rcc -pthread` on Linux.
+- [x] The shim does not conflict with host `<pthread.h>` when the host header is
       parseable.
-- [ ] The task documents which types are opaque placeholders.
+- [x] The task documents which types are opaque placeholders.

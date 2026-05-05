@@ -349,6 +349,43 @@ int main(void) { return 0; }
 }
 
 #[test]
+fn pthread_header_shim_parses_and_typechecks_for_linux_target() {
+    let input = TempCFile::new(
+        "pthread-header",
+        r#"
+#include <pthread.h>
+
+static void *worker(void *arg) {
+    return arg;
+}
+
+int main(void) {
+    pthread_t thread;
+    if (pthread_create(&thread, 0, worker, 0) != 0)
+        return 1;
+    if (pthread_join(thread, 0) != 0)
+        return 2;
+    return 0;
+}
+"#,
+    );
+    let output = input.sibling("hir");
+    let result = Command::new(rcc_bin())
+        .arg("--target=x86_64-unknown-linux-gnu")
+        .arg("--linux-gnu-hosted")
+        .arg("-pthread")
+        .arg("--emit=hir")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(output.exists(), "HIR output should be emitted after pthread header typecheck");
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");

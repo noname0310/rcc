@@ -95,6 +95,14 @@ When a shim declares a function such as `pthread_create`, `dlopen`,
 type-check a call.  The implementation is resolved by the host linker and
 runtime libraries.
 
+`lib/rcc/include/pthread.h` is a declaration shim for hosted Linux projects. It
+declares common pthread entry points such as `pthread_create`, `pthread_join`,
+mutex/condition-variable basics, thread-specific storage, and attribute helpers.
+The exposed object types (`pthread_attr_t`, `pthread_mutex_t`,
+`pthread_cond_t`, and related attr types) are ABI-sized opaque storage
+placeholders for the current glibc-oriented probes, not scheduler or locking
+implementations. Programs must still link with `-pthread`.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc

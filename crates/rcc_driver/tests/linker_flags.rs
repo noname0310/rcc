@@ -202,9 +202,7 @@ fn e2e_link_with_pthread_when_enabled() {
     let input = TempCFile::new(
         "pthread",
         r#"
-typedef unsigned long pthread_t;
-extern int pthread_create(pthread_t *, const void *, void *(*)(void *), void *);
-extern int pthread_join(pthread_t, void **);
+#include <pthread.h>
 
 static int value;
 static void *worker(void *arg) {
