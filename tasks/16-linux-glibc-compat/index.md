@@ -33,7 +33,7 @@ rcc-owned libc bodies.
 - [x] [18-posix-thread-runtime-smoke](18-posix-thread-runtime-smoke.md)
 - [x] [19-header-shim-audit-docs](19-header-shim-audit-docs.md)
 - [x] [20-real-world-glibc-dashboard](20-real-world-glibc-dashboard.md)
-- [ ] [21-gnu-include-next-directive](21-gnu-include-next-directive.md)
+- [x] [21-gnu-include-next-directive](21-gnu-include-next-directive.md)
 - [ ] [22-gnulib-funcdecl-macro-surface](22-gnulib-funcdecl-macro-surface.md)
 - [ ] [23-coreutils-posix-declaration-sweep](23-coreutils-posix-declaration-sweep.md)
 - [ ] [24-coreutils-true-runtime-oracle](24-coreutils-true-runtime-oracle.md)

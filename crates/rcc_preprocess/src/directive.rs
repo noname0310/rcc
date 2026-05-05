@@ -34,6 +34,18 @@ pub enum Directive {
         /// Raw header name text (lexed as `HeaderName`).
         header: String,
     },
+    /// GNU `#include_next "..."` / `#include_next <...>`.
+    ///
+    /// The parser stores the same body shape as `#include`; include-search
+    /// semantics are owned by `Preprocessor::process_include_next`.
+    IncludeNext {
+        /// Full directive span.
+        span: Span,
+        /// Whether the form was `<...>` (system header).
+        is_system: bool,
+        /// Raw header name text (lexed as `HeaderName`).
+        header: String,
+    },
     /// `#include MACRO` — the body does not start with `"` or `<`, so
     /// the tokens are stored raw for the caller to macro-expand and
     /// re-parse as a header name (C99 §6.10.2p4, GNU extension).
@@ -190,6 +202,7 @@ pub fn parse_directive_ext(
 
     match name {
         "include" => parse_include(line_span, body, src),
+        "include_next" => parse_include_next(line_span, body, src),
         "define" => parse_define(line_span, body, src, interner, gnu_named_variadic),
         "undef" => parse_undef(line_span, body, src, interner),
         "if" => Ok(make_conditional(line_span, ConditionalKind::If, body.to_vec())),
@@ -217,6 +230,30 @@ fn parse_include(span: Span, body: &[PpToken], src: &str) -> Result<Directive, D
     let Some(first) = body.first() else {
         return Err(malformed_include(span));
     };
+    match first.kind {
+        PpTokenKind::Punct(Punct::Lt) | PpTokenKind::StringLit { .. } => {
+            let (is_system, header) = parse_include_header(span, body, src)?;
+            Ok(Directive::Include { span, is_system, header })
+        }
+        // C99 §6.10.2p4: macro-expanded computed includes are parsed by the
+        // caller after expansion.
+        _ => Ok(Directive::IncludeTokens { span, tokens: body.to_vec() }),
+    }
+}
+
+fn parse_include_next(span: Span, body: &[PpToken], src: &str) -> Result<Directive, Diagnostic> {
+    let (is_system, header) = parse_include_header(span, body, src)?;
+    Ok(Directive::IncludeNext { span, is_system, header })
+}
+
+fn parse_include_header(
+    span: Span,
+    body: &[PpToken],
+    src: &str,
+) -> Result<(bool, String), Diagnostic> {
+    let Some(first) = body.first() else {
+        return Err(malformed_include(span));
+    };
     let last = body.last().expect("body.first() matched, so body.last() must also");
 
     let is_system = match first.kind {
@@ -225,7 +262,7 @@ fn parse_include(span: Span, body: &[PpToken], src: &str) -> Result<Directive, D
         // Not `<` or `"` — the body might be a macro that expands to a
         // header name (C99 §6.10.2p4). Return the raw tokens for the
         // caller to expand and re-parse.
-        _ => return Ok(Directive::IncludeTokens { span, tokens: body.to_vec() }),
+        _ => return Err(malformed_include(first.span)),
     };
 
     // Raw substring from the first body token through the last: for
@@ -236,7 +273,7 @@ fn parse_include(span: Span, body: &[PpToken], src: &str) -> Result<Directive, D
     let hi = last.span.hi.0 as usize;
     let header = src[lo..hi].to_string();
 
-    Ok(Directive::Include { span, is_system, header })
+    Ok((is_system, header))
 }
 
 fn parse_define(
@@ -694,6 +731,30 @@ mod tests {
                 assert_eq!(header, "\"myheader.h\"");
             }
             other => panic!("expected Include, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn include_next_system_header() {
+        let (d, _) = parse("#include_next <string.h>\n");
+        match d.expect("include_next classified") {
+            Directive::IncludeNext { is_system, header, .. } => {
+                assert!(is_system, "`<...>` form must be system");
+                assert_eq!(header, "<string.h>");
+            }
+            other => panic!("expected IncludeNext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn include_next_local_header() {
+        let (d, _) = parse("#include_next \"config.h\"\n");
+        match d.expect("include_next classified") {
+            Directive::IncludeNext { is_system, header, .. } => {
+                assert!(!is_system, "`\"...\"` form must be local");
+                assert_eq!(header, "\"config.h\"");
+            }
+            other => panic!("expected IncludeNext, got {other:?}"),
         }
     }
 

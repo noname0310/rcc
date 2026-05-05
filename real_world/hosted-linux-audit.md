@@ -23,7 +23,7 @@ state.
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
-| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe scripted and blocked on compiler-owned follow-ups | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-21` through `16-24`; first blocker is GNU `#include_next` |
+| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe scripted and blocked on compiler-owned follow-ups | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-22` through `16-24`; first blocker is gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` declarations |
 
 ## Classification Rules
 
@@ -225,10 +225,13 @@ Current `src/true.c` compiler-owned blockers:
 
 | Symptom | Classification | Owning task |
 | --- | --- | --- |
-| generated gnulib replacement headers use `#include_next` | GNU preprocessor extension / include search | `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md` |
 | generated `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` forms cascade into K&R parser diagnostics | macro-expanded declaration parser surface | `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md` |
 | missing hosted declarations/macros such as unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
 | no host-vs-rcc `true` runtime oracle yet | real-world runtime probe | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
+
+Fixed by `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`:
+generated gnulib replacement headers can now use GNU `#include_next`,
+including subdirectory spellings such as `<sys/stat.h>`.
 
 ## Open Compiler-Owned Work Queue
 

@@ -106,11 +106,9 @@ next coreutils task must either resolve that host-build input issue or select a
 smaller generated-header probe before using the utility as an oracle.
 
 Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
-progresses into `src/system.h`/gnulib replacement headers.  The `src/true.c`
-probe now records the next concrete compiler-owned blockers:
+progresses through GNU `#include_next` in generated replacement headers and
+now records the next concrete compiler-owned blockers:
 
-- `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`: generated
-  gnulib replacement headers use GNU `#include_next`.
 - `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md`:
   `_GL_FUNCDECL_*` and `_GL_CXXALIAS_*` macro-expanded declarations currently
   cascade into K&R parser diagnostics.

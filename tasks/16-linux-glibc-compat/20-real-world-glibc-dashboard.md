@@ -35,8 +35,8 @@ It records stage-level status for:
 
 - MuJS: header/config, Syntax/HIR, Object, Link, and Runtime are PASS.
 - GNU coreutils `src/true`: bootstrap/configure and generated headers are PASS;
-  Syntax/HIR is BLOCKED by `16-21`; object/link/runtime remain blocked until
-  `16-21` through `16-24` land.
+  Syntax/HIR is now BLOCKED by `16-22`; object/link/runtime remain blocked
+  until `16-22` through `16-24` land.
 
 `tasks/index.md` is intentionally not flipped for phase 16 because this
 dashboard is current but compiler-owned follow-ups remain pending.

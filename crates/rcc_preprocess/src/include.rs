@@ -87,6 +87,71 @@ where
     None
 }
 
+fn resolve_header_next_with<F>(
+    name: &str,
+    current_file: &Path,
+    current_dir: &Path,
+    include_paths: &[PathBuf],
+    mut exists: F,
+) -> (Option<PathBuf>, PathBuf)
+where
+    F: FnMut(&Path) -> bool,
+{
+    let as_path = Path::new(name);
+    if as_path.is_absolute() {
+        return (exists(as_path).then(|| as_path.to_path_buf()), current_dir.to_path_buf());
+    }
+
+    let (start, skipped) = include_next_start(name, current_file, current_dir, include_paths);
+
+    for dir in include_paths.iter().skip(start) {
+        let candidate = dir.join(as_path);
+        if exists(&candidate) {
+            return (Some(candidate), skipped);
+        }
+    }
+
+    (None, skipped)
+}
+
+fn include_next_start(
+    name: &str,
+    current_file: &Path,
+    current_dir: &Path,
+    include_paths: &[PathBuf],
+) -> (usize, PathBuf) {
+    let as_path = Path::new(name);
+    let matched_root = include_paths
+        .iter()
+        .position(|dir| same_path(&dir.join(as_path), current_file))
+        .or_else(|| include_paths.iter().position(|dir| same_directory(dir, current_dir)));
+
+    match matched_root {
+        Some(idx) => (idx + 1, include_paths[idx].clone()),
+        None => (0, current_dir.to_path_buf()),
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn same_directory(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Compiler-provided C header root.
 ///
 /// This is deliberately part of the preprocessor, not the parser smoke tests:
@@ -325,6 +390,56 @@ impl Preprocessor<'_> {
             self.session.handler.emit(&cannot_find_header(directive_span, name, is_system));
             return Vec::new();
         };
+
+        self.process_resolved_include(resolved, is_system, directive_span, current_file)
+    }
+
+    /// Resolve, load, and recursively preprocess a GNU `#include_next`.
+    pub fn process_include_next(
+        &mut self,
+        header: &str,
+        is_system: bool,
+        directive_span: Span,
+        current_file: FileId,
+    ) -> Vec<PpToken> {
+        let name = strip_header_delimiters(header);
+
+        let (current_path, current_dir): (PathBuf, PathBuf) = {
+            let sm = self.session.source_map.read().unwrap();
+            let file = sm.file(current_file);
+            (
+                file.name.clone(),
+                file.name.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")),
+            )
+        };
+        let include_paths = include_search_paths(
+            &self.session.opts.include_paths,
+            &self.session.opts.system_include_paths,
+        );
+
+        let (resolved, skipped_dir) =
+            resolve_header_next_with(name, &current_path, &current_dir, &include_paths, |path| {
+                path.is_file() || self.session.has_virtual_file(path)
+            });
+        let Some(resolved) = resolved else {
+            self.session.handler.emit(&cannot_find_include_next(
+                directive_span,
+                name,
+                &skipped_dir,
+            ));
+            return Vec::new();
+        };
+
+        self.process_resolved_include(resolved, is_system, directive_span, current_file)
+    }
+
+    fn process_resolved_include(
+        &mut self,
+        resolved: PathBuf,
+        is_system: bool,
+        directive_span: Span,
+        current_file: FileId,
+    ) -> Vec<PpToken> {
         self.session.record_source_dependency(resolved.clone(), is_system);
 
         // Dedupe on the resolved path: if this header was already
@@ -466,6 +581,28 @@ fn cannot_find_header(span: Span, name: &str, is_system: bool) -> Diagnostic {
             .into()],
         help: vec![
             "add the containing directory to the include path (e.g. `-I` or `-isystem`)".into()
+        ],
+    }
+}
+
+fn cannot_find_include_next(span: Span, name: &str, skipped_dir: &Path) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0021),
+        message: format!("cannot find next header `{name}`"),
+        labels: vec![Label {
+            span,
+            message: "GNU `#include_next` did not find a later matching header".into(),
+            primary: true,
+        }],
+        notes: vec![format!(
+            "`#include_next` starts after the include search directory `{}`",
+            skipped_dir.display()
+        )],
+        help: vec![
+            "add a later include directory containing the requested header or use ordinary \
+             `#include` if the current directory should be searched"
+                .into(),
         ],
     }
 }
@@ -712,6 +849,123 @@ mod tests {
         assert!(
             sess.source_dependencies().iter().any(|dep| dep.path == header_path && dep.system),
             "dependency trace must record exact host system header"
+        );
+    }
+
+    #[test]
+    fn include_next_skips_current_include_dir() {
+        let src_dir = TempDir::new().unwrap();
+        let first_dir = TempDir::new().unwrap();
+        let second_dir = TempDir::new().unwrap();
+        write_file(first_dir.path(), "string.h", "#include_next <string.h>\nint from_first_dir;\n");
+        write_file(second_dir.path(), "string.h", "int from_second_dir;\n");
+        let (mut sess, main_id, cap) = seed_session(
+            src_dir.path(),
+            vec![first_dir.path().to_path_buf(), second_dir.path().to_path_buf()],
+        );
+        let span = dummy_span(main_id);
+
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<string.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("from_first_dir"), "wrapper header body should remain: {text}");
+        assert!(
+            text.contains("from_second_dir"),
+            "include_next should resolve the later matching header: {text}"
+        );
+        assert_eq!(
+            text.matches("from_first_dir").count(),
+            1,
+            "include_next must not recurse into the wrapper header: {text}"
+        );
+        assert!(cap.diagnostics().is_empty(), "include_next fixture should not diagnose");
+    }
+
+    #[test]
+    fn include_next_skips_include_root_for_subdirectory_header() {
+        let src_dir = TempDir::new().unwrap();
+        let first_dir = TempDir::new().unwrap();
+        let second_dir = TempDir::new().unwrap();
+        fs::create_dir_all(first_dir.path().join("sys")).unwrap();
+        fs::create_dir_all(second_dir.path().join("sys")).unwrap();
+        write_file(
+            &first_dir.path().join("sys"),
+            "stat.h",
+            "#include_next <sys/stat.h>\nint from_first_sys_stat;\n",
+        );
+        write_file(&second_dir.path().join("sys"), "stat.h", "int from_second_sys_stat;\n");
+        let (mut sess, main_id, cap) = seed_session(
+            src_dir.path(),
+            vec![first_dir.path().to_path_buf(), second_dir.path().to_path_buf()],
+        );
+        let span = dummy_span(main_id);
+
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<sys/stat.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("from_first_sys_stat"), "{text}");
+        assert!(
+            text.contains("from_second_sys_stat"),
+            "include_next should skip the include root, not the physical sys/ dir: {text}"
+        );
+        assert_eq!(
+            text.matches("from_first_sys_stat").count(),
+            1,
+            "subdirectory include_next must not recurse into the wrapper header: {text}"
+        );
+        assert!(cap.diagnostics().is_empty(), "subdirectory include_next should not diagnose");
+    }
+
+    #[test]
+    fn ordinary_include_keeps_first_include_dir() {
+        let src_dir = TempDir::new().unwrap();
+        let first_dir = TempDir::new().unwrap();
+        let second_dir = TempDir::new().unwrap();
+        write_file(first_dir.path(), "string.h", "int from_first_dir;\n");
+        write_file(second_dir.path(), "string.h", "int from_second_dir;\n");
+        let (mut sess, main_id, cap) = seed_session(
+            src_dir.path(),
+            vec![first_dir.path().to_path_buf(), second_dir.path().to_path_buf()],
+        );
+        let span = dummy_span(main_id);
+
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<string.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("from_first_dir"), "ordinary include should use first hit: {text}");
+        assert!(
+            !text.contains("from_second_dir"),
+            "ordinary include must not skip ahead like include_next: {text}"
+        );
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_include_next_reports_skipped_directory() {
+        let src_dir = TempDir::new().unwrap();
+        let first_dir = TempDir::new().unwrap();
+        write_file(first_dir.path(), "string.h", "#include_next <missing.h>\nint after;\n");
+        let (mut sess, main_id, cap) =
+            seed_session(src_dir.path(), vec![first_dir.path().to_path_buf()]);
+        let span = dummy_span(main_id);
+
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<string.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("after"), "preprocessing should recover after missing include_next");
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one include_next diagnostic: {diags:?}");
+        let diag = &diags[0];
+        assert_eq!(diag.code, Some(E0021));
+        assert!(diag.message.contains("missing.h"), "{diag:?}");
+        assert!(
+            diag.notes.iter().any(|note| note.contains("include_next")
+                && note.contains(&first_dir.path().display().to_string())),
+            "diagnostic should name the skipped directory: {diag:?}"
         );
     }
 

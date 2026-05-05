@@ -31,6 +31,7 @@ The scripts keep cloned worktrees, generated headers, wrapper sources, and logs
 under ignored `build/`, `scratch/`, and `logs/` directories.  They must not edit
 files under `upstream/`.
 
-Current `src/true.c` status: `run-true-probe.sh` is repeatable and reaches
-generated gnulib replacement headers.  Remaining compiler-owned blockers are
-tracked by tasks 16-21 through 16-24, starting with GNU `#include_next`.
+Current `src/true.c` status: `run-true-probe.sh` is repeatable and now gets
+past GNU `#include_next` in generated replacement headers. Remaining
+compiler-owned blockers are tracked by tasks 16-22 through 16-24, starting with
+gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations.

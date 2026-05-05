@@ -701,6 +701,9 @@ impl<'a> Preprocessor<'a> {
             Ok(directive::Directive::Include { span, is_system, header }) => {
                 return self.process_include(&header, is_system, span, line[0].span.file);
             }
+            Ok(directive::Directive::IncludeNext { span, is_system, header }) => {
+                return self.process_include_next(&header, is_system, span, line[0].span.file);
+            }
             Ok(directive::Directive::IncludeTokens { span, tokens }) => {
                 let expanded = self.expand_tokens(tokens);
                 let parsed = {
