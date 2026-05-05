@@ -23,7 +23,7 @@ state.
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
-| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe scripted and blocked on compiler-owned follow-ups | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-22a` through `16-24`; first blocker is GNU `__extension__ static __inline` header functions |
+| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe scripted and blocked on compiler-owned follow-ups | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-23` through `16-24`; first blocker is hosted declaration/macro gaps |
 
 ## Classification Rules
 
@@ -226,8 +226,8 @@ Current `src/true.c` compiler-owned blockers:
 | Symptom | Classification | Owning task |
 | --- | --- | --- |
 | generated `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` forms cascade into K&R parser diagnostics | macro-expanded declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md` |
-| GNU `__extension__ static __inline` glibc functions fail with an uncoded `expected ';' after declaration` diagnostic | GNU declaration parser surface | `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md` |
-| missing hosted declarations/macros such as unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
+| GNU `__extension__ static __inline` glibc functions fail with an uncoded `expected ';' after declaration` diagnostic | GNU declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md` |
+| missing hosted declarations/macros such as `wcwidth`, unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
 | no host-vs-rcc `true` runtime oracle yet | real-world runtime probe | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 
 Fixed by `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`:

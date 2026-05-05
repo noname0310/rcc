@@ -12,10 +12,10 @@ coreutils `src/true.c` probe.
 ## Scope
 
 - In: small rcc resource-header additions for declarations/macros that are
-  host-runtime-owned: `fchownat`, `fchmodat`, `AT_SYMLINK_NOFOLLOW`,
-  `S_TYPEISSHM`, `S_TYPEISTMO`, `fputs_unlocked`, `fwrite_unlocked`,
-  `fflush_unlocked`, `clearerr_unlocked`, `fpurge`, `vasprintf`,
-  `EOPNOTSUPP`, and `ENOTSUP`.
+  host-runtime-owned: `wcwidth`, `fchownat`, `fchmodat`,
+  `AT_SYMLINK_NOFOLLOW`, `S_TYPEISSHM`, `S_TYPEISTMO`, `fputs_unlocked`,
+  `fwrite_unlocked`, `fflush_unlocked`, `clearerr_unlocked`, `fpurge`,
+  `vasprintf`, `EOPNOTSUPP`, and `ENOTSUP`.
 - In: reduced header parse/typecheck tests justifying each shim.
 - Out: implementing libc or gnulib function bodies.
 

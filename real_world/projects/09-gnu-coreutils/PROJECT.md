@@ -32,7 +32,8 @@ under ignored `build/`, `scratch/`, and `logs/` directories.  They must not edit
 files under `upstream/`.
 
 Current `src/true.c` status: `run-true-probe.sh` is repeatable and now gets
-past GNU `#include_next` in generated replacement headers and past gnulib
-`_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations. Remaining
-compiler-owned blockers are tracked by tasks 16-22a through 16-24, starting
-with GNU `__extension__ static __inline` glibc header functions.
+past GNU `#include_next` in generated replacement headers, gnulib
+`_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations, and GNU
+`__extension__ static __inline` glibc header functions. Remaining
+compiler-owned blockers are tracked by tasks 16-23 through 16-24, starting
+with hosted declaration/macro gaps.

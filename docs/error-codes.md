@@ -1565,3 +1565,17 @@ Common glibc declaration annotations such as `nothrow`, `leaf`, `nonnull`,
 `pure`, `const`, `malloc`, `format`, `warn_unused_result`, `visibility`, and
 `deprecated` are recognized. Add a new attribute deliberately before relying on
 its semantics.
+
+## W0034 — GNU __extension__ declaration prefix
+
+`__extension__` is a GNU C marker used heavily by glibc headers to wrap
+non-ISO syntax without producing pedantic diagnostics. `rcc` accepts it as a
+declaration prefix and drops the marker after parsing:
+
+```c
+__extension__ static __inline int f(int x) { return x; }
+```
+
+Strict C99 mode emits this warning because the marker is not part of the C99
+grammar. Hosted Linux mode suppresses it for system-header compatibility; the
+marker does not change ABI, storage class, or code generation.

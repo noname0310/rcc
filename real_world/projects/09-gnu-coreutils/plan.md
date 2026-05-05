@@ -106,17 +106,16 @@ next coreutils task must either resolve that host-build input issue or select a
 smaller generated-header probe before using the utility as an oracle.
 
 Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
-progresses through GNU `#include_next` in generated replacement headers and
-the gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declaration
-surface. It now records the next concrete compiler-owned blockers:
+progresses through GNU `#include_next` in generated replacement headers, the
+gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declaration surface,
+and GNU `__extension__ static __inline` glibc header functions. It now records
+the next concrete compiler-owned blockers:
 
-- `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md`:
-  GNU `__extension__ static __inline` glibc header functions currently stop
-  declaration parsing in `<bits/byteswap.h>`.
 - `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
-  hosted names such as `fputs_unlocked`, `fwrite_unlocked`, `fchownat`,
-  `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and `S_TYPEISTMO`
-  need small declaration/macro shims once the generated headers parse.
+  hosted names such as `wcwidth`, `fputs_unlocked`, `fwrite_unlocked`,
+  `fchownat`, `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and
+  `S_TYPEISTMO` need small declaration/macro shims once the generated headers
+  parse.
 - `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`: final
   host-vs-rcc runtime comparison for `src/true`.
 

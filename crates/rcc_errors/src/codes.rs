@@ -124,6 +124,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0031, W0031_DESC),
     (W0032, W0032_DESC),
     (W0033, W0033_DESC),
+    (W0034, W0034_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -962,6 +963,10 @@ const W0032_DESC: &str = "deprecated declaration used";
 /// GNU attribute parsed but not modeled by rcc.
 pub const W0033: &str = "W0033";
 const W0033_DESC: &str = "unsupported GNU attribute ignored";
+
+/// GNU `__extension__` prefix accepted outside hosted/GNU system-header mode.
+pub const W0034: &str = "W0034";
+const W0034_DESC: &str = "GNU __extension__ declaration prefix";
 
 #[cfg(test)]
 mod tests {

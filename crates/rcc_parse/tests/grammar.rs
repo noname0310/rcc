@@ -540,6 +540,44 @@ fn malformed_parenthesized_function_decl_does_not_poison_following_prototypes() 
 }
 
 #[test]
+fn gnu_extension_inline_header_function_parses_in_hosted_mode() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    let src = r#"
+        typedef unsigned long __uint64_t;
+        __extension__ static __inline __uint64_t
+        __bswap_64(__uint64_t __bsx)
+        {
+          return __bsx;
+        }
+    "#;
+    let (tu, diags, _sess) = parse_ok_with_session(src, opts);
+
+    assert_eq!(tu.decls.len(), 2);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0034)),
+        "hosted mode should suppress W0034 for glibc __extension__: {diags:#?}"
+    );
+}
+
+#[test]
+fn gnu_extension_declaration_prefix_warns_in_strict_c99() {
+    let src = r#"
+        typedef unsigned long __uint64_t;
+        __extension__ static __inline __uint64_t
+        __bswap_64(__uint64_t __bsx)
+        {
+          return __bsx;
+        }
+    "#;
+    let (_tu, diags) = parse_ok_with_options(src, Options::default());
+
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0034)),
+        "strict C99 should warn W0034 for GNU __extension__, got {diags:#?}"
+    );
+}
+
+#[test]
 fn gnu_qualifier_aliases_are_rejected_in_strict_c99() {
     parse_err("int *__restrict p;");
     parse_err("void f(int a[__const static 4]);");

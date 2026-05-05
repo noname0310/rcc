@@ -1188,7 +1188,9 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
 /// when the declarator carries an identifier-list.
 pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
     let start = p.cur_span();
+    let extension_spans = consume_gnu_extension_prefixes(p);
     let specs = parse_decl_specs(p)?;
+    warn_gnu_extension_prefixes(p, &extension_spans);
 
     // Bare `;` after specifiers → declaration with no init-declarator-list.
     if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
@@ -1353,7 +1355,14 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
 }
 
 fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
-    let at = crate::attr::skip_attribute_groups_at(p, p.cursor);
+    let mut at = crate::attr::skip_attribute_groups_at(p, p.cursor);
+    while let Some(TokenKind::Ident(sym)) = p.tokens.get(at).map(|t| &t.kind) {
+        if !is_gnu_extension_prefix(p, *sym) {
+            break;
+        }
+        at += 1;
+        at = crate::attr::skip_attribute_groups_at(p, at);
+    }
     match p.tokens.get(at).map(|t| &t.kind) {
         Some(TokenKind::Keyword(kw)) => matches!(
             kw,
@@ -1404,6 +1413,7 @@ fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
 pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
     let start = p.cur_span();
     let saved_cursor = p.cursor;
+    let extension_spans = consume_gnu_extension_prefixes(p);
     let specs = parse_decl_specs(p)?;
 
     // If the specifier list consumed nothing, it is not a declaration.
@@ -1417,6 +1427,7 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
         p.cursor = saved_cursor;
         return None;
     }
+    warn_gnu_extension_prefixes(p, &extension_spans);
 
     // Bare `;` after specifiers.
     if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
@@ -1466,6 +1477,39 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
 
     let id = p.fresh_id();
     Some(Decl { id, span: start.to(end), specs, inits })
+}
+
+fn consume_gnu_extension_prefixes(p: &mut Parser<'_>) -> Vec<Span> {
+    let mut spans = Vec::new();
+    while let Some(tok) = p.peek() {
+        let TokenKind::Ident(sym) = tok.kind else {
+            break;
+        };
+        if !is_gnu_extension_prefix(p, sym) {
+            break;
+        }
+        spans.push(tok.span);
+        p.bump();
+    }
+    spans
+}
+
+fn is_gnu_extension_prefix(p: &Parser<'_>, sym: Symbol) -> bool {
+    p.session.interner.get(sym) == "__extension__"
+}
+
+fn warn_gnu_extension_prefixes(p: &mut Parser<'_>, spans: &[Span]) {
+    if p.session.opts.linux_gnu_hosted {
+        return;
+    }
+    for &span in spans {
+        p.session
+            .handler
+            .struct_warn(span, "GNU `__extension__` declaration prefix is not part of C99")
+            .code(codes::W0034)
+            .note("parsing it as a declaration prefix for GNU-compatible headers")
+            .emit();
+    }
 }
 
 fn recover_kr_decl_list(p: &mut Parser<'_>) {

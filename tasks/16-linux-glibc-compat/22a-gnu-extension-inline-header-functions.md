@@ -1,5 +1,7 @@
 # 16-22a: GNU extension Inline Header Functions
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-22-gnulib-funcdecl-macro-surface  
 **Milestone:** hosted-linux
@@ -20,9 +22,21 @@ falling out of declaration parsing.
 
 ## Acceptance
 
-- [ ] A reduced `__extension__ static __inline` function definition fixture
+- [x] A reduced `__extension__ static __inline` function definition fixture
       parses in hosted Linux mode.
-- [ ] Strict C99 mode preserves recovery and emits a targeted GNU-extension
+- [x] Strict C99 mode preserves recovery and emits a targeted GNU-extension
       warning.
-- [ ] The coreutils `run-true-probe.sh` no longer reports an uncoded
+- [x] The coreutils `run-true-probe.sh` no longer reports an uncoded
       `expected ';' after declaration` failure from glibc `<bits/byteswap.h>`.
+
+## Result
+
+- Added parser support for GNU `__extension__` declaration prefixes.
+- Added W0034 and documentation for strict C99 mode; hosted Linux mode
+  suppresses the warning because glibc uses the marker specifically to avoid
+  pedantic diagnostics in system headers.
+- Added reduced glibc `<bits/byteswap.h>` fixtures for hosted and strict C99
+  modes.
+- Re-ran the GNU coreutils `src/true` probe: the glibc `<bits/byteswap.h>`
+  syntax blocker is gone and the first compiler-owned failures are now the
+  E0071/E0083 hosted declaration gaps tracked by task 16-23.
