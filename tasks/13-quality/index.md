@@ -23,7 +23,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [05-restrict-noalias](05-restrict-noalias.md)
 - [x] [06-coverage-threshold](06-coverage-threshold.md)
 - [x] [07-conformance-release-freeze](07-conformance-release-freeze.md)
-- [ ] [08-fuzz-regression-artifacts](08-fuzz-regression-artifacts.md)
+- [x] [08-fuzz-regression-artifacts](08-fuzz-regression-artifacts.md)
 - [ ] [09-ci-green-matrix](09-ci-green-matrix.md)
 - [ ] [10-bench-harness](10-bench-harness.md)
 - [ ] [11-toolchain-platform-matrix](11-toolchain-platform-matrix.md)

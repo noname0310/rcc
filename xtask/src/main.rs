@@ -48,6 +48,17 @@ enum Cmd {
         #[arg(long)]
         check_only: bool,
     },
+    /// Promote a reviewed libFuzzer crash artifact into a corpus seed.
+    FuzzRegression {
+        /// Fuzz target name: lex, preprocess, or parse.
+        #[arg(value_parser = ["lex", "preprocess", "parse"])]
+        target: String,
+        /// Crash artifact path from `fuzz/artifacts/<target>/...`.
+        artifact: PathBuf,
+        /// Checked-in seed filename to use under `fuzz/corpus/<target>/`.
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -70,6 +81,10 @@ fn main() -> Result<()> {
         Cmd::XfailReport { range } => xtask::xfail_report::run(&project_root(), &range),
         Cmd::Coverage { lcov, json, check_only } => {
             xtask::coverage::run(&project_root(), &lcov, &json, check_only)
+        }
+        Cmd::FuzzRegression { target, artifact, name } => {
+            xtask::fuzz_regression::run(&project_root(), &target, &artifact, name.as_deref())?;
+            Ok(())
         }
     }
 }

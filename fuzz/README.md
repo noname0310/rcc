@@ -98,7 +98,9 @@ cargo +nightly fuzz run lex -- -max_total_time=1800 -max_len=131072  # 30 min
 
 Any discovered crash is written to `fuzz/artifacts/lex/` and should be
 minified (`cargo +nightly fuzz tmin lex <artifact>`) and then filed as
-a new task under 03-lex/ or the relevant downstream phase.
+a new task under 03-lex/ or the relevant downstream phase. See
+[`docs/fuzzing.md`](../docs/fuzzing.md) for the artifact download,
+reproduction, and corpus-promotion workflow.
 
 ### Extended 30 minute run
 
@@ -209,7 +211,8 @@ cargo +nightly fuzz run preprocess -- -max_total_time=1800 -max_len=131072  # 30
 
 Crashes land in `fuzz/artifacts/preprocess/`. Minify with
 `cargo +nightly fuzz tmin preprocess <artifact>` and file a follow-up
-task under `tasks/04-preprocess/` or the relevant downstream phase.
+task under `tasks/04-preprocess/` or the relevant downstream phase. Promote
+fixed, reviewed crashes with `cargo xtask fuzz-regression`.
 
 ## Running the parse fuzzer
 
@@ -233,7 +236,8 @@ cargo +nightly fuzz run parse -- -max_total_time=60 -max_len=131072
 
 The extended workflow at `.github/workflows/fuzz-parse-30m.yml` runs the
 target for 30 minutes when parse/preprocess/lexer/fuzz paths change, or when
-manually dispatched.
+manually dispatched. It uploads corpus and crash artifacts using the same
+promotion workflow described in [`docs/fuzzing.md`](../docs/fuzzing.md).
 
 ## Windows caveats
 

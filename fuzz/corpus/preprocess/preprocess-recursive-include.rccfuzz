@@ -1,0 +1,13 @@
+#include "test.h"
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#include "include1.h"
+int test_header = 0;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#include "include2.h"
+int include1_header = 1;
+
+/*__RCC_FUZZ_VIRTUAL_FILE__*/
+#include "test.h"
+int include2_header = 2;

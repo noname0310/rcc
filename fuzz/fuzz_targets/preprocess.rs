@@ -20,10 +20,10 @@
 //!   cargo alias `fuzz-preprocess` also passes `-max_len=131072` so
 //!   libFuzzer itself won't produce larger inputs; the in-target
 //!   check is defence-in-depth for direct-invocation reproduction.
-//! * No recursion / token-budget cap is applied: pathological inputs
-//!   that blow the stack or hang the expander **are** the bugs we
-//!   want the fuzzer to surface (see the task's acceptance bullet
-//!   "stack overflow on recursive macro is caught within seconds").
+//! * The preprocessor has an include-depth cap so recursive virtual
+//!   include trees terminate before the process stack overflows. Other
+//!   pathological macro-expansion inputs are still expected to surface
+//!   as crashes or timeouts.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

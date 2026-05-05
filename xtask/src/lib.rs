@@ -2,4 +2,5 @@
 
 pub mod check_error_codes;
 pub mod coverage;
+pub mod fuzz_regression;
 pub mod xfail_report;

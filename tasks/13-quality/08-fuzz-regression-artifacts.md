@@ -1,5 +1,7 @@
 # 13-08: Fuzz crash artifacts become regression tests
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 12-05, 13-07    **Milestone:** M7
 
 ## Goal
