@@ -169,6 +169,10 @@ pub struct Cli {
     /// Include optional external test suites during `fetch-testsuites` / conformance runs.
     #[arg(long)]
     pub include_gpl_tests: bool,
+
+    /// Opt into Linux glibc/POSIX hosted compatibility policy without enabling GNU syntax by default.
+    #[arg(long = "linux-gnu-hosted", action = ArgAction::SetTrue)]
+    pub linux_gnu_hosted: bool,
 }
 
 impl Cli {

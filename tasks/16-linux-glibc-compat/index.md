@@ -14,7 +14,7 @@ rcc-owned libc bodies.
 ## Tasks (pick in order)
 
 - [x] [01-hosted-linux-surface-audit](01-hosted-linux-surface-audit.md)
-- [ ] [02-compat-mode-and-policy](02-compat-mode-and-policy.md)
+- [x] [02-compat-mode-and-policy](02-compat-mode-and-policy.md)
 - [ ] [03-feature-test-macro-model](03-feature-test-macro-model.md)
 - [ ] [04-resource-header-overlay-order](04-resource-header-overlay-order.md)
 - [ ] [05-glibc-common-macro-shims](05-glibc-common-macro-shims.md)

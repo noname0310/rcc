@@ -223,6 +223,19 @@ fn gnu_preprocessor_compat_flags_set_frontend_options() {
 }
 
 #[test]
+fn linux_gnu_hosted_flag_sets_policy_without_gnu_syntax_flags() {
+    let cli = parse(&["rcc", "--linux-gnu-hosted", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.linux_gnu_hosted);
+    assert!(!opts.gnu_binary_integer_literals);
+    assert!(!opts.gnu_statement_expressions);
+    assert!(!opts.gnu_attributes);
+    assert!(!opts.gnu_inline_asm);
+    assert!(!opts.gnu_implicit_function_declaration);
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");
@@ -282,6 +295,24 @@ fn strict_binary_integer_literal_is_rejected() {
         .expect("run rcc");
 
     assert!(!result.status.success(), "strict mode accepted GNU binary literal");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("E0011") || stderr.contains("octal"), "{stderr}");
+}
+
+#[test]
+fn linux_gnu_hosted_keeps_strict_c99_binary_integer_rejection() {
+    let input = TempCFile::new("linux-hosted-strict-binary", "int x = 0b10;\n");
+    let output = input.sibling("ast");
+    let result = Command::new(rcc_bin())
+        .arg("--linux-gnu-hosted")
+        .arg("--emit=ast")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(!result.status.success(), "hosted mode accepted GNU binary literal");
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("E0011") || stderr.contains("octal"), "{stderr}");
 }

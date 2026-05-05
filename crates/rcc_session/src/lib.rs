@@ -93,6 +93,15 @@ pub struct Options {
     pub debug_info: bool,
     /// Enable `--include-gpl` test suites.
     pub include_gpl_tests: bool,
+    /// Enable hosted Linux/glibc compatibility policy.
+    ///
+    /// This mode opts into rcc's Linux hosted environment model: compiler-owned
+    /// declaration shims, feature-test macro defaults, POSIX/GNU header probes,
+    /// and linker-driver policy for host-provided runtime libraries.  It does
+    /// not automatically enable GNU syntax extensions; those remain gated by
+    /// their explicit `-fgnu-*` flags so strict `-std=c99` diagnostics stay
+    /// visible.
+    pub linux_gnu_hosted: bool,
     /// Enable the GNU `, ## __VA_ARGS__` comma-elision extension.
     ///
     /// When a variadic function-like macro is invoked with zero
@@ -282,6 +291,7 @@ impl Default for Options {
             link: LinkOptions::default(),
             debug_info: false,
             include_gpl_tests: false,
+            linux_gnu_hosted: false,
             gnu_va_args_elision: false,
             gnu_permissive_redefinition: false,
             gnu_named_variadic: false,

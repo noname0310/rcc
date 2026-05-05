@@ -556,6 +556,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         link: link_options_from_cli(cli),
         debug_info: cli.debug_info,
         include_gpl_tests: cli.include_gpl_tests,
+        linux_gnu_hosted: cli.linux_gnu_hosted,
         gnu_va_args_elision: cli
             .feature_flags
             .iter()

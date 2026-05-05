@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 16-02: Compatibility Mode And Policy
 
 **Phase:** 16-linux-glibc-compat  
