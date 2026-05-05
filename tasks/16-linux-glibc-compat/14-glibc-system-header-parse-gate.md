@@ -1,5 +1,7 @@
 # 16-14: Glibc System Header Parse Gate
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-13-gnulib-config-header-probe  
 **Milestone:** hosted-linux
@@ -19,7 +21,7 @@ headers before real-world project probes depend on them.
 
 ## Acceptance
 
-- [ ] The gate runs in CI on Linux or is clearly marked as Linux-only.
-- [ ] Every fixture has a reason tied to a real project.
-- [ ] Failures are not ignored with broad `xfail`; each has a task link.
-- [ ] The gate is referenced from `docs/hosted-linux.md`.
+- [x] The gate runs in CI on Linux or is clearly marked as Linux-only.
+- [x] Every fixture has a reason tied to a real project.
+- [x] Failures are not ignored with broad `xfail`; each has a task link.
+- [x] The gate is referenced from `docs/hosted-linux.md`.

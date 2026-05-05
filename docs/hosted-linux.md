@@ -127,6 +127,18 @@ still require a separate dynamic-loader library must pass `-ldl`; the driver
 preserves that explicit flag in the clang/lld-compatible link command and in
 missing-linker diagnostics.
 
+The repeatable hosted header gate is:
+
+```sh
+cargo test -p rcc_driver --test hosted_linux_headers
+```
+
+It runs only on Linux hosts and lowers representative fixtures through
+`--emit=hir`: core hosted C99 declarations used by inih/cJSON/Lua/MuJS,
+filesystem/POSIX declarations used by GNU coreutils, and pthread/dlfcn
+declarations used by QuickJS and dynamic-loading probes.  Failures must become
+specific compiler or header-surface tasks; the gate does not use broad xfails.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc
@@ -169,6 +181,7 @@ The phase-16 task tree is the authoritative hosted Linux queue:
 - `tasks/16-linux-glibc-compat/04-resource-header-overlay-order.md`
 - `tasks/16-linux-glibc-compat/05-glibc-common-macro-shims.md`
 - `tasks/16-linux-glibc-compat/08-pthread-driver-flag.md`
+- `tasks/16-linux-glibc-compat/14-glibc-system-header-parse-gate.md`
 - `tasks/16-linux-glibc-compat/16-gnu-coreutils-bootstrap-probe.md`
 - `tasks/16-linux-glibc-compat/17-gnu-coreutils-single-utility-probe.md`
 
