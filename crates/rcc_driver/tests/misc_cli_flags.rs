@@ -434,6 +434,60 @@ ssize_t rw_once(int fd, void *buf, size_t n) {
 }
 
 #[test]
+fn filesystem_posix_headers_parse_and_typecheck_for_linux_target() {
+    let input = TempCFile::new(
+        "filesystem-posix",
+        r#"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <unistd.h>
+
+int inspect_path(const char *path) {
+    struct stat st;
+    struct timeval tv;
+    DIR *dir;
+    struct dirent *ent;
+    int status = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    if (fd < 0)
+        return 1;
+    if (fstat(fd, &st) != 0)
+        return 2;
+    if (S_ISREG(st.st_mode) && st.st_size < (off_t)0)
+        return 3;
+    dir = fdopendir(fd);
+    if (dir) {
+        ent = readdir(dir);
+        if (ent && ent->d_ino == (ino_t)0)
+            status = ent->d_name[0] == 0;
+        closedir(dir);
+    }
+    gettimeofday(&tv, 0);
+    waitpid((pid_t)-1, &status, WNOHANG);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+}
+"#,
+    );
+    let output = input.sibling("hir");
+    let result = Command::new(rcc_bin())
+        .arg("--target=x86_64-unknown-linux-gnu")
+        .arg("--linux-gnu-hosted")
+        .arg("--emit=hir")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(output.exists(), "HIR output should be emitted after filesystem header typecheck");
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");

@@ -23,7 +23,7 @@ rcc-owned libc bodies.
 - [x] [08-pthread-driver-flag](08-pthread-driver-flag.md)
 - [x] [09-pthread-header-shim](09-pthread-header-shim.md)
 - [x] [10-posix-core-type-shims](10-posix-core-type-shims.md)
-- [ ] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md)
+- [x] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md)
 - [ ] [12-dlfcn-and-runtime-linking](12-dlfcn-and-runtime-linking.md)
 - [ ] [13-gnulib-config-header-probe](13-gnulib-config-header-probe.md)
 - [ ] [14-glibc-system-header-parse-gate](14-glibc-system-header-parse-gate.md)

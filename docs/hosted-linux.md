@@ -111,6 +111,14 @@ The current definitions match the LP64 glibc-oriented hosted probes; adding a
 layout-sensitive type for another data model requires a target-info-backed
 test.
 
+Filesystem-oriented shims live in `fcntl.h`, `dirent.h`, `sys/stat.h`,
+`sys/time.h`, and `sys/wait.h`.  `DIR` remains opaque.  `struct dirent` and
+`struct stat` expose the fields commonly read by GNU userland probes; the
+`struct stat` shape follows the current LP64 glibc field order closely enough
+for compile-time field access and simple hosted smoke tests.  Treat it as a
+target-specific ABI surface: changes to field order, size, or timestamp storage
+need explicit target-layout coverage before they are broadened.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc

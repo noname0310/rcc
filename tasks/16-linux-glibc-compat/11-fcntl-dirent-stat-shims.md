@@ -1,5 +1,7 @@
 # 16-11: Fcntl Dirent Stat Shims
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-10-posix-core-type-shims  
 **Milestone:** hosted-linux
@@ -19,8 +21,8 @@ projects.
 
 ## Acceptance
 
-- [ ] Header smoke tests parse and type-check the selected file-system headers.
-- [ ] The chosen policy for opaque vs layout-known structs is documented.
-- [ ] At least one coreutils file-system utility source reaches the next
+- [x] Header smoke tests parse and type-check the selected file-system headers.
+- [x] The chosen policy for opaque vs layout-known structs is documented.
+- [x] At least one coreutils file-system utility source reaches the next
       non-header blocker.
-- [ ] No project source is edited.
+- [x] No project source is edited.
