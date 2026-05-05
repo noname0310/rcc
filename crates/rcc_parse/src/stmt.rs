@@ -988,6 +988,7 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
             ),
             TokenKind::Ident(sym) => {
                 matches!(p.session.interner.get(*sym), "typeof" | "__typeof" | "__typeof__")
+                    || crate::decl::ident_is_type_qualifier_alias(p, *sym)
                     || p.scopes.is_typedef(*sym)
             }
             _ => false,

@@ -181,6 +181,7 @@ fn gnu_extension_flags_added_for_conformance_are_wired() {
         "rcc",
         "-fgnu-range-designators",
         "-fgnu-attributes",
+        "-fgnu-qualifier-aliases",
         "-fgnu-inline-asm",
         "-fgnu-builtin-libcalls",
         "hello.c",
@@ -189,6 +190,7 @@ fn gnu_extension_flags_added_for_conformance_are_wired() {
 
     assert!(opts.gnu_range_designators);
     assert!(opts.gnu_attributes);
+    assert!(opts.gnu_qualifier_aliases);
     assert!(opts.gnu_inline_asm);
     assert!(opts.gnu_builtin_libcalls);
 }

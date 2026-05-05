@@ -758,7 +758,9 @@ fn starts_type_name_after_lparen(p: &Parser<'_>) -> bool {
     let at = crate::attr::skip_attribute_groups_at(p, p.cursor + 1);
     match p.tokens.get(at).map(|t| &t.kind) {
         Some(TokenKind::Keyword(kw)) => is_type_name_start_kw(*kw),
-        Some(TokenKind::Ident(sym)) => p.scopes.is_typedef(*sym),
+        Some(TokenKind::Ident(sym)) => {
+            crate::decl::ident_is_type_qualifier_alias(p, *sym) || p.scopes.is_typedef(*sym)
+        }
         _ => false,
     }
 }

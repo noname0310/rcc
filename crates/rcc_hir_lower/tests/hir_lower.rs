@@ -4433,6 +4433,37 @@ fn regression_gate_restrict_pointer_parameter_preserves_object_qualifier() {
 }
 
 #[test]
+fn hosted_qualifier_aliases_lower_parameter_object_quals() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    let (hir, tcx, cap) = checked_snippet_with_options(
+        "void f(int *__restrict p, int *__const q, int *__volatile r, int a[__restrict_arr static 4]) { }",
+        opts,
+    );
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let body = hir.bodies.values().next().expect("missing function body");
+    let params = body.locals.iter().filter(|local| local.is_param).collect::<Vec<_>>();
+    assert_eq!(params.len(), 4);
+
+    assert!(params[0].quals.is_restrict, "__restrict must qualify the pointer parameter object");
+    assert!(params[1].quals.is_const, "__const must qualify the pointer parameter object");
+    assert!(params[2].quals.is_volatile, "__volatile must qualify the pointer parameter object");
+    assert!(
+        params[3].quals.is_restrict,
+        "__restrict_arr inside [] must qualify the adjusted array parameter pointer"
+    );
+    match tcx.get(params[3].ty) {
+        Ty::Ptr(elem) => {
+            assert_eq!(elem.ty, tcx.int);
+            assert!(
+                !elem.is_restrict,
+                "array-parameter restrict belongs to the adjusted pointer, not the element"
+            );
+        }
+        other => panic!("expected adjusted array parameter to be pointer, got {other:?}"),
+    }
+}
+
+#[test]
 fn regression_gate_sizeof_type_and_compound_literal_keep_type_names() {
     let (hir, tcx) = lower_snippet(
         "struct S { int x; }; typedef struct S S; void f(void) { sizeof(S); (S){ .x = 1 }; }",

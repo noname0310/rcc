@@ -107,8 +107,6 @@ pub const KEYWORDS: &[(&str, Keyword)] = &[
     ("long", Keyword::Long),
     ("register", Keyword::Register),
     ("restrict", Keyword::Restrict),
-    ("__restrict", Keyword::Restrict),
-    ("__restrict__", Keyword::Restrict),
     ("return", Keyword::Return),
     ("short", Keyword::Short),
     ("signed", Keyword::Signed),
@@ -203,11 +201,9 @@ mod tests {
     }
 
     #[test]
-    fn gnu_keyword_aliases_are_classified() {
+    fn gnu_inline_keyword_aliases_are_classified() {
         assert_eq!(classify_ident("__inline"), Some(Keyword::Inline));
         assert_eq!(classify_ident("__inline__"), Some(Keyword::Inline));
-        assert_eq!(classify_ident("__restrict"), Some(Keyword::Restrict));
-        assert_eq!(classify_ident("__restrict__"), Some(Keyword::Restrict));
     }
 
     #[test]

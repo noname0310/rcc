@@ -480,6 +480,27 @@ fn representative_glibc_attribute_declarations_parse_in_hosted_mode() {
 }
 
 #[test]
+fn gnu_qualifier_aliases_are_rejected_in_strict_c99() {
+    parse_err("int *__restrict p;");
+    parse_err("void f(int a[__const static 4]);");
+}
+
+#[test]
+fn hosted_qualifier_aliases_parse_in_pointer_and_array_parameters() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    parse_ok_with_options(
+        "void f(char *__restrict p, char *__const q, char *__volatile r, int a[__restrict_arr static 4]);",
+        opts,
+    );
+}
+
+#[test]
+fn explicit_gnu_qualifier_alias_flag_parses_without_hosted_mode() {
+    let opts = Options { gnu_qualifier_aliases: true, ..Options::default() };
+    parse_ok_with_options("void f(char *__restrict__ p, __const int *q);", opts);
+}
+
+#[test]
 fn gnu_attribute_record_field_enum_function_and_statement_sites_parse() {
     let src = r#"
         struct __attribute__((packed)) S {

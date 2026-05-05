@@ -176,6 +176,13 @@ pub struct Options {
     /// handling. When this flag is false, syntax still parses but each
     /// attribute group emits W0015 as a strict-C99 compatibility warning.
     pub gnu_attributes: bool,
+    /// Enable GNU/glibc qualifier aliases such as `__restrict`,
+    /// `__restrict__`, `__const`, and `__volatile__`.
+    ///
+    /// These spellings are common in system headers but are not C99 keywords.
+    /// Hosted Linux mode enables them through policy; this flag lets tests or
+    /// explicit driver users opt in without the full hosted environment.
+    pub gnu_qualifier_aliases: bool,
     /// Enable GNU inline assembly syntax without a warning.
     ///
     /// The parser preserves `asm` / `__asm` / `__asm__` statements for
@@ -302,6 +309,7 @@ impl Default for Options {
             gnu_conditional_void_operand: false,
             gnu_range_designators: false,
             gnu_attributes: false,
+            gnu_qualifier_aliases: false,
             gnu_inline_asm: false,
             gnu_case_ranges: false,
             gnu_labels_as_values: false,

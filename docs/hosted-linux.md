@@ -121,6 +121,14 @@ gnulib annotations currently needed by the hosted probes: `nothrow`, `leaf`,
 with leading/trailing double underscores.  Unknown attributes are recovered with
 W0033 instead of being silently treated as semantically supported.
 
+Hosted Linux mode also normalizes GNU qualifier aliases used by glibc headers:
+`__restrict`, `__restrict__`, and `__restrict_arr` map to C99 `restrict`;
+`__const` / `__const__` map to `const`; and `__volatile` / `__volatile__` map
+to `volatile`.  These spellings are not accepted by strict C99 mode unless the
+explicit `-fgnu-qualifier-aliases` option is used.  Lowering records pointer
+parameter qualifiers in `ObjectQuals`; for array parameters, qualifiers inside
+`[...]` qualify the adjusted pointer parameter, not the array element.
+
 ## Current Probe Queue
 
 The phase-16 task tree is the authoritative hosted Linux queue:

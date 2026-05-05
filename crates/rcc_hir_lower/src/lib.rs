@@ -242,7 +242,7 @@ fn lower_function_params(
         let local = body.locals.push(LocalDecl {
             name,
             ty,
-            quals: declaration_object_quals(&param.specs, &param.declarator),
+            quals: parameter_object_quals(&param.specs, &param.declarator),
             vla_len: None,
             is_param: true,
             span: param.span,
@@ -6246,6 +6246,13 @@ fn declaration_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator)
     }
 }
 
+fn parameter_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator) -> ObjectQuals {
+    match declarator.derived.last() {
+        Some(DerivedDeclarator::Array(arr)) => object_quals_from_type_quals(&arr.quals),
+        _ => declaration_object_quals(specs, declarator),
+    }
+}
+
 /// Fold a parsed `Declarator` (name + chain of `DerivedDeclarator`) over
 /// a base `Ty` obtained from `DeclSpecs`. Produces the final `TyId` for
 /// the declared name; applies qualifiers correctly.
@@ -6395,7 +6402,15 @@ fn apply_declarator_with_base_quals_in_scope(
                     (None, false)
                 };
 
-                let merged = merge_type_quals(pending_component_quals, &arr_decl.quals);
+                let merged = if scope == DeclScope::Param {
+                    // C99 §6.7.5.3p7 adjusts array parameters to
+                    // pointers. Qualifiers written inside the brackets
+                    // qualify that adjusted pointer object, not the
+                    // element type.
+                    pending_component_quals
+                } else {
+                    merge_type_quals(pending_component_quals, &arr_decl.quals)
+                };
                 let elem = quals_to_hir(ty, &merged);
                 ty = tcx.intern(Ty::Array { elem, len, is_vla });
                 pending_component_quals = rcc_ast::TypeQuals::default();

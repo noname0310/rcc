@@ -1,5 +1,7 @@
 # 16-07: Restrict And Qualifier Aliases
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-06-gnu-header-attribute-tolerance  
 **Milestone:** hosted-linux
@@ -18,9 +20,9 @@ qualifier model.
 
 ## Acceptance
 
-- [ ] The aliases are accepted only in the compatibility mode or when already
+- [x] The aliases are accepted only in the compatibility mode or when already
       enabled by GNU extension options.
-- [ ] Lowered types preserve restrict/const information where rcc models it.
-- [ ] Tests include pointer parameters and array parameters from glibc-like
+- [x] Lowered types preserve restrict/const information where rcc models it.
+- [x] Tests include pointer parameters and array parameters from glibc-like
       declarations.
-- [ ] Strict C99 behavior remains unchanged.
+- [x] Strict C99 behavior remains unchanged.

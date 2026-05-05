@@ -112,6 +112,29 @@ struct TypeState {
     imaginary_flag: bool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QualifierAliasKind {
+    Const,
+    Volatile,
+    Restrict,
+}
+
+pub(crate) fn qualifier_alias_kind(p: &Parser<'_>, sym: Symbol) -> Option<QualifierAliasKind> {
+    if !(p.session.opts.linux_gnu_hosted || p.session.opts.gnu_qualifier_aliases) {
+        return None;
+    }
+    match p.session.interner.get(sym) {
+        "__const" | "__const__" => Some(QualifierAliasKind::Const),
+        "__volatile" | "__volatile__" => Some(QualifierAliasKind::Volatile),
+        "__restrict" | "__restrict__" | "__restrict_arr" => Some(QualifierAliasKind::Restrict),
+        _ => None,
+    }
+}
+
+pub(crate) fn ident_is_type_qualifier_alias(p: &Parser<'_>, sym: Symbol) -> bool {
+    qualifier_alias_kind(p, sym).is_some()
+}
+
 /// Parse a (possibly empty) `declaration-specifiers` production.
 ///
 /// The loop terminates on the first lookahead token that is neither a
@@ -155,7 +178,15 @@ pub fn parse_decl_specs(p: &mut Parser<'_>) -> Option<DeclSpecs> {
                 }
             }
             TokenKind::Ident(sym) => {
-                if is_gnu_typeof_name(p, *sym) {
+                let sym = *sym;
+                if consume_qualifier_alias(p, sym, tok_span, &mut specs.quals) {
+                    if first_span.is_none() {
+                        first_span = Some(tok_span);
+                    }
+                    last_span = tok_span;
+                    continue;
+                }
+                if is_gnu_typeof_name(p, sym) {
                     accept_typeof(p, &mut specs, &mut state, tok_span);
                     if first_span.is_none() {
                         first_span = Some(tok_span);
@@ -173,13 +204,12 @@ pub fn parse_decl_specs(p: &mut Parser<'_>) -> Option<DeclSpecs> {
                     && !state.complex_flag
                     && !state.imaginary_flag
                 {
-                    let name = p.session.interner.get(*sym);
+                    let name = p.session.interner.get(sym);
                     if name == "__builtin_va_list" {
                         specs.type_specs.push(TypeSpec::BuiltinVaList);
                         state.base = Some(BaseKind::Typedef);
                         p.bump();
-                    } else if p.scopes.is_typedef(*sym) {
-                        let sym = *sym;
+                    } else if p.scopes.is_typedef(sym) {
                         specs.type_specs.push(TypeSpec::TypedefName(sym));
                         state.base = Some(BaseKind::Typedef);
                         p.bump();
@@ -340,6 +370,23 @@ fn accept_qual(p: &mut Parser<'_>, slot: &mut bool, name: &str, span: Span) {
         *slot = true;
     }
     p.bump();
+}
+
+fn consume_qualifier_alias(
+    p: &mut Parser<'_>,
+    sym: Symbol,
+    span: Span,
+    quals: &mut TypeQuals,
+) -> bool {
+    let Some(kind) = qualifier_alias_kind(p, sym) else {
+        return false;
+    };
+    match kind {
+        QualifierAliasKind::Const => accept_qual(p, &mut quals.const_, "__const", span),
+        QualifierAliasKind::Volatile => accept_qual(p, &mut quals.volatile, "__volatile", span),
+        QualifierAliasKind::Restrict => accept_qual(p, &mut quals.restrict, "__restrict", span),
+    }
+    true
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1654,17 +1701,17 @@ fn parse_type_qualifier_list(p: &mut Parser<'_>) -> TypeQuals {
     let mut quals = TypeQuals::default();
     while let Some(tok) = p.peek() {
         let span = tok.span;
-        let slot: &mut bool = match &tok.kind {
-            TokenKind::Keyword(Keyword::Const) => &mut quals.const_,
-            TokenKind::Keyword(Keyword::Volatile) => &mut quals.volatile,
-            TokenKind::Keyword(Keyword::Restrict) => &mut quals.restrict,
+        let (slot, name): (&mut bool, &str) = match &tok.kind {
+            TokenKind::Keyword(Keyword::Const) => (&mut quals.const_, "const"),
+            TokenKind::Keyword(Keyword::Volatile) => (&mut quals.volatile, "volatile"),
+            TokenKind::Keyword(Keyword::Restrict) => (&mut quals.restrict, "restrict"),
+            TokenKind::Ident(sym) => match qualifier_alias_kind(p, *sym) {
+                Some(QualifierAliasKind::Const) => (&mut quals.const_, "__const"),
+                Some(QualifierAliasKind::Volatile) => (&mut quals.volatile, "__volatile"),
+                Some(QualifierAliasKind::Restrict) => (&mut quals.restrict, "__restrict"),
+                None => break,
+            },
             _ => break,
-        };
-        let name = match tok.kind {
-            TokenKind::Keyword(Keyword::Const) => "const",
-            TokenKind::Keyword(Keyword::Volatile) => "volatile",
-            TokenKind::Keyword(Keyword::Restrict) => "restrict",
-            _ => unreachable!(),
         };
         if *slot {
             p.session
@@ -1881,6 +1928,12 @@ fn parse_array_suffix(p: &mut Parser<'_>) -> ArrayDeclarator {
             | TokenKind::Keyword(Keyword::Restrict) => {
                 // Fold into the qualifier set; use the shared helper so
                 // duplicate-warning behaviour stays in one place.
+                let one = parse_type_qualifier_list(p);
+                quals.const_ |= one.const_;
+                quals.volatile |= one.volatile;
+                quals.restrict |= one.restrict;
+            }
+            TokenKind::Ident(sym) if ident_is_type_qualifier_alias(p, *sym) => {
                 let one = parse_type_qualifier_list(p);
                 quals.const_ |= one.const_;
                 quals.volatile |= one.volatile;
