@@ -1,5 +1,7 @@
 # 13-11: Toolchain and platform support matrix
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 10-16, 13-10    **Milestone:** M7
 
 ## Goal

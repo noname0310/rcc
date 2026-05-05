@@ -76,3 +76,56 @@ fn verbose_frontend_run_prints_llvm_tool_selection_without_linking() {
     assert!(stderr.contains(fake_clang.to_string_lossy().as_ref()), "{stderr}");
     assert!(stderr.contains("lld:"), "{stderr}");
 }
+
+#[test]
+fn version_verbose_prints_tool_selection_without_input() {
+    let dir = TempDir::new("version-verbose");
+    let fake_clang = dir.file("clang", "");
+
+    let result = Command::new(rcc_bin())
+        .arg("--version")
+        .arg("--verbose")
+        .env("RCC_LINKER_DRIVER", &fake_clang)
+        .output()
+        .expect("run rcc --version --verbose");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.stderr.is_empty(),
+        "stderr should be quiet: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("rcc version"), "{stdout}");
+    assert!(stdout.contains("target:"), "{stdout}");
+    assert!(stdout.contains("linker-driver:"), "{stdout}");
+    assert!(stdout.contains(fake_clang.to_string_lossy().as_ref()), "{stdout}");
+    assert!(stdout.contains("llvm-prefix:"), "{stdout}");
+}
+
+#[test]
+fn print_search_dirs_reports_actionable_missing_tool_override() {
+    let missing = std::env::temp_dir().join("rcc-definitely-missing-clang");
+
+    let result = Command::new(rcc_bin())
+        .arg("--print-search-dirs")
+        .env("RCC_LINKER_DRIVER", &missing)
+        .output()
+        .expect("run rcc --print-search-dirs");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("programs:"), "{stdout}");
+    assert!(stdout.contains("linker-driver: <not found:"), "{stdout}");
+    assert!(stdout.contains("RCC_LINKER_DRIVER"), "{stdout}");
+    assert!(stdout.contains(missing.to_string_lossy().as_ref()), "{stdout}");
+}
+
+#[test]
+fn missing_input_without_info_mode_is_usage_error() {
+    let result = Command::new(rcc_bin()).output().expect("run rcc without args");
+
+    assert_eq!(result.status.code(), Some(rcc_driver::ExitCode::Usage.code()));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("no input files"), "{stderr}");
+}

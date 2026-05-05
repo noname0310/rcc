@@ -93,6 +93,13 @@ pub fn run_status(cli: Cli) -> DriverStatus {
         eprintln!("rcc: {msg}");
         return DriverStatus { exit_code: classify_driver_error(&msg) };
     }
+    if cli.show_version || cli.print_search_dirs {
+        if let Err(err) = emit_info_only_output(&cli, &mut std::io::stdout()) {
+            eprintln!("rcc: cannot write info output: {err}");
+            return DriverStatus { exit_code: ExitCode::InfrastructureFailure };
+        }
+        return DriverStatus::SUCCESS;
+    }
     emit_ignored_feature_flag_notes(&cli);
     let opts = options_from_cli(&cli);
     if cli.verbose {
@@ -112,6 +119,7 @@ pub fn run_status(cli: Cli) -> DriverStatus {
 fn classify_driver_error(message: &str) -> ExitCode {
     if message.starts_with("unsupported standard")
         || message.starts_with("cannot specify -o")
+        || message.starts_with("no input files")
         || message.starts_with("refusing to overwrite input file")
     {
         ExitCode::Usage
@@ -123,6 +131,66 @@ fn classify_driver_error(message: &str) -> ExitCode {
 fn validate_driver_cli(cli: &Cli) -> Result<(), String> {
     if cli.ansi {
         return Err("unsupported standard '-ansi'; only -std=c99 is supported".to_owned());
+    }
+    if cli.input.is_empty() && !(cli.show_version || cli.print_search_dirs) {
+        return Err("no input files".to_owned());
+    }
+    Ok(())
+}
+
+fn emit_info_only_output(cli: &Cli, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    if cli.show_version {
+        emit_version_output(cli.verbose, out)?;
+    }
+    if cli.print_search_dirs {
+        if cli.show_version {
+            writeln!(out)?;
+        }
+        emit_search_dirs_output(out)?;
+    }
+    Ok(())
+}
+
+fn emit_version_output(verbose: bool, out: &mut impl std::io::Write) -> std::io::Result<()> {
+    writeln!(out, "rcc version {}", env!("CARGO_PKG_VERSION"))?;
+    if verbose {
+        let target = TargetInfo::host();
+        writeln!(out, "target: {}", target.triple)?;
+        emit_tool_selection_output(out)?;
+    }
+    Ok(())
+}
+
+fn emit_search_dirs_output(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    let finder = toolchain::ToolFinder::from_env();
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let programs = finder
+        .search_path()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(sep);
+    writeln!(out, "programs: {programs}")?;
+    emit_tool_selection_output(out)
+}
+
+fn emit_tool_selection_output(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    let finder = toolchain::ToolFinder::from_env();
+    match finder.find_linker_driver() {
+        Ok(path) => writeln!(out, "linker-driver: {}", path.display())?,
+        Err(err) => writeln!(out, "linker-driver: <not found: {err}>")?,
+    }
+    match finder.find_lld() {
+        Ok(path) => writeln!(out, "lld: {}", path.display())?,
+        Err(err) => writeln!(out, "lld: <not found: {err}>")?,
+    }
+    match finder.find_llvm_prefix() {
+        Some(path) => writeln!(out, "llvm-prefix: {}", path.display())?,
+        None => writeln!(out, "llvm-prefix: <none>")?,
+    }
+    match finder.find_objdump() {
+        Ok(path) => writeln!(out, "objdump: {}", path.display())?,
+        Err(err) => writeln!(out, "objdump: <not found: {err}>")?,
     }
     Ok(())
 }

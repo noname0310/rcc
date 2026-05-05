@@ -11,11 +11,18 @@ use crate::ExitCode;
 
 /// The `rcc` command-line interface.
 #[derive(Debug, Parser, Clone)]
-#[command(name = "rcc", about = "rcc: a Rust-based C99 compiler")]
+#[command(name = "rcc", about = "rcc: a Rust-based C99 compiler", disable_version_flag = true)]
 pub struct Cli {
     /// Input `.c` file(s).
-    #[arg(required = true)]
     pub input: Vec<PathBuf>,
+
+    /// Print rcc version information and exit.
+    #[arg(long = "version", action = ArgAction::SetTrue)]
+    pub show_version: bool,
+
+    /// Print tool-search directories and selected external tools, then exit.
+    #[arg(long = "print-search-dirs", action = ArgAction::SetTrue)]
+    pub print_search_dirs: bool,
 
     /// Output path (`-o`).
     #[arg(short = 'o', long)]
