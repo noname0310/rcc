@@ -306,6 +306,21 @@ int main(void) {
     }
 
     #[test]
+    fn main_fallthrough_returns_zero_runtime_probe() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping main fallthrough e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source(
+            "main_fallthrough_returns_zero",
+            "int puts(const char *); int main(void) { puts(\"implicit\"); }\n",
+            b"implicit\n",
+            0,
+        );
+    }
+
+    #[test]
     fn gnu_va_area_fmt_reaches_libc_vsprintf() {
         if !llvm_backend_enabled_for_this_build() {
             eprintln!("skipping __va_area__ e2e: LLVM backend feature is disabled");

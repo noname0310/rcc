@@ -59,9 +59,16 @@ pub struct Preprocessor<'a> {
     /// Files currently being expanded through recursive `#include`.
     ///
     /// C preprocessors permit finite conditional self-inclusion patterns such
-    /// as TinyCC's bit-field fixture, so this set is bookkeeping only; the
-    /// recursion brake is the separate include-depth limit.
-    pub active_includes: FxHashMap<FileId, ()>,
+    /// as TinyCC's bit-field fixture, so same-file recursion is allowed and
+    /// bounded by the include-depth limit. Cross-file cycles are cut early to
+    /// avoid exponential include graphs during fuzzing.
+    pub active_includes: FxHashMap<FileId, usize>,
+    /// Include-cycle diagnostics already emitted in this preprocessor run.
+    ///
+    /// Keyed by `(including_file, included_file)` so a malformed include graph
+    /// reports each recursive edge once instead of flooding stderr during fuzz
+    /// runs.
+    pub diagnosed_include_cycles: FxHashMap<(FileId, FileId), ()>,
     include_depth: usize,
     /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
     /// snapshots. These pragmas are not part of C99, but system headers
@@ -111,6 +118,7 @@ impl<'a> Preprocessor<'a> {
             include_guards: FxHashMap::default(),
             pragma_once: FxHashMap::default(),
             active_includes: FxHashMap::default(),
+            diagnosed_include_cycles: FxHashMap::default(),
             include_depth: 0,
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),

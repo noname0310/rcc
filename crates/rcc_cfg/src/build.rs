@@ -15,7 +15,8 @@ use rcc_span::{Span, Symbol};
 
 use crate::lower::{lower_stmt, LocalMap, LowerCx};
 use crate::{
-    BasicBlock, BasicBlockId, Body, LocalDecl, Statement, StatementKind, Terminator, TerminatorKind,
+    BasicBlock, BasicBlockId, Body, Const, ConstKind, LocalDecl, Operand, Place, Rvalue, Statement,
+    StatementKind, Terminator, TerminatorKind,
 };
 
 /// Build CFG bodies for every function in `hir`. Returns a `DefId -> Body` map.
@@ -62,7 +63,7 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
             lower_stmt(&mut builder, &cx, root);
         }
         if !builder.is_current_terminated() {
-            builder.terminate(Terminator { kind: TerminatorKind::Return, span: def.span });
+            emit_fallthrough_return(&mut builder, session, tcx, def, ret_ty);
         }
         let body = builder.finish();
         #[cfg(any(debug_assertions, test))]
@@ -72,6 +73,25 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
         out.insert(def_id, body);
     }
     out
+}
+
+fn emit_fallthrough_return(
+    builder: &mut BodyBuilder,
+    session: &Session,
+    tcx: &TyCtxt,
+    def: &rcc_hir::Def,
+    ret_ty: TyId,
+) {
+    if session.interner.get(def.name) == "main" && matches!(tcx.get(ret_ty), Ty::Int { .. }) {
+        builder.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place { base: crate::Local(0), projection: Vec::new() },
+                rvalue: Rvalue::Use(Operand::Const(Const { kind: ConstKind::Int(0), ty: ret_ty })),
+            },
+            span: def.span,
+        });
+    }
+    builder.terminate(Terminator { kind: TerminatorKind::Return, span: def.span });
 }
 
 fn audit_sizeof_layout(session: &mut Session, hir_body: &HirBody, layout: &LayoutCx<'_>) -> bool {

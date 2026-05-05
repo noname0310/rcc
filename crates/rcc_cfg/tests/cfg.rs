@@ -559,6 +559,20 @@ fn common_bswap_builtin_reaches_cfg() {
 }
 
 #[test]
+fn main_fallthrough_assigns_zero_to_return_slot() {
+    let lowered = lower_snippet(
+        "main_fallthrough_return_zero",
+        "int printf(const char *, ...); int main(void) { printf(\"ok\\n\"); }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert!(
+        return_slot_assigned_int_const(body, 0),
+        "falling off the end of main must lower as `return 0`:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
 fn builtin_unreachable_terminates_cfg_block() {
     let lowered =
         lower_snippet("builtin_unreachable_cfg", "void f(void) { __builtin_unreachable(); }");
@@ -710,6 +724,23 @@ fn body_contains_int_const(body: &Body, expected: i128) -> bool {
         block.statements.iter().any(|stmt| match &stmt.kind {
             StatementKind::Assign { rvalue, .. } => rvalue_contains_int_const(rvalue, expected),
             _ => false,
+        })
+    })
+}
+
+fn return_slot_assigned_int_const(body: &Body, expected: i128) -> bool {
+    body.blocks.iter().any(|block| {
+        block.statements.iter().any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(Const {
+                        kind: ConstKind::Int(value),
+                        ..
+                    })),
+                } if place.base == Local(0) && place.projection.is_empty() && *value == expected
+            )
         })
     })
 }

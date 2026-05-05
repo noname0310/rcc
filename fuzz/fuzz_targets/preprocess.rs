@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
 
+use rcc_errors::{CaptureEmitter, Handler};
 use rcc_preprocess::Preprocessor;
 use rcc_session::{Options, Session};
 
@@ -73,8 +74,11 @@ fuzz_target!(|data: &[u8]| {
 
     let root = PathBuf::from(VIRTUAL_ROOT);
     let main_path = root.join("main.c");
-    let mut session =
-        Session::new(Options { include_paths: vec![root.clone()], ..Options::default() });
+    let handler = Handler::with_emitter(Box::new(CaptureEmitter::new()));
+    let mut session = Session::with_handler(
+        Options { include_paths: vec![root.clone()], ..Options::default() },
+        handler,
+    );
     for (name, bytes) in VIRTUAL_HEADER_NAMES.iter().zip(header_bytes.iter().copied()) {
         session.add_virtual_file(root.join(Path::new(name)), lossless_fuzz_text(bytes));
     }

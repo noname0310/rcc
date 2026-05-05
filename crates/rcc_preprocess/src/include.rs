@@ -351,6 +351,15 @@ impl Preprocessor<'_> {
             }
         }
 
+        if current_file != new_file && self.active_includes.contains_key(&new_file) {
+            let edge = (current_file, new_file);
+            if !self.diagnosed_include_cycles.contains_key(&edge) {
+                self.session.handler.emit(&recursive_include_cycle(directive_span, &resolved));
+                self.diagnosed_include_cycles.insert(edge, ());
+            }
+            return Vec::new();
+        }
+
         if self.include_depth >= MAX_INCLUDE_DEPTH {
             self.session.handler.emit(&include_depth_exceeded(
                 directive_span,
@@ -360,11 +369,16 @@ impl Preprocessor<'_> {
             return Vec::new();
         }
 
-        self.active_includes.insert(new_file, ());
+        *self.active_includes.entry(new_file).or_insert(0) += 1;
         self.include_depth += 1;
         let tokens = self.run(new_file);
         self.include_depth -= 1;
-        self.active_includes.remove(&new_file);
+        if let Some(count) = self.active_includes.get_mut(&new_file) {
+            *count -= 1;
+            if *count == 0 {
+                self.active_includes.remove(&new_file);
+            }
+        }
 
         // First-inclusion fingerprinting: scan for both the
         // `#pragma once` marker and the canonical `#ifndef` guard
@@ -462,6 +476,25 @@ fn include_depth_exceeded(span: Span, path: &Path, limit: usize) -> Diagnostic {
                 .into(),
         ],
         help: vec!["break the include cycle or add a guard around the recursive include".into()],
+    }
+}
+
+fn recursive_include_cycle(span: Span, path: &Path) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0021),
+        message: format!("recursive include cycle while loading `{}`", path.display()),
+        labels: vec![Label {
+            span,
+            message: "this include target is already active in the include stack".into(),
+            primary: true,
+        }],
+        notes: vec![
+            "the preprocessor skipped this recursive edge so malformed include graphs do not \
+             grow exponentially"
+                .into(),
+        ],
+        help: vec!["add an include guard or `#pragma once` to the recursive header".into()],
     }
 }
 
@@ -850,6 +883,86 @@ mod tests {
         assert_eq!(diags.len(), 1, "expected one include-depth diagnostic: {diags:?}");
         assert_eq!(diags[0].code, Some(E0021));
         assert!(diags[0].message.contains("include nesting exceeds"));
+    }
+
+    #[test]
+    fn finite_macro_controlled_self_include_is_allowed() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_self_include__");
+        let main_path = root.join("main.c");
+        let self_path = root.join("self.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"self.h\"\n"));
+        sess.add_virtual_file(
+            self_path.clone(),
+            Arc::from(
+                r#"
+#if !defined(STEP)
+#define STEP 0
+#include "self.h"
+#undef STEP
+#define STEP 1
+#include "self.h"
+#elif STEP == 0
+int first;
+#elif STEP == 1
+int second;
+#endif
+"#,
+            ),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = out
+            .iter()
+            .map(|tok| {
+                let sm = sess.source_map.read().unwrap();
+                let file = sm.file(tok.span.file);
+                file.src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
+            })
+            .collect::<String>();
+
+        assert!(cap.diagnostics().is_empty(), "finite self-include must not diagnose");
+        assert!(text.contains("intfirst;"), "first branch missing from {text}");
+        assert!(text.contains("intsecond;"), "second branch missing from {text}");
+    }
+
+    #[test]
+    fn recursive_virtual_include_graph_deduplicates_cycle_diagnostics() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_fuzz_vfs__");
+        let main_path = root.join("main.c");
+        let test_path = root.join("test.h");
+        let include1_path = root.join("include1.h");
+        let include2_path = root.join("include2.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"test.h\"\n"));
+        sess.add_virtual_file(
+            test_path.clone(),
+            Arc::from("#include \"include1.h\"\nint test_header;\n#include \"include2.h\"\n"),
+        );
+        sess.add_virtual_file(
+            include1_path.clone(),
+            Arc::from("#include \"test.h\"\nint include1_header;\n#include \"include2.h\"\n"),
+        );
+        sess.add_virtual_file(
+            include2_path.clone(),
+            Arc::from("#include \"test.h\"\nint include2_header;\n"),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+
+        assert!(!out.is_empty(), "cycle recovery should keep non-include tokens");
+        let diags = cap.diagnostics();
+        assert!(
+            (2..=3).contains(&diags.len()),
+            "expected a small deduplicated diagnostic set, got {}: {diags:?}",
+            diags.len()
+        );
+        assert!(
+            diags.iter().all(|diag| diag.message.contains("recursive include cycle")),
+            "all diagnostics should be cycle diagnostics: {diags:?}"
+        );
     }
 
     #[test]

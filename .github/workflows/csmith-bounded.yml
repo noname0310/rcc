@@ -55,6 +55,7 @@ jobs:
           set -euo pipefail
           cmake -S third_party/testsuites/csmith -B third_party/testsuites/csmith/build -DCMAKE_BUILD_TYPE=Release
           cmake --build third_party/testsuites/csmith/build --target csmith --parallel 2
+          cmake --build third_party/testsuites/csmith/build --target headers --parallel 2
 
       - name: Build rcc with LLVM
         run: cargo build --release --bin rcc --features rcc_codegen_llvm/llvm
@@ -69,6 +70,7 @@ jobs:
             --host-cc cc \
             --csmith third_party/testsuites/csmith/build/src/csmith \
             --runtime-include third_party/testsuites/csmith/runtime \
+            --runtime-include third_party/testsuites/csmith/build/runtime \
             --iterations "${CSMITH_ITERATIONS}" \
             --max-duration-secs "${CSMITH_MAX_DURATION}" \
             --max-source-bytes "${CSMITH_MAX_SOURCE_BYTES}" \

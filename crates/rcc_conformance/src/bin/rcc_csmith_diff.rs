@@ -21,8 +21,8 @@ struct Cli {
     host_cc: PathBuf,
     #[arg(long)]
     csmith: Option<PathBuf>,
-    #[arg(long)]
-    runtime_include: Option<PathBuf>,
+    #[arg(long = "runtime-include", value_name = "DIR")]
+    runtime_includes: Vec<PathBuf>,
     #[arg(long, default_value_t = 1)]
     iterations: u32,
     #[arg(long)]
@@ -46,7 +46,7 @@ struct Config {
     rcc: PathBuf,
     host_cc: PathBuf,
     csmith: PathBuf,
-    runtime_include: PathBuf,
+    runtime_includes: Vec<PathBuf>,
     iterations: u32,
     seed: u64,
     max_source_bytes: usize,
@@ -151,9 +151,11 @@ fn run_cli() -> anyhow::Result<Report> {
         rcc: cli.rcc,
         host_cc: cli.host_cc,
         csmith: cli.csmith.unwrap_or_else(|| default_csmith_path(&root)),
-        runtime_include: cli
-            .runtime_include
-            .unwrap_or_else(|| root.join("third_party/testsuites/csmith/runtime")),
+        runtime_includes: if cli.runtime_includes.is_empty() {
+            default_csmith_runtime_includes(&root)
+        } else {
+            dedupe_paths(cli.runtime_includes)
+        },
         iterations: cli.iterations,
         seed: cli.seed.unwrap_or_else(default_seed),
         max_source_bytes: cli.max_source_bytes,
@@ -225,7 +227,7 @@ fn run_case(config: &Config, case_dir: &Path, source: &Path) -> anyhow::Result<C
 
     let host_compile = compile_with_host_cc(
         &config.host_cc,
-        &config.runtime_include,
+        &config.runtime_includes,
         source,
         &host_exe,
         config.timeout,
@@ -237,7 +239,7 @@ fn run_case(config: &Config, case_dir: &Path, source: &Path) -> anyhow::Result<C
     }
 
     let rcc_compile =
-        compile_with_rcc(&config.rcc, &config.runtime_include, source, &rcc_exe, config.timeout)?;
+        compile_with_rcc(&config.rcc, &config.runtime_includes, source, &rcc_exe, config.timeout)?;
     if !rcc_compile.status.success() {
         return Ok(CaseOutcome::RccCompileFailed {
             stderr: truncate_utf8(&rcc_compile.stderr, 1024),
@@ -275,13 +277,15 @@ fn generate_csmith(csmith: &Path, seed: u64, timeout: Duration) -> anyhow::Resul
 
 fn compile_with_host_cc(
     cc: &Path,
-    runtime_include: &Path,
+    runtime_includes: &[PathBuf],
     source: &Path,
     exe: &Path,
     timeout: Duration,
 ) -> anyhow::Result<Output> {
     let mut cmd = Command::new(cc);
-    cmd.arg("-std=c99").arg("-O0").arg("-I").arg(runtime_include).arg(source).arg("-o").arg(exe);
+    cmd.arg("-std=c99").arg("-O0");
+    add_include_args(&mut cmd, runtime_includes);
+    cmd.arg(source).arg("-o").arg(exe);
     if !cfg!(windows) {
         cmd.arg("-lm");
     }
@@ -290,14 +294,21 @@ fn compile_with_host_cc(
 
 fn compile_with_rcc(
     rcc: &Path,
-    runtime_include: &Path,
+    runtime_includes: &[PathBuf],
     source: &Path,
     exe: &Path,
     timeout: Duration,
 ) -> anyhow::Result<Output> {
     let mut cmd = Command::new(rcc);
-    cmd.arg("-I").arg(runtime_include).arg(source).arg("-o").arg(exe);
+    add_include_args(&mut cmd, runtime_includes);
+    cmd.arg(source).arg("-o").arg(exe);
     run_command(&mut cmd, timeout)
+}
+
+fn add_include_args(cmd: &mut Command, dirs: &[PathBuf]) {
+    for dir in dirs {
+        cmd.arg("-I").arg(dir);
+    }
 }
 
 fn run_executable(exe: &Path, timeout: Duration) -> anyhow::Result<ExecResult> {
@@ -394,6 +405,20 @@ fn default_csmith_path(root: &Path) -> PathBuf {
     }
 }
 
+fn default_csmith_runtime_includes(root: &Path) -> Vec<PathBuf> {
+    let suite = root.join("third_party/testsuites/csmith");
+    dedupe_paths(vec![suite.join("runtime"), suite.join("build/runtime")])
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.into_iter().fold(Vec::new(), |mut acc, path| {
+        if !acc.contains(&path) {
+            acc.push(path);
+        }
+        acc
+    })
+}
+
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -462,5 +487,24 @@ mod tests {
         let exe = bin.join(if cfg!(windows) { "csmith.exe" } else { "csmith" });
         std::fs::write(&exe, "").unwrap();
         assert_eq!(default_csmith_path(tmp.path()), exe);
+    }
+
+    #[test]
+    fn default_runtime_includes_cover_source_and_generated_headers() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            default_csmith_runtime_includes(root),
+            vec![
+                PathBuf::from("/repo/third_party/testsuites/csmith/runtime"),
+                PathBuf::from("/repo/third_party/testsuites/csmith/build/runtime"),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_include_dedupe_preserves_order() {
+        let a = PathBuf::from("a");
+        let b = PathBuf::from("b");
+        assert_eq!(dedupe_paths(vec![a.clone(), b.clone(), a.clone()]), vec![a, b]);
     }
 }
