@@ -18,6 +18,7 @@ Present:
 - `ctype.h`
 - `assert.h`
 - `errno.h`
+- `fenv.h`
 - `float.h`
 - `inttypes.h`
 - `iso646.h`
@@ -40,11 +41,11 @@ Present:
 Absent hosted C99/C95 headers:
 
 - `complex.h`
-- `fenv.h`
 - `tgmath.h`
 
-`complex.h`, `fenv.h`, and `tgmath.h` need separate compiler-support review.
-The others can start as ABI-facing declaration shims.
+`complex.h` and `tgmath.h` remain absent by design. They require compiler
+semantics for the C99 imaginary unit and type-generic dispatch before a header
+shim would be sound.
 
 ## Function declaration and macro coverage after `15-15`
 
@@ -77,8 +78,13 @@ because the float/long-double suffixed variants need a separate sweep.
    - Add C99 math classification/comparison macros only with sound frontend
      semantics.
 3. `15-16-complex-fenv-tgmath-review`
-   - Review and either implement or explicitly block the remaining C99 hosted
-     headers that require compiler semantics beyond declarations.
+   - Review and either implement or explicitly block the remaining semantic
+     C99 hosted headers.
+4. `15-17-complex-header-imaginary-unit`
+   - Implement `complex.h` only after the `I` / `_Complex_I` macro has sound
+     compiler support.
+5. `15-18-tgmath-type-generic-dispatch`
+   - Implement `tgmath.h` only after expression-type dispatch is available.
 
 Completed:
 
@@ -103,6 +109,10 @@ Completed:
   - Added `FP_*`, `HUGE_VAL*`, `INFINITY`, and `NAN` definitions without
     arbitrary integer stand-ins.
   - Added a compile/link/run fixture linked with `-lm`.
+- `15-16-complex-fenv-tgmath-review`
+  - Added `fenv.h` as a Linux hosted libm ABI shim and a runtime fixture.
+  - Kept `complex.h` and `tgmath.h` absent, with explicit blocker tasks for
+    imaginary-unit construction and type-generic dispatch.
 
 ## Policy
 

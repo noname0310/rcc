@@ -23,7 +23,9 @@ Compiler-owned support surface: target abstraction, freestanding headers, builti
 - [x] [13-hosted-math-declaration-sweep](13-hosted-math-declaration-sweep.md)
 - [x] [14-missing-hosted-header-files](14-missing-hosted-header-files.md)
 - [x] [15-math-classification-macros](15-math-classification-macros.md)
-- [ ] [16-complex-fenv-tgmath-review](16-complex-fenv-tgmath-review.md)
+- [x] [16-complex-fenv-tgmath-review](16-complex-fenv-tgmath-review.md)
+- [ ] [17-complex-header-imaginary-unit](17-complex-header-imaginary-unit.md)
+- [ ] [18-tgmath-type-generic-dispatch](18-tgmath-type-generic-dispatch.md)
 
 ## Downstream
 
