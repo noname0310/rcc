@@ -31,7 +31,8 @@ tasks/
 ├── 12-fuzz-differential/     ← cargo-fuzz corpora + bounded csmith differential
 ├── 13-quality/               ← opt levels, diag polish, bench, release
 ├── 14-lang-extensions/       ← _Pragma, __attribute__, __has_include, asm, -U, -M
-└── 15-builtin-rt/            ← TargetInfo, freestanding headers, __builtin_*, sysroot
+├── 15-builtin-rt/            ← TargetInfo, freestanding headers, __builtin_*, sysroot
+└── 16-linux-glibc-compat/    ← glibc/POSIX header shims, -pthread, hosted Linux probes
 ```
 
 ## Phase dependency graph
@@ -53,6 +54,7 @@ flowchart LR
     qual [13-quality]
     ext  [14-lang-extensions]
     brt  [15-builtin-rt]
+    glibc[16-linux-glibc-compat]
 
     infra --> diag
     infra --> lex
@@ -78,6 +80,9 @@ flowchart LR
     cg --> brt
     ext --> brt
     brt --> conf
+    brt --> glibc
+    ext --> glibc
+    glibc --> conf
 ```
 
 ## Task file format

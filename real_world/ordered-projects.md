@@ -13,6 +13,7 @@ with larger build systems and more platform assumptions.
 | 06 | SQLite amalgamation | <https://www.sqlite.org/howtocompile.html> | compile `sqlite3.c` as an object before attempting shell linkage | run one in-memory query if shell/library linkage works | single huge translation unit, strong stress test |
 | 07 | MuJS | <https://mujs.com/introduction.html> | compile core objects only | run a tiny expression if executable linkage works | small embeddable JS engine, more complex control flow |
 | 08 | QuickJS | <https://bellard.org/quickjs/> | compile selected core objects only | run a tiny expression only after GNU/platform blockers are resolved | hard target with GNU/platform assumptions |
+| 09 | GNU coreutils | <https://github.com/coreutils/coreutils> | host-bootstrap/configure first, then compile one small utility with `rcc` | run that utility against host output once linkage works | glibc/POSIX/GNU userland target with heavy gnulib and hosted-header assumptions |
 
 ## Start rule
 
@@ -35,4 +36,3 @@ to reproduce it:
 - `rcc` command and observed output
 - runtime command and output comparison, when applicable
 - compiler task links for every discovered `rcc` defect
-
