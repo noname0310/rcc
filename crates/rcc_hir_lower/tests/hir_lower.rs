@@ -3283,7 +3283,14 @@ fn snippet_typeck_preserves_global_string_pointer_initializer() {
         panic!("expected initialized global");
     };
     assert_eq!(init.entries.len(), 1);
-    assert!(matches!(init.entries[0].value, GlobalInitValue::StringLiteral(_)));
+    let GlobalInitValue::Address { def: Some(string_def), offset: 0 } = init.entries[0].value
+    else {
+        panic!("string pointer initializer should fold to the literal address");
+    };
+    assert!(
+        matches!(hir.defs[string_def].kind, DefKind::Global { init: Some(_), .. }),
+        "string literal address should target a synthetic initialized global"
+    );
     assert!(
         cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
         "string literal pointer initializer should not emit E0084"

@@ -334,6 +334,7 @@ impl<'a> ConstEval<'a> {
     /// `- icex` integer-constant offsets):
     /// * `&obj` where `obj` is a global / function (rvalue address).
     /// * `arr` where `arr` is a global array (decays to its address).
+    /// * string literals, which are addressable static array objects.
     /// * `func` where `func` is a function designator.
     /// * `&arr[N]` — folded to `(arr, N * sizeof(elem))`.
     /// * `(T*) 0` and `(T*) 0 + N` — folded to `(None, N * sizeof(T))`.
@@ -359,6 +360,7 @@ impl<'a> ConstEval<'a> {
                     _ => None,
                 }
             }
+            HirExprKind::StringRef(def_id) => Some((Some(def_id), 0)),
 
             // `&expr` ----------------------------------------------------
             HirExprKind::AddressOf(operand) => self.eval_address_of(operand),
@@ -1483,6 +1485,49 @@ mod tests {
 
         let mut ce = ConstEval::with_defs_and_session(&tcx, Some(&body), Some(&defs), None);
         assert_eq!(ce.eval_address(added), Some((Some(arr_did), 12)));
+    }
+
+    /// `(char *)"..."` is an address constant expression in a static
+    /// initializer. zlib uses this shape for `z_errmsg[]`.
+    #[test]
+    fn eval_address_casted_string_literal() {
+        use rcc_hir::{Def, Linkage, ObjectQuals, Qual};
+        let mut tcx = TyCtxt::new();
+        let mut body = Body::default();
+        let mut defs: IndexVec<DefId, Def> = IndexVec::new();
+
+        let char_ty = tcx.char_;
+        let str_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(char_ty), len: Some(6), is_vla: false });
+        let char_ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(char_ty)));
+        let str_def = defs.push(Def {
+            id: DefId(0),
+            name: rcc_span::Symbol(0),
+            span: DUMMY_SP,
+            kind: DefKind::Global {
+                ty: str_ty,
+                quals: ObjectQuals::none(),
+                linkage: Linkage::Internal,
+                init: None,
+            },
+        });
+        defs[str_def].id = str_def;
+
+        let sref = push(&mut body, str_ty, HirExprKind::StringRef(str_def));
+        let decayed = push(
+            &mut body,
+            char_ptr_ty,
+            HirExprKind::Convert { operand: sref, kind: ConvertKind::ArrayToPtr },
+        );
+        let casted =
+            push(&mut body, char_ptr_ty, HirExprKind::Cast { operand: decayed, to: char_ptr_ty });
+
+        let mut ce = ConstEval::with_defs_and_session(&tcx, Some(&body), Some(&defs), None);
+        assert_eq!(ce.eval_address(casted), Some((Some(str_def), 0)));
+        assert_eq!(
+            ce.eval_scalar(casted),
+            Some(ConstScalar::Address { def: Some(str_def), offset: 0 })
+        );
     }
 
     /// `(char*)0 + 5` ⇒ `Address { def: None, offset: 5 }`.

@@ -31,6 +31,7 @@ Every HirExpr gets a real TyId, every C99 (S)6.3 conversion is inserted, constan
 - [x] [21-aggregate-rvalue-member-access](21-aggregate-rvalue-member-access.md)
 - [x] [22-hex-integer-constant-typing](22-hex-integer-constant-typing.md)
 - [x] [23-local-const-aggregate-initializer](23-local-const-aggregate-initializer.md)
+- [x] [24-casted-string-global-initializer](24-casted-string-global-initializer.md)
 
 ## Downstream
 
