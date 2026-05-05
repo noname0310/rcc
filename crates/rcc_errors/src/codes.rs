@@ -116,6 +116,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0024, W0024_DESC),
     (W0025, W0025_DESC),
     (W0026, W0026_DESC),
+    (W0027, W0027_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -900,6 +901,13 @@ const W0025_DESC: &str = "GNU __alignof__ expression extension";
 /// `-Werror=unused-variable` enables the `unused-variable` analysis warning.
 pub const W0026: &str = "W0026";
 const W0026_DESC: &str = "unused local variable";
+
+/// Internal-linkage function defined but never referenced.
+///
+/// Emitted only when `-Wall`, `-Wextra`, `-Wunused-function`, or
+/// `-Werror=unused-function` enables the `unused-function` analysis warning.
+pub const W0027: &str = "W0027";
+const W0027_DESC: &str = "unused static function";
 
 #[cfg(test)]
 mod tests {

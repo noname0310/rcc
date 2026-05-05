@@ -159,7 +159,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         names: &["implicit-function-declaration"],
         category: WarningCategory::Wall,
     },
-    WarningRecord { code: None, names: &["unused-function"], category: WarningCategory::Wall },
+    WarningRecord {
+        code: Some(codes::W0027),
+        names: &["unused-function"],
+        category: WarningCategory::Wall,
+    },
     WarningRecord {
         code: Some(codes::W0026),
         names: &["unused-variable"],

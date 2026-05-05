@@ -1429,3 +1429,17 @@ int f(void) {
 
 Assignments and initializers alone do not count as reads. Volatile locals and
 function parameters are excluded from this warning.
+
+## W0027 — unused static function
+
+A `static` function definition has internal linkage and is not referenced in
+the current translation unit. This is an opt-in analysis warning enabled by
+`-Wall`, `-Wextra`, `-Wunused-function`, or `-Werror=unused-function`:
+
+```c
+static int helper(void) { return 1; }  // warning[W0027]: unused function `helper` [-Wunused-function]
+int main(void) { return 0; }
+```
+
+External-linkage functions are not diagnosed because another translation unit
+may reference them.

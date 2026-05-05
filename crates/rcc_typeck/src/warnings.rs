@@ -3,23 +3,50 @@
 use std::collections::BTreeSet;
 
 use rcc_errors::codes;
-use rcc_hir::{Body, HirCrate, HirExprId, HirExprKind, HirStmtId, HirStmtKind, Local, Ty, TyCtxt};
+use rcc_hir::{
+    Body, DefId, DefKind, HirCrate, HirExprId, HirExprKind, HirStmtId, HirStmtKind, Local, Ty,
+    TyCtxt,
+};
 use rcc_session::Session;
 
 /// Run typed-HIR warning checks.
 pub fn check_warnings(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
+    warn_unused_functions(session, tcx, hir);
     for body in hir.bodies.values() {
         warn_unused_variables_in_body(session, tcx, body);
     }
 }
 
-fn warn_unused_variables_in_body(session: &mut Session, tcx: &TyCtxt, body: &Body) {
-    let Some(root) = body.root else {
-        return;
-    };
+fn warn_unused_functions(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
+    let referenced = collect_referenced_defs(tcx, hir);
+    for (def_id, def) in hir.defs.iter_enumerated() {
+        let DefKind::Function { has_body: true, is_static: true, .. } = def.kind else {
+            continue;
+        };
+        if referenced.contains(&def_id) {
+            continue;
+        }
+        let name = session.interner.get(def.name);
+        session
+            .handler
+            .struct_warn(def.span, format!("unused function `{name}` [-Wunused-function]"))
+            .code(codes::W0027)
+            .help("remove the function, reference it, or suppress with `-Wno-unused-function`")
+            .emit();
+    }
+}
 
+fn collect_referenced_defs(tcx: &TyCtxt, hir: &HirCrate) -> BTreeSet<DefId> {
     let mut usage = LocalUsage::new();
-    UsageWalker { body, tcx, usage: &mut usage }.visit_stmt(root);
+    for body in hir.bodies.values().chain(hir.global_init_bodies.values()) {
+        UsageWalker { body, tcx, usage: &mut usage }.visit_reachable_body();
+    }
+    usage.def_refs
+}
+
+fn warn_unused_variables_in_body(session: &mut Session, tcx: &TyCtxt, body: &Body) {
+    let mut usage = LocalUsage::new();
+    UsageWalker { body, tcx, usage: &mut usage }.visit_reachable_body();
 
     for (local, decl) in body.locals.iter_enumerated() {
         if decl.is_param || decl.name.is_none() || decl.quals.is_volatile {
@@ -42,11 +69,12 @@ fn warn_unused_variables_in_body(session: &mut Session, tcx: &TyCtxt, body: &Bod
 struct LocalUsage {
     declared: BTreeSet<Local>,
     read: BTreeSet<Local>,
+    def_refs: BTreeSet<DefId>,
 }
 
 impl LocalUsage {
     fn new() -> Self {
-        Self { declared: BTreeSet::new(), read: BTreeSet::new() }
+        Self { declared: BTreeSet::new(), read: BTreeSet::new(), def_refs: BTreeSet::new() }
     }
 }
 
@@ -57,6 +85,16 @@ struct UsageWalker<'a> {
 }
 
 impl UsageWalker<'_> {
+    fn visit_reachable_body(&mut self) {
+        if let Some(root) = self.body.root {
+            self.visit_stmt(root);
+        } else {
+            for (expr, _) in self.body.exprs.iter_enumerated() {
+                self.visit_value_expr(expr);
+            }
+        }
+    }
+
     fn visit_stmt(&mut self, stmt: HirStmtId) {
         match &self.body.stmts[stmt].kind {
             HirStmtKind::Block(stmts) => {
@@ -124,11 +162,13 @@ impl UsageWalker<'_> {
             | HirExprKind::IntConst(_)
             | HirExprKind::FloatConst(_)
             | HirExprKind::StringRef(_)
-            | HirExprKind::DefRef(_)
             | HirExprKind::SizeofType(_)
             | HirExprKind::AlignofType(_)
             | HirExprKind::LabelAddr(_)
             | HirExprKind::BuiltinVaArea => {}
+            HirExprKind::DefRef(def) => {
+                self.usage.def_refs.insert(*def);
+            }
             HirExprKind::LocalRef(local) => {
                 self.usage.read.insert(*local);
             }
@@ -314,13 +354,13 @@ impl UsageWalker<'_> {
 mod tests {
     use rcc_errors::{codes, Level};
     use rcc_hir::{
-        Body, HirExpr, HirExprId, HirExprKind, HirStmt, HirStmtId, HirStmtKind, Local, LocalDecl,
-        ObjectQuals, TyCtxt, ValueCat,
+        Body, Def, DefId, DefKind, HirCrate, HirExpr, HirExprId, HirExprKind, HirStmt, HirStmtId,
+        HirStmtKind, Local, LocalDecl, ObjectQuals, Ty, TyCtxt, ValueCat,
     };
     use rcc_session::{Session, WarningConfig};
     use rcc_span::DUMMY_SP;
 
-    use super::warn_unused_variables_in_body;
+    use super::{warn_unused_functions, warn_unused_variables_in_body};
 
     fn enable_wall(session: &mut Session) {
         let mut config = WarningConfig::default();
@@ -376,6 +416,40 @@ mod tests {
         let decl = push_stmt(&mut body, HirStmtKind::LocalDecl { local, init: None });
         body.root = Some(push_stmt(&mut body, HirStmtKind::Block(vec![decl])));
         (body, tcx, local)
+    }
+
+    fn push_function_def(
+        hir: &mut HirCrate,
+        session: &mut Session,
+        tcx: &mut TyCtxt,
+        name: &str,
+        is_static: bool,
+        has_body: bool,
+    ) -> DefId {
+        let fn_ty =
+            tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: true });
+        let name = session.interner.intern(name);
+        let id = hir.defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Function {
+                ty: fn_ty,
+                has_body,
+                is_static,
+                is_inline: false,
+                is_extern_inline: false,
+                no_instrument_function: false,
+                variadic: false,
+            },
+        });
+        hir.defs[id].id = id;
+        if has_body {
+            let mut body = Body::default();
+            body.root = Some(push_stmt(&mut body, HirStmtKind::Block(Vec::new())));
+            hir.bodies.insert(id, body);
+        }
+        id
     }
 
     #[test]
@@ -441,6 +515,49 @@ mod tests {
         let (body, tcx, _) = one_local_body(&mut session, true);
 
         warn_unused_variables_in_body(&mut session, &tcx, &body);
+
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn warns_for_unreferenced_static_function() {
+        let (mut session, cap) = Session::for_test();
+        enable_wall(&mut session);
+        let mut tcx = TyCtxt::new();
+        let mut hir = HirCrate::default();
+        push_function_def(&mut hir, &mut session, &mut tcx, "helper", true, true);
+        push_function_def(&mut hir, &mut session, &mut tcx, "main", false, true);
+
+        warn_unused_functions(&mut session, &tcx, &hir);
+
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].level, Level::Warning);
+        assert_eq!(diags[0].code, Some(codes::W0027));
+        assert!(diags[0].message.contains("[-Wunused-function]"));
+    }
+
+    #[test]
+    fn def_ref_suppresses_unused_function_warning() {
+        let (mut session, cap) = Session::for_test();
+        enable_wall(&mut session);
+        let mut tcx = TyCtxt::new();
+        let mut hir = HirCrate::default();
+        let helper = push_function_def(&mut hir, &mut session, &mut tcx, "helper", true, true);
+        let main = push_function_def(&mut hir, &mut session, &mut tcx, "main", false, true);
+        let helper_ty = match hir.defs[helper].kind {
+            DefKind::Function { ty, .. } => ty,
+            _ => unreachable!(),
+        };
+        let body = hir.bodies.get_mut(&main).expect("main body exists");
+        let helper_ref = push_expr(body, helper_ty, HirExprKind::DefRef(helper));
+        let stmt = push_stmt(body, HirStmtKind::Expr(helper_ref));
+        let HirStmtKind::Block(stmts) = &mut body.stmts[body.root.unwrap()].kind else {
+            panic!("root is block");
+        };
+        stmts.push(stmt);
+
+        warn_unused_functions(&mut session, &tcx, &hir);
 
         assert!(cap.diagnostics().is_empty());
     }

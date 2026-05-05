@@ -222,3 +222,56 @@ fn wno_and_werror_unused_variable_are_honored() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0026));
 }
+
+#[test]
+fn wall_emits_unused_static_function_warning() {
+    let (_, cap) = compile_warning_source(
+        "unused-function",
+        "static int helper(void) { return 1; }\nint main(void) { return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0027));
+    assert!(diags[0].message.contains("[-Wunused-function]"));
+}
+
+#[test]
+fn called_or_external_function_suppresses_unused_function_warning() {
+    let (_, called) = compile_warning_source(
+        "used-function",
+        "static int helper(void) { return 1; }\nint main(void) { return helper(); }\n",
+        &["-Wall", "--emit=hir"],
+    );
+    assert!(called.diagnostics().is_empty());
+
+    let (_, external) = compile_warning_source(
+        "external-function",
+        "int helper(void) { return 1; }\nint main(void) { return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+    assert!(external.diagnostics().is_empty());
+}
+
+#[test]
+fn wno_and_werror_unused_function_are_honored() {
+    let (_, suppressed) = compile_warning_source(
+        "unused-function-wno",
+        "static int helper(void) { return 1; }\nint main(void) { return 0; }\n",
+        &["-Wall", "-Wno-unused-function", "--emit=hir"],
+    );
+    assert!(suppressed.diagnostics().is_empty());
+
+    let (session, promoted) = compile_warning_source(
+        "unused-function-werror",
+        "static int helper(void) { return 1; }\nint main(void) { return 0; }\n",
+        &["-Werror=unused-function", "--emit=hir"],
+    );
+    let diags = promoted.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0027));
+}

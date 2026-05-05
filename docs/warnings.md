@@ -74,7 +74,7 @@ These warnings are opt-in analysis warnings. A detector must call
 | Name | Owner |
 |------|-------|
 | `implicit-function-declaration` | `tasks/13-quality/03d-implicit-function-declaration-warning.md` |
-| `unused-function` | `tasks/13-quality/03b-unused-function-warning.md` |
+| `unused-function` (`W0027`) | `tasks/13-quality/03b-unused-function-warning.md` |
 | `unused-variable` (`W0026`) | `tasks/13-quality/03a-unused-variable-warning.md` |
 
 ## `-Wextra`
