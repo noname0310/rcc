@@ -386,6 +386,54 @@ int main(void) {
 }
 
 #[test]
+fn posix_core_type_headers_parse_and_lower_for_linux_target() {
+    let input = TempCFile::new(
+        "posix-core-types",
+        r#"
+#include <sys/types.h>
+#include <unistd.h>
+#include <signal.h>
+#include <time.h>
+
+static void on_signal(int signo) {
+    (void)signo;
+}
+
+ssize_t rw_once(int fd, void *buf, size_t n) {
+    off_t off = lseek(fd, (off_t)0, SEEK_SET);
+    pid_t pid = getpid();
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    mode_t mode = (mode_t)0;
+    time_t now = time(0);
+    clockid_t cid = CLOCK_MONOTONIC;
+    struct timespec ts;
+    sighandler_t handler = on_signal;
+    signal(2, handler);
+    clock_gettime(cid, &ts);
+    return off == (off_t)-1 || pid == (pid_t)-1 || uid == (uid_t)-1 ||
+           gid == (gid_t)-1 || mode == (mode_t)-1 || now == (time_t)-1
+        ? (ssize_t)-1
+        : write(fd, buf, n);
+}
+"#,
+    );
+    let output = input.sibling("hir");
+    let result = Command::new(rcc_bin())
+        .arg("--target=x86_64-unknown-linux-gnu")
+        .arg("--linux-gnu-hosted")
+        .arg("--emit=hir")
+        .arg("-o")
+        .arg(&output)
+        .arg(&input.path)
+        .output()
+        .expect("run rcc");
+
+    assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(output.exists(), "HIR output should be emitted after POSIX type lowering");
+}
+
+#[test]
 fn isystem_spelling_maps_to_system_include_options() {
     let first = PathBuf::from("first-system-include");
     let second = PathBuf::from("second-system-include");

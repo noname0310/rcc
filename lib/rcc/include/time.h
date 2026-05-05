@@ -2,11 +2,16 @@
 #define __RCC_TIME_H
 
 #include <stddef.h>
+#include <sys/types.h>
 
-typedef long clock_t;
-typedef long time_t;
+struct timespec {
+    time_t tv_sec;
+    long tv_nsec;
+};
 
 #define CLOCKS_PER_SEC 1000000L
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
 
 struct tm {
     int tm_sec;
@@ -29,5 +34,8 @@ extern char *ctime(const time_t *);
 extern struct tm *gmtime(const time_t *);
 extern struct tm *localtime(const time_t *);
 extern size_t strftime(char *, size_t, const char *, const struct tm *);
+extern int clock_gettime(clockid_t, struct timespec *);
+extern int clock_settime(clockid_t, const struct timespec *);
+extern int nanosleep(const struct timespec *, struct timespec *);
 
 #endif

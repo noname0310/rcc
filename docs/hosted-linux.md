@@ -103,6 +103,14 @@ The exposed object types (`pthread_attr_t`, `pthread_mutex_t`,
 placeholders for the current glibc-oriented probes, not scheduler or locking
 implementations. Programs must still link with `-pthread`.
 
+Core POSIX scalar typedefs live in `lib/rcc/include/bits/rcc-posix-types.h` and
+are re-exported through `sys/types.h`, `time.h`, `unistd.h`, and `signal.h`.
+This keeps `pid_t`, `uid_t`, `gid_t`, `mode_t`, `off_t`, `ssize_t`, `time_t`,
+`clockid_t`, and related names single-sourced inside rcc's resource headers.
+The current definitions match the LP64 glibc-oriented hosted probes; adding a
+layout-sensitive type for another data model requires a target-info-backed
+test.
+
 ## Common Glibc Annotation Macros
 
 `lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc

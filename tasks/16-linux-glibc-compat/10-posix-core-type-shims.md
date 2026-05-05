@@ -1,5 +1,7 @@
 # 16-10: POSIX Core Type Shims
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-09-pthread-header-shim  
 **Milestone:** hosted-linux
@@ -18,9 +20,9 @@ project headers.
 
 ## Acceptance
 
-- [ ] The audited type names have one canonical source in rcc resources or host
+- [x] The audited type names have one canonical source in rcc resources or host
       headers.
-- [ ] `pid_t`, `size_t`, `ssize_t`, `off_t`, `time_t`, and signal handler forms
+- [x] `pid_t`, `size_t`, `ssize_t`, `off_t`, `time_t`, and signal handler forms
       parse and lower.
-- [ ] No shim changes object layout assumptions without a target-info entry.
-- [ ] GNU coreutils `true.c` advances past core POSIX type parsing.
+- [x] No shim changes object layout assumptions without a target-info entry.
+- [x] GNU coreutils `true.c` advances past core POSIX type parsing.
