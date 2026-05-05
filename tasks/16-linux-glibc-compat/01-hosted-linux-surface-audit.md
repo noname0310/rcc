@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 16-01: Hosted Linux Surface Audit
 
 **Phase:** 16-linux-glibc-compat  
