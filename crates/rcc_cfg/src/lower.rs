@@ -394,6 +394,13 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             push_assign(builder, span, temp, Rvalue::BuiltinBswap { value, bits: *bits, ty });
             Operand::Copy(Place { base: temp, projection: Vec::new() })
         }
+        HirExprKind::BuiltinComplex { real, imag } => {
+            let real = lower_as_rvalue(builder, cx, *real);
+            let imag = lower_as_rvalue(builder, cx, *imag);
+            let temp = builder.alloc_temp(ty, span);
+            push_assign(builder, span, temp, Rvalue::ComplexFromParts { real, imag, to: ty });
+            Operand::Copy(Place { base: temp, projection: Vec::new() })
+        }
         HirExprKind::Assign { lhs, rhs } => {
             if let Some(parts) = compound_assign_parts(cx, *lhs, *rhs) {
                 return lower_compound_assign(builder, cx, span, *lhs, parts);

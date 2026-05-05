@@ -1790,6 +1790,10 @@ fn populate_switch_case_tables_in_expr(
         HirExprKind::BuiltinBswap { value, .. } => {
             populate_switch_case_tables_in_expr(body, value, switch_depth, session);
         }
+        HirExprKind::BuiltinComplex { real, imag } => {
+            populate_switch_case_tables_in_expr(body, real, switch_depth, session);
+            populate_switch_case_tables_in_expr(body, imag, switch_depth, session);
+        }
         HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
             populate_switch_case_tables_in_expr(body, lhs, switch_depth, session);
             populate_switch_case_tables_in_expr(body, rhs, switch_depth, session);
@@ -4402,6 +4406,39 @@ pub fn lower_expr(
                             value_cat: ValueCat::RValue,
                             span: expr.span,
                             kind: HirExprKind::BuiltinBswap { bits, value },
+                        });
+                        body.exprs[id].id = id;
+                        return id;
+                    }
+                    "__builtin_complex" => {
+                        if args.len() != 2 {
+                            session
+                                .handler
+                                .struct_err(
+                                    expr.span,
+                                    "`__builtin_complex` requires exactly 2 arguments",
+                                )
+                                .emit();
+                            let id = body.exprs.push(HirExpr {
+                                id: HirExprId(0),
+                                ty: tcx.error,
+                                value_cat: ValueCat::RValue,
+                                span: expr.span,
+                                kind: HirExprKind::IntConst(0),
+                            });
+                            body.exprs[id].id = id;
+                            return id;
+                        }
+                        let real =
+                            lower_expr(&args[0], body, scope, crate_, tcx, resolver, session);
+                        let imag =
+                            lower_expr(&args[1], body, scope, crate_, tcx, resolver, session);
+                        let id = body.exprs.push(HirExpr {
+                            id: HirExprId(0),
+                            ty: tcx.error,
+                            value_cat: ValueCat::RValue,
+                            span: expr.span,
+                            kind: HirExprKind::BuiltinComplex { real, imag },
                         });
                         body.exprs[id].id = id;
                         return id;

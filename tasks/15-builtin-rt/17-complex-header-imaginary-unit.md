@@ -1,5 +1,7 @@
 # 15-17: Complex header imaginary unit support
 
+> ✓ done — 2026-05-05
+
 **Phase:** 15-builtin-rt    **Depends on:** 15-16    **Milestone:** real-world-03
 
 ## Goal
@@ -20,11 +22,10 @@ soundly.
   expression that loses the imaginary component.
 
 ## Acceptance
-- `#include <complex.h>` exposes a standard-compatible imaginary unit.
-- `double complex z = 2.0 + 3.0 * I;` compiles, links, runs, and verifies real
+- [x] `#include <complex.h>` exposes a standard-compatible imaginary unit.
+- [x] `double complex z = 2.0 + 3.0 * I;` compiles, links, runs, and verifies real
   and imaginary parts.
-- Complex function declarations are ABI-compatible with host libm on the
+- [x] Complex function declarations are ABI-compatible with host libm on the
   current Linux target.
-- If `_Imaginary` remains unsupported, the header does not expose
+- [x] If `_Imaginary` remains unsupported, the header does not expose
   `_Imaginary_I`.
-

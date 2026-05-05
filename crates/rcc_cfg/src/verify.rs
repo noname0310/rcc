@@ -312,6 +312,11 @@ fn verify_rvalue_typed(
             let _ = verify_operand_typed(body, tcx, hir, real, at, errors);
             Some(InferredTy::Known(*to))
         }
+        Rvalue::ComplexFromParts { real, imag, to } => {
+            let _ = verify_operand_typed(body, tcx, hir, real, at.clone(), errors);
+            let _ = verify_operand_typed(body, tcx, hir, imag, at, errors);
+            Some(InferredTy::Known(*to))
+        }
         Rvalue::RealFromComplex { complex, to } => {
             let _ = verify_operand_typed(body, tcx, hir, complex, at, errors);
             Some(InferredTy::Known(*to))

@@ -218,6 +218,10 @@ impl DeprecatedWalker<'_, '_> {
             HirExprKind::BuiltinUnreachable => {}
             HirExprKind::BuiltinConstantP { expr } => self.visit_expr(*expr),
             HirExprKind::BuiltinBswap { value, .. } => self.visit_expr(*value),
+            HirExprKind::BuiltinComplex { real, imag } => {
+                self.visit_expr(*real);
+                self.visit_expr(*imag);
+            }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.visit_expr(*lhs);
                 self.visit_expr(*rhs);
@@ -593,6 +597,10 @@ impl UsageWalker<'_> {
             HirExprKind::BuiltinUnreachable => {}
             HirExprKind::BuiltinConstantP { expr } => self.visit_value_expr(*expr),
             HirExprKind::BuiltinBswap { value, .. } => self.visit_value_expr(*value),
+            HirExprKind::BuiltinComplex { real, imag } => {
+                self.visit_value_expr(*real);
+                self.visit_value_expr(*imag);
+            }
             HirExprKind::BuiltinOverflow { lhs, rhs, dst, .. } => {
                 self.visit_value_expr(*lhs);
                 self.visit_value_expr(*rhs);

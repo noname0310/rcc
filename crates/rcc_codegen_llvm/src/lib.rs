@@ -3064,6 +3064,9 @@ pub mod backend {
                 Rvalue::ComplexFromReal { real, to } => {
                     self.emit_complex_from_real(real, *to, locals, body)
                 }
+                Rvalue::ComplexFromParts { real, imag, to } => {
+                    self.emit_complex_from_parts(real, imag, *to, locals, body)
+                }
                 Rvalue::RealFromComplex { complex, to } => {
                     self.emit_real_from_complex(complex, *to, locals, body)
                 }
@@ -3740,6 +3743,22 @@ pub mod backend {
             self.build_complex_value(to, real, imag)
         }
 
+        fn emit_complex_from_parts(
+            &self,
+            real: &Operand,
+            imag: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let Ty::Complex(kind) = self.tcx.get(to) else {
+                return Err(type_lowering_error(to, "complex constructor target is not complex"));
+            };
+            let real = self.emit_real_operand_as_float_kind(real, *kind, locals, body)?;
+            let imag = self.emit_real_operand_as_float_kind(imag, *kind, locals, body)?;
+            self.build_complex_value(to, real, imag)
+        }
+
         fn emit_real_from_complex(
             &self,
             complex: &Operand,
@@ -3768,7 +3787,15 @@ pub mod backend {
                 CastKind::IntToInt => self.emit_int_to_int_cast(operand, to, locals, body),
                 CastKind::IntToFloat => self.emit_int_to_float_cast(operand, to, locals, body),
                 CastKind::FloatToInt => self.emit_float_to_int_cast(operand, to, locals, body),
-                CastKind::FloatToFloat => self.emit_float_to_float_cast(operand, to, locals, body),
+                CastKind::FloatToFloat => {
+                    if matches!(self.tcx.get(self.operand_ty(operand, body)?), Ty::Complex(_))
+                        || matches!(self.tcx.get(to), Ty::Complex(_))
+                    {
+                        self.emit_complex_to_complex_cast(operand, to, locals, body)
+                    } else {
+                        self.emit_float_to_float_cast(operand, to, locals, body)
+                    }
+                }
                 CastKind::PtrToPtr => self.emit_ptr_to_ptr_cast(operand, to, locals, body),
                 CastKind::PtrToInt => self.emit_ptr_to_int_cast(operand, to, locals, body),
                 CastKind::IntToPtr => self.emit_int_to_ptr_cast(operand, to, locals, body),
@@ -3957,6 +3984,38 @@ pub mod backend {
             Ok(cast.as_basic_value_enum())
         }
 
+        fn emit_complex_to_complex_cast(
+            &self,
+            operand: &Operand,
+            to: TyId,
+            locals: &IndexVec<Local, PointerValue<'ctx>>,
+            body: &Body,
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let from_ty = self.operand_ty(operand, body)?;
+            let Ty::Complex(from_kind) = self.tcx.get(from_ty) else {
+                return Err(type_lowering_error(from_ty, "complex cast operand is not complex"));
+            };
+            let Ty::Complex(to_kind) = self.tcx.get(to) else {
+                return Err(type_lowering_error(to, "complex cast target is not complex"));
+            };
+            let value = self.emit_complex_operand(operand, locals, body)?;
+            let real = self.extract_complex_part(value, 0, "complex.cast.real.in")?;
+            let imag = self.extract_complex_part(value, 1, "complex.cast.imag.in")?;
+            let real = self.emit_float_value_between_kinds(
+                real,
+                *from_kind,
+                *to_kind,
+                "complex.cast.real",
+            )?;
+            let imag = self.emit_float_value_between_kinds(
+                imag,
+                *from_kind,
+                *to_kind,
+                "complex.cast.imag",
+            )?;
+            self.build_complex_value(to, real, imag)
+        }
+
         fn emit_ptr_to_ptr_cast(
             &self,
             operand: &Operand,
@@ -4133,6 +4192,28 @@ pub mod backend {
                     "expected real operand for complex conversion, got {:?}",
                     other.get_type()
                 ))),
+            }
+        }
+
+        fn emit_float_value_between_kinds(
+            &self,
+            value: FloatValue<'ctx>,
+            from_kind: FloatKind,
+            kind: FloatKind,
+            name: &str,
+        ) -> Result<FloatValue<'ctx>, CodegenError> {
+            let to = self.real_ty_for_float_kind(kind);
+            let BasicTypeEnum::FloatType(to_ty) = self.type_cx().basic_type_of(to)? else {
+                return Err(type_lowering_error(to, "complex component target is not floating"));
+            };
+            let from_width = self.float_ty_width(self.real_ty_for_float_kind(from_kind))?;
+            let to_width = self.float_ty_width(to)?;
+            if from_width == to_width {
+                Ok(value)
+            } else if from_width < to_width {
+                self.builder.build_float_ext(value, to_ty, name).map_err(builder_error)
+            } else {
+                self.builder.build_float_trunc(value, to_ty, name).map_err(builder_error)
             }
         }
 

@@ -815,6 +815,10 @@ fn rvalue_contains_field_projection(rvalue: &Rvalue, expected: u32) -> bool {
             operand_contains_field_projection(op, expected)
         }
         Rvalue::ComplexFromReal { real, .. } => operand_contains_field_projection(real, expected),
+        Rvalue::ComplexFromParts { real, imag, .. } => {
+            operand_contains_field_projection(real, expected)
+                || operand_contains_field_projection(imag, expected)
+        }
         Rvalue::RealFromComplex { complex, .. } => {
             operand_contains_field_projection(complex, expected)
         }
@@ -864,6 +868,9 @@ fn rvalue_contains_int_const(rvalue: &Rvalue, expected: i128) -> bool {
             operand_contains_int_const(op, expected)
         }
         Rvalue::ComplexFromReal { real, .. } => operand_contains_int_const(real, expected),
+        Rvalue::ComplexFromParts { real, imag, .. } => {
+            operand_contains_int_const(real, expected) || operand_contains_int_const(imag, expected)
+        }
         Rvalue::RealFromComplex { complex, .. } => operand_contains_int_const(complex, expected),
         Rvalue::BitfieldPrecision { op, .. } => operand_contains_int_const(op, expected),
         Rvalue::VectorInit { lanes, .. } => {
@@ -1094,6 +1101,10 @@ fn assert_rvalue_valid(name: &str, def: DefId, body: &Body, rvalue: &Rvalue) {
         }
         Rvalue::ComplexFromReal { real, .. } => {
             assert_operand_valid(name, def, body, real);
+        }
+        Rvalue::ComplexFromParts { real, imag, .. } => {
+            assert_operand_valid(name, def, body, real);
+            assert_operand_valid(name, def, body, imag);
         }
         Rvalue::RealFromComplex { complex, .. } => {
             assert_operand_valid(name, def, body, complex);

@@ -779,6 +779,40 @@ pub fn visit_expr(
             };
             expr_id
         }
+        HirExprKind::BuiltinComplex { real, imag } => {
+            let real = visit_expr(real, body, tcx, session, def_info);
+            let real = rvalue_decayed(real, body, tcx);
+            let imag = visit_expr(imag, body, tcx, session, def_info);
+            let imag = rvalue_decayed(imag, body, tcx);
+
+            let real_ty = body.exprs[real].ty;
+            let imag_ty = body.exprs[imag].ty;
+            let mut valid = true;
+            for component in [real, imag] {
+                let component_ty = body.exprs[component].ty;
+                if component_ty != tcx.error && !is_real_arithmetic(tcx, component_ty) {
+                    session
+                        .handler
+                        .struct_err(
+                            body.exprs[component].span,
+                            "__builtin_complex components must be real arithmetic values",
+                        )
+                        .code(rcc_errors::codes::E0083)
+                        .emit();
+                    valid = false;
+                }
+            }
+
+            let common = if valid { usual_arithmetic(tcx, real_ty, imag_ty) } else { tcx.error };
+            let (component_ty, result_ty) = builtin_complex_result_ty(tcx, common);
+            let real = coerce_to(real, component_ty, body, tcx, session).expr();
+            let imag = coerce_to(imag, component_ty, body, tcx, session).expr();
+
+            body.exprs[expr_id].ty = result_ty;
+            body.exprs[expr_id].value_cat = ValueCat::RValue;
+            body.exprs[expr_id].kind = HirExprKind::BuiltinComplex { real, imag };
+            expr_id
+        }
         HirExprKind::Convert { operand, kind } => {
             let op2 = visit_expr(operand, body, tcx, session, def_info);
             // Preserve the convert kind; just rewire the operand id and
@@ -2891,6 +2925,7 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinUnreachable
         | HirExprKind::BuiltinConstantP { .. }
         | HirExprKind::BuiltinBswap { .. }
+        | HirExprKind::BuiltinComplex { .. }
         | HirExprKind::BuiltinOverflow { .. }
         | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
@@ -3593,6 +3628,21 @@ fn bswap_result_ty(tcx: &TyCtxt, bits: u16) -> TyId {
         32 => tcx.uint,
         64 => tcx.ulong_long,
         _ => tcx.error,
+    }
+}
+
+fn is_real_arithmetic(tcx: &TyCtxt, ty: TyId) -> bool {
+    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_))
+}
+
+fn builtin_complex_result_ty(tcx: &TyCtxt, common: TyId) -> (TyId, TyId) {
+    match tcx.get(common) {
+        Ty::Float(FloatKind::F32) => (tcx.float, tcx.complex_float),
+        Ty::Float(FloatKind::F64) => (tcx.double, tcx.complex_double),
+        Ty::Float(FloatKind::F80) => (tcx.long_double, tcx.complex_long_double),
+        Ty::Int { .. } | Ty::Enum(_) => (tcx.double, tcx.complex_double),
+        Ty::Error => (tcx.error, tcx.error),
+        _ => (tcx.error, tcx.error),
     }
 }
 

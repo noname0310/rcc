@@ -16,6 +16,7 @@ missing prototypes.
 Present:
 
 - `ctype.h`
+- `complex.h`
 - `assert.h`
 - `errno.h`
 - `fenv.h`
@@ -40,12 +41,10 @@ Present:
 
 Absent hosted C99/C95 headers:
 
-- `complex.h`
 - `tgmath.h`
 
-`complex.h` and `tgmath.h` remain absent by design. They require compiler
-semantics for the C99 imaginary unit and type-generic dispatch before a header
-shim would be sound.
+`tgmath.h` remains absent by design. It requires expression-type dispatch across
+real and complex math families before a header shim would be sound.
 
 ## Function declaration and macro coverage after `15-15`
 
@@ -81,8 +80,8 @@ because the float/long-double suffixed variants need a separate sweep.
    - Review and either implement or explicitly block the remaining semantic
      C99 hosted headers.
 4. `15-17-complex-header-imaginary-unit`
-   - Implement `complex.h` only after the `I` / `_Complex_I` macro has sound
-     compiler support.
+   - Implemented `complex.h` after adding sound `I` / `_Complex_I` compiler
+     support.
 5. `15-18-tgmath-type-generic-dispatch`
    - Implement `tgmath.h` only after expression-type dispatch is available.
 
@@ -113,6 +112,13 @@ Completed:
   - Added `fenv.h` as a Linux hosted libm ABI shim and a runtime fixture.
   - Kept `complex.h` and `tgmath.h` absent, with explicit blocker tasks for
     imaginary-unit construction and type-generic dispatch.
+- `15-17-complex-header-imaginary-unit`
+  - Added `__builtin_complex(real, imag)` lowering through HIR, CFG, and LLVM
+    codegen.
+  - Added `complex.h` with C99 `complex`, `_Complex_I`, `I`, and complex libm
+    declarations.
+  - Added a runtime fixture that constructs `2.0 + 3.0 * I` and verifies
+    `creal` / `cimag`.
 
 ## Policy
 

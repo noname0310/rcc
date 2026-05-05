@@ -309,6 +309,15 @@ pub enum Rvalue {
         /// Target complex type.
         to: TyId,
     },
+    /// Construct a complex value from explicit real and imaginary components.
+    ComplexFromParts {
+        /// Real component.
+        real: Operand,
+        /// Imaginary component.
+        imag: Operand,
+        /// Target complex type.
+        to: TyId,
+    },
     /// C99 complex -> real conversion: extract the real component.
     ///
     /// Backend contract: codegen must read only the real component, discarding

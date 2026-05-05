@@ -121,6 +121,14 @@ fn fmt_rvalue(tcx: &TyCtxt, rvalue: &Rvalue) -> String {
         Rvalue::ComplexFromReal { real, to } => {
             format!("ComplexFromReal({}, {})", fmt_operand(real), fmt_ty(tcx, *to))
         }
+        Rvalue::ComplexFromParts { real, imag, to } => {
+            format!(
+                "ComplexFromParts({}, {}, {})",
+                fmt_operand(real),
+                fmt_operand(imag),
+                fmt_ty(tcx, *to)
+            )
+        }
         Rvalue::RealFromComplex { complex, to } => {
             format!("RealFromComplex({}, {})", fmt_operand(complex), fmt_ty(tcx, *to))
         }

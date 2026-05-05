@@ -91,7 +91,7 @@ mod linux {
         let mut link = LinkOptions::default();
         if matches!(
             fixture.name.as_str(),
-            "hosted_math_decls" | "hosted_math_classification" | "hosted_fenv"
+            "hosted_math_decls" | "hosted_math_classification" | "hosted_fenv" | "hosted_complex"
         ) {
             link.libraries.push("m".to_owned());
         }

@@ -662,6 +662,14 @@ pub enum HirExprKind {
         /// Operand after integer conversion to the builtin result type.
         value: HirExprId,
     },
+    /// `__builtin_complex(real, imag)` — construct a complex value from
+    /// separately evaluated real and imaginary operands.
+    BuiltinComplex {
+        /// Real component.
+        real: HirExprId,
+        /// Imaginary component.
+        imag: HirExprId,
+    },
     /// `,`
     Comma {
         /// Left operand (evaluated, discarded).
