@@ -34,6 +34,36 @@ GNU coreutils is a deliberately hard hosted-Linux target:
 5. Once the first utility links and runs, compare a small runtime command
    against the host-built utility.
 
+## Generated Include Order
+
+The reproducible probe entrypoint is:
+
+```sh
+bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
+```
+
+The script does not modify `upstream/`.  It creates an ignored LF-normalized
+worktree under `build/gnulib-config-probe/src`, bootstraps/configures into
+`build/gnulib-config-probe/build`, writes logs under
+`logs/gnulib-config-probe/`, and asks `rcc` to lower a wrapper translation unit
+that includes generated `config.h` and `src/system.h`.
+
+For the first `rcc` compile, use this include order:
+
+1. generated `config.h` directory: `build/gnulib-config-probe/build/lib`
+   when present, otherwise `build/gnulib-config-probe/build`;
+2. generated gnulib replacement headers: `build/gnulib-config-probe/build/lib`;
+3. source replacement headers: `build/gnulib-config-probe/src/lib`;
+4. selected utility headers: `build/gnulib-config-probe/src/src`;
+5. gnulib source headers: `build/gnulib-config-probe/src/gl/lib`;
+6. project root fallback: `build/gnulib-config-probe/src`.
+
+Current local environment note: the checked-out ignored `upstream/` tree has
+CRLF shell scripts on Windows, so the probe deliberately clones a fresh
+`core.autocrlf=false` worktree before bootstrap.  If bootstrap tools are
+missing, the script exits `77` and writes `logs/gnulib-config-probe/blocker.env`
+linked to `tasks/16-linux-glibc-compat/16-gnu-coreutils-bootstrap-probe.md`.
+
 ## Non-Goals
 
 - Do not vendor glibc, gnulib, or Linux kernel headers into `rcc`.

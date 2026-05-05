@@ -1,6 +1,6 @@
 # 09 -- GNU coreutils
 
-Status: cloned, plan pending execution
+Status: cloned, gnulib config probe scripted; local bootstrap is environment-gated
 
 Source: <https://github.com/coreutils/coreutils>
 
@@ -18,3 +18,13 @@ as wrapper scripts, generated build logs, or build-script-only patches.
 Initial target: bootstrap/configure with the host toolchain to generate
 `lib/config.h`, then use `rcc` on one small utility translation unit before
 expanding to more of `src/`.
+
+Probe entrypoint:
+
+```sh
+bash real_world/projects/09-gnu-coreutils/scripts/run-gnulib-config-probe.sh
+```
+
+The script keeps cloned worktrees, generated `config.h`, wrapper sources, and
+logs under ignored `build/`, `scratch/`, and `logs/` directories.  It must not
+edit files under `upstream/`.

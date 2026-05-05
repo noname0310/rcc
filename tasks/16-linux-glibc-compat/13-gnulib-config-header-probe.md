@@ -1,5 +1,7 @@
 # 16-13: Gnulib Config Header Probe
 
+> ✓ done — 2026-05-06
+
 **Phase:** 16-linux-glibc-compat  
 **Depends on:** 16-12-dlfcn-and-runtime-linking  
 **Milestone:** hosted-linux
@@ -18,9 +20,9 @@ coreutils without source edits.
 
 ## Acceptance
 
-- [ ] `real_world/projects/09-gnu-coreutils/plan.md` names the generated include
+- [x] `real_world/projects/09-gnu-coreutils/plan.md` names the generated include
       paths needed for the first rcc compile.
-- [ ] `rcc -fsyntax-only` can parse generated `config.h` through a wrapper
+- [x] `rcc -fsyntax-only` can parse generated `config.h` through a wrapper
       translation unit or the remaining failures are task-linked.
-- [ ] Logs are kept under ignored `logs/` or `build/`, not committed.
-- [ ] No upstream source files are modified.
+- [x] Logs are kept under ignored `logs/` or `build/`, not committed.
+- [x] No upstream source files are modified.

@@ -25,7 +25,7 @@ rcc-owned libc bodies.
 - [x] [10-posix-core-type-shims](10-posix-core-type-shims.md)
 - [x] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md)
 - [x] [12-dlfcn-and-runtime-linking](12-dlfcn-and-runtime-linking.md)
-- [ ] [13-gnulib-config-header-probe](13-gnulib-config-header-probe.md)
+- [x] [13-gnulib-config-header-probe](13-gnulib-config-header-probe.md)
 - [ ] [14-glibc-system-header-parse-gate](14-glibc-system-header-parse-gate.md)
 - [ ] [15-mujs-hosted-smoke](15-mujs-hosted-smoke.md)
 - [ ] [16-gnu-coreutils-bootstrap-probe](16-gnu-coreutils-bootstrap-probe.md)
