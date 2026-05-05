@@ -160,7 +160,11 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         category: WarningCategory::Wall,
     },
     WarningRecord { code: None, names: &["unused-function"], category: WarningCategory::Wall },
-    WarningRecord { code: None, names: &["unused-variable"], category: WarningCategory::Wall },
+    WarningRecord {
+        code: Some(codes::W0026),
+        names: &["unused-variable"],
+        category: WarningCategory::Wall,
+    },
     WarningRecord { code: None, names: &["sign-compare"], category: WarningCategory::Wextra },
     WarningRecord { code: None, names: &["unreachable-code"], category: WarningCategory::Wextra },
     WarningRecord { code: None, names: &["unused-parameter"], category: WarningCategory::Wextra },
@@ -277,6 +281,8 @@ impl WarningConfig {
     pub fn promote_warning(&mut self, name: &str) {
         let name = normalize_warning_name(name);
         self.no_error.remove(&name);
+        self.disabled.remove(&name);
+        self.enabled.insert(name.clone());
         self.error.insert(name);
     }
 
@@ -464,6 +470,18 @@ mod tests {
         config.demote_warning("unused_variable");
         assert!(!config.named_warning_promoted_to_error("unused-variable"));
         assert!(config.named_warning_promoted_to_error("unused-function"));
+    }
+
+    #[test]
+    fn named_promotion_enables_opt_in_warning() {
+        let mut config = WarningConfig::default();
+        assert!(!config.warning_enabled("unused-variable"));
+
+        config.promote_warning("unused-variable");
+
+        assert!(config.warning_enabled("unused-variable"));
+        assert!(config.should_emit_warning(Some(codes::W0026)));
+        assert!(config.promotes_warning_to_error(Some(codes::W0026)));
     }
 
     #[test]

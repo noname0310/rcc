@@ -115,6 +115,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0023, W0023_DESC),
     (W0024, W0024_DESC),
     (W0025, W0025_DESC),
+    (W0026, W0026_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -892,6 +893,13 @@ const W0024_DESC: &str = "GNU typeof type specifier extension";
 /// and emits this warning unless `Options::gnu_alignof` is enabled.
 pub const W0025: &str = "W0025";
 const W0025_DESC: &str = "GNU __alignof__ expression extension";
+
+/// Local variable declared but never read.
+///
+/// Emitted only when `-Wall`, `-Wextra`, `-Wunused-variable`, or
+/// `-Werror=unused-variable` enables the `unused-variable` analysis warning.
+pub const W0026: &str = "W0026";
+const W0026_DESC: &str = "unused local variable";
 
 #[cfg(test)]
 mod tests {

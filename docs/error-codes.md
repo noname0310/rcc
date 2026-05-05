@@ -1413,3 +1413,19 @@ int a[__alignof__(struct S)];
 The parser preserves the expression so target-layout queries can reach HIR and
 CFG lowering. Enable `Options::gnu_alignof` or pass `-fgnu-alignof` to accept it
 without this compatibility warning.
+
+## W0026 — unused local variable
+
+An automatic local variable was declared but never read. This is an opt-in
+analysis warning enabled by `-Wall`, `-Wextra`, `-Wunused-variable`, or
+`-Werror=unused-variable`:
+
+```c
+int f(void) {
+    int x;  // warning[W0026]: unused variable `x` [-Wunused-variable]
+    return 0;
+}
+```
+
+Assignments and initializers alone do not count as reads. Volatile locals and
+function parameters are excluded from this warning.

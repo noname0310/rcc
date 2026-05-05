@@ -13,7 +13,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [01-opt-level-wiring](01-opt-level-wiring.md)
 - [x] [02-diagnostic-quality-sweep](02-diagnostic-quality-sweep.md)
 - [x] [03-warning-categories](03-warning-categories.md)
-- [ ] [03a-unused-variable-warning](03a-unused-variable-warning.md)
+- [x] [03a-unused-variable-warning](03a-unused-variable-warning.md)
 - [ ] [03b-unused-function-warning](03b-unused-function-warning.md)
 - [ ] [03c-unused-parameter-warning](03c-unused-parameter-warning.md)
 - [ ] [03d-implicit-function-declaration-warning](03d-implicit-function-declaration-warning.md)

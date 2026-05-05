@@ -37,7 +37,11 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 fn compile_warning_fixture(args: &[&str]) -> (Session, CaptureEmitter) {
-    let input = TempCFile::new("gnu-stmt-expr", "int main(void) { return ({ 1; }); }\n");
+    compile_warning_source("gnu-stmt-expr", "int main(void) { return ({ 1; }); }\n", args)
+}
+
+fn compile_warning_source(name: &str, src: &str, args: &[&str]) -> (Session, CaptureEmitter) {
+    let input = TempCFile::new(name, src);
     let output = input.path.with_extension("ast");
     let mut argv = vec!["rcc"];
     argv.extend_from_slice(args);
@@ -138,4 +142,83 @@ fn wno_unused_variable_is_stored_as_named_override() {
     let opts = options_from_cli(&cli);
 
     assert!(opts.warning_config.warning_disabled("unused-variable"));
+}
+
+#[test]
+fn wall_emits_unused_variable_warning() {
+    let (session, cap) = compile_warning_source(
+        "unused-variable",
+        "int main(void) { int x; return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    assert!(!session.handler.has_errors());
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0026));
+    assert!(diags[0].message.contains("[-Wunused-variable]"));
+}
+
+#[test]
+fn unused_variable_is_quiet_without_group_or_named_flag() {
+    let (session, cap) = compile_warning_source(
+        "unused-variable-default",
+        "int main(void) { int x; return 0; }\n",
+        &["--emit=hir"],
+    );
+
+    assert!(!session.handler.has_errors());
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn read_or_volatile_local_suppresses_unused_variable_warning() {
+    let (_, read_cap) = compile_warning_source(
+        "unused-variable-read",
+        "int main(void) { int x; return x; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+    assert!(read_cap.diagnostics().is_empty());
+
+    let (_, volatile_cap) = compile_warning_source(
+        "unused-variable-volatile",
+        "int main(void) { volatile int x; return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+    assert!(volatile_cap.diagnostics().is_empty());
+}
+
+#[test]
+fn writes_only_still_warns_for_unused_variable() {
+    let (_, cap) = compile_warning_source(
+        "unused-variable-write-only",
+        "int main(void) { int x; x = 1; return 0; }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, Some(codes::W0026));
+}
+
+#[test]
+fn wno_and_werror_unused_variable_are_honored() {
+    let (_, suppressed) = compile_warning_source(
+        "unused-variable-wno",
+        "int main(void) { int x; return 0; }\n",
+        &["-Wall", "-Wno-unused-variable", "--emit=hir"],
+    );
+    assert!(suppressed.diagnostics().is_empty());
+
+    let (session, promoted) = compile_warning_source(
+        "unused-variable-werror",
+        "int main(void) { int x; return 0; }\n",
+        &["-Werror=unused-variable", "--emit=hir"],
+    );
+    let diags = promoted.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0026));
 }

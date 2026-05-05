@@ -15,7 +15,7 @@ page is the stable policy surface they must use.
 | `-Wname` | Enable one named warning. |
 | `-Wno-name` | Disable one named warning, overriding groups. |
 | `-Werror` | Promote every emitted warning to an error. |
-| `-Werror=name` | Promote one named warning. |
+| `-Werror=name` | Enable and promote one named warning. |
 | `-Wno-error=name` | Stop promoting one named warning, overriding `-Werror`. |
 
 Warning names are normalized by removing an optional `-W` prefix, removing a
@@ -75,7 +75,7 @@ These warnings are opt-in analysis warnings. A detector must call
 |------|-------|
 | `implicit-function-declaration` | `tasks/13-quality/03d-implicit-function-declaration-warning.md` |
 | `unused-function` | `tasks/13-quality/03b-unused-function-warning.md` |
-| `unused-variable` | `tasks/13-quality/03a-unused-variable-warning.md` |
+| `unused-variable` (`W0026`) | `tasks/13-quality/03a-unused-variable-warning.md` |
 
 ## `-Wextra`
 

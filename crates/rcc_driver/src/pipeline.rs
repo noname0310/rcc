@@ -15,7 +15,7 @@ use rcc_hir_lower::lower;
 use rcc_lexer::{PpToken, PpTokenKind};
 use rcc_preprocess::preprocess;
 use rcc_session::{EmitKind, LinkOptions, Session};
-use rcc_typeck::{check, verify_typed_hir};
+use rcc_typeck::{check, check_warnings, verify_typed_hir};
 
 use crate::deps;
 pub use crate::toolchain::CommandSpec as LinkCommand;
@@ -118,6 +118,10 @@ pub fn compile(session: &mut Session, input: &Path) -> Result<(), String> {
         return Ok(());
     }
     verify_typed_hir(session, &tcx, &hir);
+    if session.handler.has_errors() {
+        return Ok(());
+    }
+    check_warnings(session, &tcx, &hir);
     if session.handler.has_errors() {
         return Ok(());
     }

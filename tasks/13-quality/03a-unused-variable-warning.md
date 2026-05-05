@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 13-03a: `-Wunused-variable`
 
 **Phase:** 13-quality    **Depends on:** 13-03    **Milestone:** M7
