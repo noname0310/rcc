@@ -626,6 +626,61 @@ pub fn resolve_expr_ident(
     None
 }
 
+fn lower_implicit_function_callee(
+    ident: Symbol,
+    span: Span,
+    scope: &ScopeStack,
+    crate_: &mut HirCrate,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    session: &mut Session,
+) -> Option<HirExprKind> {
+    if !session.opts.gnu_implicit_function_declaration {
+        return None;
+    }
+    if scope.lookup(ident).is_some() || resolver.ordinary.contains_key(&ident) {
+        return None;
+    }
+
+    if session.handler.warning_config().warning_enabled("implicit-function-declaration") {
+        let ident_str = session.interner.get(ident).to_owned();
+        session
+            .handler
+            .struct_warn(
+                span,
+                format!(
+                    "implicit declaration of function `{ident_str}` [-Wimplicit-function-declaration]"
+                ),
+            )
+            .code(rcc_errors::codes::W0029)
+            .note(
+                "synthesizing a prototype-less `extern int` declaration for GNU/C89 compatibility",
+            )
+            .emit();
+    }
+
+    let ty =
+        tcx.intern(Ty::Func { ret: tcx.int, params: Vec::new(), variadic: false, proto: false });
+    let def = crate_.defs.push(Def {
+        id: DefId(0),
+        name: ident,
+        span,
+        kind: DefKind::Function {
+            ty,
+            has_body: false,
+            is_static: false,
+            is_inline: false,
+            is_extern_inline: false,
+            no_instrument_function: false,
+            variadic: false,
+        },
+    });
+    crate_.defs[def].id = def;
+    resolver.ordinary.insert(ident, def);
+
+    Some(HirExprKind::DefRef(def))
+}
+
 /// The kind of a tag: struct, union, or enum.
 ///
 /// Used by [`resolve_tag`] to verify that a tag reference uses the same
@@ -3886,8 +3941,8 @@ pub fn lower_expr(
             // Intercept __builtin_va_start/end/copy calls before callee
             // resolution, since these are not declared functions.
             if let rcc_ast::ExprKind::Ident(sym) = &callee.kind {
-                let name = session.interner.get(*sym);
-                match name {
+                let name = session.interner.get(*sym).to_owned();
+                match name.as_str() {
                     "__builtin_va_start" => {
                         if args.len() != 2 {
                             session
@@ -4115,12 +4170,40 @@ pub fn lower_expr(
                     _ => {}
                 }
             }
-            let callee_id = lower_expr(callee, body, scope, crate_, tcx, resolver, session);
-            let arg_ids: Vec<HirExprId> = args
-                .iter()
-                .map(|a| lower_expr(a, body, scope, crate_, tcx, resolver, session))
-                .collect();
-            HirExprKind::Call { callee: callee_id, args: arg_ids }
+            let implicit_callee = match &callee.kind {
+                rcc_ast::ExprKind::Ident(sym) => lower_implicit_function_callee(
+                    *sym,
+                    callee.span,
+                    scope,
+                    crate_,
+                    tcx,
+                    resolver,
+                    session,
+                ),
+                _ => None,
+            };
+            if let Some(kind) = implicit_callee {
+                let callee_id = body.exprs.push(HirExpr {
+                    id: HirExprId(0),
+                    ty: tcx.error,
+                    value_cat: ValueCat::RValue,
+                    span: callee.span,
+                    kind,
+                });
+                body.exprs[callee_id].id = callee_id;
+                let arg_ids: Vec<HirExprId> = args
+                    .iter()
+                    .map(|a| lower_expr(a, body, scope, crate_, tcx, resolver, session))
+                    .collect();
+                HirExprKind::Call { callee: callee_id, args: arg_ids }
+            } else {
+                let callee_id = lower_expr(callee, body, scope, crate_, tcx, resolver, session);
+                let arg_ids: Vec<HirExprId> = args
+                    .iter()
+                    .map(|a| lower_expr(a, body, scope, crate_, tcx, resolver, session))
+                    .collect();
+                HirExprKind::Call { callee: callee_id, args: arg_ids }
+            }
         }
         rcc_ast::ExprKind::BuiltinVaArg { ap, ty } => {
             let ap_id = lower_expr(ap, body, scope, crate_, tcx, resolver, session);

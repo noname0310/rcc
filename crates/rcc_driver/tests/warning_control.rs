@@ -339,3 +339,84 @@ fn wno_and_werror_unused_parameter_are_honored() {
     assert_eq!(diags[0].level, rcc_errors::Level::Error);
     assert_eq!(diags[0].code, Some(codes::W0028));
 }
+
+#[test]
+fn strict_c99_undeclared_call_remains_hard_error() {
+    let (session, cap) = compile_warning_source(
+        "strict-undeclared-call",
+        "int main(void) { return missing(1); }\n",
+        &["-Wall", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert!(session.handler.has_errors());
+    assert!(diags.iter().any(|d| d.level == rcc_errors::Level::Error));
+    assert!(diags.iter().any(|d| d.code == Some(codes::E0071)), "{diags:?}");
+    assert!(!diags.iter().any(|d| d.code == Some(codes::W0029)), "{diags:?}");
+}
+
+#[test]
+fn gnu_implicit_function_declaration_warns_under_wall() {
+    let (session, cap) = compile_warning_source(
+        "gnu-implicit-call",
+        "int main(void) { return missing(1, 2.0f); }\n",
+        &["-fgnu-implicit-function-declaration", "-Wall", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert!(!session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Warning);
+    assert_eq!(diags[0].code, Some(codes::W0029));
+    assert!(diags[0].message.contains("[-Wimplicit-function-declaration]"));
+}
+
+#[test]
+fn gnu_implicit_function_declaration_can_be_enabled_by_name() {
+    let (session, cap) = compile_warning_source(
+        "gnu-implicit-call-named",
+        "int main(void) { return missing(); }\n",
+        &["-fgnu-implicit-function-declaration", "-Wimplicit-function-declaration", "--emit=hir"],
+    );
+
+    let diags = cap.diagnostics();
+    assert!(!session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, Some(codes::W0029));
+}
+
+#[test]
+fn wno_suppresses_gnu_implicit_function_declaration_warning() {
+    let (session, cap) = compile_warning_source(
+        "gnu-implicit-call-wno",
+        "int main(void) { return missing(); }\n",
+        &[
+            "-fgnu-implicit-function-declaration",
+            "-Wall",
+            "-Wno-implicit-function-declaration",
+            "--emit=hir",
+        ],
+    );
+
+    assert!(!session.handler.has_errors());
+    assert!(cap.diagnostics().is_empty());
+}
+
+#[test]
+fn werror_promotes_gnu_implicit_function_declaration_warning() {
+    let (session, cap) = compile_warning_source(
+        "gnu-implicit-call-werror",
+        "int main(void) { return missing(); }\n",
+        &[
+            "-fgnu-implicit-function-declaration",
+            "-Werror=implicit-function-declaration",
+            "--emit=hir",
+        ],
+    );
+
+    let diags = cap.diagnostics();
+    assert!(session.handler.has_errors());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].level, rcc_errors::Level::Error);
+    assert_eq!(diags[0].code, Some(codes::W0029));
+}

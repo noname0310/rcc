@@ -184,6 +184,17 @@ fn gnu_extension_flags_added_for_conformance_are_wired() {
 }
 
 #[test]
+fn gnu_implicit_function_declaration_flag_sets_frontend_option() {
+    let cli = parse(&["rcc", "-fgnu-implicit-function-declaration", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert!(opts.gnu_implicit_function_declaration);
+
+    let alias = parse(&["rcc", "-fimplicit-function-declaration", "hello.c"]);
+    assert!(options_from_cli(&alias).gnu_implicit_function_declaration);
+}
+
+#[test]
 fn gnu_preprocessor_compat_flags_set_frontend_options() {
     let cli = parse(&[
         "rcc",

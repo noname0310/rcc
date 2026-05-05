@@ -73,7 +73,7 @@ These warnings are opt-in analysis warnings. A detector must call
 
 | Name | Owner |
 |------|-------|
-| `implicit-function-declaration` | `tasks/13-quality/03d-implicit-function-declaration-warning.md` |
+| `implicit-function-declaration` (`W0029`) | `tasks/13-quality/03d-implicit-function-declaration-warning.md` |
 | `unused-function` (`W0027`) | `tasks/13-quality/03b-unused-function-warning.md` |
 | `unused-variable` (`W0026`) | `tasks/13-quality/03a-unused-variable-warning.md` |
 
@@ -92,7 +92,8 @@ These warnings are opt-in analysis warnings. A detector must call
 Each warning detector must:
 
 - use the canonical names above for CLI control and tests;
-- skip emission when `WarningConfig::warning_enabled(name)` returns false;
+- skip opt-in analysis warning emission when
+  `WarningConfig::warning_enabled(name)` returns false;
 - promote through the normal handler path or an equivalent
   `WarningConfig::named_warning_promoted_to_error(name)` check;
 - include the controlling spelling, such as `[-Wunused-variable]`, in the

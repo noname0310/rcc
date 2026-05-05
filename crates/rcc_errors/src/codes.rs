@@ -118,6 +118,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0026, W0026_DESC),
     (W0027, W0027_DESC),
     (W0028, W0028_DESC),
+    (W0029, W0029_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -916,6 +917,16 @@ const W0027_DESC: &str = "unused static function";
 /// `-Werror=unused-parameter` enables the `unused-parameter` analysis warning.
 pub const W0028: &str = "W0028";
 const W0028_DESC: &str = "unused function parameter";
+
+/// Undeclared function accepted through GNU/C89 compatibility mode.
+///
+/// Strict C99 rejects calls to undeclared identifiers with E0071. When
+/// `Options::gnu_implicit_function_declaration` is enabled, HIR lowering
+/// synthesizes a prototype-less `extern int name()` declaration for the callee
+/// and emits this warning when `-Wall`, `-Wimplicit-function-declaration`, or
+/// `-Werror=implicit-function-declaration` enables the diagnostic.
+pub const W0029: &str = "W0029";
+const W0029_DESC: &str = "implicit function declaration";
 
 #[cfg(test)]
 mod tests {

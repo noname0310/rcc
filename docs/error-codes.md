@@ -1456,3 +1456,21 @@ int f(int x) { return 0; }  // warning[W0028]: unused parameter `x` [-Wunused-pa
 
 `-Wall` alone does not enable this warning. Reading the parameter or explicitly
 casting it to `void` suppresses the diagnostic.
+
+## W0029 — implicit function declaration
+
+An undeclared identifier was called in GNU/C89 compatibility mode. Strict C99
+keeps this as E0071 because C99 removed implicit `int` function declarations.
+When `-fgnu-implicit-function-declaration` is enabled, HIR lowering synthesizes
+a prototype-less `extern int name()` declaration so the call can continue
+through type checking:
+
+```c
+int main(void) {
+    return missing(1);  // warning[W0029]: implicit declaration of function `missing` [-Wimplicit-function-declaration]
+}
+```
+
+The warning is controlled by `-Wall`, `-Wimplicit-function-declaration`, and
+`-Werror=implicit-function-declaration`. Use a real prototype to keep strict
+C99 semantics and avoid the compatibility path.

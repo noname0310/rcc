@@ -192,6 +192,8 @@ fn is_supported_feature_flag(flag: &str) -> bool {
             | "gnu-builtin-libcalls"
             | "gnu-libc-builtins"
             | "gnu-common-builtins"
+            | "gnu-implicit-function-declaration"
+            | "implicit-function-declaration"
     )
 }
 
@@ -442,6 +444,12 @@ pub fn options_from_cli(cli: &Cli) -> Options {
             matches!(
                 flag.as_str(),
                 "gnu-builtin-libcalls" | "gnu-libc-builtins" | "gnu-common-builtins"
+            )
+        }),
+        gnu_implicit_function_declaration: cli.feature_flags.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                "gnu-implicit-function-declaration" | "implicit-function-declaration"
             )
         }),
     }

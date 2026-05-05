@@ -155,7 +155,7 @@ const WARNING_RECORDS: &[WarningRecord] = &[
         category: WarningCategory::Extension,
     },
     WarningRecord {
-        code: None,
+        code: Some(codes::W0029),
         names: &["implicit-function-declaration"],
         category: WarningCategory::Wall,
     },

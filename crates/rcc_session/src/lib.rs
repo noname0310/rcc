@@ -249,6 +249,13 @@ pub struct Options {
     /// mode maps builtin libc names to normal external libc calls and injects
     /// the matching prototypes.
     pub gnu_builtin_libcalls: bool,
+    /// Enable GNU/C89-style implicit function declarations for call expressions.
+    ///
+    /// C99 removed implicit `int` declarations. With this option off, calling an
+    /// undeclared identifier remains E0071. With it enabled, HIR lowering
+    /// synthesizes a prototype-less `extern int name()` declaration for the
+    /// callee and emits W0029 when the named warning is enabled.
+    pub gnu_implicit_function_declaration: bool,
 }
 
 impl Default for Options {
@@ -289,6 +296,7 @@ impl Default for Options {
             gnu_va_area: false,
             gnu89_inline: false,
             gnu_builtin_libcalls: false,
+            gnu_implicit_function_declaration: false,
         }
     }
 }
