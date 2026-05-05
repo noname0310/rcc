@@ -1,6 +1,6 @@
 # 03 — zlib
 
-Status: not started
+Status: smoke-passed
 
 Source: <https://github.com/madler/zlib>
 
@@ -10,4 +10,3 @@ directory as wrapper scripts or build-script-only patches.
 
 Initial target: compile the core library objects without modifying generated
 configure output.
-
