@@ -17,3 +17,8 @@ rcc_data_structures  = { workspace = true }
 
 [dev-dependencies]
 tempfile             = { workspace = true }
+criterion            = { workspace = true }
+
+[[bench]]
+name = "preprocess"
+harness = false

@@ -20,3 +20,8 @@ rcc_data_structures = { workspace = true }
 rcc_preprocess      = { workspace = true }
 serde               = { workspace = true }
 toml                = { workspace = true }
+criterion           = { workspace = true }
+
+[[bench]]
+name = "parse"
+harness = false

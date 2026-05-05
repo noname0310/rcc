@@ -1,5 +1,7 @@
 # 13-10: Benchmark harness
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-01, 13-09    **Milestone:** M7
 
 ## Goal

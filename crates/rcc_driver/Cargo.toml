@@ -31,3 +31,9 @@ clap               = { workspace = true }
 
 [dev-dependencies]
 insta              = { workspace = true }
+criterion          = { workspace = true }
+tempfile           = { workspace = true }
+
+[[bench]]
+name = "pipeline"
+harness = false

@@ -59,6 +59,21 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Compare generated-code runtime against a host C compiler.
+    BenchRuntime {
+        /// Path to a release `rcc` binary with LLVM backend enabled.
+        #[arg(long, default_value = "target/release/rcc")]
+        rcc: PathBuf,
+        /// Host C compiler baseline (`cc`, `clang`, or an absolute path).
+        #[arg(long, default_value = "cc")]
+        host_cc: PathBuf,
+        /// Markdown report path.
+        #[arg(long, default_value = "docs/perf-baseline.md")]
+        out: PathBuf,
+        /// Number of executable runs per program/compiler pair.
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -85,6 +100,10 @@ fn main() -> Result<()> {
         Cmd::FuzzRegression { target, artifact, name } => {
             xtask::fuzz_regression::run(&project_root(), &target, &artifact, name.as_deref())?;
             Ok(())
+        }
+        Cmd::BenchRuntime { rcc, host_cc, out, iterations } => {
+            let opts = xtask::bench_runtime::BenchRuntimeOptions { rcc, host_cc, out, iterations };
+            xtask::bench_runtime::run(&project_root(), &opts)
         }
     }
 }
