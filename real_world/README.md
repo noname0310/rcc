@@ -98,3 +98,7 @@ Disallowed tracked files:
 Use [ordered-projects.md](ordered-projects.md). Do not jump to a harder project
 until the current project either passes or has a documented blocker with a
 follow-up `rcc` task.
+
+Hosted Linux status lives in [hosted-linux-dashboard.md](hosted-linux-dashboard.md).
+It records stage-level pass/blocker cells for MuJS and GNU coreutils without
+turning compiler failures into aggregate percentages.

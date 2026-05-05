@@ -8,6 +8,11 @@ and the selected linker driver.
 
 ## Summary
 
+For stage-level status, use
+[`hosted-linux-dashboard.md`](hosted-linux-dashboard.md).  This audit explains
+why each hosted surface exists; the dashboard records the current pass/blocker
+state.
+
 | Project | Current status | Hosted surface | First compiler-owned blockers |
 | --- | --- | --- | --- |
 | inih | pass | glibc multiarch includes, `<ctype.h>` | fixed by `tasks/15-builtin-rt/09-linux-multiarch-include-discovery.md`, `tasks/15-builtin-rt/10-ctype-hosted-declarations.md` |

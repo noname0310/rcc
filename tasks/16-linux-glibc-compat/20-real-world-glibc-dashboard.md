@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 16-20: Real-World Glibc Dashboard
 
 **Phase:** 16-linux-glibc-compat  
@@ -18,9 +20,23 @@ misleading percentage.
 
 ## Acceptance
 
-- [ ] The dashboard shows pass/fail/blocker per project stage.
-- [ ] GNU coreutils has separate bootstrap, syntax, object, link, and runtime
+- [x] The dashboard shows pass/fail/blocker per project stage.
+- [x] GNU coreutils has separate bootstrap, syntax, object, link, and runtime
       cells.
-- [ ] Every red cell names a concrete compiler-owned issue or a host tool
+- [x] Every red cell names a concrete compiler-owned issue or a host tool
       prerequisite.
-- [ ] `tasks/index.md` can flip phase 16 only after this dashboard is current.
+- [x] `tasks/index.md` can flip phase 16 only after this dashboard is current.
+
+## Result
+
+The dashboard is `real_world/hosted-linux-dashboard.md`.
+
+It records stage-level status for:
+
+- MuJS: header/config, Syntax/HIR, Object, Link, and Runtime are PASS.
+- GNU coreutils `src/true`: bootstrap/configure and generated headers are PASS;
+  Syntax/HIR is BLOCKED by `16-21`; object/link/runtime remain blocked until
+  `16-21` through `16-24` land.
+
+`tasks/index.md` is intentionally not flipped for phase 16 because this
+dashboard is current but compiler-owned follow-ups remain pending.
