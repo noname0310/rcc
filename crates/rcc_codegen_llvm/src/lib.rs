@@ -5659,9 +5659,10 @@ pub mod backend {
             let mut args = Vec::new();
             let mut param_types = Vec::new();
             let mut direct_outputs = Vec::new();
+            let mut readwrite_direct_outputs = Vec::new();
             let mut element_type_attrs = Vec::new();
 
-            for output in &asm.outputs {
+            for (output_idx, output) in asm.outputs.iter().enumerate() {
                 constraints.push(llvm_inline_asm_output_constraint(output.constraint.as_str()));
                 if output.indirect {
                     let param_idx = inline_asm_param_index(args.len())?;
@@ -5671,8 +5672,18 @@ pub mod backend {
                     let element_ty = self.cx.type_cx().basic_type_of(output.ty)?;
                     element_type_attrs.push((param_idx, element_ty));
                 } else {
+                    if inline_asm_constraint_is_readwrite(output.constraint.as_str()) {
+                        readwrite_direct_outputs.push((output_idx, output));
+                    }
                     direct_outputs.push(output);
                 }
+            }
+
+            for (output_idx, output) in readwrite_direct_outputs {
+                constraints.push(output_idx.to_string());
+                let value = self.emit_operand_value(&Operand::Copy(output.place.clone()))?;
+                param_types.push(value.get_type().into());
+                args.push(value.into());
             }
 
             for input in &asm.inputs {
@@ -6550,6 +6561,8 @@ pub mod backend {
             let marker =
                 constraint.chars().next().filter(|ch| *ch == '+' || *ch == '=').unwrap_or('=');
             format!("{marker}*{}", inline_asm_constraint_core(constraint))
+        } else if let Some(rest) = constraint.strip_prefix('+') {
+            format!("={rest}")
         } else {
             constraint.to_owned()
         }
@@ -6587,6 +6600,10 @@ pub mod backend {
     fn inline_asm_param_index(index: usize) -> Result<u32, CodegenError> {
         u32::try_from(index)
             .map_err(|_| CodegenError::Internal("inline asm parameter index overflowed".to_owned()))
+    }
+
+    fn inline_asm_constraint_is_readwrite(constraint: &str) -> bool {
+        constraint.split(',').map(str::trim_start).any(|alternative| alternative.starts_with('+'))
     }
 
     fn inline_asm_constraint_is_memory(constraint: &str) -> bool {

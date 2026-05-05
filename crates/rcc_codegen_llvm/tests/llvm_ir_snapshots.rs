@@ -127,6 +127,17 @@ fn inline_asm_register_output_lowers_to_result_store() {
 }
 
 #[test]
+fn inline_asm_readwrite_output_adds_matching_input() {
+    let ir = render_with_options(
+        "inline_asm_readwrite_output",
+        r#"void f(int *p) { __asm__ volatile ("" : "+r" (*p)); }"#,
+        Options { gnu_inline_asm: true, ..Options::default() },
+    );
+
+    assert!(ir.contains(r#"asm sideeffect "", "=r,0""#), "{ir}");
+}
+
+#[test]
 fn inline_asm_memory_input_uses_indirect_constraint() {
     let ir = render_with_options(
         "inline_asm_memory_input",
