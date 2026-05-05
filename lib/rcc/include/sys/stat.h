@@ -41,6 +41,8 @@
 #define S_ISFIFO(mode) (((mode) & S_IFMT) == S_IFIFO)
 #define S_ISLNK(mode) (((mode) & S_IFMT) == S_IFLNK)
 #define S_ISSOCK(mode) (((mode) & S_IFMT) == S_IFSOCK)
+#define S_TYPEISSHM(buf) (0)
+#define S_TYPEISTMO(buf) (0)
 
 struct stat {
     dev_t st_dev;
@@ -66,6 +68,7 @@ struct stat {
 
 extern int chmod(const char *, mode_t);
 extern int fchmod(int, mode_t);
+extern int fchmodat(int, const char *, mode_t, int);
 extern int mkdir(const char *, mode_t);
 extern int mkfifo(const char *, mode_t);
 extern mode_t umask(mode_t);

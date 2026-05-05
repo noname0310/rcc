@@ -54,11 +54,13 @@ extern int vscanf(const char *, va_list);
 extern int vsnprintf(char *, size_t, const char *, va_list);
 extern int vsprintf(char *, const char *, va_list);
 extern int vsscanf(const char *, const char *, va_list);
+extern int vasprintf(char **, const char *, va_list);
 
 extern int fgetc(FILE *);
 extern char *fgets(char *, int, FILE *);
 extern int fputc(int, FILE *);
 extern int fputs(const char *, FILE *);
+extern int fputs_unlocked(const char *, FILE *);
 extern int getc(FILE *);
 extern int getchar(void);
 extern char *gets(char *);
@@ -69,6 +71,7 @@ extern int ungetc(int, FILE *);
 
 extern size_t fread(void *, size_t, size_t, FILE *);
 extern size_t fwrite(const void *, size_t, size_t, FILE *);
+extern size_t fwrite_unlocked(const void *, size_t, size_t, FILE *);
 
 extern int fgetpos(FILE *, fpos_t *);
 extern int fseek(FILE *, long, int);
@@ -77,8 +80,11 @@ extern long ftell(FILE *);
 extern void rewind(FILE *);
 
 extern void clearerr(FILE *);
+extern void clearerr_unlocked(FILE *);
+extern int fflush_unlocked(FILE *);
 extern int feof(FILE *);
 extern int ferror(FILE *);
+extern int fpurge(FILE *);
 extern void perror(const char *);
 
 extern FILE *stdin;

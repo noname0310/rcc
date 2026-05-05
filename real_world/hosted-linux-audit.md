@@ -23,7 +23,7 @@ state.
 | SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
-| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe scripted and blocked on compiler-owned follow-ups | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | tasks `16-23` through `16-24`; first blocker is hosted declaration/macro gaps |
+| GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` probe now produces HIR and is blocked on runtime-oracle expansion | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | task `16-24`; first blocker is host-vs-rcc true object/link/runtime oracle |
 
 ## Classification Rules
 
@@ -227,12 +227,28 @@ Current `src/true.c` compiler-owned blockers:
 | --- | --- | --- |
 | generated `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` forms cascade into K&R parser diagnostics | macro-expanded declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md` |
 | GNU `__extension__ static __inline` glibc functions fail with an uncoded `expected ';' after declaration` diagnostic | GNU declaration parser surface | fixed by `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md` |
-| missing hosted declarations/macros such as `wcwidth`, unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
+| missing hosted declarations/macros such as `wcwidth`, unlocked stdio, `fchownat`, `fchmodat`, `vasprintf`, `S_TYPEISSHM`, and `S_TYPEISTMO` | resource header shim declaration surface | fixed by `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
 | no host-vs-rcc `true` runtime oracle yet | real-world runtime probe | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 
 Fixed by `tasks/16-linux-glibc-compat/21-gnu-include-next-directive.md`:
 generated gnulib replacement headers can now use GNU `#include_next`,
 including subdirectory spellings such as `<sys/stat.h>`.
+
+Task 16-23 declaration/macro shim sources:
+
+| Shim | Header | Coreutils evidence |
+| --- | --- | --- |
+| `wcwidth` | `wchar.h` | `logs/true-probe/rcc-true.stderr`: generated `build/lib/uchar.h:1040` calls `wcwidth(wc)` |
+| `fchownat` | `unistd.h` | `logs/true-probe/rcc-true.stderr`: `src/lib/openat.h:71` and `:77` call `fchownat(...)` |
+| `AT_FDCWD`, `AT_SYMLINK_NOFOLLOW` | `fcntl.h` | `logs/true-probe/rcc-true.stderr`: `src/lib/openat.h:77` calls `fchownat(..., AT_SYMLINK_NOFOLLOW)`; configure cache also probes `fchmodat(AT_FDCWD, ..., AT_SYMLINK_NOFOLLOW)` |
+| `fputs_unlocked`, `fwrite_unlocked`, `fflush_unlocked`, `clearerr_unlocked` | `stdio.h` | `logs/true-probe/rcc-true.stderr`: `src/lib/unlocked-io.h:43`, `:64`, `:92`, and `:106` macro-expand to unlocked stdio calls |
+| `EOPNOTSUPP`, `ENOTSUP` | `errno.h` | `logs/true-probe/rcc-true.stderr`: `src/src/system.h:978` compares both errno constants |
+| `fchmodat`, `vasprintf`, `fpurge`, `S_TYPEISSHM`, `S_TYPEISTMO` | `sys/stat.h` / `stdio.h` | coreutils generated configure surface enables the corresponding gnulib modules; the task fixture keeps these host-owned declarations/macros covered before they become the next first-error |
+
+Fixed by `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
+`run-true-probe.sh` now writes `build/gnulib-config-probe/true.hir`; the
+remaining coreutils work is the host-vs-rcc object/link/runtime oracle in task
+16-24.
 
 ## Open Compiler-Owned Work Queue
 

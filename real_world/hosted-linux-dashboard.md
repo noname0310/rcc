@@ -17,7 +17,7 @@ Status legend:
 | Project | Header/config | Syntax/HIR | Object | Link | Runtime | Current blocker |
 | --- | --- | --- | --- | --- | --- | --- |
 | MuJS | PASS | PASS | PASS | PASS | PASS | none; smoke output matches host |
-| GNU coreutils `src/true` | PASS | BLOCKED | TODO | BLOCKED | BLOCKED | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
+| GNU coreutils `src/true` | PASS | PASS | TODO | BLOCKED | BLOCKED | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 
 ## MuJS
 
@@ -61,15 +61,14 @@ LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 \
 | Source acquisition | PASS | Ignored LF-normalized worktree is created under `build/gnulib-config-probe/src`. | none |
 | Bootstrap/configure | PASS | `build/gnulib-config-probe/build/lib/config.h` was generated locally. | none |
 | Generated headers | PASS | `run-true-probe.sh` invokes make targets for `lib/configmake.h`, generated replacement headers, and `src/version.h`. | none |
-| Syntax/HIR | BLOCKED | `logs/true-probe/rcc-true.stderr` now gets past `_GL_FUNCDECL_*`, `_GL_CXXALIAS_*`, and glibc `__extension__ static __inline` functions. It stops on E0071/E0083 gaps for hosted declarations/macros such as `wcwidth`, `fchownat`, unlocked stdio, and errno constants. | `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md` |
-| Object | TODO | Not attempted while Syntax/HIR is blocked. | `16-23` |
+| Syntax/HIR | PASS | `run-true-probe.sh` writes `build/gnulib-config-probe/true.hir`; E0071/E0083 declaration gaps are gone from `logs/true-probe/rcc-true.stderr`. | none |
+| Object | TODO | Not attempted by the HIR-only probe. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 | Link | BLOCKED | No rcc object exists yet; host `make src/true` is also blocked by generated gnulib input issues recorded by task 16-16. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 | Runtime | BLOCKED | No host-vs-rcc `true` executable pair exists yet. | `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md` |
 
 The current compiler-owned queue is:
 
-1. `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`
-2. `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`
+1. `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`
 
 Runtime ownership: GNU coreutils runtime behavior comes from upstream sources
 plus host glibc/libpthread/libdl/libm.  rcc owns the compile pipeline and link
@@ -79,4 +78,4 @@ flag orchestration, not replacement libc bodies.
 
 Do not mark `tasks/index.md` phase 16 complete while any dashboard row is
 BLOCKED by a compiler-owned task.  At this snapshot the dashboard is current,
-but phase 16 stays open because tasks 16-23 and 16-24 are pending.
+but phase 16 stays open because task 16-24 is pending.

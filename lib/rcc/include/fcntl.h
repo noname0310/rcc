@@ -35,6 +35,9 @@
 #define F_SETFL 4
 #define FD_CLOEXEC 1
 
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+
 extern int creat(const char *, mode_t);
 extern int fcntl(int, int, ...);
 extern int open(const char *, int, ...);

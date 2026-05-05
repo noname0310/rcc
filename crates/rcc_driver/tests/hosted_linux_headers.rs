@@ -129,6 +129,37 @@ int probe(const char *name) {
 }
 "#,
         },
+        Fixture {
+            name: "coreutils-posix-declaration-sweep",
+            reason: "GNU coreutils true probe reaches gnulib wrappers for unlocked stdio, at-functions, errno, and wide-char width",
+            args: &[],
+            source: r#"
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <wchar.h>
+
+int probe(FILE *fp, const char *path, int fd, wchar_t wc, struct stat *st, va_list ap) {
+    char *allocated = 0;
+    int status = 0;
+    status += wcwidth(wc);
+    status += fchownat(fd, path, 0, 0, AT_SYMLINK_NOFOLLOW);
+    status += fchmodat(AT_FDCWD, path, 0644, 0);
+    status += fputs_unlocked(path, fp);
+    status += (int) fwrite_unlocked(path, 1, 1, fp);
+    status += fflush_unlocked(fp);
+    clearerr_unlocked(fp);
+    status += fpurge(fp);
+    status += vasprintf(&allocated, "%s", ap);
+    status += S_TYPEISSHM(st);
+    status += S_TYPEISTMO(st);
+    return status == EOPNOTSUPP || status == ENOTSUP;
+}
+"#,
+        },
     ];
 
     for fixture in fixtures {

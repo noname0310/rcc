@@ -31,9 +31,9 @@ The scripts keep cloned worktrees, generated headers, wrapper sources, and logs
 under ignored `build/`, `scratch/`, and `logs/` directories.  They must not edit
 files under `upstream/`.
 
-Current `src/true.c` status: `run-true-probe.sh` is repeatable and now gets
-past GNU `#include_next` in generated replacement headers, gnulib
-`_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations, and GNU
-`__extension__ static __inline` glibc header functions. Remaining
-compiler-owned blockers are tracked by tasks 16-23 through 16-24, starting
-with hosted declaration/macro gaps.
+Current `src/true.c` status: `run-true-probe.sh` is repeatable and now writes
+`build/gnulib-config-probe/true.hir`. It gets past GNU `#include_next`,
+gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declarations, GNU
+`__extension__ static __inline` glibc header functions, and the first hosted
+declaration/macro sweep. Remaining compiler-owned work is task 16-24: build,
+link, and run a host-vs-rcc `src/true` oracle.

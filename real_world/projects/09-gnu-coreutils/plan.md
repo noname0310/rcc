@@ -105,19 +105,11 @@ failure: `lib/hard-locale.c` sees missing `SETLOCALE_NULL_MAX` /
 next coreutils task must either resolve that host-build input issue or select a
 smaller generated-header probe before using the utility as an oracle.
 
-Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
-progresses through GNU `#include_next` in generated replacement headers, the
-gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declaration surface,
-and GNU `__extension__ static __inline` glibc header functions. It now records
-the next concrete compiler-owned blockers:
-
-- `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
-  hosted names such as `wcwidth`, `fputs_unlocked`, `fwrite_unlocked`,
-  `fchownat`, `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and
-  `S_TYPEISTMO` need small declaration/macro shims once the generated headers
-  parse.
-- `tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`: final
-  host-vs-rcc runtime comparison for `src/true`.
+Current `rcc` config-wrapper status: after generated `config.h` exists,
+`run-true-probe.sh` writes `build/gnulib-config-probe/true.hir`. The next
+concrete compiler-owned blocker is
+`tasks/16-linux-glibc-compat/24-coreutils-true-runtime-oracle.md`: build, link,
+and run a final host-vs-rcc runtime comparison for `src/true`.
 
 These are compiler/header-surface inputs, not broad xfails.
 

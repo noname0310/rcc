@@ -10,4 +10,6 @@ typedef unsigned int wint_t;
 
 #define WEOF ((wchar_t)-1)
 
+extern int wcwidth(wchar_t);
+
 #endif

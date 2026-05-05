@@ -96,6 +96,12 @@
 #ifndef EPIPE
 #define EPIPE 32
 #endif
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP 95
+#endif
+#ifndef ENOTSUP
+#define ENOTSUP EOPNOTSUPP
+#endif
 
 #if defined(_WIN32)
 extern int *__errno(void);
