@@ -27,6 +27,10 @@ use crate::macros::{MacroDef, MacroKind};
 use crate::Preprocessor;
 
 const MAX_INCLUDE_DEPTH: usize = 64;
+// Permit one active self-reentry so macro-controlled self-inclusion still
+// works, but cut branching unguarded self-includes before they grow
+// exponentially under fuzzing.
+const MAX_SELF_INCLUDE_ACTIVE: usize = 2;
 
 /// Resolve `name` against C99 §6.10.2 search rules.
 ///
@@ -368,13 +372,17 @@ impl Preprocessor<'_> {
             }
         }
 
-        if current_file != new_file && self.active_includes.contains_key(&new_file) {
-            let edge = (current_file, new_file);
-            if !self.diagnosed_include_cycles.contains_key(&edge) {
-                self.session.handler.emit(&recursive_include_cycle(directive_span, &resolved));
-                self.diagnosed_include_cycles.insert(edge, ());
+        if let Some(&active_count) = self.active_includes.get(&new_file) {
+            let finite_self_include =
+                current_file == new_file && active_count < MAX_SELF_INCLUDE_ACTIVE;
+            if !finite_self_include {
+                let edge = (current_file, new_file);
+                if !self.diagnosed_include_cycles.contains_key(&edge) {
+                    self.session.handler.emit(&recursive_include_cycle(directive_span, &resolved));
+                    self.diagnosed_include_cycles.insert(edge, ());
+                }
+                return Vec::new();
             }
-            return Vec::new();
         }
 
         if self.include_depth >= MAX_INCLUDE_DEPTH {
@@ -912,9 +920,39 @@ mod tests {
 
         assert!(!out.is_empty(), "tokens after the recursive include should still recover");
         let diags = cap.diagnostics();
-        assert_eq!(diags.len(), 1, "expected one include-depth diagnostic: {diags:?}");
+        assert_eq!(diags.len(), 1, "expected one include-cycle diagnostic: {diags:?}");
         assert_eq!(diags[0].code, Some(E0021));
-        assert!(diags[0].message.contains("include nesting exceeds"));
+        assert!(diags[0].message.contains("recursive include cycle"));
+    }
+
+    #[test]
+    fn branching_self_include_is_cut_before_exponential_growth() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_vfs__");
+        let main_path = root.join("main.c");
+        let header_path = root.join("test.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"test.h\"\n"));
+        sess.add_virtual_file(
+            header_path.clone(),
+            Arc::from(
+                "#include \"test.h\"\n#include \"test.h\"\nint after_branching_self_include;\n",
+            ),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = joined_token_text(&sess, &out);
+
+        assert!(
+            text.matches("after_branching_self_include").count() <= 3,
+            "branching self-include should be cut to a linear amount of output: {text}"
+        );
+        let diags = cap.diagnostics();
+        assert!(
+            !diags.is_empty()
+                && diags.iter().all(|diag| diag.message.contains("recursive include cycle")),
+            "expected only cycle diagnostics, got {diags:?}"
+        );
     }
 
     #[test]

@@ -160,6 +160,7 @@ impl Adapter for CTestSuiteAdapter {
 
         // Step 3: execute and compare
         let mut exec_cmd = Command::new(&exe_path);
+        exec_cmd.current_dir(tmp.path());
         match run_with_timeout(&mut exec_cmd, TIMEOUT) {
             Ok(output) => {
                 Ok(Self::compare_outcome(&output.stdout, output.status.code(), &expected_path))

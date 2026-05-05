@@ -1112,17 +1112,13 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
                 lower_stmt_in_dead_code(builder, cx, *else_b);
             }
         }
-        HirStmtKind::While { body, .. } | HirStmtKind::DoWhile { body, .. } => {
-            lower_stmt_in_dead_code(builder, cx, *body);
-        }
-        HirStmtKind::For { init, body, .. } => {
-            if let Some(init_stmt) = init {
-                lower_stmt_in_dead_code(builder, cx, *init_stmt);
+        HirStmtKind::While { .. }
+        | HirStmtKind::DoWhile { .. }
+        | HirStmtKind::For { .. }
+        | HirStmtKind::Switch { .. } => {
+            if stmt_contains_label(cx.body, stmt_id) {
+                lower_stmt_in_unreachable_island(builder, cx, stmt_id);
             }
-            lower_stmt_in_dead_code(builder, cx, *body);
-        }
-        HirStmtKind::Switch { body, .. } => {
-            lower_stmt_in_dead_code(builder, cx, *body);
         }
         HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
             if let Some(case_bb) = builder.switch_case_block(stmt_id) {
@@ -1134,6 +1130,16 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
         }
         _ => {}
     }
+}
+
+fn lower_stmt_in_unreachable_island(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    stmt_id: HirStmtId,
+) {
+    let island = builder.new_block();
+    builder.switch_to(island);
+    lower_stmt(builder, cx, stmt_id);
 }
 
 fn lower_if(
@@ -1279,9 +1285,14 @@ fn stmt_contains_label(body: &HirBody, stmt_id: HirStmtId) -> bool {
         HirStmtKind::Switch { cond, body: stmt, .. } => {
             expr_contains_label(body, *cond) || stmt_contains_label(body, *stmt)
         }
-        HirStmtKind::Case { body: stmt, .. } | HirStmtKind::Default { body: stmt } => {
-            stmt_contains_label(body, *stmt)
-        }
+        // `case` and `default` are control-flow labels too.  They can appear
+        // inside a syntactically dead branch of the nearest enclosing switch:
+        //
+        //   switch (x) { if (0) { case 1: ... } }
+        //
+        // The switch dispatch still targets that case block, so const-folded
+        // dead-code lowering must retain the label body.
+        HirStmtKind::Case { .. } | HirStmtKind::Default { .. } => true,
         HirStmtKind::Expr(expr) | HirStmtKind::GotoComputed(expr) => {
             expr_contains_label(body, *expr)
         }
@@ -4850,6 +4861,42 @@ mod tests {
         assert!(body.blocks[exit_block].statements.is_empty());
     }
 
+    /// A label nested in a syntactically dead loop can still be reached by a
+    /// later `goto`. Once control enters that label, the surrounding loop
+    /// structure is live again, so the label body must fall through to the
+    /// loop back edge rather than to itself or to the post-if continuation.
+    #[test]
+    fn const_false_if_dead_while_label_preserves_loop_backedge() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let false_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(0));
+        let while_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let label_body = assign_local_stmt(&mut hir_body, int_ty, hb, 2);
+        let label = label_stmt(&mut hir_body, "loop", label_body);
+        let loop_body = block_stmt(&mut hir_body, vec![label]);
+        let dead_loop = while_stmt(&mut hir_body, while_cond, loop_body);
+        let nested_if = if_stmt(&mut hir_body, false_cond, dead_loop, None);
+        let goto_label = goto_stmt(&mut hir_body, "loop");
+        let root = block_stmt(&mut hir_body, vec![nested_if, goto_label]);
+
+        builder.collect_labels(&hir_body, root, &map);
+        let label_block = builder.label_block(Symbol(3));
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let label_bb = &body.blocks[label_block];
+        assert_assign_const(label_bb, map.lookup(hb), 2);
+        let header_id = goto_target(label_bb);
+        assert!(
+            matches!(body.blocks[header_id].terminator.kind, TerminatorKind::SwitchInt { .. }),
+            "label body must re-enter the surrounding while condition"
+        );
+    }
+
     /// `while (a) {}` — empty body must still form a valid back edge.
     #[test]
     fn while_loop_empty_body() {
@@ -5607,6 +5654,52 @@ mod tests {
         let join = goto_target(default_bb);
         assert_eq!(goto_target(case1_bb), join, "case 1 break must not fall through");
         assert_eq!(goto_target(case2_bb), join, "case 2 break must not fall through");
+    }
+
+    /// `case` and `default` are labels even when they are nested inside a
+    /// branch eliminated by constant folding. The switch dispatch can still
+    /// jump to them, so the dead-code scanner must lower their bodies instead
+    /// of leaving dispatch targets as reachable `unreachable` blocks.
+    #[test]
+    fn switch_case_labels_inside_const_false_if_are_lowered() {
+        let (mut builder, mut hir_body, tcx, map, [ha, hb, _hc]) = three_int_locals();
+        let int_ty = tcx.int;
+
+        let switch_discr =
+            push_expr(&mut hir_body, int_ty, ValueCat::LValue, HirExprKind::LocalRef(ha));
+        let false_cond =
+            push_expr(&mut hir_body, int_ty, ValueCat::RValue, HirExprKind::IntConst(0));
+
+        let case1_body = assign_local_stmt(&mut hir_body, int_ty, hb, 10);
+        let case1 = case_stmt(&mut hir_body, 1, case1_body);
+        let default_body = assign_local_stmt(&mut hir_body, int_ty, hb, 20);
+        let default = default_stmt(&mut hir_body, default_body);
+
+        let dead_branch = block_stmt(&mut hir_body, vec![case1, default]);
+        let nested_if = if_stmt(&mut hir_body, false_cond, dead_branch, None);
+        let switch_body = block_stmt(&mut hir_body, vec![nested_if]);
+        let cases = vec![
+            rcc_hir::SwitchCase { value: Some(1), target: case1 },
+            rcc_hir::SwitchCase { value: None, target: default },
+        ];
+        let root = switch_stmt(&mut hir_body, switch_discr, switch_body, cases);
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        lower_stmt(&mut builder, &cx, root);
+        let body = finish(builder);
+
+        let entry = &body.blocks[crate::BasicBlockId(0)];
+        let dispatch = &body.blocks[goto_target(entry)];
+        let targets = switch_targets(dispatch);
+        let case_block = &body.blocks[targets[0].1];
+        let default_block = &body.blocks[targets[1].1];
+
+        assert_assign_const(case_block, map.lookup(hb), 10);
+        assert_assign_const(default_block, map.lookup(hb), 20);
+        assert!(
+            crate::verify::verify_body(&body, &tcx).is_ok(),
+            "dispatch targets must not remain reachable unreachable blocks"
+        );
     }
 
     /// Nested switch: inner `break` targets inner join, not outer join.
