@@ -2052,7 +2052,7 @@ fn combine_bitfield_precision(
 ) -> Option<BitfieldPrecision> {
     match (lhs, rhs) {
         (None, None) => None,
-        (Some(precision), None) | (None, Some(precision)) => Some(precision),
+        (Some(_), None) | (None, Some(_)) => None,
         (Some(lhs), Some(rhs)) => Some(match lhs.width.cmp(&rhs.width) {
             std::cmp::Ordering::Greater => lhs,
             std::cmp::Ordering::Less => rhs,
@@ -5980,7 +5980,8 @@ mod tests {
     fn binary_expression_applies_wide_bitfield_precision_to_operand_and_result() {
         let mut tcx = TyCtxt::new();
         let (mut session, _cap) = Session::for_test();
-        let u40 = session.interner.intern("u40");
+        let a = session.interner.intern("a");
+        let b = session.interner.intern("b");
         let record = DefId(72);
         let rec_ty = tcx.intern(Ty::Record(record));
         let mut def_info = rcc_data_structures::FxHashMap::default();
@@ -5991,63 +5992,68 @@ mod tests {
                 value_cat: ValueCat::RValue,
                 enumerator_value: None,
                 object_quals: ObjectQuals::none(),
-                record_fields: Some(vec![FieldSnapshot {
-                    name: Some(u40),
-                    ty: tcx.ulong_long,
-                    bit_width: Some(40),
-                    ms_bitfields: false,
-                    quals: ObjectQuals::none(),
-                }]),
+                record_fields: Some(vec![
+                    FieldSnapshot {
+                        name: Some(a),
+                        ty: tcx.ulong_long,
+                        bit_width: Some(40),
+                        ms_bitfields: false,
+                        quals: ObjectQuals::none(),
+                    },
+                    FieldSnapshot {
+                        name: Some(b),
+                        ty: tcx.ulong_long,
+                        bit_width: Some(40),
+                        ms_bitfields: false,
+                        quals: ObjectQuals::none(),
+                    },
+                ]),
             },
         );
 
         let mut body = Body::default();
         let s = push_local(&mut body, Some(session.interner.intern("s")), rec_ty, true);
         let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
-        let member = push_kind(
+        let lhs_member = push_kind(
             &mut body,
             tcx.error,
-            HirExprKind::UnresolvedField { base, field: u40, field_span: DUMMY_SP },
+            HirExprKind::UnresolvedField { base, field: a, field_span: DUMMY_SP },
         );
-        let rhs = push_kind(
+        let rhs_member = push_kind(
             &mut body,
             tcx.error,
-            HirExprKind::IntLiteral {
-                value: 8,
-                base: IntLiteralBase::Decimal,
-                suffix: IntLiteralSuffix::ULL,
-            },
+            HirExprKind::UnresolvedField { base, field: b, field_span: DUMMY_SP },
         );
         let bin = push_kind(
             &mut body,
             tcx.error,
-            HirExprKind::Binary { op: BinOp::Sub, lhs: member, rhs },
+            HirExprKind::Binary { op: BinOp::Sub, lhs: lhs_member, rhs: rhs_member },
         );
         set_root_expr(&mut body, bin);
 
         check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
 
         assert!(!session.handler.has_errors());
-        assert_eq!(body.exprs[member].ty, tcx.ulong_long);
-        assert_eq!(body.exprs[bin].ty, tcx.ulong_long);
+        assert_eq!(body.exprs[lhs_member].ty, tcx.ulong_long);
+        assert_eq!(body.exprs[rhs_member].ty, tcx.ulong_long);
+        assert_eq!(body.exprs[bin].ty, tcx.long_long);
         let HirExprKind::Binary { lhs, rhs: got_rhs, .. } = body.exprs[bin].kind else {
             panic!("expected binary expression");
         };
-        assert_eq!(got_rhs, rhs);
         let HirExprKind::Convert {
-            operand,
             kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+            ..
         } = body.exprs[lhs].kind
         else {
             panic!("expected lhs bit-field precision wrapper, got {:?}", body.exprs[lhs].kind);
         };
-        assert_eq!(body.exprs[lhs].ty, tcx.ulong_long);
+        assert_eq!(body.exprs[lhs].ty, body.exprs[bin].ty);
         assert!(matches!(
-            body.exprs[operand].kind,
+            body.exprs[got_rhs].kind,
             HirExprKind::Convert {
-                operand: got_member,
-                kind: ConvertKind::LvalueToRvalue
-            } if got_member == member
+                kind: ConvertKind::BitfieldPrecision { width: 40, signed: false },
+                ..
+            }
         ));
 
         let root = root_expr(&body);
