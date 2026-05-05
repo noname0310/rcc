@@ -107,11 +107,12 @@ smaller generated-header probe before using the utility as an oracle.
 
 Current `rcc` config-wrapper status: after generated `config.h` exists, `rcc`
 progresses through GNU `#include_next` in generated replacement headers and
-now records the next concrete compiler-owned blockers:
+the gnulib `_GL_FUNCDECL_*` / `_GL_CXXALIAS_*` macro-expanded declaration
+surface. It now records the next concrete compiler-owned blockers:
 
-- `tasks/16-linux-glibc-compat/22-gnulib-funcdecl-macro-surface.md`:
-  `_GL_FUNCDECL_*` and `_GL_CXXALIAS_*` macro-expanded declarations currently
-  cascade into K&R parser diagnostics.
+- `tasks/16-linux-glibc-compat/22a-gnu-extension-inline-header-functions.md`:
+  GNU `__extension__ static __inline` glibc header functions currently stop
+  declaration parsing in `<bits/byteswap.h>`.
 - `tasks/16-linux-glibc-compat/23-coreutils-posix-declaration-sweep.md`:
   hosted names such as `fputs_unlocked`, `fwrite_unlocked`, `fchownat`,
   `fchmodat`, `vasprintf`, `mbrtowc` helpers, `S_TYPEISSHM`, and `S_TYPEISTMO`

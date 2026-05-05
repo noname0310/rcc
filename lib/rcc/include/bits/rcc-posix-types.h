@@ -66,6 +66,16 @@ typedef long off_t;
 #define __rcc_off_t_defined 1
 #endif
 
+#ifndef __rcc___off64_t_defined
+typedef long __off64_t;
+#define __rcc___off64_t_defined 1
+#endif
+
+#ifndef __rcc_off64_t_defined
+typedef __off64_t off64_t;
+#define __rcc_off64_t_defined 1
+#endif
+
 #ifndef __rcc_ssize_t_defined
 typedef long ssize_t;
 #define __rcc_ssize_t_defined 1

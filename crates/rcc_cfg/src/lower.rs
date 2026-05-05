@@ -1115,10 +1115,10 @@ fn lower_stmt_in_dead_code(builder: &mut BodyBuilder, cx: &LowerCx<'_>, stmt_id:
         HirStmtKind::While { .. }
         | HirStmtKind::DoWhile { .. }
         | HirStmtKind::For { .. }
-        | HirStmtKind::Switch { .. } => {
-            if stmt_contains_label(cx.body, stmt_id) {
-                lower_stmt_in_unreachable_island(builder, cx, stmt_id);
-            }
+        | HirStmtKind::Switch { .. }
+            if stmt_contains_label(cx.body, stmt_id) =>
+        {
+            lower_stmt_in_unreachable_island(builder, cx, stmt_id);
         }
         HirStmtKind::Case { body, .. } | HirStmtKind::Default { body } => {
             if let Some(case_bb) = builder.switch_case_block(stmt_id) {

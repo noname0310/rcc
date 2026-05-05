@@ -480,6 +480,66 @@ fn representative_glibc_attribute_declarations_parse_in_hosted_mode() {
 }
 
 #[test]
+fn gnulib_funcdecl_and_cxxalias_macro_surface_parse_in_hosted_mode() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    let src = r#"
+        #define _GL_EXTERN_C extern
+        #define _GL_EXTERN_C_FUNC
+        #define _GL_FUNCDECL_SYS_NAME(func) (func)
+        #define _GL_FUNCDECL_SYS(func,rettype,parameters,...) \
+          _GL_EXTERN_C_FUNC __VA_ARGS__ rettype _GL_FUNCDECL_SYS_NAME (func) parameters
+        #define _GL_CXXALIAS_SYS(func,rettype,parameters) \
+          _GL_EXTERN_C int _gl_cxxalias_dummy
+        #define _GL_ARG_NONNULL(params) __attribute__ ((__nonnull__ params))
+
+        typedef long off64_t;
+        typedef struct __rcc_FILE FILE;
+        typedef __builtin_va_list va_list;
+
+        _GL_FUNCDECL_SYS (vfzprintf, off64_t,
+                          (FILE *restrict fp,
+                           const char *restrict format, va_list args),
+                          _GL_ARG_NONNULL ((1, 2)));
+        _GL_CXXALIAS_SYS (vfzprintf, off64_t,
+                          (FILE *restrict fp,
+                           const char *restrict format, va_list args));
+    "#;
+    let (tu, diags, _sess) = parse_ok_with_session(src, opts);
+
+    assert_eq!(tu.decls.len(), 5);
+    for forbidden in [rcc_errors::codes::W0005, rcc_errors::codes::E0030, rcc_errors::codes::E0063]
+    {
+        assert!(
+            diags.iter().all(|d| d.code != Some(forbidden)),
+            "gnulib declaration helper emitted {forbidden}: {diags:#?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_parenthesized_function_decl_does_not_poison_following_prototypes() {
+    let opts = Options { linux_gnu_hosted: true, ..Options::default() };
+    let src = r#"
+        typedef struct __rcc_FILE FILE;
+        typedef __builtin_va_list va_list;
+        __attribute__ ((__nonnull__ ((1, 2))))
+        off64_t (vfzprintf) (FILE *restrict fp,
+                             const char *restrict format, va_list args);
+        extern int _gl_cxxalias_dummy;
+        extern int isalnum(int);
+    "#;
+    let (_ast, diags, _cap) = parse_snippet_with_options(src, opts);
+
+    for forbidden in [rcc_errors::codes::W0005, rcc_errors::codes::E0030, rcc_errors::codes::E0063]
+    {
+        assert!(
+            diags.iter().all(|d| d.code != Some(forbidden)),
+            "malformed declaration recovery emitted {forbidden}: {diags:#?}"
+        );
+    }
+}
+
+#[test]
 fn gnu_qualifier_aliases_are_rejected_in_strict_c99() {
     parse_err("int *__restrict p;");
     parse_err("void f(int a[__const static 4]);");

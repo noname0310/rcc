@@ -1,7 +1,7 @@
 # 16-23: coreutils POSIX Declaration Sweep
 
 **Phase:** 16-linux-glibc-compat  
-**Depends on:** 16-22-gnulib-funcdecl-macro-surface  
+**Depends on:** 16-22a-gnu-extension-inline-header-functions  
 **Milestone:** hosted-linux
 
 ## Goal

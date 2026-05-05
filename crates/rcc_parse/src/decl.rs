@@ -1213,7 +1213,10 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
         .derived
         .last()
         .is_some_and(|d| matches!(d, DerivedDeclarator::Function(fd) if !fd.kr_names.is_empty()));
-    if has_kr_names {
+    let is_kr_definition = has_kr_names
+        && (matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace)))
+            || looks_like_decl_specifier_start(p));
+    if is_kr_definition {
         // Emit obsolescence warning.
         p.session
             .handler
@@ -1347,6 +1350,45 @@ pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
 
     let id = p.fresh_id();
     Some(ExternalDecl::Decl(Decl { id, span: start.to(end), specs, inits }))
+}
+
+fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
+    let at = crate::attr::skip_attribute_groups_at(p, p.cursor);
+    match p.tokens.get(at).map(|t| &t.kind) {
+        Some(TokenKind::Keyword(kw)) => matches!(
+            kw,
+            Keyword::Typedef
+                | Keyword::Extern
+                | Keyword::Static
+                | Keyword::Auto
+                | Keyword::Register
+                | Keyword::Void
+                | Keyword::Char
+                | Keyword::Short
+                | Keyword::Int
+                | Keyword::Long
+                | Keyword::Float
+                | Keyword::Double
+                | Keyword::Signed
+                | Keyword::Unsigned
+                | Keyword::Bool
+                | Keyword::Complex
+                | Keyword::Imaginary
+                | Keyword::Const
+                | Keyword::Volatile
+                | Keyword::Restrict
+                | Keyword::Inline
+                | Keyword::Struct
+                | Keyword::Union
+                | Keyword::Enum
+        ),
+        Some(TokenKind::Ident(sym)) => {
+            matches!(p.session.interner.get(*sym), "typeof" | "__typeof" | "__typeof__")
+                || ident_is_type_qualifier_alias(p, *sym)
+                || p.scopes.is_typedef(*sym)
+        }
+        _ => false,
+    }
 }
 
 /// Parse a `declaration` inside a block (C99 §6.7):

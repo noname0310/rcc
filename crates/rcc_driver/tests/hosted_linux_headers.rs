@@ -90,15 +90,17 @@ int probe(const char *s) {
 int probe(const char *path) {
     struct stat st;
     DIR *dir;
+    off64_t large_offset = 0;
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return 1;
     if (fstat(fd, &st) != 0)
         return 2;
+    large_offset = (off64_t) st.st_size;
     dir = fdopendir(fd);
     if (dir)
         closedir(dir);
-    return S_ISREG(st.st_mode) ? 0 : 3;
+    return S_ISREG(st.st_mode) && large_offset >= 0 ? 0 : 3;
 }
 "#,
         },

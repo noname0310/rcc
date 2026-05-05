@@ -212,7 +212,7 @@ fn warn_if_unsupported_attr(p: &mut Parser<'_>, name: rcc_span::Symbol, span: Sp
 
 fn supported_attr(raw: &str) -> bool {
     let normalized = normalize_attr_name(raw);
-    SUPPORTED_ATTRS.iter().any(|candidate| *candidate == normalized)
+    SUPPORTED_ATTRS.contains(&normalized)
 }
 
 fn normalize_attr_name(raw: &str) -> &str {
