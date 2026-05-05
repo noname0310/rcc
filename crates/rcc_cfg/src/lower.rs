@@ -1145,6 +1145,15 @@ fn lower_if(
     else_branch: Option<HirStmtId>,
 ) {
     let cond_op = lower_condition_operand(builder, cx, span, cond);
+    if let Some(cond_is_true) = const_operand_truth(&cond_op) {
+        if cond_is_true {
+            lower_stmt(builder, cx, then_branch);
+        } else if let Some(else_branch) = else_branch {
+            lower_stmt(builder, cx, else_branch);
+        }
+        return;
+    }
+
     let then_block = builder.new_block();
 
     match else_branch {
@@ -1248,6 +1257,24 @@ fn lower_short_circuit(
     lhs: rcc_hir::HirExprId,
     rhs: rcc_hir::HirExprId,
 ) -> Operand {
+    if let Some(lhs_truth) = const_condition_expr(cx, lhs) {
+        return match (is_and, lhs_truth) {
+            (true, false) => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
+            (true, true) => lower_condition_operand(builder, cx, span, rhs),
+            (false, true) => Operand::Const(Const { kind: ConstKind::Int(1), ty }),
+            (false, false) => lower_condition_operand(builder, cx, span, rhs),
+        };
+    }
+    if let Some(rhs_truth) = const_condition_expr(cx, rhs) {
+        let lhs_op = lower_condition_operand(builder, cx, span, lhs);
+        return match (is_and, rhs_truth) {
+            (true, true) => lhs_op,
+            (true, false) => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
+            (false, true) => Operand::Const(Const { kind: ConstKind::Int(1), ty }),
+            (false, false) => lhs_op,
+        };
+    }
+
     // Allocate the result temp and pre-initialise it to the short-circuit
     // answer (`0` for `&&`, `1` for `||`).
     let result_local = builder.alloc_temp(ty, span);
@@ -1333,6 +1360,13 @@ fn lower_ternary(
 ) -> Operand {
     // Lower the controlling expression in the current block.
     let cond_op = lower_condition_operand(builder, cx, span, cond);
+    if let Some(cond_is_true) = const_operand_truth(&cond_op) {
+        return if cond_is_true {
+            lower_as_rvalue(builder, cx, then_expr)
+        } else {
+            lower_as_rvalue(builder, cx, else_expr)
+        };
+    }
 
     let is_void_result = matches!(cx.tcx.get(ty), Ty::Void);
     let result_local = (!is_void_result).then(|| builder.alloc_temp(ty, span));
@@ -1504,13 +1538,17 @@ fn lower_while(
     builder.switch_to(header);
     let cond_op = lower_condition_operand(builder, cx, span, cond);
     let body_bb = builder.new_block();
-    builder.terminate(Terminator {
-        kind: TerminatorKind::SwitchInt {
-            discr: cond_op,
-            targets: vec![(Some(0), exit), (None, body_bb)],
-        },
-        span,
-    });
+    if let Some(cond_is_true) = const_operand_truth(&cond_op) {
+        builder.goto(if cond_is_true { body_bb } else { exit }, span);
+    } else {
+        builder.terminate(Terminator {
+            kind: TerminatorKind::SwitchInt {
+                discr: cond_op,
+                targets: vec![(Some(0), exit), (None, body_bb)],
+            },
+            span,
+        });
+    }
 
     // Body.
     builder.switch_to(body_bb);
@@ -1574,13 +1612,17 @@ fn lower_do_while(
     // Condition.
     builder.switch_to(cond_bb);
     let cond_op = lower_condition_operand(builder, cx, span, cond);
-    builder.terminate(Terminator {
-        kind: TerminatorKind::SwitchInt {
-            discr: cond_op,
-            targets: vec![(Some(0), exit), (None, body_bb)],
-        },
-        span,
-    });
+    if let Some(cond_is_true) = const_operand_truth(&cond_op) {
+        builder.goto(if cond_is_true { body_bb } else { exit }, span);
+    } else {
+        builder.terminate(Terminator {
+            kind: TerminatorKind::SwitchInt {
+                discr: cond_op,
+                targets: vec![(Some(0), exit), (None, body_bb)],
+            },
+            span,
+        });
+    }
 
     builder.pop_loop();
     builder.switch_to(exit);
@@ -1655,13 +1697,17 @@ fn lower_for(
     match cond {
         Some(cond_expr) => {
             let cond_op = lower_condition_operand(builder, cx, span, cond_expr);
-            builder.terminate(Terminator {
-                kind: TerminatorKind::SwitchInt {
-                    discr: cond_op,
-                    targets: vec![(Some(0), exit), (None, body_bb)],
-                },
-                span,
-            });
+            if let Some(cond_is_true) = const_operand_truth(&cond_op) {
+                builder.goto(if cond_is_true { body_bb } else { exit }, span);
+            } else {
+                builder.terminate(Terminator {
+                    kind: TerminatorKind::SwitchInt {
+                        discr: cond_op,
+                        targets: vec![(Some(0), exit), (None, body_bb)],
+                    },
+                    span,
+                });
+            }
         }
         None => {
             // Infinite loop: no condition, unconditionally jump to body.
@@ -1808,6 +1854,10 @@ fn lower_condition_operand(
     span: Span,
     expr: HirExprId,
 ) -> Operand {
+    if let Some(truth) = const_condition_expr(cx, expr) {
+        return Operand::Const(Const { kind: ConstKind::Int(i128::from(truth)), ty: cx.tcx.int });
+    }
+
     let value = lower_as_rvalue(builder, cx, expr);
     let ty = cx.body.exprs[expr].ty;
     normalize_condition_operand(builder, cx, span, value, ty)
@@ -1820,6 +1870,10 @@ fn normalize_condition_operand(
     value: Operand,
     ty: rcc_hir::TyId,
 ) -> Operand {
+    if let Some(truth) = const_operand_truth(&value) {
+        return Operand::Const(Const { kind: ConstKind::Int(i128::from(truth)), ty: cx.tcx.int });
+    }
+
     if matches!(cx.tcx.get(ty), rcc_hir::Ty::Int { .. }) {
         return value;
     }
@@ -1827,6 +1881,240 @@ fn normalize_condition_operand(
     let result = builder.alloc_temp(cx.tcx.int, span);
     push_assign(builder, span, result, Rvalue::BinaryOp(BinOp::Ne, value, scalar_zero(cx.tcx, ty)));
     Operand::Copy(Place { base: result, projection: Vec::new() })
+}
+
+fn const_condition_expr(cx: &LowerCx<'_>, expr: HirExprId) -> Option<bool> {
+    if let Some(value) = const_int_expr(cx, expr) {
+        return Some(value != 0);
+    }
+    const_float_expr(cx, expr).map(|value| value != 0.0)
+}
+
+fn const_operand_truth(value: &Operand) -> Option<bool> {
+    match value {
+        Operand::Const(Const { kind: ConstKind::Int(value), .. }) => Some(*value != 0),
+        Operand::Const(Const { kind: ConstKind::Float(value), .. }) => Some(*value != 0.0),
+        Operand::Const(Const { kind: ConstKind::ZeroInit, .. }) => Some(false),
+        Operand::Const(Const {
+            kind: ConstKind::Global(_) | ConstKind::BlockAddress(_), ..
+        }) => Some(true),
+        Operand::Copy(_) | Operand::Move(_) => None,
+    }
+}
+
+fn const_int_expr(cx: &LowerCx<'_>, expr: HirExprId) -> Option<i128> {
+    let expr = cx.body.exprs.get(expr)?;
+    match expr.kind.clone() {
+        HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => Some(value),
+        HirExprKind::FloatConst(_) => None,
+        HirExprKind::SizeofExpr(operand) => {
+            let operand_ty = cx.body.exprs.get(operand)?.ty;
+            if matches!(cx.tcx.get(operand_ty), Ty::Array { is_vla: true, .. }) {
+                return None;
+            }
+            cx.layout.layout_of(operand_ty).ok().map(layout_size_as_i128)
+        }
+        HirExprKind::SizeofType(ty) => cx.layout.layout_of(ty).ok().map(layout_size_as_i128),
+        HirExprKind::AlignofExpr(operand) => {
+            let operand_ty = cx.body.exprs.get(operand)?.ty;
+            cx.layout.layout_of(operand_ty).ok().map(layout_align_as_i128)
+        }
+        HirExprKind::AlignofType(ty) => cx.layout.layout_of(ty).ok().map(layout_align_as_i128),
+        HirExprKind::Unary { op, operand } => {
+            let value = const_int_expr(cx, operand)?;
+            match op {
+                HirUnOp::Plus => Some(value),
+                HirUnOp::Neg => value.checked_neg(),
+                HirUnOp::BitNot => Some(!value),
+                HirUnOp::LogNot => Some(i128::from(value == 0)),
+                HirUnOp::PreInc | HirUnOp::PreDec | HirUnOp::PostInc | HirUnOp::PostDec => None,
+            }
+        }
+        HirExprKind::Binary { op, lhs, rhs } => const_int_binary(cx, op, lhs, rhs),
+        HirExprKind::Cond { cond, then_expr, else_expr } => {
+            if const_condition_expr(cx, cond)? {
+                const_int_expr(cx, then_expr)
+            } else {
+                const_int_expr(cx, else_expr)
+            }
+        }
+        HirExprKind::OmittedCond { cond, else_expr } => {
+            let cond_value = const_int_expr(cx, cond)?;
+            if cond_value != 0 {
+                Some(cond_value)
+            } else {
+                const_int_expr(cx, else_expr)
+            }
+        }
+        HirExprKind::Cast { operand, to } => const_int_cast(cx, operand, to),
+        HirExprKind::Convert { operand, kind } => match kind {
+            ConvertKind::IntegerPromotion
+            | ConvertKind::UsualArithmetic
+            | ConvertKind::LvalueToRvalue => const_int_expr(cx, operand),
+            ConvertKind::BitfieldPrecision { width, signed } => {
+                const_int_expr(cx, operand).map(|value| truncate_int(value, width, signed))
+            }
+            ConvertKind::ArrayToPtr
+            | ConvertKind::FuncToPtr
+            | ConvertKind::Pointer
+            | ConvertKind::RealToComplex
+            | ConvertKind::ComplexToReal => None,
+        },
+        HirExprKind::BuiltinExpect { value, expected } => {
+            const_int_expr(cx, expected)?;
+            const_int_expr(cx, value)
+        }
+        HirExprKind::BuiltinBswap { bits, value } => {
+            let value = const_int_expr(cx, value)?;
+            Some(match bits {
+                16 => i128::from((value as u16).swap_bytes()),
+                32 => i128::from((value as u32).swap_bytes()),
+                64 => i128::from((value as u64).swap_bytes()),
+                _ => return None,
+            })
+        }
+        HirExprKind::StringRef(_)
+        | HirExprKind::LocalRef(_)
+        | HirExprKind::DefRef(_)
+        | HirExprKind::Call { .. }
+        | HirExprKind::StmtExpr { .. }
+        | HirExprKind::UnresolvedField { .. }
+        | HirExprKind::Field { .. }
+        | HirExprKind::Index { .. }
+        | HirExprKind::CompoundLiteral { .. }
+        | HirExprKind::VectorInit { .. }
+        | HirExprKind::AddressOf(_)
+        | HirExprKind::LabelAddr(_)
+        | HirExprKind::Deref(_)
+        | HirExprKind::Comma { .. }
+        | HirExprKind::Assign { .. }
+        | HirExprKind::BuiltinVaArea
+        | HirExprKind::BuiltinVaArg { .. }
+        | HirExprKind::BuiltinVaStart { .. }
+        | HirExprKind::BuiltinVaEnd { .. }
+        | HirExprKind::BuiltinVaCopy { .. }
+        | HirExprKind::BuiltinUnreachable
+        | HirExprKind::BuiltinConstantP { .. }
+        | HirExprKind::BuiltinComplex { .. }
+        | HirExprKind::BuiltinTgmath { .. }
+        | HirExprKind::BuiltinOverflow { .. }
+        | HirExprKind::BuiltinOverflowP { .. } => None,
+    }
+}
+
+fn const_int_binary(
+    cx: &LowerCx<'_>,
+    op: HirBinOp,
+    lhs: HirExprId,
+    rhs: HirExprId,
+) -> Option<i128> {
+    if matches!(op, HirBinOp::LogAnd | HirBinOp::LogOr) {
+        let lhs = const_condition_expr(cx, lhs)?;
+        return match op {
+            HirBinOp::LogAnd if !lhs => Some(0),
+            HirBinOp::LogAnd => Some(i128::from(const_condition_expr(cx, rhs)?)),
+            HirBinOp::LogOr if lhs => Some(1),
+            HirBinOp::LogOr => Some(i128::from(const_condition_expr(cx, rhs)?)),
+            _ => unreachable!(),
+        };
+    }
+
+    if let (Some(lhs), Some(rhs)) = (const_int_expr(cx, lhs), const_int_expr(cx, rhs)) {
+        return match op {
+            HirBinOp::Add => lhs.checked_add(rhs),
+            HirBinOp::Sub => lhs.checked_sub(rhs),
+            HirBinOp::Mul => lhs.checked_mul(rhs),
+            HirBinOp::Div => (rhs != 0).then(|| lhs / rhs),
+            HirBinOp::Rem => (rhs != 0).then(|| lhs % rhs),
+            HirBinOp::Shl => shift_amount(rhs).and_then(|rhs| lhs.checked_shl(rhs)),
+            HirBinOp::Shr => shift_amount(rhs).map(|rhs| lhs >> rhs),
+            HirBinOp::Lt => Some(i128::from(lhs < rhs)),
+            HirBinOp::Le => Some(i128::from(lhs <= rhs)),
+            HirBinOp::Gt => Some(i128::from(lhs > rhs)),
+            HirBinOp::Ge => Some(i128::from(lhs >= rhs)),
+            HirBinOp::Eq => Some(i128::from(lhs == rhs)),
+            HirBinOp::Ne => Some(i128::from(lhs != rhs)),
+            HirBinOp::BitAnd => Some(lhs & rhs),
+            HirBinOp::BitXor => Some(lhs ^ rhs),
+            HirBinOp::BitOr => Some(lhs | rhs),
+            HirBinOp::LogAnd | HirBinOp::LogOr => unreachable!(),
+        };
+    }
+
+    let lhs = const_float_expr(cx, lhs)?;
+    let rhs = const_float_expr(cx, rhs)?;
+    match op {
+        HirBinOp::Lt => Some(i128::from(lhs < rhs)),
+        HirBinOp::Le => Some(i128::from(lhs <= rhs)),
+        HirBinOp::Gt => Some(i128::from(lhs > rhs)),
+        HirBinOp::Ge => Some(i128::from(lhs >= rhs)),
+        HirBinOp::Eq => Some(i128::from(lhs == rhs)),
+        HirBinOp::Ne => Some(i128::from(lhs != rhs)),
+        _ => None,
+    }
+}
+
+fn const_float_expr(cx: &LowerCx<'_>, expr: HirExprId) -> Option<f64> {
+    let expr = cx.body.exprs.get(expr)?;
+    match expr.kind.clone() {
+        HirExprKind::FloatConst(value) => Some(value),
+        HirExprKind::IntLiteral { value, .. } | HirExprKind::IntConst(value) => Some(value as f64),
+        HirExprKind::Convert {
+            operand,
+            kind: ConvertKind::IntegerPromotion | ConvertKind::UsualArithmetic,
+        } => const_float_expr(cx, operand),
+        HirExprKind::Cast { operand, to } if matches!(cx.tcx.get(to), Ty::Float(_)) => {
+            const_float_expr(cx, operand).or_else(|| const_int_expr(cx, operand).map(|v| v as f64))
+        }
+        HirExprKind::Unary { op: HirUnOp::Plus, operand } => const_float_expr(cx, operand),
+        HirExprKind::Unary { op: HirUnOp::Neg, operand } => {
+            const_float_expr(cx, operand).map(|value| -value)
+        }
+        _ => None,
+    }
+}
+
+fn const_int_cast(cx: &LowerCx<'_>, operand: HirExprId, to: TyId) -> Option<i128> {
+    let Ty::Int { signed, rank } = *cx.tcx.get(to) else {
+        return None;
+    };
+    if let Some(value) = const_int_expr(cx, operand) {
+        return Some(truncate_int(value, int_rank_bits(rank), signed));
+    }
+    let value = const_float_expr(cx, operand)?;
+    if !value.is_finite() || value < i128::MIN as f64 || value > i128::MAX as f64 {
+        return None;
+    }
+    Some(truncate_int(value.trunc() as i128, int_rank_bits(rank), signed))
+}
+
+fn shift_amount(value: i128) -> Option<u32> {
+    u32::try_from(value).ok().filter(|amount| *amount < 128)
+}
+
+fn int_rank_bits(rank: IntRank) -> u32 {
+    match rank {
+        IntRank::Bool => 1,
+        IntRank::Char => 8,
+        IntRank::Short => 16,
+        IntRank::Int => 32,
+        IntRank::Long | IntRank::LongLong => 64,
+    }
+}
+
+fn truncate_int(value: i128, bits: u32, signed: bool) -> i128 {
+    if bits >= 128 {
+        return value;
+    }
+    let modulus = 1_i128 << bits;
+    let mut value = value.rem_euclid(modulus);
+    if signed {
+        let sign_bit = 1_i128 << (bits - 1);
+        if value >= sign_bit {
+            value -= modulus;
+        }
+    }
+    value
 }
 
 /// Helper: emit `Statement::Assign { place: <local>, rvalue: rv }` in

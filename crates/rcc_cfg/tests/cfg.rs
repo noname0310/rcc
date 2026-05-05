@@ -288,6 +288,13 @@ const EDGE_FIXTURES: &[EdgeFixture] = &[
         src: "extern int printf(const char *, ...); void f(void) { (1 ? printf(\"ok\\n\") : ({ loop: printf(\"bad\\n\"); goto loop; })); }",
         functions: 1,
     },
+    EdgeFixture {
+        name: "edge_constant_false_sizeof_and",
+        task: "08-29",
+        review_finding: "LibTomMath-style MP_HAS false branches must not leak disabled calls into CFG",
+        src: "void disabled(void); int f(int err) { if ((err != 0) && (sizeof(\"S_READ_ARC4RANDOM_C\") == 1u)) disabled(); return 0; }",
+        functions: 1,
+    },
 ];
 
 #[test]
@@ -653,6 +660,36 @@ fn complex_conversion_rvalues_are_explicit() {
     }
 }
 
+#[test]
+fn constant_false_logical_and_prunes_dead_call() {
+    let lowered = lower_snippet(
+        "constant_false_logical_and_prunes_dead_call",
+        "void disabled(void); int f(int err) { if ((err != 0) && (sizeof(\"S_READ_ARC4RANDOM_C\") == 1u)) disabled(); return 0; }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert_eq!(
+        call_terminator_count(body),
+        0,
+        "constant-false RHS of && should let if-lowering skip the disabled call:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
+#[test]
+fn side_effectful_lhs_and_constant_false_rhs_keeps_lhs_call_only() {
+    let lowered = lower_snippet(
+        "side_effectful_lhs_and_constant_false_rhs_keeps_lhs_call_only",
+        "int probe(void); void disabled(void); int f(void) { if (probe() && 0) disabled(); return 0; }",
+    );
+    let body = &lowered.bodies[0].1;
+    assert_eq!(
+        call_terminator_count(body),
+        1,
+        "f() && 0 must keep the lhs call for side effects but prune the dead body call:\n{}",
+        dump_body(body, &lowered.tcx)
+    );
+}
+
 fn lower_snippet(name: &str, src: &str) -> Lowered {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
@@ -694,6 +731,13 @@ fn complex_conversion_counts(body: &Body) -> (usize, usize) {
         }
     }
     (to_complex, to_real)
+}
+
+fn call_terminator_count(body: &Body) -> usize {
+    body.blocks
+        .iter()
+        .filter(|block| matches!(block.terminator.kind, TerminatorKind::Call { .. }))
+        .count()
 }
 
 fn first_call_arg_temp(body: &Body) -> Option<Local> {
