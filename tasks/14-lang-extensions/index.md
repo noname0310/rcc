@@ -11,7 +11,7 @@ Preprocessor and parser extensions: pragmas, builtins, attributes, inline asm.
 - [x] [01-pragma-operator](01-pragma-operator.md)
 - [x] [02-has-include](02-has-include.md)
 - [x] [03-counter-macro](03-counter-macro.md)
-- [ ] [04-cli-undefine](04-cli-undefine.md)
+- [x] [04-cli-undefine](04-cli-undefine.md)
 - [x] [05-dependency-generation](05-dependency-generation.md)
 - [x] [06-target-predefined-macros](06-target-predefined-macros.md)
 - [x] [07-attribute-syntax](07-attribute-syntax.md)

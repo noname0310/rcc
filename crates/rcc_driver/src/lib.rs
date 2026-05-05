@@ -422,6 +422,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
     Options {
         include_paths: cli.include_paths.clone(),
         cli_defines: cli.defines.clone(),
+        cli_undefines: cli.undefines.clone(),
         target: cli.target.clone().unwrap_or_else(TargetInfo::host),
         emit,
         output,

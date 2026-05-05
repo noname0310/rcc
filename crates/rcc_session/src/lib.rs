@@ -62,6 +62,8 @@ pub struct Options {
     pub include_paths: Vec<PathBuf>,
     /// Command-line `-D` macro definitions: `(name, value)`.
     pub cli_defines: Vec<(String, Option<String>)>,
+    /// Command-line `-U` macro undefines, applied after `-D` and predefined macros.
+    pub cli_undefines: Vec<String>,
     /// Target-specific C layout and backend metadata.
     pub target: TargetInfo,
     /// What to emit (may be multiple).
@@ -263,6 +265,7 @@ impl Default for Options {
         Self {
             include_paths: Vec::new(),
             cli_defines: Vec::new(),
+            cli_undefines: Vec::new(),
             target: TargetInfo::baseline(),
             emit: Vec::new(),
             output: None,

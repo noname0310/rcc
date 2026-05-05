@@ -56,6 +56,15 @@ fn std_c99_is_accepted_and_preserves_default_options() {
 }
 
 #[test]
+fn cli_undefine_spelling_maps_to_session_options() {
+    let cli = parse(&["rcc", "-DFOO=1", "-UFOO", "-U", "BAR", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert_eq!(cli.undefines, vec!["FOO".to_string(), "BAR".to_string()]);
+    assert_eq!(opts.cli_undefines, vec!["FOO".to_string(), "BAR".to_string()]);
+}
+
+#[test]
 fn unsupported_std_is_rejected_during_cli_parse() {
     let err = Cli::try_parse_from(["rcc", "-std=c11", "hello.c"]).unwrap_err().to_string();
 

@@ -1,5 +1,7 @@
 # 14-04: `-U NAME` CLI flag
 
+> ✓ done — 2026-05-05
+
 **Phase:** 14-lang-extensions    **Depends on:** —    **Milestone:** M5
 
 ## Goal

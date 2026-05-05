@@ -160,6 +160,7 @@ impl<'a> Preprocessor<'a> {
             self.predefined_installed = true;
             self.install_cli_defines();
             self.install_predefined();
+            self.install_cli_undefines();
         }
 
         let src = self.session.source_map.read().unwrap().file(root).src.clone();
@@ -388,6 +389,19 @@ impl<'a> Preprocessor<'a> {
                 def_span,
                 is_predefined: false,
             });
+        }
+    }
+
+    /// Apply every CLI `-U NAME` after `-D` and predefined macro
+    /// installation. This mirrors GCC/Clang command-line behaviour:
+    /// unknown names are ignored, while predefined names may be
+    /// suppressed by the driver even though source-level `#undef`
+    /// remains a C99 constraint violation.
+    pub fn install_cli_undefines(&mut self) {
+        let undefines = self.session.opts.cli_undefines.clone();
+        for name in undefines {
+            let sym = self.session.interner.intern(&name);
+            self.macros.undef(sym);
         }
     }
 
@@ -1919,6 +1933,45 @@ mod run_tests {
         let mut pp = Preprocessor::new(&mut sess);
         let out = pp.run(id);
         assert_eq!(joined_text(&pp, &out), "1");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cli_undefine_runs_after_cli_define() {
+        let mut opts = rcc_session::Options::default();
+        opts.cli_defines.push(("FOO".to_string(), Some("42".to_string())));
+        opts.cli_undefines.push("FOO".to_string());
+        let src = "#ifdef FOO\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed_with_opts(opts, src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "no");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cli_undefine_of_unknown_name_is_silent() {
+        let mut opts = rcc_session::Options::default();
+        opts.cli_undefines.push("NEVER_DEFINED".to_string());
+        let (mut sess, id, cap) = seed_with_opts(opts, "ok\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "ok");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cli_undefine_can_suppress_predefined_macro() {
+        let mut opts = rcc_session::Options::default();
+        opts.cli_undefines.push("__STDC__".to_string());
+        let src = "#ifdef __STDC__\nyes\n#else\nno\n#endif\n";
+        let (mut sess, id, cap) = seed_with_opts(opts, src);
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+
+        assert_eq!(joined_text(&pp, &out), "no");
         assert!(cap.diagnostics().is_empty());
     }
 

@@ -58,6 +58,10 @@ pub struct Cli {
     #[arg(short = 'D', long = "define", value_parser = parse_define)]
     pub defines: Vec<(String, Option<String>)>,
 
+    /// Command-line macro undefines (`-U NAME` or `-UNAME`). May repeat.
+    #[arg(short = 'U', long = "undefine", value_name = "NAME", action = ArgAction::Append)]
+    pub undefines: Vec<String>,
+
     /// Emit make dependencies to stdout and stop after preprocessing (`-M`).
     #[arg(short = 'M', action = ArgAction::SetTrue)]
     pub dep_only: bool,
