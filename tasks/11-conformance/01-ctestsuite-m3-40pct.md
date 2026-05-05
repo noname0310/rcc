@@ -16,7 +16,7 @@ basic control flow, and pointer dereferences.
 
 ## Deliverables
 - xfail entries pointing at future tasks.
-- Bug-fix PRs for anything unblockable.
+- Bug-fix commits/tasks for anything unblockable.
 - `docs/conformance.md` row: c-testsuite column shows ≥ 40 %.
 
 ## Acceptance

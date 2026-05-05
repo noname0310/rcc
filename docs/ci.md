@@ -8,14 +8,14 @@ the mandatory release checks. A job is mandatory when it runs automatically on
 
 | Workflow | Job | Trigger | Purpose |
 |----------|-----|---------|---------|
-| `CI` | `rustfmt` | push, PR, manual | Formatting gate. |
-| `CI` | `clippy` | push, PR, manual | `cargo clippy --workspace --all-targets -- -D warnings`. |
-| `CI` | `test (no-llvm)` | push, PR, manual | Default workspace tests with required vendored suites fetched. |
-| `CI` | `test (llvm)` | push, PR, manual | Workspace tests with LLVM 18 and `rcc_codegen_llvm/llvm`. |
-| `CI` | `coverage (llvm-cov)` | push, PR, manual | `cargo xtask coverage` threshold gate and artifacts. |
-| `CI` | `fuzz smoke (lexer)` | push, PR, manual | 30-second lexer libFuzzer smoke, with crash artifacts uploaded. |
-| `CI` | `conformance (release dashboard)` | push, PR, manual | M7 release dashboard: c-testsuite, chibicc stage-1-3, tcc-tests2, llvm-test-suite. |
-| `CI` | `gcc-torture smoke` | push, PR, manual | Curated GCC torture smoke subset with LLVM 18. |
+| `CI` | `rustfmt` | push, manual | Formatting gate. |
+| `CI` | `clippy` | push, manual | `cargo clippy --workspace --all-targets -- -D warnings`. |
+| `CI` | `test (no-llvm)` | push, manual | Default workspace tests with required vendored suites fetched. |
+| `CI` | `test (llvm)` | push, manual | Workspace tests with LLVM 18 and `rcc_codegen_llvm/llvm`. |
+| `CI` | `coverage (llvm-cov)` | push, manual | `cargo xtask coverage` threshold gate and artifacts. |
+| `CI` | `fuzz smoke (lexer)` | push, manual | 30-second lexer libFuzzer smoke, with crash artifacts uploaded. |
+| `CI` | `conformance (release dashboard)` | push, manual | M7 release dashboard: c-testsuite, chibicc stage-1-3, tcc-tests2, llvm-test-suite. |
+| `CI` | `gcc-torture smoke` | push, manual | Curated GCC torture smoke subset with LLVM 18. |
 | `Fuzz Lex 30m` | `lex 30m` | path-filtered push, manual | Extended lexer fuzz gate. |
 | `Fuzz Preprocess 30m` | `preprocess 30m` | path-filtered push, manual | Extended preprocessor fuzz gate. |
 | `Fuzz Parse 30m` | `parse 30m` | path-filtered push, manual | Extended parser fuzz gate. |

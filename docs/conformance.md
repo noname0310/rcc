@@ -24,6 +24,7 @@ cargo run --release --package rcc_conformance --bin rcc_conformance_render -- \
 
 The release policy for required rows, xfails, and exploratory suites is
 defined in [`release-conformance-policy.md`](release-conformance-policy.md).
+Release command order is listed in [`release-checklist.md`](release-checklist.md).
 
 ### Modes
 

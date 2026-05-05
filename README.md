@@ -6,11 +6,12 @@ modelled after the `rustc` multi-crate workspace: each stage
 (preprocess / lex / parse / HIR / typeck / MIR / codegen) lives in its
 own crate and communicates through narrow public type boundaries.
 
-> **Status.** This repository is the *skeleton* produced from the
-> architecture plan. Every crate compiles and exposes its public types,
-> but the bodies of most passes are deliberately empty — the whole point
-> is to freeze interfaces so that feature work (M1–M7 in the plan) can
-> proceed in parallel without merge conflicts.
+> **Status.** `rcc` now has a working C99 front end, HIR/type checking,
+> CFG lowering, LLVM IR/object emission, conformance adapters, fuzz targets,
+> and release-quality gates. The M7 release target is hosted
+> `x86_64-unknown-linux-gnu`; other parsed target triples are documented as
+> layout/front-end models unless explicitly listed in
+> [`docs/platform-support.md`](docs/platform-support.md).
 
 ## Repository layout
 
@@ -18,6 +19,7 @@ own crate and communicates through narrow public type boundaries.
 crates/
   rcc_span/             # Spans, SourceMap, Symbol interner
   rcc_errors/           # Diagnostic, Handler, Emitter
+  rcc_target/           # Target triples, data models, C type layouts
   rcc_session/          # Options, CLI-facing session
   rcc_data_structures/  # FxHashMap, IndexVec, new_index!
   rcc_lexer/            # Character stream -> pp-tokens
@@ -32,7 +34,7 @@ crates/
   rcc_codegen_llvm/     # CFG -> LLVM IR (inkwell, behind `llvm` feature)
   rcc_driver/           # `rcc` binary: CLI + pipeline orchestration
   rcc_conformance/      # External test-suite runner + reports
-xtask/                 # cargo xtask fetch-testsuites / show-manifest
+xtask/                 # fetch, coverage, fuzz, benchmark, release helpers
 third_party/
   MANIFEST.toml        # Pinned external C test suites
   testsuites/          # Populated by `cargo xtask fetch-testsuites`
@@ -63,8 +65,9 @@ export LLVM_SYS_181_PREFIX=/usr/lib/llvm-18
 cargo build --features rcc_codegen_llvm/llvm
 ```
 
-On Windows with the official `clang+llvm-18.1.8-x86_64-pc-windows-msvc`
-archive, use the project-supported LLVM-C import library path:
+On Windows hosts with the official `clang+llvm-18.1.8-x86_64-pc-windows-msvc`
+archive, use the project-supported LLVM-C import library path. This is
+Windows host support, not Windows target support:
 
 ```powershell
 $env:LLVM_SYS_181_PREFIX='D:\Tools\clang+llvm-18.1.8-x86_64-pc-windows-msvc'
@@ -110,9 +113,15 @@ license bookkeeping.
   fuzz test strategy.
 - [`docs/conformance.md`](docs/conformance.md) — external test-suite
   progress.
+- [`docs/ci.md`](docs/ci.md) — mandatory vs exploratory GitHub Actions.
+- [`docs/platform-support.md`](docs/platform-support.md) — supported hosts,
+  release target, LLVM/tool discovery, and libc/linker boundaries.
+- [`docs/release-checklist.md`](docs/release-checklist.md) — release gates in
+  execution order.
 
-The source of truth for high-level design decisions is the plan at
-`.cursor/plans/c_compiler_architecture_plan_*.plan.md`.
+The original architecture plan under `.cursor/plans/` is historical and
+read-only for agents. The executable source of truth for remaining work is the
+task tree under [`tasks/`](tasks/).
 
 ## License
 

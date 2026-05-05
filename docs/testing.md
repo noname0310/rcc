@@ -93,3 +93,4 @@ CI budgets:
 Each milestone (M1..M7 in the plan) tightens gate 7 with a concrete
 pass-rate target (see [`conformance.md`](conformance.md)).
 The mandatory/manual GitHub Actions split is documented in [`ci.md`](ci.md).
+For release execution order, use [`release-checklist.md`](release-checklist.md).

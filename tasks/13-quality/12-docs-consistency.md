@@ -1,5 +1,7 @@
 # 13-12: Documentation consistency sweep
 
+> ✓ done — 2026-05-05
+
 **Phase:** 13-quality    **Depends on:** 13-11    **Milestone:** M7
 
 ## Goal
@@ -11,8 +13,9 @@ claims are release risks.
 - In:
   - Review `README.md`, `docs/architecture.md`, `docs/testing.md`,
     `docs/conformance.md`, task READMEs, and workflow docs.
-  - Remove stale references to PR workflow, Slack, unsupported platforms,
-    obsolete pass-rate targets, or old `cc_` naming.
+  - Remove stale references to old collaboration workflows, team-chat
+    assumptions, unsupported platforms, obsolete pass-rate targets, or old
+    crate-prefix naming.
   - Ensure every documented command runs or is explicitly marked as requiring
     LLVM/network/GPL/manual setup.
   - Cross-link release docs, CI docs, platform docs, conformance docs, and

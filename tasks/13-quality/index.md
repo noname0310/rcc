@@ -27,7 +27,7 @@ toolchain checks, benchmarks, docs, and finally a tagged release.
 - [x] [09-ci-green-matrix](09-ci-green-matrix.md)
 - [x] [10-bench-harness](10-bench-harness.md)
 - [x] [11-toolchain-platform-matrix](11-toolchain-platform-matrix.md)
-- [ ] [12-docs-consistency](12-docs-consistency.md)
+- [x] [12-docs-consistency](12-docs-consistency.md)
 - [ ] [13-release-candidate-dry-run](13-release-candidate-dry-run.md)
 - [ ] [14-release-process](14-release-process.md)
 

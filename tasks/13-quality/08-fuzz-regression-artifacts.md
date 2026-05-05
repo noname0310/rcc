@@ -20,7 +20,7 @@ fixed, and stored as a regression seed or unit test.
     failure and success.
 - Out:
   - 24h scheduled fuzzing.
-  - Slack notifications or team-channel assumptions.
+  - Team-channel notification assumptions.
 
 ## Deliverables
 - `docs/fuzzing.md` with reproduce/minimize/promote workflow.
