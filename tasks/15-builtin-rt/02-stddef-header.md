@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-05
+
 # 15-02: Compiler-provided `stddef.h`
 
 **Phase:** 15-builtin-rt    **Depends on:** 15-01    **Milestone:** M5

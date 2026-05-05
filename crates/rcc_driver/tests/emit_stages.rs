@@ -151,6 +151,33 @@ fn frontend_hir_and_mir_write_stage_files_without_backend() {
 }
 
 #[test]
+fn stddef_header_typechecks_without_backend() {
+    let input = TempCFile::new(
+        "stddef",
+        r#"
+        #include <stddef.h>
+        struct S { char c; int field; };
+        int f(void) {
+            size_t n = sizeof(int);
+            ptrdiff_t d = 0;
+            wchar_t w = 0;
+            max_align_t a;
+            return (int)(n + (size_t)d + (size_t)w + sizeof(a)
+                + (sizeof(size_t) == sizeof(void *))
+                + (offsetof(struct S, field) == 4));
+        }
+        "#,
+    );
+    let output = TempOutput::new("stddef");
+
+    compile_with(&input, vec![EmitKind::Hir], Some(output.path.clone()))
+        .expect("stddef.h should parse, expand, and type-check without LLVM");
+
+    let hir = read(&output.path);
+    assert!(hir.contains("HirCrate"), "hir:\n{hir}");
+}
+
+#[test]
 fn backend_required_emit_does_not_flush_partial_stage_files_without_backend() {
     if llvm_backend_enabled_for_this_build() {
         return;

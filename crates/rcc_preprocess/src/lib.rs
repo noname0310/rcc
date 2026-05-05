@@ -1068,11 +1068,7 @@ impl<'a> Preprocessor<'a> {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let mut include_paths = self.session.opts.include_paths.clone();
-        let builtin = include::builtin_include_dir();
-        if builtin.is_dir() {
-            include_paths.push(builtin);
-        }
+        let include_paths = include::include_search_paths(&self.session.opts.include_paths);
         let mut has_include = |name: &str, system: bool, _span: Span| {
             include::resolve_header(name, system, &current_dir, &include_paths).is_some()
         };
@@ -2148,6 +2144,26 @@ mod run_tests {
         let out = pp.run(id);
 
         assert_eq!(joined_text(&pp, &out), "1184");
+        assert!(cap.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn stddef_uses_target_conditionals_from_predefined_macros() {
+        let opts = rcc_session::Options {
+            target: rcc_session::TargetInfo::from_triple(&rcc_session::TargetTriple::new(
+                "x86_64-pc-windows-msvc",
+            ))
+            .unwrap(),
+            ..rcc_session::Options::default()
+        };
+        let (mut sess, id, cap) = seed_with_opts(opts, "#include <stddef.h>\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        let text = joined_text(&pp, &out);
+
+        assert!(text.contains("typedefunsignedlonglongsize_t;"), "stddef.h text: {text}");
+        assert!(text.contains("typedeflonglongptrdiff_t;"), "stddef.h text: {text}");
+        assert!(text.contains("typedefunsignedshortwchar_t;"), "stddef.h text: {text}");
         assert!(cap.diagnostics().is_empty());
     }
 

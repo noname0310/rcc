@@ -95,6 +95,22 @@ pub fn builtin_include_dir() -> PathBuf {
         .join("include")
 }
 
+/// Complete include search path for system-header probes.
+///
+/// The compiler resource directory comes first so freestanding shims such as
+/// `stddef.h` and `stdarg.h` resolve before host system headers. User-provided
+/// `-I` entries still handle project headers and non-resource headers after the
+/// compiler-owned surface.
+pub fn include_search_paths(user_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let builtin = builtin_include_dir();
+    let mut paths = Vec::with_capacity(user_paths.len() + usize::from(builtin.is_dir()));
+    if builtin.is_dir() {
+        paths.push(builtin);
+    }
+    paths.extend(user_paths.iter().cloned());
+    paths
+}
+
 /// Return `true` if `tokens` (a header's full pp-token stream, as
 /// produced by `rcc_lexer::tokenize`) contains a `#pragma once`
 /// directive anywhere in the file.
@@ -182,11 +198,7 @@ impl Preprocessor<'_> {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let mut include_paths = self.session.opts.include_paths.clone();
-        let builtin = builtin_include_dir();
-        if builtin.is_dir() {
-            include_paths.push(builtin);
-        }
+        let include_paths = include_search_paths(&self.session.opts.include_paths);
 
         let Some(resolved) =
             resolve_header_with(name, is_system, &current_dir, &include_paths, |path| {
@@ -497,6 +509,18 @@ mod tests {
         Span::new(file, BytePos(0), BytePos(0))
     }
 
+    fn joined_token_text(sess: &Session, tokens: &[PpToken]) -> String {
+        tokens
+            .iter()
+            .map(|tok| {
+                let sm = sess.source_map.read().unwrap();
+                let file = sm.file(tok.span.file);
+                file.src[tok.span.lo.0 as usize..tok.span.hi.0 as usize].to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[test]
     fn acceptance_local_header_resolves_and_includes() {
         // main.c in tmp/ includes "util.h" sitting next to it. Must
@@ -562,7 +586,7 @@ mod tests {
         let span = dummy_span(main_id);
         {
             let mut pp = Preprocessor::new(&mut sess);
-            for header in ["stdio.h", "math.h", "ctype.h"] {
+            for header in ["stddef.h", "stdio.h", "math.h", "ctype.h"] {
                 let tokens = pp.process_include(&format!("<{header}>"), true, span, main_id);
                 assert!(!tokens.is_empty(), "builtin {header} must contribute tokens");
             }
@@ -570,12 +594,32 @@ mod tests {
 
         assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
         let deps = sess.source_dependencies();
-        for header in ["stdio.h", "math.h", "ctype.h"] {
+        for header in ["stddef.h", "stdio.h", "math.h", "ctype.h"] {
             assert!(
                 deps.iter().any(|dep| dep.path.ends_with(Path::new(header)) && dep.system),
                 "{header} must be recorded as a system dependency: {deps:?}"
             );
         }
+    }
+
+    #[test]
+    fn compiler_builtin_headers_precede_cli_include_paths_for_system_form() {
+        let src_dir = TempDir::new().unwrap();
+        let inc_dir = TempDir::new().unwrap();
+        write_file(inc_dir.path(), "stddef.h", "int user_stddef_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session(src_dir.path(), vec![inc_dir.path().to_path_buf()]);
+        let span = dummy_span(main_id);
+        let tokens =
+            Preprocessor::new(&mut sess).process_include("<stddef.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("size_t"), "builtin stddef.h must define size_t: {text}");
+        assert!(
+            !text.contains("user_stddef_marker"),
+            "compiler resource header must win over same-named -I system header: {text}"
+        );
+        assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
     }
 
     #[test]
