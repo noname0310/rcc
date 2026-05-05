@@ -41,8 +41,7 @@ point to a concrete task or be fixed before release.
 
 | Case | Category | Reason |
 |------|----------|--------|
-| `c-testsuite::00046` | non-C99 | anonymous struct/union members are a compatibility extension outside C99 |
-| `c-testsuite::00050` | non-C99 | anonymous union member inside struct is outside C99 |
+| `c-testsuite::00050` | non-C99 | anonymous union member inside struct still needs alias/layout semantics beyond parser support |
 | `c-testsuite::00216` | non-C99 | empty aggregate and anonymous aggregate extension forms are outside C99 |
 | `c-testsuite::00219` | non-C99 | C11 `_Generic` is outside C99 |
 

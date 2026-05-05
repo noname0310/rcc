@@ -879,6 +879,14 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
     }
 
     let mut declarators: Vec<FieldDeclarator> = Vec::new();
+    if is_anonymous_record_member(&specs)
+        && matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi)))
+    {
+        let end = p.bump().map(|tok| tok.span).unwrap_or(start);
+        declarators.push(FieldDeclarator { declarator: None, bit_width: None });
+        return Some(FieldDecl { specs, declarators, span: start.to(end) });
+    }
+
     loop {
         let fd = parse_field_declarator(p);
         declarators.push(fd);
@@ -908,6 +916,13 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
     };
 
     Some(FieldDecl { specs, declarators, span: start.to(end) })
+}
+
+fn is_anonymous_record_member(specs: &DeclSpecs) -> bool {
+    matches!(
+        specs.type_specs.as_slice(),
+        [TypeSpec::Record(rec)] if rec.tag.is_none() && rec.fields.is_some()
+    )
 }
 
 /// Parse one *struct-declarator* (C99 §6.7.2.1):
@@ -3467,6 +3482,48 @@ mod tests {
         let w = fd.bit_width.as_ref().expect("width present");
         assert_eq!(int_lit_text(w, &sess), "3");
         assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn gnu_anonymous_record_member_without_declarator_parses() {
+        let (rec, diags, sess) =
+            parse_record("struct S { union { int a; struct { int b; int c; }; }; int tail; }");
+        let fs = rec.fields.as_ref().expect("body");
+        assert_eq!(fs.len(), 2);
+        let anon = &fs[0].declarators[0];
+        assert!(anon.declarator.is_none(), "anonymous record member has no declarator");
+        assert!(anon.bit_width.is_none(), "anonymous record member is not a bit-field");
+        match fs[0].specs.type_specs.as_slice() {
+            [TypeSpec::Record(union)] => {
+                assert_eq!(union.kind, RecordKind::Union);
+                assert!(union.tag.is_none());
+                let inner = union.fields.as_ref().expect("union body");
+                assert_eq!(inner.len(), 2);
+                assert!(inner[1].declarators[0].declarator.is_none());
+            }
+            other => panic!("expected anonymous union field, got {other:?}"),
+        }
+        let (tail, _) =
+            fs[1].declarators[0].declarator.as_ref().and_then(|d| d.name).expect("tail field");
+        assert_eq!(sess.interner.get(tail), "tail");
+        assert!(diags.is_empty(), "clean: {diags:?}");
+    }
+
+    #[test]
+    fn gnu_attribute_without_trailing_underscores_before_declarator_parses() {
+        let (ed, diags, sess) =
+            parse_external("static void __attribute((unused)) dump_token(int x);");
+        match ed {
+            ExternalDecl::Decl(decl) => {
+                let (sym, _) = decl.inits[0].declarator.name.expect("function name");
+                assert_eq!(sess.interner.get(sym), "dump_token");
+            }
+            other => panic!("expected declaration, got {other:?}"),
+        }
+        assert!(
+            !codes_of(&diags).contains(&"E0061"),
+            "attribute alias must not break the declarator: {diags:?}"
+        );
     }
 
     #[test]

@@ -17,6 +17,10 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+#define _SC_OPEN_MAX 4
+
+extern char **environ;
+
 extern int access(const char *, int);
 extern int chdir(const char *);
 extern int close(int);
@@ -40,8 +44,13 @@ extern int isatty(int);
 extern off_t lseek(int, off_t, int);
 extern int pipe(int[2]);
 extern ssize_t read(int, void *, size_t);
+extern ssize_t readlink(const char *__restrict, char *__restrict, size_t);
 extern int rmdir(const char *);
+extern int setgid(gid_t);
+extern int setuid(uid_t);
 extern unsigned int sleep(unsigned int);
+extern long sysconf(int);
+extern int symlink(const char *, const char *);
 extern int unlink(const char *);
 extern int usleep(useconds_t);
 extern ssize_t write(int, const void *, size_t);

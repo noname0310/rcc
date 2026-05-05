@@ -96,6 +96,12 @@
 #ifndef EPIPE
 #define EPIPE 32
 #endif
+#ifndef ENOSYS
+#define ENOSYS 38
+#endif
+#ifndef ETIMEDOUT
+#define ETIMEDOUT 110
+#endif
 #ifndef EOPNOTSUPP
 #define EOPNOTSUPP 95
 #endif

@@ -87,6 +87,11 @@ fn install_gnu_builtin_libcalls(
         ("strchr", char_ptr, vec![const_char_ptr, tcx.int], false),
         ("strlen", tcx.ulong, vec![const_char_ptr], false),
         ("tmpnam", char_ptr, vec![char_ptr], false),
+        ("__builtin_clz", tcx.int, vec![tcx.uint], false),
+        ("__builtin_clzll", tcx.int, vec![tcx.ulong_long], false),
+        ("__builtin_ctz", tcx.int, vec![tcx.uint], false),
+        ("__builtin_ctzll", tcx.int, vec![tcx.ulong_long], false),
+        ("__builtin_frame_address", void_ptr, vec![tcx.uint], false),
     ];
 
     for (name, ret, params, variadic) in builtins {
@@ -2537,8 +2542,126 @@ fn flat_scalar_initializer_items(
     !items.is_empty()
         && items.iter().all(|(desigs, init)| {
             desigs.is_empty()
-                && matches!(init, rcc_ast::Initializer::Expr(expr) if !is_string_literal_expr(expr))
+                && matches!(init, rcc_ast::Initializer::Expr(expr) if is_flat_elidable_scalar_initializer_expr(expr))
         })
+}
+
+fn is_flat_elidable_scalar_initializer_expr(expr: &rcc_ast::Expr) -> bool {
+    !is_string_literal_expr(expr) && !matches!(expr.kind, rcc_ast::ExprKind::CompoundLiteral { .. })
+}
+
+fn initializer_list_contains_whole_record_item(
+    target_ty: TyId,
+    items: &[(Vec<rcc_ast::Designator>, rcc_ast::Initializer)],
+    body: &Body,
+    scope: &ScopeStack,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    resolver: &Resolver,
+) -> bool {
+    match tcx.get(target_ty).clone() {
+        Ty::Array { elem, .. } => items.iter().any(|(desigs, init)| {
+            desigs.is_empty()
+                && record_expr_initializes_ty(init, elem.ty, body, scope, crate_, tcx, resolver)
+        }),
+        Ty::Record(def_id) => {
+            let DefKind::Record { fields, kind, .. } = &crate_.defs[def_id].kind else {
+                return false;
+            };
+            let field_pairs = fields.iter().map(|field| (field.name, field.ty)).collect::<Vec<_>>();
+            let mut cursor = 0_u32;
+            for (desigs, init) in items {
+                if !desigs.is_empty() {
+                    continue;
+                }
+                let Some(field_idx) = next_initializable_field(&field_pairs, cursor) else {
+                    return false;
+                };
+                let field_ty = fields[field_idx as usize].ty;
+                if record_expr_initializes_ty(init, field_ty, body, scope, crate_, tcx, resolver) {
+                    return true;
+                }
+                cursor = field_idx + 1;
+                if matches!(kind, RecordKind::Union) {
+                    break;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn record_expr_initializes_ty(
+    init: &rcc_ast::Initializer,
+    target_ty: TyId,
+    body: &Body,
+    scope: &ScopeStack,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    resolver: &Resolver,
+) -> bool {
+    if !matches!(tcx.get(target_ty), Ty::Record(_)) {
+        return false;
+    }
+    let rcc_ast::Initializer::Expr(expr) = init else {
+        return false;
+    };
+    expr_known_ty(expr, body, scope, crate_, tcx, resolver).is_some_and(|ty| ty == target_ty)
+}
+
+fn expr_known_ty(
+    expr: &rcc_ast::Expr,
+    body: &Body,
+    scope: &ScopeStack,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    resolver: &Resolver,
+) -> Option<TyId> {
+    match &expr.kind {
+        rcc_ast::ExprKind::Paren(inner) => expr_known_ty(inner, body, scope, crate_, tcx, resolver),
+        rcc_ast::ExprKind::Ident(name) => binding_expr_ty(*name, body, scope, crate_, resolver),
+        rcc_ast::ExprKind::Call { callee, .. } => {
+            let callee_ty = expr_known_ty(callee, body, scope, crate_, tcx, resolver)?;
+            match tcx.get(callee_ty) {
+                Ty::Func { ret, .. } => Some(*ret),
+                Ty::Ptr(q) => match tcx.get(q.ty) {
+                    Ty::Func { ret, .. } => Some(*ret),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        rcc_ast::ExprKind::Index { base, .. } => {
+            let base_ty = expr_known_ty(base, body, scope, crate_, tcx, resolver)?;
+            match tcx.get(base_ty) {
+                Ty::Array { elem, .. } => Some(elem.ty),
+                Ty::Ptr(q) => Some(q.ty),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn binding_expr_ty(
+    name: Symbol,
+    body: &Body,
+    scope: &ScopeStack,
+    crate_: &HirCrate,
+    resolver: &Resolver,
+) -> Option<TyId> {
+    let binding =
+        scope.lookup(name).or_else(|| resolver.ordinary.get(&name).copied().map(Binding::Def))?;
+    match binding {
+        Binding::Local(local) => Some(body.locals[local].ty),
+        Binding::Def(def_id) => match crate_.defs[def_id].kind {
+            DefKind::Global { ty, .. } | DefKind::Function { ty, .. } | DefKind::Typedef(ty) => {
+                Some(ty)
+            }
+            _ => None,
+        },
+    }
 }
 
 fn aggregate_leaf_count(ty: TyId, tcx: &TyCtxt, crate_: &HirCrate) -> u64 {
@@ -2803,9 +2926,13 @@ fn eval_range_designator(
     hi: &rcc_ast::Expr,
     len: Option<u64>,
     span: Span,
+    scope: DeclScope,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
     session: &mut Session,
 ) -> Option<(u64, u64)> {
-    let Some(lo) = eval_const_expr_as_i128(lo) else {
+    let Some(lo) = eval_array_bound_as_i128(lo, scope, None, tcx, resolver, crate_, session) else {
         emit_invalid_initializer_designator(
             span,
             "initializer range lower bound must be an integer constant",
@@ -2813,7 +2940,7 @@ fn eval_range_designator(
         );
         return None;
     };
-    let Some(hi) = eval_const_expr_as_i128(hi) else {
+    let Some(hi) = eval_array_bound_as_i128(hi, scope, None, tcx, resolver, crate_, session) else {
         emit_invalid_initializer_designator(
             span,
             "initializer range upper bound must be an integer constant",
@@ -2979,6 +3106,11 @@ fn lower_global_flat_brace_elision_initializer(
     if !flat_scalar_initializer_items(items) {
         return false;
     }
+    if initializer_list_contains_whole_record_item(
+        target_ty, items, body, scope, crate_, tcx, resolver,
+    ) {
+        return false;
+    }
     let leaves = aggregate_leaf_paths(target_ty, tcx, crate_);
     if leaves.is_empty() {
         return false;
@@ -3040,9 +3172,20 @@ fn lower_global_initializer_list(
                         let idx = eval_const_expr_as_u64(e).unwrap_or(cursor);
                         (Some((idx, idx)), rest)
                     }
-                    Some((rcc_ast::Designator::Range { lo, hi }, rest)) => {
-                        (eval_range_designator(lo, hi, len, span, session), rest)
-                    }
+                    Some((rcc_ast::Designator::Range { lo, hi }, rest)) => (
+                        eval_range_designator(
+                            lo,
+                            hi,
+                            len,
+                            span,
+                            DeclScope::File,
+                            tcx,
+                            resolver,
+                            crate_,
+                            session,
+                        ),
+                        rest,
+                    ),
                     Some((rcc_ast::Designator::Field(_), _)) => {
                         emit_invalid_initializer_designator(
                             span,
@@ -3529,6 +3672,11 @@ fn lower_flat_brace_elision_initializer(
     if !flat_scalar_initializer_items(items) {
         return false;
     }
+    if initializer_list_contains_whole_record_item(
+        target_ty, items, body, scope, crate_, tcx, resolver,
+    ) {
+        return false;
+    }
     let leaves = aggregate_leaf_paths(target_ty, tcx, crate_);
     if leaves.is_empty() {
         return false;
@@ -3614,9 +3762,20 @@ fn lower_array_initializer(
                 let i = eval_const_expr_as_u64(e).unwrap_or(cursor);
                 (Some((i, i)), rest)
             }
-            Some((rcc_ast::Designator::Range { lo, hi }, rest)) => {
-                (eval_range_designator(lo, hi, len, span, session), rest)
-            }
+            Some((rcc_ast::Designator::Range { lo, hi }, rest)) => (
+                eval_range_designator(
+                    lo,
+                    hi,
+                    len,
+                    span,
+                    DeclScope::Block,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                ),
+                rest,
+            ),
             Some((rcc_ast::Designator::Field(_), _)) => {
                 emit_invalid_initializer_designator(
                     span,
@@ -6941,23 +7100,19 @@ fn int_type_bit_width(ty: TyId, tcx: &TyCtxt) -> Option<u32> {
 
 /// Constant-evaluate a bit-field width expression to a signed integer.
 ///
-/// Accepts integer literals, parenthesised expressions, and a unary
-/// minus in front of a literal so that `-1` (a common "bad width" case)
-/// can be detected and diagnosed instead of silently underflowing.
-/// Returns `None` when the expression is not a recognised constant.
-fn eval_bit_width(expr: &rcc_ast::Expr) -> Option<i64> {
-    match &expr.kind {
-        rcc_ast::ExprKind::IntLit(_) => {
-            eval_const_expr_as_u64(expr).and_then(|u| i64::try_from(u).ok())
-        }
-        rcc_ast::ExprKind::Paren(inner) => eval_bit_width(inner),
-        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
-            let inner = eval_bit_width(operand)?;
-            inner.checked_neg()
-        }
-        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => eval_bit_width(operand),
-        _ => None,
-    }
+/// Bit-field widths are integer constant expressions, so reuse the same
+/// pre-typeck evaluator that array bounds use. This covers common hosted
+/// headers and projects that spell widths as `sizeof(type) * CHAR_BIT - n`.
+fn eval_bit_width(
+    expr: &rcc_ast::Expr,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> Option<i64> {
+    let value =
+        eval_array_bound_as_i128(expr, DeclScope::Block, None, tcx, resolver, crate_, session)?;
+    i64::try_from(value).ok()
 }
 
 /// Fold an enumerator's `= expr` initializer into an `i128`.
@@ -7205,7 +7360,8 @@ pub fn lower_record(
                 // ── Anonymous bit-field: `int : 0;` separator. ──────
                 (None, Some(width_expr)) => {
                     let (ok_width, bit_width) = validate_bit_width(
-                        base, width_expr, fd.span, /*is_named=*/ false, tcx, session,
+                        base, width_expr, fd.span, /*is_named=*/ false, tcx, resolver, crate_,
+                        session,
                     );
                     if ok_width {
                         out_fields.push(Field {
@@ -7255,6 +7411,8 @@ pub fn lower_record(
                             fd.span,
                             /*is_named=*/ name.is_some(),
                             tcx,
+                            resolver,
+                            crate_,
                             session,
                         );
                         if !ok {
@@ -7331,10 +7489,12 @@ fn validate_bit_width(
     width_expr: &rcc_ast::Expr,
     span: Span,
     is_named: bool,
-    tcx: &TyCtxt,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
     session: &mut Session,
 ) -> (bool, Option<u32>) {
-    let value = match eval_bit_width(width_expr) {
+    let value = match eval_bit_width(width_expr, tcx, resolver, crate_, session) {
         Some(v) => v,
         None => {
             session

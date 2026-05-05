@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/types.h>
 
 typedef struct __rcc_FILE FILE;
 #if defined(_WIN64)
@@ -75,8 +76,10 @@ extern size_t fwrite_unlocked(const void *, size_t, size_t, FILE *);
 
 extern int fgetpos(FILE *, fpos_t *);
 extern int fseek(FILE *, long, int);
+extern int fseeko(FILE *, off_t, int);
 extern int fsetpos(FILE *, const fpos_t *);
 extern long ftell(FILE *);
+extern off_t ftello(FILE *);
 extern void rewind(FILE *);
 
 extern void clearerr(FILE *);
@@ -86,6 +89,11 @@ extern int feof(FILE *);
 extern int ferror(FILE *);
 extern int fpurge(FILE *);
 extern void perror(const char *);
+
+extern FILE *fdopen(int, const char *);
+extern int fileno(FILE *);
+extern FILE *popen(const char *, const char *);
+extern int pclose(FILE *);
 
 extern FILE *stdin;
 extern FILE *stdout;

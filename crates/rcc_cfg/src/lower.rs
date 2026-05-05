@@ -315,6 +315,9 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
             }
             let inner = lower_as_rvalue(builder, cx, *operand);
             let from_ty = cx.body.exprs[*operand].ty;
+            if from_ty == *to {
+                return inner;
+            }
             let kind = explicit_cast_kind(from_ty, *to, cx.tcx);
             let temp = builder.alloc_temp(*to, span);
             push_assign(builder, span, temp, Rvalue::Cast { op: inner, to: *to, kind });
@@ -3524,6 +3527,51 @@ mod tests {
                 ..
             } => assert_eq!(*to, dbl_ty),
             other => panic!("expected IntToFloat cast, got {other:?}"),
+        }
+    }
+
+    /// Explicit identity casts such as QuickJS' `(JSValue)v` must not be
+    /// classified as integer casts when `JSValue` is a record type.
+    #[test]
+    fn explicit_same_record_cast_is_no_op() {
+        let mut tcx = TyCtxt::new();
+        let rec_ty = tcx.intern(Ty::Record(rcc_hir::DefId(0)));
+
+        let mut hir_body = HirBody::default();
+        let hval = hir_body.locals.push(rcc_hir::LocalDecl {
+            name: None,
+            ty: rec_ty,
+            quals: rcc_hir::ObjectQuals::none(),
+            vla_len: None,
+            is_param: true,
+            span: DUMMY_SP,
+        });
+
+        let mut builder = BodyBuilder::new();
+        let _ret = builder.alloc_return_slot(rec_ty, DUMMY_SP);
+        let cval = builder.alloc_user_local(rcc_span::Symbol(1), rec_ty, DUMMY_SP);
+        let mut map = LocalMap::new();
+        map.insert(hval, cval);
+
+        let val = push_expr(&mut hir_body, rec_ty, ValueCat::LValue, HirExprKind::LocalRef(hval));
+        let cast = push_expr(
+            &mut hir_body,
+            rec_ty,
+            ValueCat::RValue,
+            HirExprKind::Cast { operand: val, to: rec_ty },
+        );
+
+        let cx = LowerCx::new(&hir_body, &tcx, &map);
+        let op = lower_as_rvalue(&mut builder, &cx, cast);
+        let body = finish(builder);
+
+        assert!(body.blocks[crate::BasicBlockId(0)].statements.is_empty());
+        match op {
+            Operand::Copy(Place { base, projection }) => {
+                assert_eq!(base, cval);
+                assert!(projection.is_empty());
+            }
+            other => panic!("expected Copy of record operand, got {other:?}"),
         }
     }
 

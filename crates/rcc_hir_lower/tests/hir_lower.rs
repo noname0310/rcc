@@ -1521,6 +1521,29 @@ fn composite_struct_with_named_bitfield() {
 }
 
 #[test]
+fn composite_bitfield_width_accepts_sizeof_integer_constant_expression() {
+    let src = r#"
+        typedef unsigned long uintptr_t;
+        struct StackElemBits {
+            uintptr_t val : sizeof(uintptr_t) * 8 - 3;
+            uintptr_t type : 3;
+        };
+    "#;
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    let record = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Record { fields, .. } if fields.len() == 2 => Some(fields),
+            _ => None,
+        })
+        .expect("missing StackElemBits record");
+    assert_eq!(record[0].bit_width, Some(61));
+    assert_eq!(record[1].bit_width, Some(3));
+}
+
+#[test]
 fn composite_union_kind_propagates() {
     // union U { int a; long b; }
     let (mut sess, _cap) = Session::for_test();
@@ -1905,6 +1928,88 @@ fn snippet_gnu_range_designator_lowers_nested_array_field() {
     let mut writes = local_field_array_int_writes(body, Local(0), 0);
     writes.sort();
     assert_eq!(writes, vec![(0, 0), (1, 7), (2, 7), (3, 0)]);
+}
+
+#[test]
+fn snippet_gnu_range_designator_accepts_enum_constant_bounds() {
+    let (hir, _tcx, cap) = checked_snippet_with_options(
+        "enum { OP_COUNT = 250 }; void f(void) { int table[256] = { [OP_COUNT ... 255] = 7 }; }",
+        Options { gnu_range_designators: true, ..Options::default() },
+    );
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    assert!(hir.bodies.values().next().is_some(), "snippet should lower a function body");
+}
+
+#[test]
+fn quickjs_nan_boxing_jsvalueconst_initializers_survive_typeck() {
+    let src = r#"
+        typedef struct JSContext JSContext;
+        typedef long long int64_t;
+        typedef unsigned long long uint64_t;
+        typedef uint64_t JSValue;
+        #define JSValueConst JSValue
+
+        JSValue JS_NewInt64(JSContext *ctx, int64_t val);
+
+        struct array_sort_context {
+            JSContext *ctx;
+            int exception;
+            int has_method;
+            JSValueConst method;
+        };
+
+        void f(JSContext *ctx, JSValue element, JSValue source, JSValueConst *argv) {
+            JSValueConst args[3] = { element, JS_NewInt64(ctx, 1), source };
+            struct array_sort_context asc = { ctx, 0, 0, argv[0] };
+        }
+    "#;
+    let (_hir, _tcx, cap, _sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "diagnostics: {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn quickjs_struct_jsvalueconst_initializers_survive_typeck() {
+    let src = r#"
+        typedef struct JSContext JSContext;
+        typedef long int64_t;
+        typedef union JSValueUnion {
+            int int32;
+            double float64;
+            void *ptr;
+            int64_t short_big_int;
+        } JSValueUnion;
+        typedef struct JSValue {
+            JSValueUnion u;
+            int64_t tag;
+        } JSValue;
+        #define JSValueConst JSValue
+        #define JS_MKVAL(tag, val) (JSValue){ (JSValueUnion){ .int32 = val }, tag }
+
+        JSValue JS_NewInt64(JSContext *ctx, int64_t val);
+
+        struct array_sort_context {
+            JSContext *ctx;
+            int exception;
+            int has_method;
+            JSValueConst method;
+        };
+
+        void f(JSContext *ctx, JSValue element, JSValue source, JSValueConst *argv) {
+            JSValueConst args[3] = { element, JS_NewInt64(ctx, 1), source };
+            struct array_sort_context asc = { ctx, 0, 0, argv[0] };
+            JSValue v = JS_MKVAL(0, 1);
+        }
+    "#;
+    let (_hir, _tcx, cap, _sess) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "diagnostics: {:?}",
+        cap.diagnostics()
+    );
 }
 
 #[test]
@@ -2753,6 +2858,59 @@ fn snippet_compound_literal_record_initializer_reuses_initializer_walker() {
                 && hir_int_value(body, rhs) == Some(1)
         }),
         "record compound literal should initialise field x via lower_initializer"
+    );
+}
+
+#[test]
+fn snippet_record_initializer_keeps_aggregate_compound_literal_as_subobject() {
+    let src = r#"
+        typedef union {
+            int int32;
+            void *ptr;
+        } JSValueUnion;
+        typedef struct {
+            JSValueUnion u;
+            long tag;
+        } JSValue;
+
+        void f(int val) {
+            JSValue v = (JSValue){ (JSValueUnion){ .int32 = val }, 1 };
+        }
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let body = hir.bodies.values().next().expect("missing function body");
+    let outer_literal = body
+        .exprs
+        .iter()
+        .find_map(|expr| match expr.kind {
+            HirExprKind::CompoundLiteral { ty, local, ref init_stmts }
+                if matches!(tcx.get(ty), Ty::Record(def_id)
+                if matches!(
+                    hir.defs[*def_id].kind,
+                    DefKind::Record { kind: RecordKind::Struct, .. }
+                )) =>
+            {
+                Some((local, init_stmts))
+            }
+            _ => None,
+        })
+        .expect("missing JSValue compound literal");
+    let saw_whole_union_assignment = outer_literal.1.iter().any(|stmt| {
+        let Some((lhs, rhs)) = init_assign_operands(&body.stmts[*stmt]) else { return false };
+        matches!(body.exprs[lhs].kind, HirExprKind::Field { base, field_index: 0 }
+            if matches!(body.exprs[base].kind, HirExprKind::LocalRef(local) if local == outer_literal.0))
+            && body.exprs[lhs].ty == body.exprs[rhs].ty
+            && matches!(tcx.get(body.exprs[rhs].ty), Ty::Record(def_id)
+                if matches!(
+                    hir.defs[*def_id].kind,
+                    DefKind::Record { kind: RecordKind::Union, .. }
+                ))
+    });
+    assert!(
+        saw_whole_union_assignment,
+        "aggregate compound literal must initialize the union subobject as a whole"
     );
 }
 

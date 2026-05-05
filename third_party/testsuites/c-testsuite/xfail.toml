@@ -6,12 +6,8 @@
 # Feature tasks add entries here; they shrink as rcc improves.
 
 [[xfail]]
-id     = "c-testsuite::00046"
-reason = "non-C99: anonymous struct/union members are compatibility extensions outside C99 parser scope"
-
-[[xfail]]
 id     = "c-testsuite::00050"
-reason = "non-C99: anonymous union member inside struct is outside C99 parser scope"
+reason = "non-C99: anonymous union member inside struct still needs alias/layout semantics beyond parser support"
 
 [[xfail]]
 id     = "c-testsuite::00216"

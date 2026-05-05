@@ -25,5 +25,6 @@ extern size_t strspn(const char *, const char *);
 extern char *strstr(const char *, const char *);
 extern char *strtok(char *, const char *);
 extern char *strerror(int);
+extern char *strdup(const char *);
 
 #endif

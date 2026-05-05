@@ -42,6 +42,7 @@ extern void *malloc(size_t);
 extern void *calloc(size_t, size_t);
 extern void *realloc(void *, size_t);
 extern void free(void *);
+extern void *alloca(size_t);
 
 extern void exit(int);
 extern void _Exit(int);
@@ -49,6 +50,9 @@ extern void abort(void);
 extern int atexit(void (*)(void));
 
 extern char *getenv(const char *);
+extern int setenv(const char *, const char *, int);
+extern int unsetenv(const char *);
+extern char *realpath(const char *__restrict, char *__restrict);
 extern int system(const char *);
 
 extern void *bsearch(const void *, const void *, size_t, size_t, int (*)(const void *, const void *));

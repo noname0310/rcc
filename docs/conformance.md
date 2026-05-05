@@ -64,7 +64,7 @@ next missing compiler feature instead of already-owned extensions.
 <!-- BEGIN autogen -->
 | Suite | Discovered | Pass | XFail | Fail | Skip | % |
 |-------|------------|------|-------|------|------|---|
-| c-testsuite | 220 | 216 | 4 | 0 | 0 | 100.0 |
+| c-testsuite | 220 | 217 | 3 | 0 | 0 | 100.0 |
 | chibicc | 3 | 3 | 0 | 0 | 0 | 100.0 |
 | tcc-tests2 | 88 | 75 | 9 | 0 | 4 | 95.5 |
 | llvm-test-suite | 6 | 6 | 0 | 0 | 0 | 100.0 |

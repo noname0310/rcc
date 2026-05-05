@@ -1,6 +1,6 @@
 # 08 — QuickJS
 
-Status: not started
+Status: object probe passes
 
 Source: <https://bellard.org/quickjs/>
 
@@ -9,6 +9,6 @@ then create `plan.md` from the fetched build files. Do not edit upstream `.c` or
 `.h` files. Any adaptation must live in this directory as wrapper scripts or
 build-script-only patches.
 
-Initial target: compile selected core objects only. Expect GNU and platform
-assumptions; record each one explicitly instead of weakening the probe.
-
+Initial target: compile selected core objects only with
+`scripts/run-object-probe.sh`. Expect GNU and platform assumptions; record each
+one explicitly instead of weakening the probe.

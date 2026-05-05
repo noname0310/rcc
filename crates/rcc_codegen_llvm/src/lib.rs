@@ -1870,7 +1870,12 @@ pub mod backend {
                 let function = self.functions.get(&def).copied().ok_or_else(|| {
                     CodegenError::Internal(format!("function definition {def:?} was not declared"))
                 })?;
-                self.codegen_body(function, body)?;
+                self.codegen_body(function, body).map_err(|err| {
+                    CodegenError::Internal(format!(
+                        "while emitting function {} ({def:?}): {err}",
+                        self.def_name(def_data)
+                    ))
+                })?;
             }
             Ok(())
         }
@@ -4505,8 +4510,18 @@ pub mod backend {
             locals: &IndexVec<Local, PointerValue<'ctx>>,
             body: &Body,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-            let lhs = self.emit_int_operand(lhs, locals, body)?;
-            let rhs = self.emit_int_operand(rhs, locals, body)?;
+            let lhs_ty = self.operand_ty(lhs, body)?;
+            let rhs_ty = self.operand_ty(rhs, body)?;
+            let lhs = self.emit_int_operand(lhs, locals, body).map_err(|err| {
+                CodegenError::Internal(format!(
+                    "{op:?} lhs is not an integer operand (type {lhs_ty:?}, operand {lhs:?}): {err}"
+                ))
+            })?;
+            let rhs = self.emit_int_operand(rhs, locals, body).map_err(|err| {
+                CodegenError::Internal(format!(
+                    "{op:?} rhs is not an integer operand (type {rhs_ty:?}, operand {rhs:?}): {err}"
+                ))
+            })?;
             let value = match op {
                 BinOp::Add => self.builder.build_int_add(lhs, rhs, "add"),
                 BinOp::Sub => self.builder.build_int_sub(lhs, rhs, "sub"),
@@ -7877,7 +7892,8 @@ pub mod backend {
                 BasicValueEnum::IntValue(int_val) => {
                     let val = int_val.get_zero_extended_constant().unwrap_or(0);
                     for i in 0..expected_size {
-                        let byte = (val >> (i * 8)) & 0xFF;
+                        let shift = i.saturating_mul(8);
+                        let byte = if shift < u64::BITS { (val >> shift) & 0xFF } else { 0 };
                         bytes.push(i8_ty.const_int(byte, false).into());
                     }
                 }

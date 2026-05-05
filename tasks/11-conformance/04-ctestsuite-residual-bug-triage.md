@@ -36,8 +36,7 @@ Source: `docs/conformance.json` generated after task `11-03`
 
 | TU | Current xfail reason | Initial policy |
 |---|---|---|
-| `c-testsuite::00046` | anonymous struct/union members | non-C99 extension |
-| `c-testsuite::00050` | anonymous union member inside struct | non-C99 extension |
+| `c-testsuite::00050` | anonymous union member inside struct | non-C99 extension; parser support exists, alias/layout semantics remain |
 | `c-testsuite::00152` | macro-expanded `#line` directive | likely C99 compiler bug; should not stay hidden |
 | `c-testsuite::00216` | empty aggregate extension / anonymous aggregate members | mixed extension; split reason if needed |
 | `c-testsuite::00219` | C11 `_Generic` | non-C99 extension |
@@ -80,7 +79,7 @@ Source: `docs/conformance.json` generated after task `11-03`
 | `00218` | Implementation-defined bitfield policy gap: enum bitfield should zero-extend for this suite. | `09-27` |
 
 Existing xfails retained as non-C99/future-scope unless a later task elects to
-support the extension: `00046`, `00050`, `00216`, `00219`. `00152` should be
+support the extension: `00050`, `00216`, `00219`. `00152` should be
 removed from xfail by `04-21`.
 
 ## Acceptance

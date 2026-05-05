@@ -61,7 +61,10 @@ pub(crate) fn peek_attribute(p: &Parser<'_>) -> bool {
 pub(crate) fn is_attribute_at(p: &Parser<'_>, at: usize) -> bool {
     matches!(
         p.tokens.get(at).map(|t| &t.kind),
-        Some(TokenKind::Ident(sym)) if p.session.interner.get(*sym) == "__attribute__"
+        Some(TokenKind::Ident(sym)) if matches!(
+            p.session.interner.get(*sym),
+            "__attribute__" | "__attribute"
+        )
     )
 }
 

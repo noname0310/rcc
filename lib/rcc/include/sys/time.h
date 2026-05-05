@@ -15,5 +15,8 @@ struct timezone {
 };
 
 extern int gettimeofday(struct timeval *__restrict, void *__restrict);
+extern int utimes(const char *, const struct timeval[2]);
+
+#include <sys/select.h>
 
 #endif

@@ -2,8 +2,10 @@
 //!
 //! For each `.c` file in the suite, we run `lex → preprocess → parse`
 //! and assert that `rcc_parse::parse` returns `Some(TranslationUnit)`.
-//! Files listed in `xfail.toml` are expected to fail; the test still
-//! asserts they *do* fail so the xfail list stays accurate.
+//! Files listed in `xfail.toml` are full-pipeline conformance xfails.
+//! A conformance xfail may already parse successfully while still failing
+//! HIR/typeck/CFG/codegen/runtime, so this smoke test treats parse-success
+//! xfails as informative rather than failing the parser gate.
 //!
 //! The test is skipped (not failed) when the suite directory is absent.
 
@@ -121,7 +123,7 @@ fn ctestsuite_parse_smoke() {
     let mut pass = 0usize;
     let mut xfail_pass = 0usize;
     let mut unexpected_fail: Vec<String> = Vec::new();
-    let mut unexpected_pass: Vec<String> = Vec::new();
+    let mut xfail_parse_pass: Vec<String> = Vec::new();
 
     for file in &files {
         let stem = file.file_stem().unwrap().to_string_lossy().to_string();
@@ -129,8 +131,7 @@ fn ctestsuite_parse_smoke() {
 
         if xfail.contains(&stem) {
             if ok {
-                // xfail file now passes — should be removed from xfail list.
-                unexpected_pass.push(stem);
+                xfail_parse_pass.push(stem);
             } else {
                 xfail_pass += 1;
             }
@@ -157,25 +158,20 @@ fn ctestsuite_parse_smoke() {
             eprintln!("  {f}");
         }
     }
-    if !unexpected_pass.is_empty() {
+    if !xfail_parse_pass.is_empty() {
         eprintln!();
-        eprintln!("Unexpected passes (remove from xfail.toml):");
-        for f in &unexpected_pass {
+        eprintln!("Conformance xfails that already parse successfully:");
+        for f in &xfail_parse_pass {
             eprintln!("  {f}");
         }
     }
 
-    // Assert: no unexpected failures, no unexpected passes.
+    // Assert: no unexpected parser failures. Full-pipeline xfails may be
+    // parse-green while later compiler stages still need ownership tasks.
     assert!(
         unexpected_fail.is_empty(),
         "{} file(s) failed unexpectedly — add to xfail.toml or fix the parser:\n{}",
         unexpected_fail.len(),
         unexpected_fail.join("\n")
-    );
-    assert!(
-        unexpected_pass.is_empty(),
-        "{} file(s) now pass but are still in xfail.toml — remove them:\n{}",
-        unexpected_pass.len(),
-        unexpected_pass.join("\n")
     );
 }

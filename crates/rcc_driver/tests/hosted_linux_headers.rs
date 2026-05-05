@@ -111,6 +111,7 @@ int probe(const char *path) {
             source: r#"
 #include <pthread.h>
 #include <dlfcn.h>
+#include <time.h>
 
 static void *worker(void *arg) {
     return arg;
@@ -118,14 +119,42 @@ static void *worker(void *arg) {
 
 int probe(const char *name) {
     pthread_t thread;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    struct timespec timeout = { 0, 0 };
     void *handle = dlopen(0, RTLD_NOW | RTLD_LOCAL);
     void *symbol = handle ? dlsym(handle, name) : 0;
     if (pthread_create(&thread, 0, worker, symbol) != 0)
         return 1;
     pthread_join(thread, 0);
+    pthread_cond_timedwait(&cond, &mutex, &timeout);
     if (handle)
         dlclose(handle);
     return symbol != 0 ? 0 : 2;
+}
+"#,
+        },
+        Fixture {
+            name: "stdatomic-quickjs-surface",
+            reason: "QuickJS uses stdatomic _Atomic(T) casts and fetch/exchange helpers under CONFIG_ATOMICS",
+            args: &["-fgnu-statement-expressions"],
+            source: r#"
+#include <stdint.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <time.h>
+
+int probe(uint32_t *p) {
+    time_t now = 0;
+    struct tm tm;
+    void *stack = alloca(16);
+    uint32_t old = atomic_fetch_add((_Atomic(uint32_t) *)p, 3);
+    uint32_t seen = atomic_exchange((_Atomic(uint32_t) *)p, old);
+    uint32_t expected = seen;
+    localtime_r(&now, &tm);
+    return atomic_compare_exchange_strong((_Atomic(uint32_t) *)p, &expected, 7)
+        + (stack != 0)
+        + (int)tm.tm_gmtoff;
 }
 "#,
         },

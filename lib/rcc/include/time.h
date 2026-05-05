@@ -23,6 +23,8 @@ struct tm {
     int tm_wday;
     int tm_yday;
     int tm_isdst;
+    long tm_gmtoff;
+    const char *tm_zone;
 };
 
 extern clock_t clock(void);
@@ -33,6 +35,8 @@ extern char *asctime(const struct tm *);
 extern char *ctime(const time_t *);
 extern struct tm *gmtime(const time_t *);
 extern struct tm *localtime(const time_t *);
+extern struct tm *gmtime_r(const time_t *, struct tm *);
+extern struct tm *localtime_r(const time_t *, struct tm *);
 extern size_t strftime(char *, size_t, const char *, const struct tm *);
 extern int clock_gettime(clockid_t, struct timespec *);
 extern int clock_settime(clockid_t, const struct timespec *);
