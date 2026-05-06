@@ -950,7 +950,16 @@ fn parse_char_constant(
                 'n' => 0x0a,
                 't' => 0x09,
                 'r' => 0x0d,
-                '0' => 0,
+                '0'..='7' => {
+                    let mut value = next.to_digit(8).unwrap() as i128;
+                    for _ in 0..2 {
+                        let Some(c) = it.clone().next() else { break };
+                        let Some(digit) = c.to_digit(8) else { break };
+                        value = (value << 3) + digit as i128;
+                        it.next();
+                    }
+                    value
+                }
                 '\\' => 0x5c,
                 '\'' => 0x27,
                 '"' => 0x22,

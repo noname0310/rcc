@@ -1705,7 +1705,9 @@ pub mod backend {
             for def in defs {
                 match &self.hir.defs[def].kind {
                     DefKind::Function { .. } => {
-                        self.declare_function(def)?;
+                        if self.should_declare_function(def)? {
+                            self.declare_function(def)?;
+                        }
                     }
                     DefKind::Global { .. } => {
                         self.declare_global(def)?;
@@ -1719,10 +1721,30 @@ pub mod backend {
             Ok(())
         }
 
+        fn should_declare_function(&self, def: DefId) -> Result<bool, CodegenError> {
+            let def_data = self.hir.defs.get(def).ok_or_else(|| {
+                CodegenError::Internal(format!("function definition {def:?} is missing"))
+            })?;
+            let DefKind::Function { .. } = &def_data.kind else {
+                return Err(CodegenError::Internal(format!(
+                    "definition {def:?} is not a function"
+                )));
+            };
+            Ok(true)
+        }
+
         /// Declare one HIR function and return the reused or newly-created LLVM value.
         pub fn declare_function(
             &mut self,
             def: DefId,
+        ) -> Result<FunctionValue<'ctx>, CodegenError> {
+            self.declare_function_with_linkage(def, None)
+        }
+
+        fn declare_function_with_linkage(
+            &mut self,
+            def: DefId,
+            override_linkage: Option<LlvmLinkage>,
         ) -> Result<FunctionValue<'ctx>, CodegenError> {
             if let Some(&function) = self.functions.get(&def) {
                 return Ok(function);
@@ -1740,19 +1762,26 @@ pub mod backend {
                         "definition {def:?} is not a function"
                     )));
                 };
+                let linkage = override_linkage.unwrap_or_else(|| {
+                    if !*has_body && *is_static {
+                        LlvmLinkage::External
+                    } else {
+                        common_attr_linkage(
+                            self.hir.def_attrs.get(&def).copied().unwrap_or_default(),
+                            function_linkage(
+                                *has_body,
+                                *is_static,
+                                *is_inline,
+                                *is_extern_inline,
+                                self.session.opts.gnu89_inline,
+                            ),
+                        )
+                    }
+                });
                 (
                     self.def_name(def_data),
                     *ty,
-                    common_attr_linkage(
-                        self.hir.def_attrs.get(&def).copied().unwrap_or_default(),
-                        function_linkage(
-                            *has_body,
-                            *is_static,
-                            *is_inline,
-                            *is_extern_inline,
-                            self.session.opts.gnu89_inline,
-                        ),
-                    ),
+                    linkage,
                     self.hir.def_attrs.get(&def).copied().unwrap_or_default(),
                 )
             };
@@ -1951,6 +1980,28 @@ pub mod backend {
 
         fn def_name(&self, def: &Def) -> String {
             self.session.interner.get(def.name).to_owned()
+        }
+
+        fn describe_def(&self, def: DefId) -> String {
+            let Some(def_data) = self.hir.defs.get(def) else {
+                return format!("{def:?} (missing HIR definition)");
+            };
+            let name = self.def_name(def_data);
+            let kind = match &def_data.kind {
+                DefKind::Function { has_body, is_static, is_inline, is_extern_inline, .. } => {
+                    format!(
+                        "function(has_body={has_body}, static={is_static}, inline={is_inline}, extern_inline={is_extern_inline})"
+                    )
+                }
+                DefKind::Global { linkage, init, .. } => {
+                    format!("global(linkage={linkage:?}, has_init={})", init.is_some())
+                }
+                DefKind::Typedef(_) => "typedef".to_owned(),
+                DefKind::Record { .. } => "record".to_owned(),
+                DefKind::Enum { .. } => "enum".to_owned(),
+                DefKind::Enumerator { value, .. } => format!("enumerator(value={value})"),
+            };
+            format!("{name} ({def:?}, {kind})")
         }
 
         fn apply_param_abi_attrs(
@@ -5557,8 +5608,8 @@ pub mod backend {
                         Ok(fv.as_global_value().as_pointer_value().as_basic_value_enum())
                     } else {
                         Err(CodegenError::Internal(format!(
-                            "global constant references undeclared definition {:?}",
-                            def
+                            "global constant references undeclared definition {}",
+                            self.describe_def(*def)
                         )))
                     }
                 }
@@ -6490,8 +6541,15 @@ pub mod backend {
                 return Ok(None);
             }
             let function = self.cx.function_decl(*def).ok_or_else(|| {
+                let name = self
+                    .cx
+                    .hir
+                    .defs
+                    .get(*def)
+                    .map(|def_data| self.cx.session.interner.get(def_data.name).to_owned())
+                    .unwrap_or_else(|| format!("{def:?}"));
                 CodegenError::Internal(format!(
-                    "function constant references undeclared definition {:?}",
+                    "function constant references undeclared definition {:?} ({name}); internal-linkage declarations without a definition are not emitted",
                     *def
                 ))
             })?;
@@ -9797,6 +9855,44 @@ mod tests {
         );
         assert_eq!(cx.global_decl(static_global).unwrap().get_linkage(), LlvmLinkage::Internal);
         assert_eq!(cx.global_decl(external_global).unwrap().get_linkage(), LlvmLinkage::External);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_declarations_lower_undefined_static_function_prototypes_as_external_declarations() {
+        use inkwell::module::Linkage as LlvmLinkage;
+
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let fn_ty = tcx.intern(Ty::Func {
+            ret: tcx.void,
+            params: Vec::new(),
+            variadic: false,
+            proto: true,
+        });
+        let static_fn_name = session.interner.intern("static_proto");
+        let external_fn_name = session.interner.intern("external_proto");
+        let mut defs = IndexVec::new();
+        let static_fn = function_def(
+            &mut defs,
+            static_fn_name,
+            fn_ty,
+            FunctionDefOptions { is_static: true, ..FunctionDefOptions::default() },
+        );
+        let external_fn =
+            function_def(&mut defs, external_fn_name, fn_ty, FunctionDefOptions::default());
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        cx.declare_all().unwrap();
+        cx.verify_module().unwrap();
+
+        assert_eq!(cx.function_decl(static_fn).unwrap().get_linkage(), LlvmLinkage::External);
+        assert!(cx.module().get_function("static_proto").is_some());
+        assert_eq!(cx.function_decl(external_fn).unwrap().get_linkage(), LlvmLinkage::External);
+        assert!(cx.module().get_function("external_proto").is_some());
     }
 
     #[cfg(feature = "llvm")]

@@ -4546,6 +4546,25 @@ fn def_named<'a>(hir: &'a HirCrate, sess: &Session, name: &str) -> &'a rcc_hir::
 }
 
 #[test]
+fn sqlite_const_pointer_chain_local_assignment_typechecks() {
+    let src = r#"
+        int main(void) {
+            char **src = 0;
+            const char *const *azArg;
+            azArg = (const char *const *)src;
+            return 0;
+        }
+    "#;
+    let (hir, tcx, cap, _) = lower_and_typeck_snippet(src);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "clean const pointer-chain assignment should not emit errors: {:?}",
+        cap.diagnostics()
+    );
+    assert_no_body_expr_error_types_after_typeck(&hir, &tcx);
+}
+
+#[test]
 fn regression_gate_file_scope_typedef_record_pointer_field_resolves_before_tag_materialization() {
     let src = r#"
         typedef unsigned int FFelem;

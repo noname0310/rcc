@@ -1079,6 +1079,106 @@ fn assignment_through_pointer_to_const_emits_e0080() {
 }
 
 #[test]
+fn assignment_to_pointer_to_const_pointer_local_is_modifiable() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let char_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: tcx.char_,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let ptr_to_const_char_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: char_ptr,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let local =
+        push_local_with_quals(&mut body, ptr_to_const_char_ptr, rcc_hir::ObjectQuals::none());
+    let rhs_local = push_local(&mut body, ptr_to_const_char_ptr);
+    let lhs = push_kind(&mut body, ptr_to_const_char_ptr, HirExprKind::LocalRef(local));
+    let rhs = push_kind(&mut body, ptr_to_const_char_ptr, HirExprKind::LocalRef(rhs_local));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)),
+        "assigning the pointer object itself must remain modifiable: {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn assignment_through_pointer_to_const_pointer_local_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let char_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: tcx.char_,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let ptr_to_const_char_ptr = tcx.intern(Ty::Ptr(Qual {
+        ty: char_ptr,
+        is_const: true,
+        is_volatile: false,
+        is_restrict: false,
+    }));
+    let ptr = push_local_ref(&mut body, ptr_to_const_char_ptr);
+    let lhs = push_kind(&mut body, char_ptr, HirExprKind::Deref(ptr));
+    let rhs = push_kind(&mut body, char_ptr, HirExprKind::IntConst(0));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_to_const_pointer_object_emits_e0080() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let ptr_ty = ptr_to_int(&mut tcx);
+    let local = push_local_with_quals(
+        &mut body,
+        ptr_ty,
+        rcc_hir::ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+    );
+    let lhs = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(local));
+    let rhs = push_kind(&mut body, ptr_ty, HirExprKind::IntConst(0));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)));
+}
+
+#[test]
+fn assignment_to_pointer_to_const_local_is_modifiable() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let ptr_ty = const_ptr_to_int(&mut tcx);
+    let local = push_local_with_quals(&mut body, ptr_ty, rcc_hir::ObjectQuals::none());
+    let lhs = push_kind(&mut body, ptr_ty, HirExprKind::LocalRef(local));
+    let rhs = push_kind(&mut body, ptr_ty, HirExprKind::IntConst(0));
+    let assign = push_kind(&mut body, tcx.error, HirExprKind::Assign { lhs, rhs });
+    root_stmt(&mut body, assign);
+
+    let (mut session, cap) = Session::for_test();
+    check_body(&mut body, &mut tcx, &mut session);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.code == Some(codes::E0080)),
+        "assigning a pointer-to-const object must be allowed: {:?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn increment_const_local_emits_e0080() {
     let mut tcx = TyCtxt::new();
     let mut body = Body::default();
