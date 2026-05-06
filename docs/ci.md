@@ -31,7 +31,7 @@ set with a documented policy reason.
 |----------|---------|------------|
 | `Csmith Bounded Differential (manual)` | `workflow_dispatch` | Generates broad random programs and currently finds many real bugs; useful for bug discovery, not a deterministic release gate. |
 | `llvm-test-suite SingleSource (manual)` | `workflow_dispatch` job inside `CI` | The curated release subset already runs in the conformance dashboard; this job is for manual expansion/debugging. |
-| `gcc-torture execute (manual, long-running)` | `workflow_dispatch` job inside `CI` | Full GCC torture execute is long-running and broader than the first C99 release gate. |
+| `gcc-torture execute (manual, long-running)` | `workflow_dispatch` job inside `CI` | Full GCC torture execute is long-running and broader than the first ISO release gate. |
 
 Manual jobs must still upload reports. Their failures should become concrete
 tasks, not silent skips.

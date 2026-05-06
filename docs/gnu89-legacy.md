@@ -1,8 +1,8 @@
 # GNU89 Legacy Policy
 
-`rcc` remains a C99-first compiler. A small GNU89 compatibility slice is
-supported when it is already part of the C99 obsolescent surface or needed to
-classify gcc-torture behavior:
+`rcc` remains an ISO C99/C11 compiler, not a GNU89 compiler. A small GNU89
+compatibility slice is supported when it is already part of the C99
+obsolescent surface or needed to classify gcc-torture behavior:
 
 - implicit `int` on old code paths is accepted as compatibility syntax;
 - K&R-style function definitions are parsed with W0005;

@@ -2,7 +2,7 @@
 
 Each task either owns one KPI cell in 00-overview/02-kpi-dashboard.md or
 turns an external-suite failure into a concrete compiler-bug task. Pass rate
-is a gate, not a hiding place: C99 compiler bugs must be fixed even when the
+is a gate, not a hiding place: ISO C compiler bugs must be fixed even when the
 current numeric milestone already passes.
 
 ## Upstream deps

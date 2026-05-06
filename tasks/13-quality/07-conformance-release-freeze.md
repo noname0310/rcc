@@ -14,8 +14,8 @@ rates.
   - Regenerate `docs/conformance.json` and `docs/conformance.md` from the
     same command sequence documented in `docs/conformance.md`.
   - Confirm required suites have zero non-xfailed failures.
-  - Review every xfail entry and classify it as non-C99, implementation gap,
-    external-suite drift, or platform/runtime limitation.
+  - Review every xfail entry and classify it as outside-release target,
+    implementation gap, external-suite drift, or platform/runtime limitation.
   - Add concrete follow-up tasks for any implementation gap that is not fixed
     before release.
 - Out:

@@ -7,9 +7,9 @@ Closing a KPI task means the numbers in `docs/conformance.md` rise past
 the target and stay there.
 
 Pass rate is not the source of truth for correctness. If a failing TU exposes
-a C99 compiler bug, fix or task the bug even when the current numeric target
-already passes. XFAIL is only for explicit non-C99 extensions, unsupported
-future milestones, or documented policy decisions.
+an ISO C compiler bug, fix or task the bug even when the current numeric target
+already passes. XFAIL is only for explicit outside-release extensions,
+unsupported future milestones, or documented policy decisions.
 
 ## Tasks
 
@@ -57,4 +57,4 @@ KPI tasks are "done" when two things are both true:
 2. The cell **stays** green on three consecutive CI runs.
 
 Triage tasks are "done" only when every failing TU is classified and every
-C99 compiler bug has an owner task. A compiler panic is always a compiler bug.
+ISO C compiler bug has an owner task. A compiler panic is always a compiler bug.

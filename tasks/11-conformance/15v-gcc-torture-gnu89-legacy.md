@@ -5,7 +5,7 @@
 **Phase:** 11-conformance    **Depends on:** 11-15k    **Milestone:** M6
 
 ## Goal
-Decide how gcc-torture GNU89-only runtime cases are represented in a C99-first
+Decide how gcc-torture GNU89-only runtime cases are represented in an ISO C99/C11
 compiler project.
 
 ## Scope

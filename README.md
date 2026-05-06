@@ -1,14 +1,14 @@
-# rcc — a Rust-based C99 compiler
+# rcc — a Rust-based C99/C11 compiler
 
-`rcc` is a C99 compiler written in Rust, targeting **LLVM IR** through
+`rcc` is a C99/C11 compiler written in Rust, targeting **LLVM IR** through
 [`inkwell`](https://github.com/TheDan64/inkwell). Its architecture is
 modelled after the `rustc` multi-crate workspace: each stage
 (preprocess / lex / parse / HIR / typeck / MIR / codegen) lives in its
 own crate and communicates through narrow public type boundaries.
 
-> **Status.** `rcc` now has a working C99 front end, HIR/type checking,
-> CFG lowering, LLVM IR/object emission, conformance adapters, fuzz targets,
-> and release-quality gates. The M7 release target is hosted
+> **Status.** `rcc` now has working C99 and C11 language modes, HIR/type
+> checking, CFG lowering, LLVM IR/object emission, conformance adapters, fuzz
+> targets, and release-quality gates. The M7 release target is hosted
 > `x86_64-unknown-linux-gnu`; other parsed target triples are documented as
 > layout/front-end models unless explicitly listed in
 > [`docs/platform-support.md`](docs/platform-support.md).
@@ -28,7 +28,7 @@ crates/
   rcc_parse/            # pp-tokens -> AST (recursive descent + Pratt)
   rcc_hir/              # Name-resolved tree + Ty/TyCtxt
   rcc_hir_lower/        # AST -> HIR
-  rcc_typeck/           # C99 conversions, const-eval
+  rcc_typeck/           # C conversions, const-eval
   rcc_cfg/              # MIR-style CFG (BasicBlock/Terminator/Body)
   rcc_cfg_transform/    # CFG passes
   rcc_codegen_llvm/     # CFG -> LLVM IR (inkwell, behind `llvm` feature)

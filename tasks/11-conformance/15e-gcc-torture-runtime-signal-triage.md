@@ -23,7 +23,7 @@ signal at runtime.
 - Representative cases `20010904-1`, `20010904-2`, `20011113-1`, and
   `20011223-1` are either fixed or classified into narrower follow-up tasks.
 - No runtime-signal case is marked xfail without a specific reason tied to a
-  non-C99 extension or an already-created compiler-bug task.
+  outside-release extension or an already-created compiler-bug task.
 
 ## Result
 
@@ -34,7 +34,7 @@ signal at runtime.
 | `20011113-1` | fail, SIGABRT | aggregate copy / by-value ABI runtime bug; follow-up `15j` |
 | `20011223-1` | pass | fixed by applying integer promotions to `switch` conditions |
 
-- Fixed a C99 compiler bug: `switch ((signed char)i)` now promotes the
+- Fixed an ISO C compiler bug: `switch ((signed char)i)` now promotes the
   controlling expression to `int` before CFG/codegen, so `case 255` no longer
   matches `-1`.
 - Added a typeck regression test proving switch conditions receive an

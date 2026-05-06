@@ -18,7 +18,7 @@ Fix the flexible-array initializer/assignment path exposed by tcc-tests2.
   and illegal usage still diagnoses cleanly.
 
 ## Acceptance
-- `80_flexarray` passes or is reclassified only if a specific non-C99
+- `80_flexarray` passes or is reclassified only if a specific outside-release
   construct is proven after the C99 bug is gone.
 - No generic `expression is not assignable to the required type` is emitted
   for legal flexible-array initialization.

@@ -16,7 +16,7 @@ qualifier model.
 - In: `__restrict`, `__restrict__`, `__restrict_arr`, `__const`, and related
   aliases found in system headers.
 - In: parser, HIR lowering, and type-check tests.
-- Out: inventing non-C99 qualifier semantics.
+- Out: inventing outside-release qualifier semantics.
 
 ## Acceptance
 

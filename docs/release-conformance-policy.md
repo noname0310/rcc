@@ -1,8 +1,9 @@
 # Release conformance policy
 
-`rcc` is a C99 compiler first. Release conformance gates therefore track the
-supported C99 surface and keep non-C99 compatibility work visible without
-letting it block a C99 release.
+`rcc` is now a C99/C11 compiler. Release conformance gates therefore track the
+supported strict C99 release surface, C11 core-language coverage, and hosted
+C11 library-header coverage separately while keeping GNU/TinyCC compatibility
+work visible without letting it block an ISO C release.
 
 ## Required release dashboard
 
@@ -26,7 +27,7 @@ Every `xfail.toml` entry must use one of these categories in its reason text:
 
 | Category | Meaning |
 |----------|---------|
-| `non-C99` | The fixture depends on C11, GNU, TinyCC, PCC, or another extension outside the current language target. |
+| `outside release target` | The fixture depends on GNU, TinyCC, PCC, or another extension outside the current ISO C release gates. |
 | `implementation gap` | The fixture is valid for the supported target, but `rcc` has not implemented it yet. This must have a follow-up task. |
 | `external-suite drift` | The vendored expected output or fixture behavior disagrees with GCC/Clang/TCC for reasons outside `rcc`. |
 | `platform/runtime limitation` | The fixture depends on host headers, system calls, signals, or runtime behavior outside the portable release gate. |
@@ -41,22 +42,22 @@ point to a concrete task or be fixed before release.
 
 | Case | Category | Reason |
 |------|----------|--------|
-| `c-testsuite::00050` | non-C99 | anonymous union member inside struct still needs alias/layout semantics beyond parser support |
-| `c-testsuite::00216` | non-C99 | empty aggregate and anonymous aggregate extension forms are outside C99 |
-| `c-testsuite::00219` | non-C99 | C11 `_Generic` is outside C99 |
+| `c-testsuite::00050` | outside release target | anonymous union member inside struct still needs alias/layout semantics beyond parser support |
+| `c-testsuite::00216` | outside release target | empty aggregate and anonymous aggregate extension forms are outside strict ISO C initializer coverage |
+| `c-testsuite::00219` | implementation gap | C11 `_Generic` is covered by focused C11 gates; this legacy suite case still needs full-pipeline ownership |
 
 ### `tcc-tests2`
 
 | Case | Category | Reason |
 |------|----------|--------|
 | `tcc-tests2::60_errors_and_warnings` | external-suite drift | TinyCC diagnostic mode checks TCC-specific diagnostics, not runtime C99 behavior |
-| `tcc-tests2::70_floating_point_literals` | non-C99 | TinyCC-only binary floating constants under `__TINYC__` |
-| `tcc-tests2::76_dollars_in_identifiers` | non-C99 | GNU/TinyCC `$` identifiers |
-| `tcc-tests2::80_flexarray` | non-C99 | static initialization of a flexible array member, rejected by GCC under C99 pedantic mode |
-| `tcc-tests2::83_utf8_in_identifiers` | non-C99 | raw UTF-8 identifier spelling extension |
-| `tcc-tests2::85_asm-outside-function` | non-C99 | file-scope GNU assembly |
-| `tcc-tests2::90_struct-init` | non-C99 | GNU empty structs, empty initializer lists, and global compound-literal initializer forms |
-| `tcc-tests2::94_generic` | non-C99 | C11 `_Generic` |
+| `tcc-tests2::70_floating_point_literals` | outside release target | TinyCC-only binary floating constants under `__TINYC__` |
+| `tcc-tests2::76_dollars_in_identifiers` | outside release target | GNU/TinyCC `$` identifiers |
+| `tcc-tests2::80_flexarray` | outside release target | static initialization of a flexible array member, rejected by GCC under strict ISO modes |
+| `tcc-tests2::83_utf8_in_identifiers` | outside release target | raw UTF-8 identifier spelling extension |
+| `tcc-tests2::85_asm-outside-function` | outside release target | file-scope GNU assembly |
+| `tcc-tests2::90_struct-init` | outside release target | GNU empty structs, empty initializer lists, and global compound-literal initializer forms |
+| `tcc-tests2::94_generic` | implementation gap | C11 `_Generic` is covered by focused C11 gates; this TinyCC fixture remains a separate full-pipeline target |
 | `tcc-tests2::96_nodata_wanted` | external-suite drift | TinyCC `-dt` data-section diagnostic mode |
 
 `chibicc`, `llvm-test-suite`, `gcc-torture`, and `csmith` currently have empty
@@ -68,7 +69,7 @@ These runs are useful, but they are not release-blocking M7 rows:
 
 - Full chibicc compile mode: broad extension-heavy upstream surface.
 - `gcc-torture` smoke/full execute: important for future compatibility, but
-  too broad for the first C99 release gate.
+  too broad for the first ISO release gate.
 - `csmith` differential fuzzing: bounded bug-finding tool, not a stable
   deterministic release dashboard row.
 

@@ -17,7 +17,7 @@ include directory.
 - In: directive parsing, include search starting after the including header's
   directory, dependency recording, and regression tests.
 - In: `#include_next <h>` and `#include_next "h"` as a GNU hosted extension.
-- Out: broad GCC warning policy for every non-C99 directive.
+- Out: broad GCC warning policy for every outside-release directive.
 
 ## Acceptance
 

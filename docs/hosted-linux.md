@@ -1,6 +1,6 @@
 # Hosted Linux Mode
 
-`rcc` is a C99-first compiler with an explicit C11 mode.  Hosted Linux support is an explicit
+`rcc` supports C99 and C11 language modes. Hosted Linux support is an explicit
 compatibility policy selected with:
 
 ```sh

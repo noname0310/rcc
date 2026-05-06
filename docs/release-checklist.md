@@ -68,10 +68,10 @@ steps are listed here for order only:
 
 ## Policy Reminders
 
-- Required C99 conformance failures are compiler bugs, even if aggregate pass
+- Required ISO C conformance failures are compiler bugs, even if aggregate pass
   percentages look good.
 - GNU/C11/TinyCC-specific cases must be explicitly xfailed or tracked as
-  extension tasks; they are not part of the strict C99 release gate.
+  extension tasks; they are not part of the strict ISO release gate.
 - Windows host support and Windows target support are separate. The M7
   release target remains `x86_64-unknown-linux-gnu`.
 - `rcc` uses hosted libc and external LLVM/system linker tools; it does not

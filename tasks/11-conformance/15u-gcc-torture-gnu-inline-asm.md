@@ -20,7 +20,7 @@ only parsed.
 
 ## Acceptance
 - Inline-asm cases either pass or have narrower tasks per operand/clobber kind.
-- Instrumentation cases are not counted as ordinary C99 compiler bugs.
+- Instrumentation cases are not counted as ordinary ISO C compiler bugs.
 
 ## References
 - `docs/gcc-torture-signal-clusters.md`

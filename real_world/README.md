@@ -20,7 +20,7 @@ that the curated conformance suites missed.
    generated config headers, or build-script-only patches.
 4. If a build requires changing upstream `.c` or `.h` files, stop and file an
    `rcc` compiler/runtime task instead.
-5. If a project depends on non-C99 extensions, record the exact extension and
+5. If a project depends on outside-release extensions, record the exact extension and
    decide whether it belongs in `14-lang-extensions`, `15-builtin-rt`, or a
    project-local skip.
 
@@ -52,11 +52,11 @@ Classify every failure before changing project integration:
 
 | Failure class | Action |
 | --- | --- |
-| C99 feature missing or implemented incorrectly | add a focused task under the owning phase, add a minimized regression, fix `rcc`, then rerun |
-| Wrong diagnostics for valid C99 | add parser/typeck/preprocess regression before changing the wrapper |
+| ISO C feature missing or implemented incorrectly | add a focused task under the owning phase, add a minimized regression, fix `rcc`, then rerun |
+| Wrong diagnostics for valid ISO C | add parser/typeck/preprocess regression before changing the wrapper |
 | Wrong runtime behavior | add CFG/codegen/driver regression and compare against the host compiler |
 | Missing hosted-library surface | add a `15-builtin-rt` task or document the external libc dependency |
-| Non-C99 extension | record the exact extension and decide between `14-lang-extensions` or a project-local skip |
+| Outside-release extension | record the exact extension and decide between `14-lang-extensions` or a project-local skip |
 | Build-system assumption | wrapper or build-script-only patch is allowed |
 
 Do not mark a project probe as passing by deleting a failing upstream test,

@@ -43,7 +43,7 @@ phases.
 None for the C99 parser surface as of 05-40. The remaining
 c-testsuite parse xfails are owned by preprocessor behavior,
 freestanding headers/runtime, HIR/initializer lowering, or explicitly
-non-C99 extension semantics.
+outside-release extension semantics.
 
 ## External Suite Notes
 

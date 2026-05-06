@@ -12,8 +12,9 @@ parser fixes instead of treating the 60% gate as sufficient.
 - In: failures reported as `expected ';' after declaration`, `expected ')' to
   close parameter list`, and closely related declaration/declarator recovery
   cases in `gcc.c-torture/execute`.
-- Out: C11-only constructs that are not required for the C99 compiler; if a
-  failing case is C11-only, document it and keep it out of strict gates.
+- Out: constructs that are not required for the current ISO C release gates; if
+  a failing case is outside the release target, document it and keep it out of
+  strict gates.
 
 ## Deliverables
 - Minimal parser unit or UI tests extracted from representative failing cases.
@@ -23,8 +24,8 @@ parser fixes instead of treating the 60% gate as sufficient.
 ## Acceptance
 - Representative cases such as `20000822-1`, `20001024-1`, `20001121-1`,
   and `20020108-1` no longer fail with parser shape errors unless classified
-  as out-of-scope non-C99 syntax.
-- No xfail entries are added for ordinary C99 parser bugs.
+  as out-of-scope extension syntax.
+- No xfail entries are added for ordinary ISO C parser bugs.
 
 ## Result
 - Added parser keyword aliases for GNU reserved spellings `__restrict`,

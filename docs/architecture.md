@@ -56,9 +56,9 @@ This document is the code-facing version of the high-level plan at
 | `rcc_preprocess`       | — (C-specific)             | Macros, `#include`, conditionals |
 | `rcc_ast`              | `rustc_ast`                | Concrete-ish AST + visitor |
 | `rcc_parse`            | `rustc_parse`              | pp-tokens → AST, typedef disambiguation |
-| `rcc_hir`              | `rustc_hir`                | Name-resolved tree + C99 `Ty`/`TyCtxt` |
+| `rcc_hir`              | `rustc_hir`                | Name-resolved tree + C `Ty`/`TyCtxt` |
 | `rcc_hir_lower`        | `rustc_ast_lowering`       | AST → HIR, declarator flattening |
-| `rcc_typeck`           | `rustc_hir_typeck`         | C99 §6.3 conversions, const-eval |
+| `rcc_typeck`           | `rustc_hir_typeck`         | ISO C conversions, const-eval |
 | `rcc_cfg`              | `rustc_middle::mir` + build| CFG/MIR + HIR → CFG |
 | `rcc_cfg_transform`    | `rustc_mir_transform`      | CFG passes |
 | `rcc_codegen_llvm`     | `rustc_codegen_llvm`       | CFG → LLVM IR via `inkwell` |

@@ -11,7 +11,7 @@ VLA-dependent types.
 ## Scope
 - In: failures containing `has no compile-time layout: VLA size is runtime` or
   `cannot compute layout for sizeof operand` when the construct is valid C99.
-- Out: invalid VLA constructs and non-C99 extensions.
+- Out: invalid VLA constructs and outside-release extensions.
 
 ## Deliverables
 - Reduced HIR/CFG/codegen test that exercises a currently failing VLA case.

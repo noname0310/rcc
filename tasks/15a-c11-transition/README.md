@@ -1,6 +1,6 @@
 # 15a-c11-transition
 
-**Goal of the phase.** Move `rcc` from a C99-only compiler to a
+**Goal of the phase.** Move `rcc` from its original C99 baseline to a
 C11-capable compiler without hiding C11 syntax behind project-local macros.
 This phase exists because real hosted Linux code, including Toybox, uses C11
 spellings such as `_Noreturn` directly in project headers. Treating those as
