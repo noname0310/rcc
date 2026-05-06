@@ -197,12 +197,14 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             Some(Expr { id, kind: ExprKind::FloatLit(lit), span })
         }
         TokenKind::CharLit(lit) => {
+            diagnose_c11_unicode_literal(p, lit.encoding, span);
             let lit = ast_char_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
             Some(Expr { id, kind: ExprKind::CharLit(lit), span })
         }
         TokenKind::StringLit(lit) => {
+            diagnose_c11_unicode_literal(p, lit.encoding, span);
             let lit = ast_string_literal(p, span, lit);
             p.bump();
             let id = p.fresh_id();
@@ -250,6 +252,19 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             None
         }
     }
+}
+
+fn diagnose_c11_unicode_literal(p: &mut Parser<'_>, enc: StringEncoding, span: Span) {
+    if matches!(enc, StringEncoding::None | StringEncoding::Wide)
+        || p.session.opts.language_standard == rcc_session::LanguageStandard::C11
+    {
+        return;
+    }
+    p.session
+        .handler
+        .struct_err(span, "Unicode character and string literal prefixes require `-std=c11`")
+        .code(codes::E0061)
+        .emit();
 }
 
 fn parse_generic_selection(p: &mut Parser<'_>, generic_span: Span) -> Option<Expr> {

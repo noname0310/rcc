@@ -854,6 +854,40 @@ fn c11_thread_local_requires_c11_mode_and_rejects_typedef_combination() {
 }
 
 #[test]
+fn c11_unicode_character_and_string_literals_parse() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        r#"
+        int f(void) {
+            return u'a' + U'b' + u"x"[0] + U"y"[0] + u8"z"[0];
+        }
+        "#,
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+    assert_eq!(tu.decls.len(), 1);
+}
+
+#[test]
+fn c11_incompatible_prefixed_string_concat_is_diagnosed() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_tu, diags, _cap) = parse_snippet_with_options(r#"int *p = u"a" U"b";"#, opts);
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0041)),
+        "expected incompatible string-literal concat diagnostic, got {diags:?}"
+    );
+}
+
+#[test]
+fn c99_unicode_literal_prefixes_are_diagnosed() {
+    let errors = parse_err(r#"int f(void) { return u'x' + U"y"[0] + u8"z"[0]; }"#);
+    assert!(
+        errors.iter().any(|d| d.message.contains("literal prefixes require `-std=c11`")),
+        "expected C11-mode diagnostic, got {errors:#?}"
+    );
+}
+
+#[test]
 fn s6_7_3_type_qualifiers() {
     parse_ok("const int x = 0;");
     parse_ok("volatile int y;");

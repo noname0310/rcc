@@ -194,6 +194,28 @@ int probe(void) {
 "#,
         },
         Fixture {
+            name: "uchar-c11-surface",
+            reason: "C11 hosted projects may use Unicode literals plus uchar conversion declarations",
+            args: &["-std=c11"],
+            source: r#"
+#include <uchar.h>
+
+_Static_assert(sizeof(u"x"[0]) == sizeof(char16_t), "char16_t literal width");
+_Static_assert(sizeof(U"x"[0]) == sizeof(char32_t), "char32_t literal width");
+_Static_assert(sizeof(u8"x"[0]) == 1, "u8 literal width");
+
+int probe(char *buf, const char *src, mbstate_t *st) {
+    char16_t c16 = u'x';
+    char32_t c32 = U'x';
+    size_t n = mbrtoc16(&c16, src, 4, st);
+    n = n + c16rtomb(buf, c16, st);
+    n = n + mbrtoc32(&c32, src, 4, st);
+    n = n + c32rtomb(buf, c32, st);
+    return (int)n;
+}
+"#,
+        },
+        Fixture {
             name: "coreutils-posix-declaration-sweep",
             reason: "GNU coreutils true probe reaches gnulib wrappers for unlocked stdio, at-functions, errno, and wide-char width",
             args: &[],

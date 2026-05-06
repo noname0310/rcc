@@ -649,7 +649,7 @@ pub fn decode_string(raw: &str, enc: StringEncoding) -> Result<Vec<u8>, Diagnost
             // in strings as they do in character constants — that is
             // exactly how C99 §6.4.4.4 specifies them.
             let (val, used) = decode_one_char(body, i)?;
-            out.push(val as u8);
+            push_decoded_string_scalar(&mut out, val, enc);
             i += used;
         } else {
             // Raw source byte — push verbatim. For narrow strings this
@@ -662,6 +662,19 @@ pub fn decode_string(raw: &str, enc: StringEncoding) -> Result<Vec<u8>, Diagnost
         }
     }
     Ok(out)
+}
+
+fn push_decoded_string_scalar(out: &mut Vec<u8>, val: u32, enc: StringEncoding) {
+    if matches!(enc, StringEncoding::None) {
+        out.push(val as u8);
+        return;
+    }
+    if let Some(ch) = char::from_u32(val) {
+        let mut buf = [0_u8; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    } else {
+        out.push(val as u8);
+    }
 }
 
 /// Decode a single character (plain byte or escape) starting at `body[i]`.
@@ -1429,6 +1442,12 @@ mod tests {
     #[test]
     fn string_with_u8_prefix_decodes() {
         assert_eq!(sok("u8\"A\"", StringEncoding::Utf8), vec![0x41]);
+    }
+
+    #[test]
+    fn prefixed_string_ucn_keeps_unicode_scalar_payload() {
+        assert_eq!(sok("u\"\\u00e9\"", StringEncoding::Utf16), "é".as_bytes());
+        assert_eq!(sok("U\"\\U0001F600\"", StringEncoding::Utf32), "😀".as_bytes());
     }
 
     // ── decode_string: malformed ─────────────────────────────────────

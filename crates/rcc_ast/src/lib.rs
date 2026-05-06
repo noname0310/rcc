@@ -459,6 +459,11 @@ pub enum Initializer {
 }
 
 /// A designator (C99).
+///
+/// Keep `Index(Expr)` inline for now because designator lowering and parser
+/// tests pattern-match this public AST shape directly. A future AST compaction
+/// task can box this after updating all phase boundaries together.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Designator {
     /// `.name`
@@ -518,6 +523,11 @@ pub struct Stmt {
 }
 
 /// Statement discriminant.
+///
+/// Statement shape is intentionally source-faithful and still used directly by
+/// parser and lowering tests. Boxing individual expression fields is a wider
+/// AST boundary change, so keep this lint scoped to the enum until that task.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum StmtKind {
     /// Expression statement.

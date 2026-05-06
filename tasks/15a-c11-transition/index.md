@@ -25,7 +25,7 @@ work, because Toybox and similar Linux projects expose C11 syntax directly.
 - [x] [07-generic-selection](07-generic-selection.md)
 - [x] [08-atomic-types-and-stdatomic](08-atomic-types-and-stdatomic.md)
 - [x] [09-thread-local-and-threads-header](09-thread-local-and-threads-header.md)
-- [ ] [10-unicode-character-and-string-literals](10-unicode-character-and-string-literals.md)
+- [x] [10-unicode-character-and-string-literals](10-unicode-character-and-string-literals.md)
 - [ ] [11-c11-library-header-sweep](11-c11-library-header-sweep.md)
 - [ ] [12-c11-conformance-and-realworld-gates](12-c11-conformance-and-realworld-gates.md)
 

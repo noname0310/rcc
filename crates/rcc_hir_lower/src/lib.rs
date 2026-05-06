@@ -2961,17 +2961,40 @@ fn string_initializer_len(expr: &rcc_ast::Expr) -> Option<u64> {
     Some((string_literal_elements(lit).len() + 1) as u64)
 }
 
+fn string_literal_element_ty(lit: &rcc_ast::StringLiteral, tcx: &TyCtxt) -> TyId {
+    match lit.encoding {
+        rcc_ast::LiteralEncoding::None | rcc_ast::LiteralEncoding::Utf8 => tcx.char_,
+        rcc_ast::LiteralEncoding::Utf16 => tcx.ushort,
+        rcc_ast::LiteralEncoding::Utf32 => tcx.uint,
+        rcc_ast::LiteralEncoding::Wide => tcx.int,
+    }
+}
+
+fn char_literal_ty(enc: rcc_ast::LiteralEncoding, tcx: &TyCtxt) -> TyId {
+    match enc {
+        rcc_ast::LiteralEncoding::Utf16 => tcx.ushort,
+        rcc_ast::LiteralEncoding::Utf32 => tcx.uint,
+        rcc_ast::LiteralEncoding::None
+        | rcc_ast::LiteralEncoding::Utf8
+        | rcc_ast::LiteralEncoding::Wide => tcx.int,
+    }
+}
+
 fn string_literal_elements(lit: &rcc_ast::StringLiteral) -> Vec<i128> {
     match lit.encoding {
         rcc_ast::LiteralEncoding::None | rcc_ast::LiteralEncoding::Utf8 => {
             lit.bytes.iter().map(|&b| i128::from(b)).collect()
         }
-        rcc_ast::LiteralEncoding::Wide
-        | rcc_ast::LiteralEncoding::Utf16
-        | rcc_ast::LiteralEncoding::Utf32 => match std::str::from_utf8(&lit.bytes) {
-            Ok(text) => text.chars().map(|ch| i128::from(ch as u32)).collect(),
+        rcc_ast::LiteralEncoding::Utf16 => match std::str::from_utf8(&lit.bytes) {
+            Ok(text) => text.encode_utf16().map(i128::from).collect(),
             Err(_) => lit.bytes.iter().map(|&b| i128::from(b)).collect(),
         },
+        rcc_ast::LiteralEncoding::Wide | rcc_ast::LiteralEncoding::Utf32 => {
+            match std::str::from_utf8(&lit.bytes) {
+                Ok(text) => text.chars().map(|ch| i128::from(ch as u32)).collect(),
+                Err(_) => lit.bytes.iter().map(|&b| i128::from(b)).collect(),
+            }
+        }
     }
 }
 
@@ -3077,6 +3100,7 @@ fn emit_invalid_initializer_designator(span: Span, message: &str, session: &mut 
     session.handler.struct_err(span, message.to_string()).code(rcc_errors::codes::E0079).emit();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_range_designator(
     lo: &rcc_ast::Expr,
     hi: &rcc_ast::Expr,
@@ -4404,7 +4428,10 @@ pub fn lower_expr(
             initial_ty = hir_float_literal_ty(lit.suffix, tcx);
             HirExprKind::FloatConst(lit.value)
         }
-        rcc_ast::ExprKind::CharLit(lit) => HirExprKind::IntConst(i128::from(lit.value)),
+        rcc_ast::ExprKind::CharLit(lit) => {
+            initial_ty = char_literal_ty(lit.encoding, tcx);
+            HirExprKind::IntConst(i128::from(lit.value))
+        }
         rcc_ast::ExprKind::StringLit(lit) => {
             let def_id = intern_string_literal(lit, expr.span, crate_, tcx, resolver);
             HirExprKind::StringRef(def_id)
@@ -5299,12 +5326,12 @@ fn invalid_va_area_use(span: Span, session: &mut Session, msg: &str) {
 /// Looks up the (already deduplicated) `Symbol` of the literal's
 /// source text in `resolver.strings`. If present, returns the cached
 /// `DefId`. Otherwise creates a new `DefKind::Global` with
-/// `linkage: Internal` and an `array-of-char` type whose length is
-/// the decoded byte length plus one (for the trailing NUL required by
-/// C99 §6.4.5p6).
+/// `linkage: Internal` and an array type whose element type follows the
+/// string-literal encoding and whose length includes the trailing NUL required
+/// by C99/C11 §6.4.5p6.
 ///
-/// The type is interned as `char[N]` via `TyCtxt::intern` so string
-/// literals with identical text share the same type id.
+/// The type is interned via `TyCtxt::intern` so string literals with identical
+/// text share the same type id.
 fn intern_string_literal(
     lit: &rcc_ast::StringLiteral,
     span: Span,
@@ -5317,30 +5344,30 @@ fn intern_string_literal(
         return existing;
     }
 
-    let len = lit.bytes.len() + 1; // +1 for NUL
+    let elements = string_literal_elements(lit);
+    let len = elements.len() + 1; // +1 for NUL
 
-    let char_ty = tcx.char_;
+    let elem_ty = string_literal_element_ty(lit, tcx);
     let array_ty =
-        tcx.intern(Ty::Array { elem: Qual::plain(char_ty), len: Some(len as u64), is_vla: false });
+        tcx.intern(Ty::Array { elem: Qual::plain(elem_ty), len: Some(len as u64), is_vla: false });
 
-    // Build byte-level GlobalInit entries from the already-decoded
-    // `lit.bytes` (parser phase-7 output).  This avoids re-parsing
-    // source spelling in codegen, which would break adjacent string
-    // concatenation (`"a" "b"` → single `ab` payload).
+    // Build element-level GlobalInit entries from the already-decoded parser
+    // payload. This avoids re-parsing source spelling in codegen, which would
+    // break adjacent string concatenation (`"a" "b"` → single `ab` payload).
     let mut entries = Vec::with_capacity(len);
-    for (i, &b) in lit.bytes.iter().enumerate() {
+    for (i, value) in elements.into_iter().enumerate() {
         entries.push(GlobalInitEntry {
             path: vec![GlobalInitDesignator::Index(i as u64)],
-            ty: char_ty,
+            ty: elem_ty,
             expr: None,
-            value: GlobalInitValue::Int(i128::from(b)),
+            value: GlobalInitValue::Int(value),
             span,
         });
     }
     // Trailing NUL.
     entries.push(GlobalInitEntry {
-        path: vec![GlobalInitDesignator::Index(lit.bytes.len() as u64)],
-        ty: char_ty,
+        path: vec![GlobalInitDesignator::Index((len - 1) as u64)],
+        ty: elem_ty,
         expr: None,
         value: GlobalInitValue::Int(0),
         span,
@@ -5774,10 +5801,26 @@ fn lower_typeof_expr_to_ty(
             rcc_ast::FloatSuffix::F => tcx.float,
             rcc_ast::FloatSuffix::L => tcx.long_double,
         },
-        rcc_ast::ExprKind::CharLit(_) => tcx.int,
+        rcc_ast::ExprKind::CharLit(lit) => char_literal_ty(lit.encoding, tcx),
         rcc_ast::ExprKind::StringLit(lit) => {
-            let len = lit.bytes.len().saturating_add(1) as u64;
-            tcx.intern(Ty::Array { elem: Qual::plain(tcx.char_), len: Some(len), is_vla: false })
+            let elem = string_literal_element_ty(lit, tcx);
+            let len = string_literal_elements(lit).len().saturating_add(1) as u64;
+            tcx.intern(Ty::Array { elem: Qual::plain(elem), len: Some(len), is_vla: false })
+        }
+        rcc_ast::ExprKind::Index { base, .. } => {
+            let base_ty = lower_typeof_expr_to_ty(base, scope, resolver, crate_, tcx, session);
+            match tcx.get(base_ty) {
+                Ty::Array { elem, .. } => elem.ty,
+                Ty::Ptr(q) => q.ty,
+                _ => {
+                    session
+                        .handler
+                        .struct_err(expr.span, "subscripted expression is not an array or pointer")
+                        .code(rcc_errors::codes::E0061)
+                        .emit();
+                    tcx.error
+                }
+            }
         }
         rcc_ast::ExprKind::SizeofExpr(_)
         | rcc_ast::ExprKind::SizeofType(_)
@@ -7162,6 +7205,18 @@ fn eval_array_bound_as_i128(
             let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
             Some(i128::from(layout.align))
         }
+        rcc_ast::ExprKind::SizeofExpr(operand) => {
+            let ty =
+                lower_typeof_expr_to_ty(operand, typedef_scope, resolver, crate_, tcx, session);
+            let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
+            Some(i128::from(layout.size))
+        }
+        rcc_ast::ExprKind::AlignofExpr(operand) => {
+            let ty =
+                lower_typeof_expr_to_ty(operand, typedef_scope, resolver, crate_, tcx, session);
+            let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
+            Some(i128::from(layout.align))
+        }
         rcc_ast::ExprKind::Ident(name) => {
             let def_id = *resolver.ordinary.get(name)?;
             match &crate_.defs.get(def_id)?.kind {
@@ -7707,6 +7762,7 @@ fn find_anon_record_in_specs(specs: &rcc_ast::DeclSpecs) -> Option<&RecordSpec> 
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn field_align_override(
     specs: &rcc_ast::DeclSpecs,
     declarator_attrs: &[rcc_ast::Attribute],
@@ -7742,6 +7798,7 @@ fn field_align_override(
 /// - `bit_width == Some(n)` is the accepted bit-field width for the
 ///   `Field` record; `None` means the expression failed to evaluate
 ///   to an integer constant (diagnostic already emitted).
+#[allow(clippy::too_many_arguments)]
 fn validate_bit_width(
     field_ty: TyId,
     width_expr: &rcc_ast::Expr,

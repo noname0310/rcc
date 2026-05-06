@@ -1376,6 +1376,53 @@ fn c11_thread_local_block_scope_requires_static_or_extern() {
 }
 
 #[test]
+fn c11_unicode_string_literal_elements_have_target_widths() {
+    let src = r#"
+        _Static_assert(sizeof(u"x"[0]) == 2, "char16_t element width");
+        _Static_assert(sizeof(U"x"[0]) == 4, "char32_t element width");
+        _Static_assert(sizeof(u8"x"[0]) == 1, "u8 element width");
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_uchar_header_parses_and_lowers() {
+    let src = r#"
+        #include <uchar.h>
+
+        _Static_assert(sizeof(char16_t) == sizeof(u"x"[0]), "char16_t matches u string");
+        _Static_assert(sizeof(char32_t) == sizeof(U"x"[0]), "char32_t matches U string");
+
+        int probe(char *buf, const char *src, mbstate_t *st) {
+            char16_t c16 = u'x';
+            char32_t c32 = U'x';
+            size_t n = mbrtoc16(&c16, src, 4, st);
+            n = n + c16rtomb(buf, c16, st);
+            n = n + mbrtoc32(&c32, src, 4, st);
+            n = n + c32rtomb(buf, c32, st);
+            return (int)n;
+        }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+    assert!(
+        hir.defs.iter().any(|def| matches!(def.kind, DefKind::Function { .. })),
+        "uchar.h probe should lower a function body"
+    );
+}
+
+#[test]
 fn gnu_common_global_and_local_unused_attrs_lower() {
     let src = r#"
         int g __attribute__((unused, visibility("default"), section(".data.rcc")));

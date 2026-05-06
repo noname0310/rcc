@@ -301,19 +301,17 @@ pub fn merge_adjacent_strings(session: &mut Session, tokens: Vec<Token>) -> Vec<
 ///
 /// - Identical prefixes (`None+None`, `L+L`, `u+u`, `U+U`, `u8+u8`)
 ///   pass through unchanged.
-/// - `None` (narrow) and `Wide` (`L`) combine, in either order, to
-///   `Wide` — the only promotion C99 §6.4.5p5 specifies ("if any of
-///   the tokens are wide string literal tokens, the resulting
-///   sequence is treated as a wide string literal").
-/// - Every other mix (`None+Utf16`, `Wide+Utf32`, `Utf16+Utf32`, …)
-///   is undefined behavior in C99 and rejected here.
+/// - `None` (ordinary) and one prefixed literal combine, in either order, to
+///   the prefixed encoding. C11 extends the old C99 narrow+wide rule to the
+///   Unicode string-literal prefixes.
+/// - Two different non-ordinary prefixes (`L+u`, `u+U`, `u8+U`, …) are
+///   rejected instead of taking implementation-defined behavior.
 fn promote_encoding(a: StringEncoding, b: StringEncoding) -> Option<StringEncoding> {
     if a == b {
         return Some(a);
     }
     match (a, b) {
-        (StringEncoding::None, StringEncoding::Wide)
-        | (StringEncoding::Wide, StringEncoding::None) => Some(StringEncoding::Wide),
+        (StringEncoding::None, other) | (other, StringEncoding::None) => Some(other),
         _ => None,
     }
 }
@@ -892,6 +890,24 @@ mod tests {
             TokenKind::StringLit(lit) => {
                 assert_eq!(lit.bytes, vec![b'a', b'b']);
                 assert_eq!(lit.encoding, StringEncoding::Wide);
+            }
+            other => panic!("expected StringLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn narrow_then_utf16_promotes_to_utf16() {
+        // `"a" u"b"` — C11 ordinary + prefixed concatenation adopts the
+        // prefixed encoding.
+        let src = r#""a"u"b""#;
+        let (out, _sess, cap) =
+            make_and_convert(src, &[(0, 3, StringEncoding::None), (3, 7, StringEncoding::Utf16)]);
+        assert!(cap.diagnostics().is_empty(), "ordinary+UTF-16 concat must be accepted");
+        assert_eq!(out.len(), 1);
+        match &out[0].kind {
+            TokenKind::StringLit(lit) => {
+                assert_eq!(lit.bytes, vec![b'a', b'b']);
+                assert_eq!(lit.encoding, StringEncoding::Utf16);
             }
             other => panic!("expected StringLit, got {other:?}"),
         }

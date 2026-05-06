@@ -1,5 +1,7 @@
 # 15a-10: Unicode Character and String Literals
 
+> ✓ done — 2026-05-06
+
 **Phase:** 15a-c11-transition  
 **Depends on:** 15a-02-c11-keyword-tokenization  
 **Milestone:** c11-transition
@@ -22,10 +24,10 @@ breaking existing narrow/wide string handling.
 
 ## Acceptance
 
-- [ ] Unicode-prefixed literals tokenize and parse in C11 mode.
-- [ ] Invalid mixed string literal concatenations are diagnosed.
-- [ ] `sizeof(u"x"[0])` and `sizeof(U"x"[0])` match the selected target types.
-- [ ] `<uchar.h>` resource header parses and lowers.
+- [x] Unicode-prefixed literals tokenize and parse in C11 mode.
+- [x] Invalid mixed string literal concatenations are diagnosed.
+- [x] `sizeof(u"x"[0])` and `sizeof(U"x"[0])` match the selected target types.
+- [x] `<uchar.h>` resource header parses and lowers.
 
 ## References
 
