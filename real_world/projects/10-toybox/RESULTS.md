@@ -36,10 +36,10 @@ compiling the first applet source set.
 Observed blocker:
 
 ```text
-lib/lib.h: _Noreturn declaration syntax is not accepted
+C11 language surface is no longer the Toybox blocker: _Noreturn and
+sigjmp_buf no longer appear in the current rcc-build.stderr.
 lib/portability.c: stpcpy, syscall, timer_t, SIGKILL are missing
 lib/tty.c: SIGWINCH is missing
-toys.h: sigjmp_buf is missing
 /usr/include/...: timespec/timeval redeclaration and netinet/tcp enum parsing gaps
 ```
 
@@ -47,7 +47,7 @@ toys.h: sigjmp_buf is missing
 
 | ID | Status | Symptom |
 | --- | --- | --- |
-| TBX-001 | open | Toybox's smallest applet build reaches hosted Linux header/language gaps before object emission. Tracked by `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md`. |
+| TBX-001 | open | Toybox's smallest applet build reaches hosted Linux header/POSIX gaps before object emission. C11 `_Noreturn` parsing and `sigjmp_buf` coverage are no longer the blocker; remaining failures are tracked by `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md`. |
 
 ## Upstream Source Policy
 

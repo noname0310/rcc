@@ -12,7 +12,7 @@ mod linux {
 
     use rcc_driver::pipeline;
     use rcc_errors::{CaptureEmitter, Handler};
-    use rcc_session::{OptLevel, Options, Session};
+    use rcc_session::{LanguageStandard, OptLevel, Options, Session};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -302,6 +302,40 @@ int main(void) {
             b"",
             0,
             Options { opt_level: OptLevel::Default, ..Options::default() },
+        );
+    }
+
+    #[test]
+    fn c11_core_constructs_compile_link_and_run() {
+        if !llvm_backend_enabled_for_this_build() {
+            eprintln!("skipping C11 core e2e: LLVM backend feature is disabled");
+            return;
+        }
+
+        assert_source_with_options(
+            "c11_core_constructs",
+            r#"
+#include <stdio.h>
+#include <stdlib.h>
+
+_Static_assert(_Alignof(int) == 4, "int alignment");
+
+_Noreturn void fatal(void) {
+  abort();
+}
+
+int main(void) {
+  int value = 4;
+  int generic = _Generic(value, int: 38, long: 11, default: 7);
+  if (generic != 38)
+    fatal();
+  puts("c11 core ok");
+  return 0;
+}
+"#,
+            b"c11 core ok\n",
+            0,
+            Options { language_standard: LanguageStandard::C11, ..Options::default() },
         );
     }
 

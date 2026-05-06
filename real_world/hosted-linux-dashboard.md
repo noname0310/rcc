@@ -90,7 +90,7 @@ LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 \
 | --- | --- | --- | --- |
 | Source acquisition | PASS | Ignored LF-normalized worktree is created under `real_world/projects/10-toybox/upstream`. | none |
 | Host baseline | PASS | `scripts/single.sh true false echo cat wc` builds with host `cc` and the wrapper records per-applet run logs. | none |
-| Syntax/HIR | BLOCKED | The `rcc` compile path stops while compiling the first applet source set; diagnostics include `_Noreturn`, `sigjmp_buf`, `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and `timespec/timeval` gaps. | `16-25` |
+| Syntax/HIR | BLOCKED | The `rcc` compile path stops while compiling the first applet source set. C11 `_Noreturn` and `sigjmp_buf` no longer appear; current diagnostics include `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and duplicate `timespec`/`timeval` gaps. | `16-25` |
 | Object | TODO | Not reached. | `16-25` |
 | Link | TODO | Not reached. | `16-25` |
 | Runtime | TODO | Not reached. | `16-25` |

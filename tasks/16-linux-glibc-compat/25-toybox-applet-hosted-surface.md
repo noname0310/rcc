@@ -15,11 +15,9 @@ oracle.
 - In: `real_world/projects/10-toybox/scripts/run-applet-smoke.sh`.
 - In: compiler/header fixes required by Toybox's smallest applet set:
   `true false echo cat wc`.
-- In: deciding whether `_Noreturn` belongs in language extension handling, a
-  hosted header shim, or both.
 - In: hosted Linux declarations/types/constants exposed by Toybox:
-  `sigjmp_buf`, `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`,
-  `netinet/tcp.h`, and duplicate `timespec`/`timeval` protection.
+  `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`,
+  and duplicate `timespec`/`timeval` protection.
 - Out: editing Toybox upstream source files.
 - Out: deleting applets from the selected smoke set to hide a compiler bug.
 - Out: implementing libc function bodies; host glibc supplies runtime bodies.
@@ -50,9 +48,10 @@ Observed result:
 
 - Host applet build succeeds.
 - `rcc` stops while compiling the first applet source set.
-- Diagnostics mention `_Noreturn`, `sigjmp_buf`, `timer_t`, `SIGKILL`,
-  `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and duplicate
-  `timespec`/`timeval`.
+- C11 `_Noreturn` syntax and `sigjmp_buf` coverage are already resolved by the
+  C11 transition; do not reintroduce `_Noreturn` macro substitution.
+- Diagnostics mention `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`,
+  `netinet/tcp.h`, and duplicate `timespec`/`timeval`.
 
 ## Notes
 

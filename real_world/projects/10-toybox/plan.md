@@ -55,7 +55,7 @@ Record each failure here before fixing anything.
 
 | ID | Command | Symptom | Classification | Follow-up task |
 | --- | --- | --- | --- | --- |
-| TBX-001 | `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 bash real_world/projects/10-toybox/scripts/run-applet-smoke.sh` | Host applets build, but `rcc` stops while compiling the first Toybox applet source set. Diagnostics include `_Noreturn`, `sigjmp_buf`, `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and `timespec/timeval` redeclaration gaps. | hosted Linux header/language surface | `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md` |
+| TBX-001 | `LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 bash real_world/projects/10-toybox/scripts/run-applet-smoke.sh` | Host applets build, but `rcc` stops while compiling the first Toybox applet source set. After the C11 transition, `_Noreturn` and `sigjmp_buf` no longer appear in the failure log; current diagnostics include `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and `timespec/timeval` redeclaration gaps. | hosted Linux header/POSIX surface | `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md` |
 
 ## Exit criteria
 
