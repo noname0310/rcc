@@ -12,6 +12,7 @@ struct timespec {
 #define CLOCKS_PER_SEC 1000000L
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
+#define TIME_UTC 1
 
 struct tm {
     int tm_sec;
@@ -41,5 +42,6 @@ extern size_t strftime(char *, size_t, const char *, const struct tm *);
 extern int clock_gettime(clockid_t, struct timespec *);
 extern int clock_settime(clockid_t, const struct timespec *);
 extern int nanosleep(const struct timespec *, struct timespec *);
+extern int timespec_get(struct timespec *, int);
 
 #endif

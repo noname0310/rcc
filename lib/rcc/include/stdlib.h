@@ -41,13 +41,16 @@ extern void srand(unsigned int);
 extern void *malloc(size_t);
 extern void *calloc(size_t, size_t);
 extern void *realloc(void *, size_t);
+extern void *aligned_alloc(size_t, size_t);
 extern void free(void *);
 extern void *alloca(size_t);
 
 extern void exit(int);
 extern void _Exit(int);
+extern void quick_exit(int);
 extern void abort(void);
 extern int atexit(void (*)(void));
+extern int at_quick_exit(void (*)(void));
 
 extern char *getenv(const char *);
 extern int setenv(const char *, const char *, int);

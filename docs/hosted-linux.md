@@ -116,6 +116,29 @@ needed by the frontend; the function body remains host-owned.
 | `errno.h` | errno macro declarations/constants | LibTomMath and coreutils probes needed POSIX errno constants beyond C99 `EDOM`/`ERANGE` | constants plus host errno accessor declaration; storage is host-owned | narrow constants when project probes no longer reference them or host header parses |
 | `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `math.h`, `locale.h`, `wchar.h`, `wctype.h`, `fenv.h`, `complex.h`, `tgmath.h` | hosted C/POSIX declaration surface | inih, cJSON, Lua, MuJS, and upcoming coreutils probes need libc/libm declarations while rcc cannot yet parse all host headers | declarations/macros only; libc/libm bodies are linked from host | keep only declarations justified by conformance or real-world probes; prefer parser fixes over broad libc copying |
 
+## C11 Library Surface
+
+The C11 resource-header surface is intentionally split into compiler-owned
+syntax/type support and host-owned runtime bodies:
+
+| Header | Status | Runtime owner / deferred work |
+| --- | --- | --- |
+| `stdalign.h` | implemented macro surface: `alignas`, `alignof`, `__alignas_is_defined`, `__alignof_is_defined` | no runtime |
+| `stdnoreturn.h` | implemented macro surface: `noreturn`, `__noreturn_is_defined` | no runtime |
+| `stdatomic.h` | declaration/macro surface for atomic typedefs, lock-free macros, memory-order constants, simple load/store/fetch helpers, `atomic_flag`, and fences | rcc lowers atomic lvalue load/store to LLVM atomics; full generic-operation lowering and link-free `atomic_flag_*` bodies are deferred compiler/runtime work |
+| `threads.h` | declaration surface over pthread-compatible hosted Linux types plus `thread_local` | host libc/pthread owns thread scheduling, mutex/cond/key behavior, and `thrd_*`/`mtx_*`/`cnd_*`/`tss_*` bodies |
+| `uchar.h` | declaration surface for `char16_t`, `char32_t`, `mbstate_t`, and conversion functions | host libc owns multibyte conversion state and locale behavior |
+| `assert.h` | C11 `static_assert` macro plus existing `assert` behavior | `assert` abort path uses host `abort`; static assertions are compile-time only |
+| `float.h` | C11 decimal-digit/subnormal macro deltas for the current LP64/Linux and Windows baselines | target-info-backed generation is deferred |
+| `stdlib.h` | C11 declarations for `aligned_alloc`, `quick_exit`, and `at_quick_exit` | host libc owns allocation and quick-exit behavior |
+| `time.h` | C11 `TIME_UTC` and `timespec_get` declaration | host libc owns clock behavior |
+
+Deferred C11 library pieces are explicit: Annex K bounds-checking interfaces,
+the analyzability annex, a fully conforming C11 thread runtime independent of
+pthread, and generated per-target floating-point macro tables. Do not paper over
+these with large copied libc headers; add a targeted shim or a compiler task
+when a real source file reaches a missing declaration.
+
 `lib/rcc/include/pthread.h` is a declaration shim for hosted Linux projects. It
 declares common pthread entry points such as `pthread_create`, `pthread_join`,
 mutex/condition-variable basics, thread-specific storage, and attribute helpers.

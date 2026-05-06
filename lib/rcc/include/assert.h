@@ -8,4 +8,8 @@
 #define assert(expr) ((expr) ? (void)0 : abort())
 #endif
 
+#ifndef __cplusplus
+#define static_assert _Static_assert
+#endif
+
 #endif

@@ -1,5 +1,7 @@
 # 15a-11: C11 Library Header Sweep
 
+> ✓ done — 2026-05-06
+
 **Phase:** 15a-c11-transition  
 **Depends on:** 15a-10-unicode-character-and-string-literals  
 **Milestone:** c11-transition
@@ -22,12 +24,29 @@ without copying large libc headers.
 
 ## Acceptance
 
-- [ ] A driver header gate includes every C11 resource header under
+- [x] A driver header gate includes every C11 resource header under
       `-std=c11`.
-- [ ] Header declarations lower to HIR without requiring GNU flags.
-- [ ] Every declaration-only runtime dependency is documented as host-owned.
-- [ ] `docs/hosted-linux.md` and task docs list which C11 library features are
+- [x] Header declarations lower to HIR without requiring GNU flags.
+- [x] Every declaration-only runtime dependency is documented as host-owned.
+- [x] `docs/hosted-linux.md` and task docs list which C11 library features are
       implemented, declaration-only, or deferred.
+
+## Completed Surface
+
+- Implemented small C11 resource-header deltas:
+  - `stdnoreturn.h`: `noreturn`, `__noreturn_is_defined`.
+  - `assert.h`: `static_assert` macro.
+  - `float.h`: decimal-digit/subnormal macros for current target baselines.
+  - `stdlib.h`: `aligned_alloc`, `quick_exit`, `at_quick_exit`.
+  - `time.h`: `TIME_UTC`, `timespec_get`.
+  - `stdatomic.h`: full scalar typedef surface, `atomic_flag`, init macros,
+    lock-free probes, and declaration-only `atomic_flag_*` functions.
+- Added a hosted Linux driver fixture that includes `assert.h`, `float.h`,
+  `stdalign.h`, `stdatomic.h`, `stdnoreturn.h`, `stdlib.h`, `threads.h`,
+  `time.h`, and `uchar.h` together under `-std=c11 -pthread` without GNU syntax
+  flags.
+- Documented host-owned runtime behavior and deferred Annex K/analyzability/
+  full thread-runtime work in `docs/hosted-linux.md`.
 
 ## References
 

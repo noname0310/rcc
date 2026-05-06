@@ -216,6 +216,51 @@ int probe(char *buf, const char *src, mbstate_t *st) {
 "#,
         },
         Fixture {
+            name: "c11-library-header-sweep",
+            reason: "C11 resource headers should lower together without GNU syntax flags",
+            args: &["-std=c11", "-pthread"],
+            source: r#"
+#include <assert.h>
+#include <float.h>
+#include <stdalign.h>
+#include <stdatomic.h>
+#include <stdnoreturn.h>
+#include <stdlib.h>
+#include <threads.h>
+#include <time.h>
+#include <uchar.h>
+
+static_assert(FLT_DECIMAL_DIG >= FLT_DIG, "float decimal digits");
+static_assert(DBL_DECIMAL_DIG >= DBL_DIG, "double decimal digits");
+static_assert(LDBL_DECIMAL_DIG >= LDBL_DIG, "long double decimal digits");
+
+struct c11_probe {
+    alignas(16) atomic_int counter;
+    atomic_flag flag;
+    char16_t c16;
+    char32_t c32;
+};
+
+noreturn void c11_fatal(int code) {
+    thrd_exit(code);
+}
+
+int probe(struct c11_probe *p) {
+    struct timespec ts = { 0, 0 };
+    void *storage = aligned_alloc(16, 16);
+    p->flag = (atomic_flag)ATOMIC_FLAG_INIT;
+    p->c16 = u'x';
+    p->c32 = U'x';
+    atomic_store(&p->counter, atomic_load(&p->counter));
+    if (storage)
+        free(storage);
+    return timespec_get(&ts, TIME_UTC) >= 0
+        && atomic_is_lock_free(&p->counter)
+        && kill_dependency(p->c16) == u'x';
+}
+"#,
+        },
+        Fixture {
             name: "coreutils-posix-declaration-sweep",
             reason: "GNU coreutils true probe reaches gnulib wrappers for unlocked stdio, at-functions, errno, and wide-char width",
             args: &[],
