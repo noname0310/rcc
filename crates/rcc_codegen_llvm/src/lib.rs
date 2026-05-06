@@ -13621,7 +13621,7 @@ mod tests {
         id
     }
 
-    /// `static int x = 5;` emits `@x = internal global i32 5`.
+    /// `static int x = 5;` emits `@x = internal global i32 5, align 4`.
     #[cfg(feature = "llvm")]
     #[test]
     fn scalar_global_emits_initializer() {

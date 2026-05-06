@@ -42,10 +42,8 @@ jobs:
       - name: Install LLVM 18 and csmith build tools
         run: |
           set -euo pipefail
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y llvm-18-dev libpolly-18-dev cmake m4
+          bash scripts/ci/install-llvm-18.sh
+          sudo apt-get install -y cmake m4
 
       - name: Fetch csmith
         run: cargo xtask fetch-testsuites --only csmith

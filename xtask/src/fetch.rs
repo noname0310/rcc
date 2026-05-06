@@ -58,7 +58,16 @@ pub fn run(manifest: &Manifest, include_gpl: bool, only: Option<&str>) -> Result
 fn fetch_git(suite: &Suite, git: &str, dst: &Path) -> Result<()> {
     let rev = suite.rev.as_deref().context("git suite missing `rev`")?;
     if dst.join(".git").is_dir() {
-        // Already cloned — fetch + checkout the pinned rev.
+        // Already cloned — make sure old local checkouts follow the current
+        // manifest URL, then fetch + checkout the pinned rev.
+        run_cmd(Command::new("git").args([
+            "-C",
+            &dst.to_string_lossy(),
+            "remote",
+            "set-url",
+            "origin",
+            git,
+        ]))?;
         run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "fetch", "--all"]))?;
         run_cmd(Command::new("git").args(["-C", &dst.to_string_lossy(), "checkout", rev]))?;
         return Ok(());

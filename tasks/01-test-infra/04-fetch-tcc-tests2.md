@@ -26,4 +26,4 @@ opt-in; CI may fetch and execute the suite inside the runner.
 
 ## References
 - Plan §9.1 "tcc 테스트".
-- Upstream: https://repo.or.cz/tinycc.git
+- Upstream: https://github.com/TinyCC/tinycc.git

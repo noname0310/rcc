@@ -262,7 +262,7 @@ fn global_variable() {
     target datalayout = "<normalized>"
     target triple = "x86_64-unknown-linux-gnu"
 
-    @x = internal global i32 5
+    @x = internal global i32 5, align 4
 
     define i32 @f() {
     entry:

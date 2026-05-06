@@ -1,6 +1,6 @@
 # tcc-tests2
 
-Upstream: https://repo.or.cz/tinycc.git
+Upstream: https://github.com/TinyCC/tinycc.git
 License: LGPL-2.1
 
 > **Warning:** do not copy these sources into the rcc repository.

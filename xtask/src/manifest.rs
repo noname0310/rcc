@@ -171,6 +171,17 @@ mod tests {
     }
 
     #[test]
+    fn tcc_tests2_uses_github_mirror() {
+        let m = load_real_manifest();
+        let suite = m.suite.iter().find(|s| s.name == "tcc-tests2").expect("tcc-tests2 entry");
+        let git = suite.git.as_deref().expect("tcc-tests2 must have a git URL");
+        assert_eq!(
+            git, "https://github.com/TinyCC/tinycc.git",
+            "repo.or.cz is too flaky for CI runners; use the GitHub mirror"
+        );
+    }
+
+    #[test]
     fn llvm_test_suite_rev_is_pinned_sha() {
         let m = load_real_manifest();
         let suite =
