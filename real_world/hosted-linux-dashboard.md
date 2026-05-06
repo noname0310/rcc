@@ -18,6 +18,7 @@ Status legend:
 | --- | --- | --- | --- | --- | --- | --- |
 | MuJS | PASS | PASS | PASS | PASS | PASS | none; smoke output matches host |
 | GNU coreutils `src/true` | PASS | PASS | PASS | PASS | PASS | none; direct TU oracle exits 0 with empty stdout/stderr for host and rcc |
+| Toybox applet smoke | PASS | BLOCKED | TODO | TODO | TODO | `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md` |
 
 ## MuJS
 
@@ -76,8 +77,30 @@ Runtime ownership: GNU coreutils runtime behavior comes from upstream sources
 plus host glibc/libpthread/libdl/libm.  rcc owns the compile pipeline and link
 flag orchestration, not replacement libc bodies.
 
+## Toybox
+
+Applet smoke command:
+
+```sh
+LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 \
+  bash real_world/projects/10-toybox/scripts/run-applet-smoke.sh
+```
+
+| Stage | Status | Evidence | Next task |
+| --- | --- | --- | --- |
+| Source acquisition | PASS | Ignored LF-normalized worktree is created under `real_world/projects/10-toybox/upstream`. | none |
+| Host baseline | PASS | `scripts/single.sh true false echo cat wc` builds with host `cc` and the wrapper records per-applet run logs. | none |
+| Syntax/HIR | BLOCKED | The `rcc` compile path stops while compiling the first applet source set; diagnostics include `_Noreturn`, `sigjmp_buf`, `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and `timespec/timeval` gaps. | `16-25` |
+| Object | TODO | Not reached. | `16-25` |
+| Link | TODO | Not reached. | `16-25` |
+| Runtime | TODO | Not reached. | `16-25` |
+
+Runtime ownership: Toybox runtime behavior should come from upstream sources
+plus host glibc. rcc owns the compile pipeline, hosted header model, and link
+flag orchestration, not replacement libc bodies.
+
 ## Phase-16 gate
 
 Do not mark `tasks/index.md` phase 16 complete while any dashboard row is
-BLOCKED by a compiler-owned task.  At this snapshot the dashboard is current
-and phase 16 is complete for the first hosted Linux oracle set.
+BLOCKED by a compiler-owned task. At this snapshot Toybox has reopened phase 16
+with task `16-25`.

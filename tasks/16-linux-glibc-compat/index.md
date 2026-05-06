@@ -38,10 +38,12 @@ rcc-owned libc bodies.
 - [x] [22a-gnu-extension-inline-header-functions](22a-gnu-extension-inline-header-functions.md)
 - [x] [23-coreutils-posix-declaration-sweep](23-coreutils-posix-declaration-sweep.md)
 - [x] [24-coreutils-true-runtime-oracle](24-coreutils-true-runtime-oracle.md)
+- [ ] [25-toybox-applet-hosted-surface](25-toybox-applet-hosted-surface.md)
 
 ## Downstream
 
 - 11-conformance
 - real_world/projects/07-mujs
 - real_world/projects/09-gnu-coreutils
+- real_world/projects/10-toybox
 - future POSIX-threaded hosted Linux project probes
