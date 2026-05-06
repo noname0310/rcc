@@ -4,15 +4,13 @@
 
 - Project: curl (HTTP/HTTPS client and `libcurl`)
 - Upstream URL: <https://github.com/curl/curl>
-- Clone command: `git clone --depth=1 https://github.com/curl/curl.git upstream`
+- Clone command: wrapper-managed `git init upstream` + `git fetch --depth 1 origin ${CURL_REV}`
 - Resolved commit: `9c9a4f3eabbb6f24277538d28a00afa25ba2839a`
-- Local probe source (the tree the WSL probe ran against):
-  `~/work-curl-rcc-20260505/curl/`
 - Date fetched: 2026-05-06
-- Wrapper source policy: a checked-in wrapper should clone the upstream tree
-  into ignored `upstream/`. The wrapper must not edit upstream `.c` or `.h`
-  files. All adaptation belongs in wrapper scripts, environment variables, and
-  CMake flags.
+- Wrapper source policy: the checked-in wrapper clones the upstream tree into
+  ignored `upstream/` by default. The wrapper must not edit upstream `.c` or
+  `.h` files. All adaptation belongs in wrapper scripts, environment variables,
+  and CMake flags.
 
 ## Why this project
 
@@ -32,9 +30,10 @@ CLI sub-target). The probe exercises:
   netinet/in.h);
 - a static archive (`libcurl.a`) link followed by a CLI executable link
   (`src/curl`);
-- HTTP runtime smoke against the public `example.com` and `httpbin.org`
-  endpoints — a network-positive smoke that catches link-only and runtime-
-  initialisation regressions invisible to the conformance suites.
+- HTTP runtime smoke against a deterministic local loopback server, with an
+  optional public `example.com` request behind `NETWORK_SMOKE=1`. The local
+  oracle catches link-only and runtime-initialisation regressions without
+  depending on public network behaviour.
 
 ## Probe command
 
@@ -50,38 +49,40 @@ The script honours these environment overrides:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `CURL_SRC` | Upstream curl source tree | `${HOME}/work-curl-rcc-20260505/curl` |
+| `CURL_URL` | Upstream curl repository | `https://github.com/curl/curl.git` |
+| `CURL_REV` | Pinned upstream commit | `9c9a4f3eabbb6f24277538d28a00afa25ba2839a` |
+| `CURL_SRC` | Upstream curl source tree | `real_world/projects/12-curl/upstream` |
 | `RCC` | rcc binary | `${REPO_ROOT}/target/debug/rcc` |
+| `HOST_CC` | Host compiler for the baseline oracle | `cc` |
 | `LLVM_SYS_181_PREFIX` | LLVM install prefix | `/usr/lib/llvm-18` |
 | `RCC_LINKER_DRIVER` | Linker invoked by rcc | `/usr/bin/clang-18` |
 | `RCC_TIMEOUT` | Per-rcc-invocation timeout | `600s` |
 | `MAKEFLAGS_J` | `make -j` parallelism | `4` |
-| `NETWORK_SMOKE` | Run HTTP smoke (1) or skip (0) | `1` |
+| `NETWORK_SMOKE` | Run optional public `example.com` smoke (1) or skip (0) | `0` |
 
 Equivalent command sequence from the repository root is recorded in
-`PROJECT.md` (CMake configure + `make` + a `--version` and an `example.com`
-HTTP smoke).
+`PROJECT.md` (CMake configure + `make` + a `--version` and local loopback HTTP
+smoke).
 
 ## Baseline oracle
 
-- Host compiler: `clang-18` or `gcc` building the same upstream tree with the
-  same disable list, then running the same smoke. The baseline confirms the
-  smoke is not sensitive to network conditions or the disable list.
+- Host compiler: `HOST_CC` building the same upstream tree with the same CMake
+  disable list, then running the same local loopback smoke.
 - Expected `--version` line: `curl 8.20.1-DEV (Linux) libcurl/8.20.1-DEV`.
-- Expected `example.com` GET: HTTP `200`, body length `528`, body begins
-  `<!doctype html>`.
-- Expected `google.com` redirect (no `-L`): HTTP `301`, `Location` header
-  starts with `http://www.google.com/`.
+- Expected local GET: host and `rcc` binaries produce identical HTTP status,
+  downloaded size, and response body.
+- Optional public `example.com` GET with `NETWORK_SMOKE=1`: HTTP `200`, body
+  contains `<title>Example Domain</title>`.
 
 ## rcc probe
 
 - `rcc` invoked as the C compiler by CMake; flags listed in `PROJECT.md`.
 - Final link is performed by `clang-18` via `RCC_LINKER_DRIVER`.
 - Run command:
-  - `build/src/curl --version`
-  - `build/src/curl http://example.com/`
-- Expected comparison: identical exit status (`0`), identical body (`example.com`
-  serves a static page), identical `--version` first-line tag.
+  - `build/rcc-cmake/src/curl --version`
+  - `build/rcc-cmake/src/curl http://127.0.0.1:<local-port>/`
+- Expected comparison: host and `rcc` binaries have identical local HTTP status,
+  downloaded size, and response body.
 
 ## Allowed local adaptation
 
@@ -92,8 +93,7 @@ HTTP smoke).
   - `artifacts/`
   - `logs/`
 - Local ignored source probe:
-  - future checked-in wrapper source under project-local ignored `upstream/`
-  - current ad-hoc probe at WSL `~/work-curl-rcc-20260505/curl/`
+  - checked-in wrapper source under project-local ignored `upstream/`
 - CMake disable flags listed in `PROJECT.md`.
 
 ## Disallowed adaptation checklist
@@ -138,8 +138,8 @@ both at configure time and at link time.
 - [x] `lib/libcurl.a` is created
 - [x] `src/*.c` files reach a successful `.o`
 - [x] `src/curl` is linked by `${RCC_LINKER_DRIVER}`
-- [x] `build/src/curl --version` prints the curl version line
-- [x] `build/src/curl http://example.com/` returns HTTP 200 and 528 bytes
+- [x] `build/rcc-cmake/src/curl --version` prints the curl version line
+- [x] local loopback HTTP smoke matches the host-compiler baseline
 - [x] No upstream `.c` or `.h` was edited
 - [x] Three compiler findings (`CURL-001`, `CURL-002`, `CURL-003`) have
       checked-in fixes in the rcc tree

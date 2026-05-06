@@ -13,6 +13,9 @@ Equivalent manual command sequence is recorded in `PROJECT.md` and `plan.md`.
 Result:
 
 - `rcc` build availability: success
+- wrapper source acquisition: success; default source lives under ignored
+  `real_world/projects/12-curl/upstream/`
+- host baseline CMake build: success
 - `cmake` configure with `rcc` as `CMAKE_C_COMPILER`: success
 - `lib/*.c` translation units: 183 / 184 emitted (one `lib/curlx/*.c` file is
   excluded by the CMake disable list); zero `rcc` errors
@@ -20,14 +23,17 @@ Result:
 - `lib/libcurl.a` archive: success (2,269,244 bytes)
 - `src/curl` final link: success (2,239,608 bytes)
 - runtime `--version` smoke: success
-- runtime HTTP smoke against `http://example.com/`: success (HTTP 200, 528 B)
+- runtime local HTTP smoke: success; `rcc` output/body match the host-compiler
+  baseline
+- optional runtime HTTP smoke against `http://example.com/`: success in the
+  latest manual network run (HTTP 200, 528 B)
 
 Upstream curl tree probed: commit `9c9a4f3eabbb6f24277538d28a00afa25ba2839a`
 of <https://github.com/curl/curl>, no `.c`/`.h` modifications.
 
 ## Runtime evidence
 
-`build/src/curl --version`:
+`build/rcc-cmake/src/curl --version`:
 
 ```text
 curl 8.20.1-DEV (Linux) libcurl/8.20.1-DEV
@@ -36,21 +42,29 @@ Protocols: http ipfs ipns
 Features: Largefile
 ```
 
-`build/src/curl http://example.com/` (network smoke):
+Local loopback HTTP smoke:
+
+```text
+host: status=200 size=149
+rcc:  status=200 size=149
+body diff: empty
+```
+
+`build/rcc-cmake/src/curl http://example.com/` (optional network smoke):
 
 ```text
 status=200 size=528 time=0.087360
 first 80 bytes: <!doctype html><html lang="en"><head><title>Example Domain</title><meta name="vi
 ```
 
-`build/src/curl http://google.com/` redirect handling:
+`build/rcc-cmake/src/curl http://google.com/` redirect handling:
 
 ```text
 no -L:  status=301 location=http://www.google.com/
 with -L: final_url=http://www.google.com/ status=200 hops=1
 ```
 
-`build/src/curl -I http://example.com/`:
+`build/rcc-cmake/src/curl -I http://example.com/`:
 
 ```text
 HTTP/1.1 200 OK
@@ -63,7 +77,7 @@ Allow: GET, HEAD
 Accept-Ranges: bytes
 ```
 
-`build/src/curl -X POST -d 'foo=bar&baz=qux' http://httpbin.org/post`:
+`build/rcc-cmake/src/curl -X POST -d 'foo=bar&baz=qux' http://httpbin.org/post`:
 
 ```text
 status=200
@@ -114,9 +128,7 @@ runtime switch.
 
 ## Upstream source policy
 
-The wrapper does not modify upstream C or header files. The current manual
-probe uses the host-local `~/work-curl-rcc-20260505/curl/` tree (not committed
-to this repository). A future checked-in wrapper should clone the official
-upstream tree under this project directory's ignored `upstream/` subdirectory,
-with generated outputs kept under the ignored `build/`, `logs/`, or
-`artifacts/` directories.
+The wrapper does not modify upstream C or header files. By default it fetches
+the official upstream tree into this project directory's ignored `upstream/`
+subdirectory, with generated outputs kept under the ignored `build/`, `logs/`,
+or `artifacts/` directories.

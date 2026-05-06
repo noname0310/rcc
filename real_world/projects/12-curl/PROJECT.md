@@ -1,16 +1,16 @@
 # 12 — curl
 
-Status: manual PASS — full upstream `curl/curl` tree (commit `9c9a4f3`) compiles
-with `rcc-llvm` driving CMake, links a static `libcurl.a` and the `curl` CLI
-executable, and serves real HTTP requests against `example.com` and
-`httpbin.org`.
+Status: reproducible PASS probe — the checked-in wrapper fetches the pinned
+upstream `curl/curl` tree (commit `9c9a4f3`) into this project's ignored
+`upstream/` directory, builds both a host-compiler baseline and an `rcc-llvm`
+CMake tree, links a static `libcurl.a` plus the `curl` CLI executable, and
+compares both binaries against a local HTTP oracle.
 
 Source: <https://github.com/curl/curl>
 
-Current local probe source: `~/work-curl-rcc-20260505/curl/` on the WSL host.
-For a checked-in real-world wrapper, clone the upstream tree into ignored
-`upstream/` and keep adaptation in this directory as wrapper scripts only. Do
-not edit upstream `.c` or `.h` files.
+The wrapper clones the upstream tree into ignored `upstream/` by default and
+keeps adaptation in this directory as wrapper scripts only. Do not edit
+upstream `.c` or `.h` files.
 
 ## Reproducible wrapper
 
@@ -24,9 +24,11 @@ directories. The latest recorded result is in `RESULTS.md`.
 
 ## Observed command sequence
 
-Run from a Linux host with `cmake`, `make`, `clang-18`, and the `rcc` build
-prerequisites available. The probe builds against the curl tree at
-`${CURL_SRC}` (default: `${HOME}/work-curl-rcc-20260505/curl`).
+Run from a Linux host with `git`, `cmake`, `make`, `python3`, `clang-18`, and
+the `rcc` build prerequisites available. The probe builds against the curl tree
+at `${CURL_SRC}` (default: `real_world/projects/12-curl/upstream`). If the
+default source tree is absent, the wrapper fetches `${CURL_REV}` from
+`${CURL_URL}`.
 
 Rcc + linker environment:
 
@@ -83,13 +85,15 @@ make -j4
 Smoke tests:
 
 ```sh
-build/src/curl --version
-build/src/curl -sS -o /tmp/example.html \
-  -w 'status=%{http_code} size=%{size_download} time=%{time_total}\n' \
-  http://example.com/
+build/rcc-cmake/src/curl --version
+build/rcc-cmake/src/curl -sS -o artifacts/rcc-local.html \
+  -w 'status=%{http_code} size=%{size_download}\n' \
+  http://127.0.0.1:<local-port>/
 ```
 
-Expected status: `200`, body bytes: `528`.
+Expected local HTTP stdout/body: identical to the host-compiler curl binary
+built from the same source and CMake disable list. Set `NETWORK_SMOKE=1` to
+also run the optional public `example.com` request.
 
 ## Compiler findings fixed by the probe
 
@@ -114,6 +118,7 @@ Expected status: `200`, body bytes: `528`.
 - `BUILD_TESTING=OFF` and `ENABLE_CURL_MANUAL=OFF` keep the build scope narrow.
   The runtime smoke is a real HTTP request, not curl's internal test suite.
 
-Runtime ownership: every `lib/*.c` and `src/*.c` body in the curl CLI is
+Runtime ownership: every `lib/*.c` and `src/*.c` body in the `rcc` curl CLI is
 compiled by `rcc`; libc/libdl/libm behaviour and process startup come from the
-host clang-18 driver invoked as the linker.
+host clang-18 driver invoked as the linker. The host binary exists only as the
+real-world oracle required by `real_world/README.md`.
