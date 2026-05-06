@@ -17,7 +17,7 @@ work, because Toybox and similar Linux projects expose C11 syntax directly.
 ## Tasks (pick in order)
 
 - [x] [01-language-standard-mode](01-language-standard-mode.md)
-- [ ] [02-c11-keyword-tokenization](02-c11-keyword-tokenization.md)
+- [x] [02-c11-keyword-tokenization](02-c11-keyword-tokenization.md)
 - [ ] [03-noreturn-function-specifier](03-noreturn-function-specifier.md)
 - [ ] [04-static-assert-declarations](04-static-assert-declarations.md)
 - [ ] [05-alignof-alignas](05-alignof-alignas.md)

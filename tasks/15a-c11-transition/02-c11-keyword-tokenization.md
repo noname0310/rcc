@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-02: C11 Keyword Tokenization
 
 **Phase:** 15a-c11-transition  

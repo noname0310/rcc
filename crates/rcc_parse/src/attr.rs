@@ -372,6 +372,13 @@ fn keyword_spelling(kw: Keyword) -> &'static str {
         Keyword::Bool => "_Bool",
         Keyword::Complex => "_Complex",
         Keyword::Imaginary => "_Imaginary",
+        Keyword::Alignas => "_Alignas",
+        Keyword::Alignof => "_Alignof",
+        Keyword::Atomic => "_Atomic",
+        Keyword::Generic => "_Generic",
+        Keyword::Noreturn => "_Noreturn",
+        Keyword::StaticAssert => "_Static_assert",
+        Keyword::ThreadLocal => "_Thread_local",
     }
 }
 

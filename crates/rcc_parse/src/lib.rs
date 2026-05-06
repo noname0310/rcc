@@ -36,7 +36,9 @@ pub use expr::{
     parse_prefix_unary, parse_primary,
 };
 pub use init::parse_initializer;
-pub use keywords::{classify_ident, Keyword, KEYWORDS};
+pub use keywords::{
+    classify_ident, Keyword, C11_KEYWORDS, C99_KEYWORDS, GNU_KEYWORD_ALIASES, KEYWORDS,
+};
 pub use literal::{
     decode_char, decode_float, decode_integer, decode_integer_with_options, decode_string,
 };

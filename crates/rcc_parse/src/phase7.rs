@@ -56,11 +56,10 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
     let kind = match pp.kind {
         PpTokenKind::Ident => {
             // Intern first, then resolve through the interner so that the
-            // keyword match runs against the canonical text (C99 §6.4.1).
-            // All 37 C99 keywords are real reserved words at every position
-            // in the grammar — there is no context-sensitive keyword list
-            // like C++'s `override` / `final`, so a one-shot table lookup
-            // suffices.
+            // keyword match runs against the canonical text (C99/C11 §6.4.1).
+            // C keywords are real reserved words at every position in the
+            // grammar — there is no context-sensitive keyword list like C++'s
+            // `override` / `final`, so a one-shot table lookup suffices.
             let sym = intern_span(session, pp.span);
             let text = session.interner.get(sym);
             match classify_ident(text) {
@@ -455,6 +454,55 @@ mod tests {
         let pp = tok(PpTokenKind::Ident, fid, 0, 5);
         let t = pp_to_token(&mut sess, pp).expect("keyword converts");
         assert_eq!(t.kind, TokenKind::Keyword(crate::keywords::Keyword::Bool));
+    }
+
+    #[test]
+    fn c11_underscore_keywords_become_keyword_tokens_in_c11_mode() {
+        for (spelling, kw) in [
+            ("_Alignas", crate::keywords::Keyword::Alignas),
+            ("_Alignof", crate::keywords::Keyword::Alignof),
+            ("_Atomic", crate::keywords::Keyword::Atomic),
+            ("_Generic", crate::keywords::Keyword::Generic),
+            ("_Noreturn", crate::keywords::Keyword::Noreturn),
+            ("_Static_assert", crate::keywords::Keyword::StaticAssert),
+            ("_Thread_local", crate::keywords::Keyword::ThreadLocal),
+        ] {
+            let opts = Options {
+                language_standard: rcc_session::LanguageStandard::C11,
+                ..Options::default()
+            };
+            let sess = Session::new(opts);
+            let fid = sess
+                .source_map
+                .write()
+                .unwrap()
+                .add_file("t.c".into(), Arc::from(spelling.to_owned()));
+            let mut sess = sess;
+            let pp = tok(PpTokenKind::Ident, fid, 0, spelling.len() as u32);
+            let t = pp_to_token(&mut sess, pp).expect("keyword converts");
+            assert_eq!(t.kind, TokenKind::Keyword(kw), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn c11_keywords_are_reserved_in_c99_mode_too() {
+        // rcc's C99 policy is explicit: these implementation-reserved
+        // `_`+uppercase spellings are classified as future keywords rather
+        // than accepted as ordinary identifiers.
+        for (spelling, kw) in [
+            ("_Alignas", crate::keywords::Keyword::Alignas),
+            ("_Alignof", crate::keywords::Keyword::Alignof),
+            ("_Atomic", crate::keywords::Keyword::Atomic),
+            ("_Generic", crate::keywords::Keyword::Generic),
+            ("_Noreturn", crate::keywords::Keyword::Noreturn),
+            ("_Static_assert", crate::keywords::Keyword::StaticAssert),
+            ("_Thread_local", crate::keywords::Keyword::ThreadLocal),
+        ] {
+            let (mut sess, fid) = mk_session(spelling);
+            let pp = tok(PpTokenKind::Ident, fid, 0, spelling.len() as u32);
+            let t = pp_to_token(&mut sess, pp).expect("keyword converts");
+            assert_eq!(t.kind, TokenKind::Keyword(kw), "{spelling}");
+        }
     }
 
     #[test]
