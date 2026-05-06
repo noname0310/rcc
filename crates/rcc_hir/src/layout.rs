@@ -201,6 +201,7 @@ impl<'tcx> LayoutCx<'tcx> {
                 })
             }
             Ty::Vector { bytes, .. } => Ok(Layout { size: *bytes, align: vector_align(*bytes) }),
+            Ty::Atomic(inner) => self.layout_of_inner(*inner, record_stack),
             Ty::Ptr(_) => Ok(type_layout(self.target.layouts.pointer)),
             Ty::Func { .. } => {
                 Err(LayoutError::Unsized { ty, reason: "function types have no object size" })

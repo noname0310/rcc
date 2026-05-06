@@ -453,7 +453,7 @@ fn verify_operand_typed(
 ) -> Option<TyId> {
     match operand {
         Operand::Copy(place) | Operand::Move(place) => {
-            verify_place_typed(body, tcx, hir, place, at, errors)
+            verify_place_typed(body, tcx, hir, place, at, errors).map(|ty| strip_atomic(tcx, ty))
         }
         Operand::Const(c) => {
             if let ConstKind::Global(def) = c.kind {
@@ -706,7 +706,7 @@ fn verify_type_match(
 ) {
     match actual {
         InferredTy::Known(actual) => {
-            if actual != expected {
+            if !same_value_type(tcx, actual, expected) {
                 errors.push(CfgError { at, kind: CfgErrorKind::TypeMismatch { expected, actual } });
             }
         }
@@ -729,6 +729,17 @@ fn verify_type_match(
             }
         },
     }
+}
+
+fn strip_atomic(tcx: &TyCtxt, mut ty: TyId) -> TyId {
+    while let Ty::Atomic(inner) = *tcx.get(ty) {
+        ty = inner;
+    }
+    ty
+}
+
+fn same_value_type(tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
+    strip_atomic(tcx, a) == strip_atomic(tcx, b)
 }
 
 fn binary_result_ty(tcx: &TyCtxt, op: crate::BinOp, lhs_ty: TyId, rhs_ty: TyId) -> TyId {

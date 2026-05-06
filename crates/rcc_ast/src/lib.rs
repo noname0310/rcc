@@ -153,6 +153,8 @@ pub struct TypeQuals {
     pub volatile: bool,
     /// `restrict` (C99).
     pub restrict: bool,
+    /// `_Atomic` (C11 type qualifier form).
+    pub atomic: bool,
 }
 
 /// Bitset of function specifiers (C99/C11).
@@ -203,6 +205,8 @@ pub enum TypeSpec {
     TypeofExpr(Box<Expr>),
     /// GNU `typeof (type-name)`.
     TypeofType(Box<TypeName>),
+    /// C11 `_Atomic(type-name)` type specifier.
+    Atomic(Box<TypeName>),
 }
 
 /// `struct`/`union` specifier.

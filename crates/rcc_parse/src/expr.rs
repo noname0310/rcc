@@ -984,6 +984,7 @@ fn is_type_name_start_kw(kw: Keyword) -> bool {
             | Keyword::Const
             | Keyword::Volatile
             | Keyword::Restrict
+            | Keyword::Atomic
     )
 }
 

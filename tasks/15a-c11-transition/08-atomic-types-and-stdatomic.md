@@ -1,5 +1,7 @@
 # 15a-08: Atomic Types and `stdatomic.h`
 
+> ✓ done — 2026-05-06
+
 **Phase:** 15a-c11-transition  
 **Depends on:** 15a-07-generic-selection  
 **Milestone:** c11-transition
@@ -26,11 +28,11 @@ explicitly tracked.
 
 ## Acceptance
 
-- [ ] `_Atomic(int) x;` and `_Atomic int y;` parse in C11 mode.
-- [ ] Existing QuickJS atomic smoke remains green.
-- [ ] A C11-only atomic fixture compiles, links, and runs on Linux when LLVM is
+- [x] `_Atomic(int) x;` and `_Atomic int y;` parse in C11 mode.
+- [x] Existing QuickJS atomic smoke remains green.
+- [x] A C11-only atomic fixture compiles, links, and runs on Linux when LLVM is
       enabled.
-- [ ] Unsupported atomic operations fail with targeted diagnostics rather than
+- [x] Unsupported atomic operations fail with targeted diagnostics rather than
       silently degrading to non-atomic operations.
 
 ## References

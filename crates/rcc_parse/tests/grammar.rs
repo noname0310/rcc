@@ -982,6 +982,35 @@ fn c99_generic_selection_is_diagnosed() {
 }
 
 #[test]
+fn c11_atomic_type_specifier_and_qualifier_parse() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, _) = parse_ok_with_options("_Atomic(int) x; _Atomic int y; int * _Atomic p;", opts);
+    assert_eq!(tu.decls.len(), 3);
+
+    let ExternalDecl::Decl(first) = &tu.decls[0] else { panic!("expected declaration") };
+    assert!(matches!(first.specs.type_specs.as_slice(), [TypeSpec::Atomic(_)]));
+
+    let ExternalDecl::Decl(second) = &tu.decls[1] else { panic!("expected declaration") };
+    assert!(second.specs.quals.atomic);
+    assert!(matches!(second.specs.type_specs.as_slice(), [TypeSpec::Int]));
+
+    let ExternalDecl::Decl(third) = &tu.decls[2] else { panic!("expected declaration") };
+    assert!(matches!(
+        third.inits[0].declarator.derived.as_slice(),
+        [DerivedDeclarator::Pointer(q)] if q.atomic
+    ));
+}
+
+#[test]
+fn c11_atomic_requires_c11_mode() {
+    let errors = parse_err("_Atomic(int) x; _Atomic int y;");
+    assert!(
+        errors.iter().any(|d| d.message.contains("`_Atomic")),
+        "expected _Atomic C11 diagnostic, got {errors:#?}"
+    );
+}
+
+#[test]
 fn c11_anonymous_record_member_is_standard() {
     let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
     let (_tu, diags) =

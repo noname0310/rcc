@@ -2841,6 +2841,7 @@ enum TyClass {
 
 fn classify(id: TyId, tcx: &TyCtxt) -> TyClass {
     match tcx.get(id) {
+        Ty::Atomic(inner) => classify(*inner, tcx),
         Ty::Int { signed: true, .. } => TyClass::SignedInt,
         Ty::Int { signed: false, .. } => TyClass::UnsignedInt,
         Ty::Float(_) | Ty::Complex(_) => TyClass::Float,

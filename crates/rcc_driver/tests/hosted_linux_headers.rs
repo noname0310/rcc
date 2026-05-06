@@ -137,7 +137,7 @@ int probe(const char *name) {
         Fixture {
             name: "stdatomic-quickjs-surface",
             reason: "QuickJS uses stdatomic _Atomic(T) casts and fetch/exchange helpers under CONFIG_ATOMICS",
-            args: &["-fgnu-statement-expressions"],
+            args: &["-std=c11", "-fgnu-statement-expressions"],
             source: r#"
 #include <stdint.h>
 #include <stdatomic.h>

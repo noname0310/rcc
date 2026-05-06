@@ -536,7 +536,12 @@ fn ptr() -> DerivedDeclarator {
 }
 
 fn const_ptr() -> DerivedDeclarator {
-    DerivedDeclarator::Pointer(TypeQuals { const_: true, volatile: false, restrict: false })
+    DerivedDeclarator::Pointer(TypeQuals {
+        const_: true,
+        volatile: false,
+        restrict: false,
+        atomic: false,
+    })
 }
 
 fn int_lit(text: &str, sess: &mut Session) -> Expr {
@@ -1286,6 +1291,46 @@ fn c11_generic_selection_missing_match_without_default_is_diagnosed() {
     let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
     assert!(
         cap.diagnostics().iter().any(|d| d.message.contains("no matching association")),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_atomic_specifier_and_qualifier_lower_to_atomic_ty() {
+    let src = "_Atomic(int) x; _Atomic int y; int * _Atomic p;";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+
+    let globals = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { ty, .. } => Some(ty),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(globals.len(), 3);
+    assert!(matches!(tcx.get(globals[0]), Ty::Atomic(inner) if *inner == tcx.int));
+    assert!(matches!(tcx.get(globals[1]), Ty::Atomic(inner) if *inner == tcx.int));
+    let Ty::Atomic(ptr) = *tcx.get(globals[2]) else {
+        panic!("expected atomic-qualified pointer, got {:?}", tcx.get(globals[2]));
+    };
+    assert!(matches!(tcx.get(ptr), Ty::Ptr(q) if q.ty == tcx.int));
+}
+
+#[test]
+fn c11_invalid_atomic_object_types_are_diagnosed() {
+    let src = "_Atomic(void) v; typedef int F(void); _Atomic(F) f;";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().any(|d| d.message.contains("invalid C11 atomic object type")),
         "{:#?}",
         cap.diagnostics()
     );
@@ -4230,6 +4275,7 @@ fn assert_ty_has_no_error(tcx: &TyCtxt, ty: TyId, context: &str) {
     match tcx.get(ty) {
         Ty::Error => panic!("{context} unexpectedly contains tcx.error"),
         Ty::Ptr(pointee) => assert_ty_has_no_error(tcx, pointee.ty, context),
+        Ty::Atomic(inner) => assert_ty_has_no_error(tcx, *inner, context),
         Ty::Array { elem, .. } => assert_ty_has_no_error(tcx, elem.ty, context),
         Ty::Vector { elem, .. } => assert_ty_has_no_error(tcx, *elem, context),
         Ty::Func { ret, params, .. } => {

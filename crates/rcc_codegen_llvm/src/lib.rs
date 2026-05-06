@@ -294,6 +294,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
 
     fn classify_param(&self, ty: TyId) -> Result<AbiParam, CodegenError> {
         match self.tcx.get(ty) {
+            Ty::Atomic(inner) => self.classify_param(*inner),
             Ty::Void => Err(type_lowering_error(ty, "void is not a parameter type")),
             Ty::Func { .. } => Err(type_lowering_error(ty, "function parameters must decay")),
             Ty::Error => Err(type_lowering_error(ty, "error type cannot be ABI-classified")),
@@ -307,6 +308,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
 
     fn classify_return(&self, ty: TyId) -> Result<AbiReturn, CodegenError> {
         match self.tcx.get(ty) {
+            Ty::Atomic(inner) => self.classify_return(*inner),
             Ty::Void => Ok(AbiReturn {
                 source: ty,
                 kind: AbiReturnKind::Void,
@@ -516,6 +518,7 @@ impl<'tcx> SysvParamClassifier<'tcx> {
         chunks: &mut [Eightbyte],
     ) -> Result<(), CodegenError> {
         match self.tcx.get(ty) {
+            Ty::Atomic(inner) => self.classify_ty_into(*inner, offset, chunks),
             Ty::Int { .. } | Ty::Ptr(_) | Ty::Enum(_) => {
                 let layout = self
                     .layout
@@ -737,7 +740,11 @@ fn abi_reg_usage(param: &AbiParam) -> (u32, u32) {
 
 #[cfg(feature = "llvm")]
 fn is_aggregate_abi_ty(tcx: &TyCtxt, ty: TyId) -> bool {
-    matches!(tcx.get(ty), Ty::Array { .. } | Ty::Record(_) | Ty::BuiltinVaList)
+    match tcx.get(ty) {
+        Ty::Atomic(inner) => is_aggregate_abi_ty(tcx, *inner),
+        Ty::Array { .. } | Ty::Record(_) | Ty::BuiltinVaList => true,
+        _ => false,
+    }
 }
 
 fn indirect_param(ty: TyId, layout: Layout) -> AbiParam {
@@ -975,7 +982,10 @@ pub mod backend {
         FunctionValue, GlobalValue, InstructionOpcode, IntValue, PointerValue, StructValue,
     };
     use inkwell::OptimizationLevel;
-    use inkwell::{AddressSpace, FloatPredicate, GlobalVisibility, InlineAsmDialect, IntPredicate};
+    use inkwell::{
+        AddressSpace, AtomicOrdering, FloatPredicate, GlobalVisibility, InlineAsmDialect,
+        IntPredicate,
+    };
     use rcc_cfg::UnOp;
     use rcc_cfg::{
         BasicBlockId, BinOp, Body, CastKind, ConstKind, InlineAsm, InlineAsmArg, Operand, Place,
@@ -1547,6 +1557,7 @@ pub mod backend {
                     )
                     .map_err(|e| type_lowering_error(ty, e))?
                     .as_type(),
+                Ty::Atomic(inner) => self.debug_type(*inner)?,
                 Ty::Ptr(pointee) => {
                     let pointee = self.debug_type(pointee.ty)?;
                     debug
@@ -2695,15 +2706,22 @@ pub mod backend {
             addr: PointerValue<'ctx>,
             name: &str,
             volatile: bool,
+            atomic: bool,
         ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
             let v = self.builder.build_load(llvm_ty, addr, name).map_err(builder_error)?;
-            if volatile {
+            if volatile || atomic {
                 let Some(inst) = v.as_instruction_value() else {
                     return Err(CodegenError::Internal(
                         "load result is not an instruction".to_owned(),
                     ));
                 };
-                inst.set_volatile(true).map_err(|e| CodegenError::Internal(e.to_string()))?;
+                if volatile {
+                    inst.set_volatile(true).map_err(|e| CodegenError::Internal(e.to_string()))?;
+                }
+                if atomic {
+                    inst.set_atomic_ordering(AtomicOrdering::Monotonic)
+                        .map_err(|e| CodegenError::Internal(e.to_string()))?;
+                }
             }
             Ok(v)
         }
@@ -2713,10 +2731,15 @@ pub mod backend {
             addr: PointerValue<'ctx>,
             value: BasicValueEnum<'ctx>,
             volatile: bool,
+            atomic: bool,
         ) -> Result<(), CodegenError> {
             let inst = self.builder.build_store(addr, value).map_err(builder_error)?;
             if volatile {
                 inst.set_volatile(true).map_err(|e| CodegenError::Internal(e.to_string()))?;
+            }
+            if atomic {
+                inst.set_atomic_ordering(AtomicOrdering::Monotonic)
+                    .map_err(|e| CodegenError::Internal(e.to_string()))?;
             }
             Ok(())
         }
@@ -2801,6 +2824,7 @@ pub mod backend {
                     access.storage_addr,
                     "bf.load",
                     access.volatile,
+                    false,
                 )?
                 .into_int_value();
             let logical_storage =
@@ -2869,6 +2893,7 @@ pub mod backend {
                     access.storage_addr,
                     "bf.old",
                     access.volatile,
+                    false,
                 )?
                 .into_int_value();
             let logical_storage =
@@ -2895,6 +2920,7 @@ pub mod backend {
                 access.storage_addr,
                 stored.as_basic_value_enum(),
                 access.volatile,
+                false,
             )?;
             Ok(true)
         }
@@ -3040,6 +3066,7 @@ pub mod backend {
                             ptr,
                             "deref_load",
                             prefix_object_vol,
+                            false,
                         )?;
                         ptr = v.into_pointer_value();
                         current_ty = pointee.ty;
@@ -3093,6 +3120,7 @@ pub mod backend {
                                         ptr,
                                         "index_base_load",
                                         prefix_object_vol,
+                                        false,
                                     )?
                                     .into_pointer_value();
                                 let elem_ty = self.type_cx().basic_type_of(pointee.ty)?;
@@ -3133,7 +3161,8 @@ pub mod backend {
                     }
                     let llvm_ty = self.type_cx().basic_type_of(ty)?;
                     let volatile = self.place_is_volatile(place, body)?;
-                    self.emit_memory_load(llvm_ty, addr, "load", volatile)
+                    let atomic = matches!(self.tcx.get(ty), Ty::Atomic(_));
+                    self.emit_memory_load(llvm_ty, addr, "load", volatile, atomic)
                 }
                 Operand::Const(c) => self.emit_const(c),
             }
@@ -3296,7 +3325,7 @@ pub mod backend {
                         "checked overflow destination must be a pointer".to_owned(),
                     ));
                 };
-                self.emit_memory_store(dst_ptr, wrapped.as_basic_value_enum(), false)?;
+                self.emit_memory_store(dst_ptr, wrapped.as_basic_value_enum(), false, false)?;
             }
 
             let BasicTypeEnum::IntType(c_int_ty) = self.type_cx().basic_type_of(self.tcx.int)?
@@ -5290,8 +5319,9 @@ pub mod backend {
                 let off_val = i64_ty.const_int(off, false);
                 let sp = self.build_gep(i8_ty, src, &[off_val], "vbc.src")?;
                 let dp = self.build_gep(i8_ty, dest, &[off_val], "vbc.dst")?;
-                let b = self.emit_memory_load(i8_ty.as_basic_type_enum(), sp, "vbc.l", true)?;
-                self.emit_memory_store(dp, b, true)?;
+                let b =
+                    self.emit_memory_load(i8_ty.as_basic_type_enum(), sp, "vbc.l", true, false)?;
+                self.emit_memory_store(dp, b, true, false)?;
             }
             Ok(())
         }
@@ -5308,7 +5338,7 @@ pub mod backend {
             for off in 0..layout.size {
                 let off_val = i64_ty.const_int(off, false);
                 let dp = self.build_gep(i8_ty, dest, &[off_val], "vmz")?;
-                self.emit_memory_store(dp, zero, true)?;
+                self.emit_memory_store(dp, zero, true, false)?;
             }
             Ok(())
         }
@@ -5369,7 +5399,8 @@ pub mod backend {
             }
             let addr = self.emit_place_addr(place, locals, body)?;
             let volatile = self.place_is_volatile(place, body)?;
-            self.emit_memory_store(addr, value, volatile)
+            let atomic = matches!(self.tcx.get(self.place_ty(place, body)?), Ty::Atomic(_));
+            self.emit_memory_store(addr, value, volatile, atomic)
         }
 
         /// Resolve the HIR type of a place from the body's local declarations.
@@ -5420,9 +5451,19 @@ pub mod backend {
 
         fn operand_ty(&self, operand: &Operand, body: &Body) -> Result<TyId, CodegenError> {
             match operand {
-                Operand::Copy(place) | Operand::Move(place) => self.place_ty(place, body),
+                Operand::Copy(place) | Operand::Move(place) => {
+                    let ty = self.place_ty(place, body)?;
+                    Ok(self.strip_atomic_ty(ty))
+                }
                 Operand::Const(c) => Ok(c.ty),
             }
+        }
+
+        fn strip_atomic_ty(&self, mut ty: TyId) -> TyId {
+            while let Ty::Atomic(inner) = *self.tcx.get(ty) {
+                ty = inner;
+            }
+            ty
         }
 
         fn is_bool_ty(&self, ty: TyId) -> bool {
@@ -5543,6 +5584,7 @@ pub mod backend {
                 gv.as_pointer_value(),
                 "global.load",
                 self.global_is_volatile(def),
+                matches!(self.tcx.get(ty), Ty::Atomic(_)),
             )
         }
 
@@ -7090,6 +7132,7 @@ pub mod backend {
                 Ty::Int { rank, .. } => self.int_type(*rank).into(),
                 Ty::Float(kind) => self.float_type(*kind).into(),
                 Ty::Complex(kind) => self.complex_type(*kind).into(),
+                Ty::Atomic(inner) => self.type_of(*inner)?,
                 Ty::Vector { elem, lanes, .. } => match self.basic_type_of(*elem)? {
                     BasicTypeEnum::IntType(elem) => elem.vec_type(*lanes).into(),
                     BasicTypeEnum::FloatType(elem) => elem.vec_type(*lanes).into(),
@@ -8826,6 +8869,7 @@ pub fn pretty_ty(tcx: &TyCtxt, ty: TyId) -> String {
         Ty::Int { signed: false, rank } => format!("u{:?}", rank).to_lowercase(),
         Ty::Float(k) => format!("{:?}", k).to_lowercase(),
         Ty::Complex(k) => format!("complex {:?}", k).to_lowercase(),
+        Ty::Atomic(inner) => format!("atomic({})", pretty_ty(tcx, *inner)),
         Ty::Vector { elem, lanes, bytes } => {
             format!("vector lanes={lanes} bytes={bytes} elem={}", pretty_ty(tcx, *elem))
         }
@@ -12792,6 +12836,57 @@ mod tests {
         let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
         let ir = assert_codegen_fixture_verifies(&mut tcx, "__volatile_obj_store", ret_ty, body);
         assert!(ir.contains("store volatile"), "expected store volatile in:\n{ir}");
+    }
+
+    /// Loading from a C11 `_Atomic(T)` object uses an LLVM atomic load.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn atomic_object_load_emits_atomic_load() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.int;
+        let atomic_int = tcx.intern(Ty::Atomic(tcx.int));
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, ret_ty, false));
+        locals.push(cfg_local_decl(Some(Symbol(1)), atomic_int, false));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: ret_slot(),
+                    rvalue: Rvalue::Use(Operand::Copy(local_place(Local(1)))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__atomic_obj_load", ret_ty, body);
+        assert!(ir.contains("load atomic"), "expected atomic load in:\n{ir}");
+    }
+
+    /// Storing to a C11 `_Atomic(T)` object uses an LLVM atomic store.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn atomic_object_store_emits_atomic_store() {
+        let mut tcx = TyCtxt::new();
+        let ret_ty = tcx.void;
+        let atomic_int = tcx.intern(Ty::Atomic(tcx.int));
+        let mut locals = IndexVec::new();
+        locals.push(cfg_local_decl(None, tcx.void, false));
+        locals.push(cfg_local_decl(None, atomic_int, false));
+        locals.push(cfg_local_decl(None, tcx.int, true));
+        let block = cfg_block(
+            vec![Statement {
+                kind: StatementKind::Assign {
+                    place: Place { base: Local(1), projection: Vec::new() },
+                    rvalue: Rvalue::Use(Operand::Copy(local_place(Local(2)))),
+                },
+                span: DUMMY_SP,
+            }],
+            TerminatorKind::Return,
+        );
+        let body = cfg_body_with_locals(ret_ty, locals, vec![block]);
+        let ir = assert_codegen_fixture_verifies(&mut tcx, "__atomic_obj_store", ret_ty, body);
+        assert!(ir.contains("store atomic"), "expected atomic store in:\n{ir}");
     }
 
     /// Non-volatile loads are plain `load`, not `load volatile`.

@@ -837,6 +837,29 @@ fn lvalue_to_rvalue_inserts_wrapper_for_lvalue_scalar() {
 }
 
 #[test]
+fn lvalue_to_rvalue_unwraps_atomic_object_type() {
+    let mut tcx = TyCtxt::new();
+    let atomic_int = tcx.intern(Ty::Atomic(tcx.int));
+    let mut body = Body::default();
+    let lv = push_kind(&mut body, atomic_int, HirExprKind::LocalRef(Local(0)));
+    let rv = lvalue_to_rvalue_if_needed(&mut tcx, &mut body, lv);
+    assert_ne!(rv, lv);
+    assert_eq!(body.exprs[rv].ty, tcx.int);
+    let HirExprKind::Convert { kind, .. } = body.exprs[rv].kind else { panic!() };
+    assert_eq!(kind, ConvertKind::LvalueToRvalue);
+}
+
+#[test]
+fn atomic_wrapped_arithmetic_is_assignment_compatible_with_inner_type() {
+    let mut tcx = TyCtxt::new();
+    let mut body = Body::default();
+    let src = push_kind(&mut body, tcx.int, HirExprKind::IntConst(1));
+    let atomic_int = tcx.intern(Ty::Atomic(tcx.int));
+    assert_eq!(is_assignable(&tcx, &body, atomic_int, tcx.int, src), Ok(()));
+    assert!(is_compatible_type(&tcx, atomic_int, tcx.int));
+}
+
+#[test]
 fn lvalue_to_rvalue_passthrough_for_rvalue() {
     let mut tcx = TyCtxt::new();
     let mut body = Body::default();

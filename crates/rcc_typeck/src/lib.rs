@@ -42,6 +42,8 @@ const INT_BITS: u32 = 32;
 /// captured up-front so each per-body walk does not need shared `&hir`
 /// access concurrently with the `&mut Body` it edits.
 pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
+    validate_atomic_types(session, tcx, hir);
+
     // We need to look up `Def::kind` while typing `DefRef` nodes. Snapshot
     // the (DefId, ty/value-cat-relevant) info up front so the per-body
     // walk does not have to borrow `hir.defs` while it holds `&mut hir.bodies[id]`.
@@ -64,6 +66,66 @@ pub fn check(session: &mut Session, tcx: &mut TyCtxt, hir: &mut HirCrate) {
     }
 
     check_global_initializers(session, tcx, hir, &def_info);
+}
+
+fn validate_atomic_types(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) {
+    for def in hir.defs.iter() {
+        match &def.kind {
+            DefKind::Function { ty, .. }
+            | DefKind::Global { ty, .. }
+            | DefKind::Typedef(ty)
+            | DefKind::Enumerator { ty, .. } => {
+                validate_atomic_ty(session, tcx, *ty, def.span);
+            }
+            DefKind::Record { fields, .. } => {
+                for field in fields {
+                    validate_atomic_ty(session, tcx, field.ty, field.span);
+                }
+            }
+            DefKind::Enum { repr, .. } => validate_atomic_ty(session, tcx, *repr, def.span),
+        }
+    }
+    for body in hir.bodies.values() {
+        for local in body.locals.iter() {
+            validate_atomic_ty(session, tcx, local.ty, local.span);
+        }
+    }
+}
+
+fn validate_atomic_ty(session: &mut Session, tcx: &TyCtxt, ty: TyId, span: rcc_span::Span) {
+    match *tcx.get(ty) {
+        Ty::Atomic(inner) => {
+            if matches!(
+                tcx.get(inner),
+                Ty::Void | Ty::Array { .. } | Ty::Func { .. } | Ty::Atomic(_)
+            ) {
+                session
+                    .handler
+                    .struct_err(span, "invalid C11 atomic object type")
+                    .code(rcc_errors::codes::E0083)
+                    .note("`_Atomic` may not wrap void, function, array, or another atomic type")
+                    .emit();
+            }
+            validate_atomic_ty(session, tcx, inner, span);
+        }
+        Ty::Ptr(q) => validate_atomic_ty(session, tcx, q.ty, span),
+        Ty::Array { elem, .. } => validate_atomic_ty(session, tcx, elem.ty, span),
+        Ty::Func { ret, ref params, .. } => {
+            validate_atomic_ty(session, tcx, ret, span);
+            for param in params {
+                validate_atomic_ty(session, tcx, *param, span);
+            }
+        }
+        Ty::Void
+        | Ty::Int { .. }
+        | Ty::Float(_)
+        | Ty::Complex(_)
+        | Ty::Vector { .. }
+        | Ty::Record(_)
+        | Ty::Enum(_)
+        | Ty::BuiltinVaList
+        | Ty::Error => {}
+    }
 }
 
 fn check_global_initializers(
@@ -1342,6 +1404,13 @@ fn is_scalar(tcx: &TyCtxt, ty: TyId) -> bool {
     is_arithmetic(tcx, ty) || is_pointer(tcx, ty)
 }
 
+fn strip_atomic(tcx: &TyCtxt, mut ty: TyId) -> TyId {
+    while let Ty::Atomic(inner) = *tcx.get(ty) {
+        ty = inner;
+    }
+    ty
+}
+
 fn valid_explicit_cast(src: TyId, dst: TyId, tcx: &TyCtxt) -> bool {
     let src_is_vector = is_vector(tcx, src);
     let dst_is_vector = is_vector(tcx, dst);
@@ -1362,11 +1431,11 @@ fn valid_explicit_cast(src: TyId, dst: TyId, tcx: &TyCtxt) -> bool {
 }
 
 fn is_vector(tcx: &TyCtxt, ty: TyId) -> bool {
-    matches!(tcx.get(ty), Ty::Vector { .. })
+    matches!(tcx.get(strip_atomic(tcx, ty)), Ty::Vector { .. })
 }
 
 fn is_integer_like(tcx: &TyCtxt, ty: TyId) -> bool {
-    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Enum(_))
+    matches!(tcx.get(strip_atomic(tcx, ty)), Ty::Int { .. } | Ty::Enum(_))
 }
 
 fn same_layout_size(tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
@@ -1584,12 +1653,14 @@ fn coerce_to(
     session: &mut Session,
 ) -> CoerceResult {
     let src_ty = body.exprs[expr].ty;
-    if src_ty == dst {
+    let dst_value_ty = strip_atomic(tcx, dst);
+    let src_value_ty = strip_atomic(tcx, src_ty);
+    if src_ty == dst || src_value_ty == dst_value_ty {
         return CoerceResult::Noop(expr);
     }
     // Skip coercion when either side is the error sentinel — there is
     // already a diagnostic upstream.
-    if src_ty == tcx.error || dst == tcx.error {
+    if src_ty == tcx.error || dst == tcx.error || dst_value_ty == tcx.error {
         return CoerceResult::Error(expr);
     }
 
@@ -1634,8 +1705,8 @@ fn coerce_to(
     // emit W0012 when complex-to-real drops the imaginary part. Real ↔
     // real continues to use the UsualArithmetic-style wrapper. Narrowing
     // diagnostics for real arithmetic remain deferred to W0008.
-    if is_arithmetic(tcx, src_ty) && is_arithmetic(tcx, dst) {
-        let new_id = push_arithmetic_convert(body, session, tcx, expr, dst);
+    if is_arithmetic(tcx, src_ty) && is_arithmetic(tcx, dst_value_ty) {
+        let new_id = push_arithmetic_convert(body, session, tcx, expr, dst_value_ty);
         return if new_id == expr {
             CoerceResult::Noop(expr)
         } else {
@@ -1644,8 +1715,8 @@ fn coerce_to(
     }
     // Pointer-shaped destination: diagnostics are emitted here, not
     // deferred to CFG/codegen.
-    if matches!(*tcx.get(dst), Ty::Ptr(_)) {
-        match pointer_convert(tcx, body, expr, dst) {
+    if is_pointer(tcx, dst_value_ty) {
+        match pointer_convert(tcx, body, expr, dst_value_ty) {
             Ok(new_id) => {
                 return if new_id == expr {
                     CoerceResult::Noop(expr)
@@ -1656,7 +1727,7 @@ fn coerce_to(
             Err(err) => {
                 if err == ConvertError::QualifierLoss {
                     emit_pointer_conversion_warning(session, body.exprs[expr].span, err);
-                    return CoerceResult::Converted(push_pointer_convert(body, expr, dst));
+                    return CoerceResult::Converted(push_pointer_convert(body, expr, dst_value_ty));
                 }
                 emit_pointer_conversion_error(session, body.exprs[expr].span, err);
                 return CoerceResult::Error(mark_expr_error(body, tcx, expr));
@@ -1666,8 +1737,8 @@ fn coerce_to(
     // `_Bool` ← pointer / arithmetic. We emit a UsualArithmetic-flavoured
     // convert for now; the dedicated `BoolFromPtr` ConvertKind is task
     // 07-11.
-    if dst == tcx.bool_ {
-        return CoerceResult::Converted(push_arith_convert(body, expr, dst));
+    if dst_value_ty == tcx.bool_ {
+        return CoerceResult::Converted(push_arith_convert(body, expr, dst_value_ty));
     }
     CoerceResult::Noop(expr)
 }
@@ -2212,7 +2283,7 @@ fn expr_bit_precision(
 }
 
 fn should_apply_bitfield_precision(tcx: &TyCtxt, ty: TyId, precision: BitfieldPrecision) -> bool {
-    let Ty::Int { rank, .. } = *tcx.get(ty) else {
+    let Ty::Int { rank, .. } = *tcx.get(strip_atomic(tcx, ty)) else {
         return false;
     };
     precision.width > INT_BITS && int_rank_bits(rank) > INT_BITS
@@ -2252,11 +2323,11 @@ fn combine_bitfield_precision(
 }
 
 fn is_signed_integer(tcx: &TyCtxt, ty: TyId) -> bool {
-    matches!(*tcx.get(ty), Ty::Int { signed: true, .. })
+    matches!(*tcx.get(strip_atomic(tcx, ty)), Ty::Int { signed: true, .. })
 }
 
 fn int_rank_of(tcx: &TyCtxt, ty: TyId) -> Option<IntRank> {
-    match *tcx.get(ty) {
+    match *tcx.get(strip_atomic(tcx, ty)) {
         Ty::Int { rank, .. } => Some(rank),
         _ => None,
     }
@@ -3010,6 +3081,7 @@ fn unsigned_integer_max(bits: u32) -> u128 {
 /// Non-integer types pass through unchanged so callers can chain this with
 /// the usual arithmetic conversions blindly.
 pub fn integer_promotion(tcx: &TyCtxt, ty: TyId, bit_width: Option<u32>) -> TyId {
+    let ty = strip_atomic(tcx, ty);
     if matches!(tcx.get(ty), Ty::Enum(_)) {
         return tcx.int;
     }
@@ -3187,6 +3259,9 @@ fn signed_counterpart(tcx: &TyCtxt, rank: IntRank) -> TyId {
 /// The caller is responsible for actually inserting `Convert` nodes on
 /// each operand to bring it to the returned common type.
 pub fn usual_arithmetic(tcx: &TyCtxt, a: TyId, b: TyId) -> TyId {
+    let a = strip_atomic(tcx, a);
+    let b = strip_atomic(tcx, b);
+
     // §6.3.1.8 second paragraph: if either operand has complex type, the
     // result has complex type, and its corresponding real type is the
     // higher of the two operands' corresponding real types. Pre-empt the
@@ -3508,7 +3583,7 @@ pub fn lvalue_to_rvalue_if_needed(tcx: &mut TyCtxt, body: &mut Body, expr: HirEx
     // We're conservative here: if the operand still has array/function
     // type by the time we're invoked, leave it alone — `decay_if_needed`
     // is the right tool.
-    match tcx.get(orig_ty) {
+    match tcx.get(strip_atomic(tcx, orig_ty)) {
         Ty::Array { .. } | Ty::Func { .. } => return expr,
         _ => {}
     }
@@ -3519,7 +3594,7 @@ pub fn lvalue_to_rvalue_if_needed(tcx: &mut TyCtxt, body: &mut Body, expr: HirEx
     // ordinary scalar already has no qualifiers, so no rewrite is
     // required. Pointer-to-qualified-T stays pointer-to-qualified-T:
     // the qualifier belongs to the pointee, not the pointer value.
-    let new_ty = orig_ty;
+    let new_ty = strip_atomic(tcx, orig_ty);
     let span = body.exprs[expr].span;
     let id = body.exprs.push(HirExpr {
         id: HirExprId(0),
@@ -3708,8 +3783,8 @@ pub fn is_null_pointer_constant(body: &Body, expr: HirExprId) -> bool {
 /// single `TyId`. We expose the helper as a named function anyway so
 /// callers (and future cross-TU compatibility logic) have a stable
 /// extension point.
-pub fn is_compatible_type(_tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
-    a == b
+pub fn is_compatible_type(tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
+    strip_atomic(tcx, a) == strip_atomic(tcx, b)
 }
 
 /// Width in bits of an integer rank. Re-exported helper so the
@@ -3759,6 +3834,8 @@ fn max_float_kind(a: FloatKind, b: FloatKind) -> FloatKind {
 /// (integer or float); records, pointers, void, and the error sentinel
 /// must be filtered out before calling this.
 fn is_narrowing_arithmetic(tcx: &TyCtxt, src: TyId, dst: TyId) -> bool {
+    let src = strip_atomic(tcx, src);
+    let dst = strip_atomic(tcx, dst);
     if src == dst {
         return false;
     }
@@ -3807,17 +3884,20 @@ fn is_narrowing_arithmetic(tcx: &TyCtxt, src: TyId, dst: TyId) -> bool {
 /// floating, real or complex). `_Complex` is included because §6.5.16.1
 /// treats every arithmetic type uniformly.
 fn is_arithmetic(tcx: &TyCtxt, a: TyId) -> bool {
-    matches!(tcx.get(a), Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_) | Ty::Complex(_))
+    matches!(
+        tcx.get(strip_atomic(tcx, a)),
+        Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_) | Ty::Complex(_)
+    )
 }
 
 /// True iff `a` is a pointer type.
 fn is_pointer(tcx: &TyCtxt, a: TyId) -> bool {
-    matches!(tcx.get(a), Ty::Ptr(_))
+    matches!(tcx.get(strip_atomic(tcx, a)), Ty::Ptr(_))
 }
 
 /// Pointee `Qual` of a pointer type, or `None` for non-pointers.
 fn pointee_qual(tcx: &TyCtxt, a: TyId) -> Option<Qual> {
-    match *tcx.get(a) {
+    match *tcx.get(strip_atomic(tcx, a)) {
         Ty::Ptr(q) => Some(q),
         _ => None,
     }
@@ -3837,13 +3917,13 @@ fn qualifiers_superset(outer: Qual, inner: Qual) -> bool {
 /// True iff `t` is `void` (possibly via a `Qual` wrapper at the call
 /// site; this helper takes the bare `TyId`).
 fn is_void(tcx: &TyCtxt, t: TyId) -> bool {
-    matches!(tcx.get(t), Ty::Void)
+    matches!(tcx.get(strip_atomic(tcx, t)), Ty::Void)
 }
 
 /// True iff `t` is an "object type" or incomplete type in the sense of
 /// §6.5.16.1p1 fourth bullet — anything that is not a function type.
 fn is_object_or_incomplete(tcx: &TyCtxt, t: TyId) -> bool {
-    !matches!(tcx.get(t), Ty::Func { .. })
+    !matches!(tcx.get(strip_atomic(tcx, t)), Ty::Func { .. })
 }
 
 /// Check the C99 §6.5.16.1 simple-assignment constraint. Returns
@@ -3880,6 +3960,9 @@ pub fn is_assignable(
     src_ty: TyId,
     src_expr: HirExprId,
 ) -> Result<(), AssignError> {
+    let dst = strip_atomic(tcx, dst);
+    let src_ty = strip_atomic(tcx, src_ty);
+
     // Same TyId: trivially assignable. Catches `int = int`, `T* = T*`,
     // `struct S = struct S`. No conversion is required.
     if dst == src_ty {
@@ -4145,7 +4228,7 @@ fn push_pointer_convert(body: &mut Body, src: HirExprId, dst_ty: TyId) -> HirExp
 
 /// True iff `t` is an integer type per C99 §6.2.5p17.
 fn is_integer(tcx: &TyCtxt, t: TyId) -> bool {
-    matches!(tcx.get(t), Ty::Int { .. } | Ty::Enum(_))
+    matches!(tcx.get(strip_atomic(tcx, t)), Ty::Int { .. } | Ty::Enum(_))
 }
 
 fn bswap_result_ty(tcx: &TyCtxt, bits: u16) -> TyId {
@@ -4158,7 +4241,7 @@ fn bswap_result_ty(tcx: &TyCtxt, bits: u16) -> TyId {
 }
 
 fn is_real_arithmetic(tcx: &TyCtxt, ty: TyId) -> bool {
-    matches!(tcx.get(ty), Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_))
+    matches!(tcx.get(strip_atomic(tcx, ty)), Ty::Int { .. } | Ty::Enum(_) | Ty::Float(_))
 }
 
 fn builtin_complex_result_ty(tcx: &TyCtxt, common: TyId) -> (TyId, TyId) {

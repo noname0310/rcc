@@ -2,15 +2,27 @@
 #define __RCC_STDATOMIC_H
 
 /*
- * C11 atomics compatibility surface for hosted C99 probes.
+ * C11 atomics compatibility surface for hosted probes.
  *
- * rcc does not implement the C11 memory model yet.  This header intentionally
- * exposes the small source-compatibility layer needed by real-world hosted
- * projects such as QuickJS while keeping the operations in ordinary C
- * expressions.  Multi-threaded atomic semantics remain future compiler work.
+ * rcc parses and preserves `_Atomic` types.  Load/store of atomic lvalues are
+ * emitted as LLVM monotonic atomic memory operations when the LLVM backend is
+ * enabled; the generic function-like helpers below keep real-world source
+ * compatibility for projects such as QuickJS while fuller memory-order
+ * lowering remains future compiler work.
  */
 
-#define _Atomic(T) T
+typedef _Atomic(_Bool) atomic_bool;
+typedef _Atomic(char) atomic_char;
+typedef _Atomic(signed char) atomic_schar;
+typedef _Atomic(unsigned char) atomic_uchar;
+typedef _Atomic(short) atomic_short;
+typedef _Atomic(unsigned short) atomic_ushort;
+typedef _Atomic(int) atomic_int;
+typedef _Atomic(unsigned int) atomic_uint;
+typedef _Atomic(long) atomic_long;
+typedef _Atomic(unsigned long) atomic_ulong;
+typedef _Atomic(long long) atomic_llong;
+typedef _Atomic(unsigned long long) atomic_ullong;
 
 #define memory_order_relaxed 0
 #define memory_order_consume 1

@@ -236,6 +236,7 @@ fn ty_contains_error(tcx: &TyCtxt, ty: TyId) -> bool {
     }
     match tcx.get(ty) {
         Ty::Ptr(q) => ty_contains_error(tcx, q.ty),
+        Ty::Atomic(inner) => ty_contains_error(tcx, *inner),
         Ty::Array { elem, .. } => ty_contains_error(tcx, elem.ty),
         Ty::Vector { elem, .. } => ty_contains_error(tcx, *elem),
         Ty::Func { ret, params, .. } => {

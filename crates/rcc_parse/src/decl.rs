@@ -267,6 +267,13 @@ fn consume_kw_specifier(
         Keyword::Restrict => {
             accept_qual(p, &mut specs.quals.restrict, "restrict", span);
         }
+        Keyword::Atomic => {
+            if looks_like_atomic_type_specifier(p) {
+                accept_atomic_specifier(p, specs, state, span);
+            } else {
+                accept_c11_qual(p, &mut specs.quals.atomic, "_Atomic", span);
+            }
+        }
 
         // ── function-specifier ───────────────────────────────────
         Keyword::Inline => {
@@ -395,6 +402,78 @@ fn accept_qual(p: &mut Parser<'_>, slot: &mut bool, name: &str, span: Span) {
         *slot = true;
     }
     p.bump();
+}
+
+fn accept_c11_qual(p: &mut Parser<'_>, slot: &mut bool, name: &str, span: Span) {
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(span, format!("C11 `{name}` type qualifier requires `-std=c11`"))
+            .code(codes::E0061)
+            .emit();
+    }
+    accept_qual(p, slot, name, span);
+}
+
+fn looks_like_atomic_type_specifier(p: &Parser<'_>) -> bool {
+    matches!(p.tokens.get(p.cursor + 1).map(|tok| &tok.kind), Some(TokenKind::Punct(Punct::LParen)))
+}
+
+fn accept_atomic_specifier(
+    p: &mut Parser<'_>,
+    specs: &mut DeclSpecs,
+    state: &mut TypeState,
+    span: Span,
+) {
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(span, "C11 `_Atomic(type-name)` type specifier requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+    if state.base.is_some() || !is_type_state_clean(state) {
+        specifier_conflict(
+            p,
+            "cannot combine `_Atomic(type-name)` with previous type specifier",
+            span,
+        );
+        p.bump();
+        return;
+    }
+
+    p.bump(); // `_Atomic`
+    let lparen_span = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) => {
+            let span = tok.span;
+            p.bump();
+            span
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `(` after `_Atomic` type specifier")
+                .code(codes::E0061)
+                .emit();
+            return;
+        }
+    };
+    let ty = parse_type_name(p);
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RParen)) => {
+            p.bump();
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `)` to close `_Atomic` type specifier")
+                .label(lparen_span, "`_Atomic` type starts here")
+                .code(codes::E0061)
+                .emit();
+        }
+    }
+    specs.type_specs.push(TypeSpec::Atomic(Box::new(ty)));
+    state.base = Some(BaseKind::Typedef);
 }
 
 fn consume_qualifier_alias(
@@ -760,6 +839,7 @@ fn is_type_name_start_kw(kw: Keyword) -> bool {
             | Keyword::Const
             | Keyword::Volatile
             | Keyword::Restrict
+            | Keyword::Atomic
     )
 }
 
@@ -916,6 +996,7 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
         && !specs.quals.const_
         && !specs.quals.volatile
         && !specs.quals.restrict
+        && !specs.quals.atomic
         && !specs.func_specs.inline
         && !specs.func_specs.noreturn
         && specs.align_specs.is_empty();
@@ -1610,6 +1691,7 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
         && !specs.quals.const_
         && !specs.quals.volatile
         && !specs.quals.restrict
+        && !specs.quals.atomic
         && !specs.func_specs.inline
         && !specs.func_specs.noreturn
         && specs.align_specs.is_empty();
@@ -1994,6 +2076,16 @@ fn parse_type_qualifier_list(p: &mut Parser<'_>) -> TypeQuals {
             TokenKind::Keyword(Keyword::Const) => (&mut quals.const_, "const"),
             TokenKind::Keyword(Keyword::Volatile) => (&mut quals.volatile, "volatile"),
             TokenKind::Keyword(Keyword::Restrict) => (&mut quals.restrict, "restrict"),
+            TokenKind::Keyword(Keyword::Atomic) => {
+                if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+                    p.session
+                        .handler
+                        .struct_err(span, "C11 `_Atomic` type qualifier requires `-std=c11`")
+                        .code(codes::E0061)
+                        .emit();
+                }
+                (&mut quals.atomic, "_Atomic")
+            }
             TokenKind::Ident(sym) => match qualifier_alias_kind(p, *sym) {
                 Some(QualifierAliasKind::Const) => (&mut quals.const_, "__const"),
                 Some(QualifierAliasKind::Volatile) => (&mut quals.volatile, "__volatile"),
@@ -2214,19 +2306,22 @@ fn parse_array_suffix(p: &mut Parser<'_>) -> ArrayDeclarator {
             }
             TokenKind::Keyword(Keyword::Const)
             | TokenKind::Keyword(Keyword::Volatile)
-            | TokenKind::Keyword(Keyword::Restrict) => {
+            | TokenKind::Keyword(Keyword::Restrict)
+            | TokenKind::Keyword(Keyword::Atomic) => {
                 // Fold into the qualifier set; use the shared helper so
                 // duplicate-warning behaviour stays in one place.
                 let one = parse_type_qualifier_list(p);
                 quals.const_ |= one.const_;
                 quals.volatile |= one.volatile;
                 quals.restrict |= one.restrict;
+                quals.atomic |= one.atomic;
             }
             TokenKind::Ident(sym) if ident_is_type_qualifier_alias(p, *sym) => {
                 let one = parse_type_qualifier_list(p);
                 quals.const_ |= one.const_;
                 quals.volatile |= one.volatile;
                 quals.restrict |= one.restrict;
+                quals.atomic |= one.atomic;
             }
             _ => break,
         }

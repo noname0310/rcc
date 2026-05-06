@@ -36,6 +36,8 @@ pub enum Ty {
         /// Total vector object size in bytes.
         bytes: u64,
     },
+    /// C11 `_Atomic(T)` or `_Atomic` qualified object type.
+    Atomic(TyId),
     /// Pointer to qualified type.
     Ptr(Qual),
     /// Array of `elem`. `len` = `None` for incomplete or `[*]` VLA.

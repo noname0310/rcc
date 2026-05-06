@@ -981,7 +981,9 @@ fn walk_decl_specs_labels(
                 }
             }
             TypeSpec::TypeofExpr(expr) => walk_expr_labels(expr, resolver, session, pass),
-            TypeSpec::TypeofType(ty) => walk_type_name_labels(ty, resolver, session, pass),
+            TypeSpec::TypeofType(ty) | TypeSpec::Atomic(ty) => {
+                walk_type_name_labels(ty, resolver, session, pass);
+            }
             _ => {}
         }
     }
@@ -5890,9 +5892,10 @@ fn lower_type_from_parts_in_scope(
     apply_aligned_attr_override_to_record(base, &specs.attrs, tcx, crate_, session);
     apply_packed_attr_to_record(base, &specs.attrs, tcx, crate_, session);
     apply_scalar_storage_order_attr_to_record(base, &specs.attrs, tcx, crate_, session);
+    let base = lower_atomic_qual(base, &specs.quals, tcx);
     let mut ty = apply_declarator_with_base_quals_in_scope(
         base,
-        specs.quals,
+        strip_atomic_qual(specs.quals),
         declarator,
         scope,
         typedef_scope,
@@ -6390,6 +6393,18 @@ fn lower_specs_to_base_ty_in_scope(
                     session,
                 );
             }
+            TypeSpec::Atomic(ty) => {
+                let inner = lower_type_name_in_scope(
+                    ty,
+                    DeclScope::File,
+                    typedef_scope,
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                );
+                return if inner == tcx.error { inner } else { tcx.intern(Ty::Atomic(inner)) };
+            }
             _ => {}
         }
     }
@@ -6540,8 +6555,22 @@ pub enum DeclScope {
 }
 
 /// Convert AST `TypeQuals` to HIR `Qual` wrapping a given `TyId`.
-fn quals_to_hir(base: TyId, q: &rcc_ast::TypeQuals) -> Qual {
-    Qual { ty: base, is_const: q.const_, is_volatile: q.volatile, is_restrict: q.restrict }
+fn lower_atomic_qual(base: TyId, q: &rcc_ast::TypeQuals, tcx: &mut TyCtxt) -> TyId {
+    if q.atomic {
+        tcx.intern(Ty::Atomic(base))
+    } else {
+        base
+    }
+}
+
+fn strip_atomic_qual(mut q: rcc_ast::TypeQuals) -> rcc_ast::TypeQuals {
+    q.atomic = false;
+    q
+}
+
+fn quals_to_hir(base: TyId, q: &rcc_ast::TypeQuals, tcx: &mut TyCtxt) -> Qual {
+    let ty = lower_atomic_qual(base, q, tcx);
+    Qual { ty, is_const: q.const_, is_volatile: q.volatile, is_restrict: q.restrict }
 }
 
 fn object_quals_from_type_quals(q: &rcc_ast::TypeQuals) -> ObjectQuals {
@@ -6556,6 +6585,7 @@ fn merge_type_quals(
         const_: base.const_ || component.const_,
         volatile: base.volatile || component.volatile,
         restrict: base.restrict || component.restrict,
+        atomic: base.atomic || component.atomic,
     }
 }
 
@@ -6677,7 +6707,7 @@ fn apply_declarator_with_base_quals_in_scope(
                 // the newly constructed pointer type: an outer pointer/array
                 // can consume them as component qualifiers, while the final
                 // declarator object records them in `ObjectQuals`.
-                let qual = quals_to_hir(ty, &pending_component_quals);
+                let qual = quals_to_hir(ty, &pending_component_quals, tcx);
                 ty = tcx.intern(Ty::Ptr(qual));
                 pending_component_quals = *quals;
             }
@@ -6732,7 +6762,7 @@ fn apply_declarator_with_base_quals_in_scope(
                 } else {
                     merge_type_quals(pending_component_quals, &arr_decl.quals)
                 };
-                let elem = quals_to_hir(ty, &merged);
+                let elem = quals_to_hir(ty, &merged, tcx);
                 ty = tcx.intern(Ty::Array { elem, len, is_vla });
                 pending_component_quals = rcc_ast::TypeQuals::default();
             }
@@ -6789,6 +6819,8 @@ fn apply_declarator_with_base_quals_in_scope(
             }
         }
     }
+
+    ty = lower_atomic_qual(ty, &pending_component_quals, tcx);
 
     // Final check: if after all derivations the type is still void
     // and the declarator has a name (i.e. it's an object, not a
@@ -6913,7 +6945,8 @@ fn lower_builtin_specs_to_base_ty(
             | TypeSpec::Record(_)
             | TypeSpec::Enum(_)
             | TypeSpec::TypeofExpr(_)
-            | TypeSpec::TypeofType(_) => {
+            | TypeSpec::TypeofType(_)
+            | TypeSpec::Atomic(_) => {
                 saw_unsupported = true;
             }
         }
@@ -8279,7 +8312,7 @@ fn specs_name_function_type(
     specs.type_specs.iter().any(|spec| match spec {
         TypeSpec::TypedefName(sym) => function_typedefs.contains(sym),
         TypeSpec::TypeofExpr(expr) => typeof_expr_names_function(expr, resolver, crate_),
-        TypeSpec::TypeofType(ty) => {
+        TypeSpec::TypeofType(ty) | TypeSpec::Atomic(ty) => {
             type_name_names_function_type(ty, function_typedefs, resolver, crate_)
         }
         _ => false,
@@ -9829,7 +9862,12 @@ mod tests {
 
     /// Helper: make a pointer derived declarator with const qualifier.
     fn const_ptr() -> DerivedDeclarator {
-        DerivedDeclarator::Pointer(TypeQuals { const_: true, volatile: false, restrict: false })
+        DerivedDeclarator::Pointer(TypeQuals {
+            const_: true,
+            volatile: false,
+            restrict: false,
+            atomic: false,
+        })
     }
 
     /// Helper: make an array derived declarator with a constant size.
