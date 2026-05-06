@@ -8800,8 +8800,60 @@ fn finalize_file_scope_typedef_def_types(
             if let DefKind::Typedef(slot) = &mut crate_.defs[def_id].kind {
                 *slot = ty;
             }
+            if ordinal > 0 {
+                if let Some(prev_def_id) =
+                    find_file_scope_ordinary_def(crate_, name, true, ordinal - 1)
+                {
+                    let prev_ty = match crate_.defs[prev_def_id].kind {
+                        DefKind::Typedef(prev_ty) => prev_ty,
+                        _ => tcx.error,
+                    };
+                    if prev_ty != tcx.error
+                        && ty != tcx.error
+                        && !typedef_types_are_compatible(tcx, prev_ty, ty)
+                    {
+                        emit_incompatible_typedef_redefinition(
+                            name,
+                            init_decl.declarator.span,
+                            prev_def_id,
+                            crate_,
+                            session,
+                        );
+                    }
+                }
+            }
         }
     }
+}
+
+fn typedef_types_are_compatible(tcx: &TyCtxt, a: TyId, b: TyId) -> bool {
+    strip_atomic_ty(tcx, a) == strip_atomic_ty(tcx, b)
+}
+
+fn strip_atomic_ty(tcx: &TyCtxt, mut ty: TyId) -> TyId {
+    while let Ty::Atomic(inner) = *tcx.get(ty) {
+        ty = inner;
+    }
+    ty
+}
+
+fn emit_incompatible_typedef_redefinition(
+    name: Symbol,
+    span: Span,
+    prev_def_id: DefId,
+    crate_: &HirCrate,
+    session: &mut Session,
+) {
+    let name_str = session.interner.get(name);
+    let mut diag = session
+        .handler
+        .struct_err(span, format!("incompatible typedef redefinition of `{name_str}`"));
+    diag = diag.code(rcc_errors::codes::E0078);
+    diag = diag.label(span, "this typedef names a different type");
+    if let Some(prev) = crate_.defs.get(prev_def_id) {
+        diag = diag.label(prev.span, "previous typedef with the same name is here");
+    }
+    diag.emit();
 }
 
 fn typedef_array_bound_needs_source_order(

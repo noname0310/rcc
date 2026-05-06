@@ -985,6 +985,23 @@ fn cross_decl_typedef_redef_keeps_earliest_resolver_binding() {
 }
 
 #[test]
+fn incompatible_cross_decl_typedef_redef_emits_e0078() {
+    let src = r#"
+        typedef int T;
+        typedef char *T;
+        T x;
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    let diags = cap.diagnostics();
+    assert!(
+        diags.iter().any(|d| {
+            d.code == Some("E0078") && d.message.contains("incompatible typedef redefinition")
+        }),
+        "expected E0078 for incompatible typedef redefinition, got {diags:?}"
+    );
+}
+
+#[test]
 fn gnu_aligned_attribute_sets_record_layout_override() {
     let src = r#"
         typedef struct x { int a; int b; } __attribute__((aligned(32))) X;
