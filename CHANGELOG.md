@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.1
+
+- Release candidate prepared by `cargo xtask release-bump`.
+- See `docs/release-notes-v0.0.1.md` and `docs/conformance.md` for release details.
+
 ## 0.0.0
 
 - Initial crates.io pipeline release for the `rcc-compiler` package.
