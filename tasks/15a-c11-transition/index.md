@@ -21,7 +21,7 @@ work, because Toybox and similar Linux projects expose C11 syntax directly.
 - [x] [03-noreturn-function-specifier](03-noreturn-function-specifier.md)
 - [x] [04-static-assert-declarations](04-static-assert-declarations.md)
 - [x] [05-alignof-alignas](05-alignof-alignas.md)
-- [ ] [06-anonymous-records-standard-mode](06-anonymous-records-standard-mode.md)
+- [x] [06-anonymous-records-standard-mode](06-anonymous-records-standard-mode.md)
 - [ ] [07-generic-selection](07-generic-selection.md)
 - [ ] [08-atomic-types-and-stdatomic](08-atomic-types-and-stdatomic.md)
 - [ ] [09-thread-local-and-threads-header](09-thread-local-and-threads-header.md)

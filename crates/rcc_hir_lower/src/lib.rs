@@ -7439,10 +7439,9 @@ pub fn lower_enum(
 ///   - With a `bit_width` → anonymous bit-field (padding separator).
 ///     The field is emitted with `name = None` so name lookup skips it.
 ///   - Without a `bit_width` → anonymous `struct`/`union` member
-///     (C99 §6.7.2.1p13 / GNU/C11 anonymous-member convention, used
-///     widely in kernel-style code). Its fields are *flattened* into
-///     the enclosing record's field list so that `parent.inner_field`
-///     is accessible as `parent.inner_field` from the outside.
+///     (C11 §6.7.2.1p13). The anonymous record itself remains a real
+///     field so layout preserves tail padding and union overlay; typeck
+///     performs recursive promoted-member lookup for `parent.inner_field`.
 /// - Bit-field widths are validated per C99 §6.7.2.1p4: the width must
 ///   be a non-negative integer constant expression and shall not
 ///   exceed the width of the underlying type. Named zero-width
@@ -7514,18 +7513,33 @@ pub fn lower_record(
                         });
                     }
                 }
-                // ── Anonymous struct/union member — flatten. ────────
+                // ── Anonymous struct/union member. ─────────────────
                 (None, None) => {
-                    // The only way to get here legally is that the field
-                    // specifier described an anonymous record (no tag,
-                    // defined inline). Flatten its fields into the
-                    // parent so both `outer.a` and `outer.b` resolve.
+                    // The field specifier describes an anonymous record
+                    // (no tag, defined inline). Keep it as a real unnamed
+                    // field for layout; typeck recursively promotes the
+                    // member names during `.` / `->` lookup.
                     if let Some(inner_spec) = find_anon_record_in_specs(&fd.specs) {
-                        if let DefKind::Record { fields: inner_fields, .. } =
-                            lower_record(inner_spec, tcx, resolver, crate_, session)
-                        {
-                            out_fields.extend(inner_fields);
-                        }
+                        let ty =
+                            lower_record_spec_to_ty(inner_spec, tcx, resolver, crate_, session);
+                        out_fields.push(Field {
+                            name: None,
+                            ty,
+                            quals: object_quals_from_type_quals(&fd.specs.quals),
+                            align_override: field_align_override(
+                                &fd.specs,
+                                &[],
+                                DeclScope::Block,
+                                None,
+                                tcx,
+                                resolver,
+                                crate_,
+                                session,
+                            ),
+                            offset: None,
+                            bit_width: None,
+                            span: fd.span,
+                        });
                     }
                     // Any other shape (e.g. `int;` with no declarator) is
                     // a malformed field declaration; the parser already
@@ -10577,7 +10591,7 @@ mod tests {
     }
 
     #[test]
-    fn record_anonymous_struct_flattens_fields() {
+    fn record_anonymous_struct_preserves_layout_field() {
         // Acceptance: struct { int a; struct { int b; }; } — outer struct
         // exposes both `a` and `b` for lookup.
         let (mut sess, cap) = Session::for_test();
@@ -10605,24 +10619,24 @@ mod tests {
         let mut crate_ = HirCrate::default();
 
         let kind = lower_record(&outer_spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
-        assert!(cap.diagnostics().is_empty(), "anon flattening should not error");
+        assert!(cap.diagnostics().is_empty(), "anonymous record lowering should not error");
 
         match kind {
             DefKind::Record { fields, .. } => {
-                // Flattened: both a and b appear in the outer list.
-                let names: Vec<_> = fields.iter().filter_map(|f| f.name).collect();
-                assert!(names.contains(&a), "outer should expose `a`");
-                assert!(names.contains(&b), "outer should expose flattened `b`");
+                // Preserved: `a` and one unnamed record field appear in the outer list.
                 assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, Some(a));
+                assert_eq!(fields[1].name, None);
+                assert!(matches!(tcx.get(fields[1].ty), Ty::Record(_)));
             }
             other => panic!("expected Record, got {other:?}"),
         }
     }
 
     #[test]
-    fn record_anonymous_union_flattens_fields() {
+    fn record_anonymous_union_preserves_union_layout_field() {
         // struct { int a; union { int b; int c; }; }
-        // Flattened: a, b, c.
+        // Preserved: a, anonymous union field.
         let (mut sess, _cap) = Session::for_test();
         let mut tcx = TyCtxt::new();
         let a = sym(&mut sess, "a");
@@ -10649,11 +10663,19 @@ mod tests {
         let kind = lower_record(&outer_spec, &mut tcx, &mut resolver, &mut crate_, &mut sess);
         match kind {
             DefKind::Record { fields, .. } => {
-                let names: Vec<_> = fields.iter().filter_map(|f| f.name).collect();
-                assert!(names.contains(&a));
-                assert!(names.contains(&b));
-                assert!(names.contains(&c));
-                assert_eq!(fields.len(), 3);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, Some(a));
+                assert_eq!(fields[1].name, None);
+                let Ty::Record(union_def) = *tcx.get(fields[1].ty) else {
+                    panic!("anonymous union should remain a record field");
+                };
+                let DefKind::Record { kind: RecordKind::Union, fields: union_fields, .. } =
+                    &crate_.defs[union_def].kind
+                else {
+                    panic!("expected anonymous union definition");
+                };
+                let names: Vec<_> = union_fields.iter().filter_map(|f| f.name).collect();
+                assert_eq!(names, vec![b, c]);
             }
             other => panic!("expected Record, got {other:?}"),
         }

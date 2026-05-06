@@ -932,6 +932,7 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
     if is_anonymous_record_member(&specs)
         && matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi)))
     {
+        warn_c99_anonymous_record_member(p, start);
         let end = p.bump().map(|tok| tok.span).unwrap_or(start);
         declarators.push(FieldDeclarator { declarator: None, bit_width: None });
         return Some(FieldDecl { specs, declarators, span: start.to(end) });
@@ -973,6 +974,18 @@ fn is_anonymous_record_member(specs: &DeclSpecs) -> bool {
         specs.type_specs.as_slice(),
         [TypeSpec::Record(rec)] if rec.tag.is_none() && rec.fields.is_some()
     )
+}
+
+fn warn_c99_anonymous_record_member(p: &mut Parser<'_>, span: Span) {
+    if p.session.opts.language_standard == rcc_session::LanguageStandard::C11 {
+        return;
+    }
+    p.session
+        .handler
+        .struct_warn(span, "C11 anonymous struct/union member is not part of C99")
+        .code(codes::W0035)
+        .note("parsing it as an extension so promoted member access can be checked")
+        .emit();
 }
 
 /// Parse one *struct-declarator* (C99 §6.7.2.1):
@@ -3660,7 +3673,7 @@ mod tests {
     }
 
     #[test]
-    fn gnu_anonymous_record_member_without_declarator_parses() {
+    fn c99_anonymous_record_member_without_declarator_warns() {
         let (rec, diags, sess) =
             parse_record("struct S { union { int a; struct { int b; int c; }; }; int tail; }");
         let fs = rec.fields.as_ref().expect("body");
@@ -3681,7 +3694,10 @@ mod tests {
         let (tail, _) =
             fs[1].declarators[0].declarator.as_ref().and_then(|d| d.name).expect("tail field");
         assert_eq!(sess.interner.get(tail), "tail");
-        assert!(diags.is_empty(), "clean: {diags:?}");
+        assert!(
+            diags.iter().any(|d| d.code == Some(codes::W0035)),
+            "expected C99 anonymous record warning, got {diags:?}"
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-06: Anonymous Structs/Unions as Standard C11
 
 **Phase:** 15a-c11-transition  
@@ -21,10 +23,10 @@ compatibility behavior, while keeping C99 diagnostics intact.
 
 ## Acceptance
 
-- [ ] `struct S { union { int x; long y; }; };` parses and lowers in C11 mode.
-- [ ] Member lookup through anonymous records works in typeck and codegen.
-- [ ] Duplicate ambiguous member names produce a diagnostic.
-- [ ] Existing GNU/MS bitfield behavior is unchanged.
+- [x] `struct S { union { int x; long y; }; };` parses and lowers in C11 mode.
+- [x] Member lookup through anonymous records works in typeck and codegen.
+- [x] Duplicate ambiguous member names produce a diagnostic.
+- [x] Existing GNU/MS bitfield behavior is unchanged.
 
 ## References
 

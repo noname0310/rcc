@@ -1186,6 +1186,61 @@ fn c11_invalid_alignas_is_diagnosed() {
 }
 
 #[test]
+fn c11_anonymous_union_member_preserves_layout_and_promoted_lookup() {
+    let src = r#"
+        struct S {
+            union { int x; long y; };
+            char tail;
+        };
+        int f(struct S *s) {
+            s->x = 1;
+            s->y = 2;
+            return s->x;
+        }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, mut tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+
+    let (record_def, fields) = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { kind: RecordKind::Struct, fields, .. }
+                if fields.len() == 2 && fields[0].name.is_none() && fields[1].name.is_some() =>
+            {
+                Some((id, fields))
+            }
+            _ => None,
+        })
+        .expect("outer record");
+    assert!(matches!(tcx.get(fields[0].ty), Ty::Record(_)));
+    let record_ty = tcx.intern(Ty::Record(record_def));
+    let layout = LayoutCx::with_defs(&tcx, &hir.defs)
+        .record_layout_of(record_ty)
+        .expect("outer record layout");
+    assert_eq!(layout.fields[0].offset, 0);
+    assert_eq!(layout.fields[1].offset, 8, "tail must follow the anonymous union storage");
+
+    let body = hir.bodies.values().next().expect("function body");
+    assert!(
+        body.exprs.iter().any(|expr| {
+            matches!(
+                expr.kind,
+                HirExprKind::Field { base, field_index: 0 }
+                    if matches!(body.exprs[base].kind, HirExprKind::Field { field_index: 0, .. })
+            )
+        }),
+        "promoted `s->x`/`s->y` should lower through nested anonymous field paths: {:#?}",
+        body.exprs
+    );
+}
+
+#[test]
 fn gnu_common_global_and_local_unused_attrs_lower() {
     let src = r#"
         int g __attribute__((unused, visibility("default"), section(".data.rcc")));
@@ -1758,9 +1813,9 @@ fn composite_union_kind_propagates() {
 }
 
 #[test]
-fn composite_anonymous_struct_member_flattens() {
+fn composite_anonymous_struct_member_preserves_nested_layout_field() {
     // struct Outer { struct { int a; int b; }; int c; }
-    // Field list seen from outside: [a, b, c].
+    // Physical field list: [anonymous struct, c]. Typeck promotes a/b for lookup.
     let (mut sess, _cap) = Session::for_test();
     let mut tcx = TyCtxt::new();
     let a = intern(&mut sess, "a");
@@ -1789,7 +1844,15 @@ fn composite_anonymous_struct_member_flattens() {
     match kind {
         DefKind::Record { fields, .. } => {
             let names: Vec<_> = fields.iter().map(|f| f.name).collect();
-            assert_eq!(names, vec![Some(a), Some(b), Some(c)]);
+            assert_eq!(names, vec![None, Some(c)]);
+            let Ty::Record(inner_def) = *tcx.get(fields[0].ty) else {
+                panic!("anonymous struct should remain a nested record field");
+            };
+            let DefKind::Record { fields: inner_fields, .. } = &crate_.defs[inner_def].kind else {
+                panic!("expected nested record");
+            };
+            let inner_names: Vec<_> = inner_fields.iter().map(|f| f.name).collect();
+            assert_eq!(inner_names, vec![Some(a), Some(b)]);
         }
         other => panic!("expected record, got {other:?}"),
     }

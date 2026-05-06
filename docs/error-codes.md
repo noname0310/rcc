@@ -1595,3 +1595,19 @@ __extension__ static __inline int f(int x) { return x; }
 Strict C99 mode emits this warning because the marker is not part of the C99
 grammar. Hosted Linux mode suppresses it for system-header compatibility; the
 marker does not change ABI, storage class, or code generation.
+
+## W0035 — C11 anonymous struct/union member extension
+
+C11 standardizes anonymous structure and union members:
+
+```c
+struct S {
+    union {
+        int x;
+        long y;
+    };
+};
+```
+
+When compiling as C99, `rcc` still parses this shape for compatibility but
+emits W0035. In `-std=c11` mode it is accepted as standard C without a warning.

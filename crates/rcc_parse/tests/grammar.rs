@@ -949,6 +949,27 @@ fn c99_alignof_and_alignas_are_diagnosed() {
 }
 
 #[test]
+fn c11_anonymous_record_member_is_standard() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_tu, diags) =
+        parse_ok_with_options("struct S { union { int x; long y; }; int tail; };", opts);
+    assert!(
+        diags.iter().all(|d| d.code != Some(rcc_errors::codes::W0035)),
+        "C11 anonymous record member should not warn: {diags:#?}"
+    );
+}
+
+#[test]
+fn c99_anonymous_record_member_warns_as_extension() {
+    let (ast, diags, _) = parse_snippet("struct S { union { int x; long y; }; int tail; };");
+    assert!(ast.is_some(), "extension should still parse");
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::W0035)),
+        "expected W0035 in C99 mode, got {diags:#?}"
+    );
+}
+
+#[test]
 fn s6_7_5_pointer_declarator() {
     parse_ok("int *p;");
     parse_ok("const int *p;");

@@ -126,6 +126,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (W0032, W0032_DESC),
     (W0033, W0033_DESC),
     (W0034, W0034_DESC),
+    (W0035, W0035_DESC),
 ];
 
 // ── Lexer / preprocessor block: E0001..E0020 ────────────────────────
@@ -976,6 +977,10 @@ const W0033_DESC: &str = "unsupported GNU attribute ignored";
 /// GNU `__extension__` prefix accepted outside hosted/GNU system-header mode.
 pub const W0034: &str = "W0034";
 const W0034_DESC: &str = "GNU __extension__ declaration prefix";
+
+/// C11 anonymous struct/union member accepted while compiling in C99 mode.
+pub const W0035: &str = "W0035";
+const W0035_DESC: &str = "C11 anonymous struct/union member extension";
 
 #[cfg(test)]
 mod tests {

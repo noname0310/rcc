@@ -1988,13 +1988,26 @@ fn type_unresolved_field(
 ) -> HirExprId {
     let cat = value_category(body, base);
     match member_base_record(body, tcx, base) {
-        Some(record) => match resolve_field(record, request.name, def_info) {
-            Some((field_index, field)) => {
-                body.exprs[expr_id].ty = typed_field_expr_ty(tcx, field);
-                body.exprs[expr_id].value_cat = cat;
-                body.exprs[expr_id].kind = HirExprKind::Field { base, field_index };
+        Some(record) => match resolve_field(record, request.name, tcx, def_info) {
+            FieldResolution::Found(path) => {
+                rewrite_field_path(expr_id, base, request.span, path.as_slice(), cat, body, tcx);
             }
-            None => {
+            FieldResolution::Ambiguous => {
+                let field_name = session.interner.get(request.name).to_string();
+                invalid_member_access(
+                    session,
+                    request.span,
+                    format!("member name `{field_name}` is ambiguous through anonymous records"),
+                );
+                body.exprs[expr_id].ty = tcx.error;
+                body.exprs[expr_id].value_cat = cat;
+                body.exprs[expr_id].kind = HirExprKind::UnresolvedField {
+                    base,
+                    field: request.name,
+                    field_span: request.span,
+                };
+            }
+            FieldResolution::Missing => {
                 let field_name = session.interner.get(request.name).to_string();
                 invalid_member_access(
                     session,
@@ -2212,16 +2225,85 @@ fn member_base_record(body: &Body, tcx: &TyCtxt, base: HirExprId) -> Option<rcc_
     }
 }
 
+#[derive(Debug, Clone)]
+enum FieldResolution {
+    Found(Vec<(u32, FieldSnapshot)>),
+    Ambiguous,
+    Missing,
+}
+
 fn resolve_field(
     record: rcc_hir::DefId,
     name: Symbol,
+    tcx: &TyCtxt,
     def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
-) -> Option<(u32, FieldSnapshot)> {
-    let fields = def_info.get(&record)?.record_fields.as_ref()?;
-    fields
-        .iter()
-        .enumerate()
-        .find_map(|(idx, field)| (field.name == Some(name)).then_some((idx as u32, *field)))
+) -> FieldResolution {
+    let mut matches = Vec::new();
+    collect_field_paths(record, name, tcx, def_info, &mut Vec::new(), &mut matches);
+    match matches.len() {
+        0 => FieldResolution::Missing,
+        1 => FieldResolution::Found(matches.pop().expect("one match")),
+        _ => FieldResolution::Ambiguous,
+    }
+}
+
+fn collect_field_paths(
+    record: rcc_hir::DefId,
+    name: Symbol,
+    tcx: &TyCtxt,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+    prefix: &mut Vec<(u32, FieldSnapshot)>,
+    matches: &mut Vec<Vec<(u32, FieldSnapshot)>>,
+) {
+    let Some(fields) = def_info.get(&record).and_then(|snapshot| snapshot.record_fields.as_ref())
+    else {
+        return;
+    };
+    for (idx, field) in fields.iter().copied().enumerate() {
+        let idx = idx as u32;
+        prefix.push((idx, field));
+        if field.name == Some(name) {
+            matches.push(prefix.clone());
+        }
+        if field.name.is_none() && field.bit_width.is_none() {
+            if let Ty::Record(nested) = *tcx.get(field.ty) {
+                collect_field_paths(nested, name, tcx, def_info, prefix, matches);
+            }
+        }
+        prefix.pop();
+    }
+}
+
+fn rewrite_field_path(
+    expr_id: HirExprId,
+    base: HirExprId,
+    span: rcc_span::Span,
+    path: &[(u32, FieldSnapshot)],
+    cat: ValueCat,
+    body: &mut Body,
+    tcx: &TyCtxt,
+) {
+    let Some((last, parents)) = path.split_last() else {
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = cat;
+        return;
+    };
+    let mut current_base = base;
+    for (field_index, field) in parents {
+        let id = body.exprs.push(HirExpr {
+            id: HirExprId(0),
+            ty: typed_field_expr_ty(tcx, *field),
+            value_cat: cat,
+            span,
+            kind: HirExprKind::Field { base: current_base, field_index: *field_index },
+        });
+        body.exprs[id].id = id;
+        current_base = id;
+    }
+    let (field_index, field) = *last;
+    body.exprs[expr_id].ty = typed_field_expr_ty(tcx, field);
+    body.exprs[expr_id].value_cat = cat;
+    body.exprs[expr_id].kind = HirExprKind::Field { base: current_base, field_index };
 }
 
 fn invalid_member_access(session: &mut Session, span: rcc_span::Span, msg: String) {
@@ -6202,6 +6284,15 @@ mod tests {
         fields: Vec<(Option<Symbol>, TyId)>,
     ) -> rcc_data_structures::FxHashMap<DefId, DefSnapshot> {
         let mut def_info = rcc_data_structures::FxHashMap::default();
+        insert_record_def_info(&mut def_info, record, fields);
+        def_info
+    }
+
+    fn insert_record_def_info(
+        def_info: &mut rcc_data_structures::FxHashMap<DefId, DefSnapshot>,
+        record: DefId,
+        fields: Vec<(Option<Symbol>, TyId)>,
+    ) {
         def_info.insert(
             record,
             DefSnapshot {
@@ -6224,7 +6315,6 @@ mod tests {
                 ),
             },
         );
-        def_info
     }
 
     #[test]
@@ -6594,6 +6684,90 @@ mod tests {
         assert!(!session.handler.has_errors());
         assert_eq!(body.exprs[member].ty, tcx.long);
         assert!(matches!(body.exprs[member].kind, HirExprKind::Field { field_index: 1, .. }));
+    }
+
+    #[test]
+    fn member_access_resolves_promoted_anonymous_record_field_path() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, _cap) = Session::for_test();
+        let x = session.interner.intern("x");
+        let tail = session.interner.intern("tail");
+        let inner_record = DefId(90);
+        let outer_record = DefId(91);
+        let inner_ty = tcx.intern(Ty::Record(inner_record));
+        let outer_ty = tcx.intern(Ty::Record(outer_record));
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        insert_record_def_info(&mut def_info, inner_record, vec![(Some(x), tcx.int)]);
+        insert_record_def_info(
+            &mut def_info,
+            outer_record,
+            vec![(None, inner_ty), (Some(tail), tcx.char_)],
+        );
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), outer_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: x, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert!(!session.handler.has_errors());
+        assert_eq!(body.exprs[member].ty, tcx.int);
+        let HirExprKind::Field { base: anon_base, field_index: 0 } = body.exprs[member].kind else {
+            panic!("expected final promoted field, got {:?}", body.exprs[member].kind);
+        };
+        assert!(matches!(
+            body.exprs[anon_base].kind,
+            HirExprKind::Field { base: got_base, field_index: 0 } if got_base == base
+        ));
+        assert_eq!(body.exprs[anon_base].ty, inner_ty);
+    }
+
+    #[test]
+    fn member_access_reports_ambiguous_anonymous_record_promotions() {
+        let mut tcx = TyCtxt::new();
+        let (mut session, cap) = Session::for_test();
+        let x = session.interner.intern("x");
+        let left_record = DefId(92);
+        let right_record = DefId(93);
+        let outer_record = DefId(94);
+        let left_ty = tcx.intern(Ty::Record(left_record));
+        let right_ty = tcx.intern(Ty::Record(right_record));
+        let outer_ty = tcx.intern(Ty::Record(outer_record));
+        let mut def_info = rcc_data_structures::FxHashMap::default();
+        insert_record_def_info(&mut def_info, left_record, vec![(Some(x), tcx.int)]);
+        insert_record_def_info(&mut def_info, right_record, vec![(Some(x), tcx.long)]);
+        insert_record_def_info(
+            &mut def_info,
+            outer_record,
+            vec![(None, left_ty), (None, right_ty)],
+        );
+
+        let mut body = Body::default();
+        let s = push_local(&mut body, Some(session.interner.intern("s")), outer_ty, true);
+        let base = push_kind(&mut body, tcx.error, HirExprKind::LocalRef(s));
+        let member = push_kind(
+            &mut body,
+            tcx.error,
+            HirExprKind::UnresolvedField { base, field: x, field_span: DUMMY_SP },
+        );
+        set_root_expr(&mut body, member);
+
+        check_body_with_defs(&mut body, &mut tcx, &mut session, &def_info);
+
+        assert_eq!(body.exprs[member].ty, tcx.error);
+        assert!(
+            cap.diagnostics().iter().any(|diag| {
+                diag.code == Some(rcc_errors::codes::E0087) && diag.message.contains("ambiguous")
+            }),
+            "expected ambiguous member diagnostic, got {:?}",
+            cap.diagnostics()
+        );
     }
 
     #[test]
