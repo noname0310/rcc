@@ -21,13 +21,14 @@ adds:
 - a multi-translation-unit runtime with enough surface to expose lowering,
   type-checking, and codegen gaps before a full executable smoke.
 
-## Probe Command
+## Probe Commands
 
 ```sh
 bash real_world/projects/08-quickjs/scripts/run-object-probe.sh
+bash real_world/projects/08-quickjs/scripts/run-full-qjs-smoke.sh
 ```
 
-The first stable target is an object-only probe for the core library sources:
+The object-only probe covers the core library sources:
 
 ```text
 quickjs.c
@@ -38,8 +39,12 @@ cutils.c
 quickjs-libc.c
 ```
 
-The script builds each source once with host `cc` and once with `rcc` using the
-same upstream source tree and core Makefile flags:
+The full smoke builds a host `qjsc` only to generate `repl.c`, then compiles
+`qjs.c`, `repl.c`, and the QuickJS runtime objects with `rcc` and links the
+result against host libc/libm/libpthread/libdl.
+
+Both scripts build each source from the same upstream source tree and core
+Makefile flags:
 
 ```sh
 -std=c99 -O2 -fwrapv -funsigned-char -D_GNU_SOURCE \
@@ -53,14 +58,16 @@ libcall declarations.
 
 ## Current Result
 
-Status: object probe passes.
+Status: full `qjs` link and rich runtime smoke pass.
 
 The probe is expected to be tightened monotonically:
 
 1. Core object probe passes for all six translation units. Done.
-2. `libquickjs.a` archive probe.
-3. `qjs` link probe against host libc/libm/libpthread/libdl.
-4. Runtime smoke comparing host-built and rcc-built `qjs` output.
+2. `libquickjs.a` archive probe. Covered by the same rcc object set used by the full smoke.
+3. `qjs` link probe against host libc/libm/libpthread/libdl. Done.
+4. Basic runtime smoke for `qjs -e 'console.log(1 + 2)'`. Done.
+5. Rich JavaScript runtime probe for objects, arrays, functions, loops, JSON,
+   and generated file input. Done; tracked as QJS-004 in `RESULTS.md`.
 
 ## Known Compiler-Owned Findings
 
@@ -72,6 +79,10 @@ The probe is expected to be tightened monotonically:
 | `quickjs.c` includes `<stdatomic.h>` and uses `_Atomic(T)` casts. | hosted Linux resource header surface | fixed in local work as a C99 compatibility shim before this probe is marked pass |
 | `quickjs.h` uses explicit identity casts such as `(JSValue)v` when `JSValue` is a record. | `rcc_cfg` cast lowering | fixed by treating same-type explicit casts as no-op |
 | `quickjs-libc.c` depends on Linux/POSIX declarations (`fd_set`, `popen`, `realpath`, `environ`, extra signals). | hosted Linux resource header surface | fixed by extending checked-in header shims |
+| QuickJS uses GNU builtins (`alloca`, `__builtin_clz*`, `__builtin_ctz*`, `__builtin_frame_address`) that must not be left as unresolved libc symbols. | `rcc_codegen_llvm` GNU builtin lowering | fixed by lowering to LLVM alloca/intrinsics |
+| `JSCFunctionListEntry` stores pointer-bearing active members inside a union used by static global arrays. | `rcc_codegen_llvm` global initializer materialization | fixed by preserving pointer relocation chunks in union storage |
+| `extern const uint8_t qjsc_repl[]` must be representable as an external incomplete array and usable as a pointer. | `rcc_codegen_llvm` global declaration/codegen | fixed by zero-length external declarations plus element alignment |
+| `JSClosureVar` starts with bit-fields followed by non-bit-field members at offset 2; LLVM explicit struct stride and bit-field access width must match HIR `sizeof`. | `rcc_codegen_llvm` explicit bit-field record layout | fixed by capping represented bit-field storage at the next non-bit-field offset |
 
 ## Follow-up Rule
 

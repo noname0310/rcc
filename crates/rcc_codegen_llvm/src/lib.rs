@@ -988,6 +988,19 @@ pub mod backend {
     use rcc_span::{FileId, Span, Symbol};
     use rcc_target::Endianness;
 
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    enum UnionStorageChunkKind {
+        Bytes,
+        Pointer,
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    struct UnionStorageChunk {
+        offset: u64,
+        size: u64,
+        kind: UnionStorageChunkKind,
+    }
+
     struct CheckedOverflowArgs<'a> {
         op: BinOp,
         lhs: &'a Operand,
@@ -1782,6 +1795,10 @@ pub mod backend {
                 .get_global(&name)
                 .unwrap_or_else(|| self.module.add_global(global_ty, None, &name));
             global.set_linkage(linkage);
+            let align = self.global_storage_align(ty, linkage, needs_zero_initializer)?;
+            if align > 1 {
+                global.set_alignment(align);
+            }
             self.apply_common_global_attrs(global, attrs);
             if needs_zero_initializer && global.get_initializer().is_none() {
                 let zero = global_ty.const_zero();
@@ -1804,6 +1821,24 @@ pub mod backend {
                 }
             }
             self.type_cx().basic_type_of(ty)
+        }
+
+        fn global_storage_align(
+            &self,
+            ty: TyId,
+            linkage: LlvmLinkage,
+            needs_zero_initializer: bool,
+        ) -> Result<u32, CodegenError> {
+            if !needs_zero_initializer && linkage == LlvmLinkage::External {
+                if let Ty::Array { elem, len: None, is_vla: false } = self.tcx.get(ty) {
+                    return self
+                        .layout_cx()
+                        .layout_of(elem.ty)
+                        .map(|layout| layout.align)
+                        .map_err(|err| type_lowering_error(elem.ty, err.to_string()));
+                }
+            }
+            self.local_storage_align(ty)
         }
 
         fn apply_common_function_attrs(&self, function: FunctionValue<'ctx>, attrs: CommonAttrs) {
@@ -2697,7 +2732,13 @@ pub mod backend {
             let bit_offset = field.layout.bit_offset.ok_or_else(|| {
                 CodegenError::Internal("bit-field layout is missing bit offset".to_owned())
             })?;
-            let storage_bits = storage_bits_for_bitfield(field.layout.storage_size)?;
+            let record_layout = self
+                .layout_cx()
+                .record_layout_of(owner_ty)
+                .map_err(|err| type_error(owner_ty, err.to_string()))?;
+            let storage_size =
+                explicit_bitfield_repr_size(&record_layout.fields, *field_idx as usize, owner_ty)?;
+            let storage_bits = storage_bits_for_bitfield(storage_size)?;
             if bit_offset.checked_add(bit_width).is_none_or(|end| end > storage_bits) {
                 return Err(CodegenError::Internal(format!(
                     "bit-field range offset {} width {} exceeds {}-bit storage unit",
@@ -3062,6 +3103,9 @@ pub mod backend {
                     let addr = self.emit_place_addr(place, locals, body)?;
                     let ty = self.place_ty(place, body)?;
                     if matches!(self.tcx.get(ty), Ty::Func { .. }) {
+                        return Ok(addr.into());
+                    }
+                    if matches!(self.tcx.get(ty), Ty::Array { .. }) {
                         return Ok(addr.into());
                     }
                     let llvm_ty = self.type_cx().basic_type_of(ty)?;
@@ -5981,7 +6025,7 @@ pub mod backend {
             target: Option<BasicBlockId>,
         ) -> Result<(), CodegenError> {
             let fn_ty = self.callee_fn_ty(callee)?;
-            if self.try_emit_gnu_builtin_llabs_call(callee, args, destination, target, fn_ty)? {
+            if self.try_emit_gnu_builtin_call(callee, args, destination, target, fn_ty)? {
                 return Ok(());
             }
             let abi = sysv_fn_abi(self.cx.tcx, &self.cx.hir.defs, fn_ty)?;
@@ -6059,7 +6103,7 @@ pub mod backend {
             }
         }
 
-        fn try_emit_gnu_builtin_llabs_call(
+        fn try_emit_gnu_builtin_call(
             &self,
             callee: &Operand,
             args: &[Operand],
@@ -6070,20 +6114,196 @@ pub mod backend {
             if !self.cx.session.opts.gnu_builtin_libcalls {
                 return Ok(false);
             }
-            if !self.is_exact_llabs_signature(fn_ty) {
+
+            let Some(name) = self.direct_callee_name(callee) else {
                 return Ok(false);
+            };
+            match name {
+                "alloca" => self.emit_alloca_builtin(args, destination, target).map(|()| true),
+                "__builtin_clz" | "__builtin_clzll" => self
+                    .emit_ctlz_cttz_builtin(name, args, destination, target, fn_ty, "ctlz")
+                    .map(|()| true),
+                "__builtin_ctz" | "__builtin_ctzll" => self
+                    .emit_ctlz_cttz_builtin(name, args, destination, target, fn_ty, "cttz")
+                    .map(|()| true),
+                "__builtin_frame_address" => {
+                    self.emit_frame_address_builtin(args, destination, target).map(|()| true)
+                }
+                "llabs" if self.is_exact_llabs_signature(fn_ty) => {
+                    self.emit_llabs_builtin(args, destination, target).map(|()| true)
+                }
+                _ => Ok(false),
             }
+        }
+
+        fn direct_callee_name(&self, callee: &Operand) -> Option<&str> {
             let Operand::Const(rcc_cfg::Const { kind: ConstKind::Global(def), .. }) = callee else {
-                return Ok(false);
+                return None;
             };
-            let Some(def_data) = self.cx.hir.defs.get(*def) else {
-                return Ok(false);
-            };
-            if self.cx.session.interner.get(def_data.name) != "llabs" {
-                return Ok(false);
+            let def_data = self.cx.hir.defs.get(*def)?;
+            if !matches!(def_data.kind, DefKind::Function { .. }) {
+                return None;
             }
+            Some(self.cx.session.interner.get(def_data.name))
+        }
+
+        fn emit_alloca_builtin(
+            &self,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+        ) -> Result<(), CodegenError> {
             if args.len() != 1 {
-                return Ok(false);
+                return Err(CodegenError::Internal(format!(
+                    "alloca builtin expected 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            let size = self.emit_builtin_int_arg(&args[0], "alloca size")?;
+            let size =
+                self.cx.cast_int_value(size, self.cx.context.i64_type(), false, "alloca.n")?;
+            let ptr = self
+                .cx
+                .builder
+                .build_array_alloca(self.cx.context.i8_type(), size, "alloca")
+                .map_err(builder_error)?;
+            self.finish_builtin_call(ptr.as_basic_value_enum(), destination, target)
+        }
+
+        fn emit_ctlz_cttz_builtin(
+            &self,
+            name: &str,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+            fn_ty: TyId,
+            intrinsic: &str,
+        ) -> Result<(), CodegenError> {
+            if args.len() != 1 {
+                return Err(CodegenError::Internal(format!(
+                    "{name} expected 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            let value = self.emit_builtin_int_arg(&args[0], name)?;
+            let bits = value.get_type().get_bit_width();
+            let intrinsic_name = format!("llvm.{intrinsic}.i{bits}");
+            let intrinsic = self.cx.module.get_function(&intrinsic_name).unwrap_or_else(|| {
+                let fn_ty = value
+                    .get_type()
+                    .fn_type(&[value.get_type().into(), self.cx.context.bool_type().into()], false);
+                self.cx.module.add_function(&intrinsic_name, fn_ty, None)
+            });
+            let zero_is_undef = self.cx.context.bool_type().const_zero();
+            let call = self
+                .cx
+                .builder
+                .build_call(intrinsic, &[value.into(), zero_is_undef.into()], name)
+                .map_err(builder_error)?;
+            let result = call
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| CodegenError::Internal(format!("{intrinsic_name} returned void")))?
+                .into_int_value();
+            let ret_ty = self.fn_return_ty(fn_ty)?;
+            let ret_llvm_ty = self.cx.type_cx().basic_type_of(ret_ty)?;
+            let BasicTypeEnum::IntType(ret_int_ty) = ret_llvm_ty else {
+                return Err(CodegenError::Internal(format!(
+                    "{name} return type must be integer, got {ret_llvm_ty:?}"
+                )));
+            };
+            let result = self.cx.cast_int_value(result, ret_int_ty, false, name)?;
+            self.finish_builtin_call(result.as_basic_value_enum(), destination, target)
+        }
+
+        fn emit_frame_address_builtin(
+            &self,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+        ) -> Result<(), CodegenError> {
+            if args.len() != 1 {
+                return Err(CodegenError::Internal(format!(
+                    "__builtin_frame_address expected 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            let level = self.emit_frame_address_level(&args[0])?;
+            let intrinsic_name = "llvm.frameaddress.p0";
+            let intrinsic = self.cx.module.get_function(intrinsic_name).unwrap_or_else(|| {
+                let ptr_ty = self.cx.context.ptr_type(AddressSpace::default());
+                let fn_ty = ptr_ty.fn_type(&[self.cx.context.i32_type().into()], false);
+                self.cx.module.add_function(intrinsic_name, fn_ty, None)
+            });
+            let call = self
+                .cx
+                .builder
+                .build_call(intrinsic, &[level.into()], "frameaddress")
+                .map_err(builder_error)?;
+            let result = call.try_as_basic_value().left().ok_or_else(|| {
+                CodegenError::Internal("llvm.frameaddress did not return a value".to_owned())
+            })?;
+            self.finish_builtin_call(result, destination, target)
+        }
+
+        fn emit_frame_address_level(&self, arg: &Operand) -> Result<IntValue<'ctx>, CodegenError> {
+            let Some(value) = self.const_int_operand(arg) else {
+                return Err(CodegenError::Internal(
+                    "__builtin_frame_address level must be an integer constant".to_owned(),
+                ));
+            };
+            Ok(self.cx.context.i32_type().const_int(value as u64, value < 0))
+        }
+
+        fn const_int_operand(&self, operand: &Operand) -> Option<i128> {
+            match operand {
+                Operand::Const(rcc_cfg::Const { kind: ConstKind::Int(value), .. }) => Some(*value),
+                Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => {
+                    self.const_int_local(place.base)
+                }
+                _ => None,
+            }
+        }
+
+        fn const_int_local(&self, local: Local) -> Option<i128> {
+            let mut found = None;
+            for block in self.body.blocks.iter() {
+                for statement in &block.statements {
+                    let StatementKind::Assign { place, rvalue } = &statement.kind else {
+                        continue;
+                    };
+                    if place.base != local || !place.projection.is_empty() {
+                        continue;
+                    }
+                    let value = self.const_int_rvalue(rvalue)?;
+                    if found.replace(value).is_some() {
+                        return None;
+                    }
+                }
+            }
+            found
+        }
+
+        fn const_int_rvalue(&self, rvalue: &Rvalue) -> Option<i128> {
+            match rvalue {
+                Rvalue::Use(operand) | Rvalue::Cast { op: operand, .. } => {
+                    self.const_int_operand(operand)
+                }
+                _ => None,
+            }
+        }
+
+        fn emit_llabs_builtin(
+            &self,
+            args: &[Operand],
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+        ) -> Result<(), CodegenError> {
+            if args.len() != 1 {
+                return Err(CodegenError::Internal(format!(
+                    "llabs expected 1 argument, got {}",
+                    args.len()
+                )));
             }
 
             let value = self.emit_operand_value(&args[0])?;
@@ -6107,9 +6327,33 @@ pub mod backend {
                 .map_err(builder_error)?
                 .into_int_value();
 
+            self.finish_builtin_call(abs.as_basic_value_enum(), destination, target)
+        }
+
+        fn emit_builtin_int_arg(
+            &self,
+            arg: &Operand,
+            builtin: &str,
+        ) -> Result<IntValue<'ctx>, CodegenError> {
+            let value = self.emit_operand_value(arg)?;
+            let BasicValueEnum::IntValue(value) = value else {
+                return Err(CodegenError::Internal(format!(
+                    "{builtin} argument must lower to an integer, got {:?}",
+                    value.get_type()
+                )));
+            };
+            Ok(value)
+        }
+
+        fn finish_builtin_call(
+            &self,
+            value: BasicValueEnum<'ctx>,
+            destination: Option<&Place>,
+            target: Option<BasicBlockId>,
+        ) -> Result<(), CodegenError> {
             if let Some(dest) = destination {
                 let dest_addr = self.cx.emit_place_addr(dest, &self.locals, self.body)?;
-                self.cx.builder.build_store(dest_addr, abs).map_err(builder_error)?;
+                self.cx.builder.build_store(dest_addr, value).map_err(builder_error)?;
             }
 
             match target {
@@ -6118,7 +6362,17 @@ pub mod backend {
                     self.cx.builder.build_unreachable().map_err(builder_error)?;
                 }
             }
-            Ok(true)
+            Ok(())
+        }
+
+        fn fn_return_ty(&self, fn_ty: TyId) -> Result<TyId, CodegenError> {
+            let Ty::Func { ret, .. } = self.cx.tcx.get(fn_ty) else {
+                return Err(CodegenError::Internal(format!(
+                    "expected function type, got {:?}",
+                    fn_ty
+                )));
+            };
+            Ok(*ret)
         }
 
         fn is_exact_llabs_signature(&self, fn_ty: TyId) -> bool {
@@ -6613,6 +6867,27 @@ pub mod backend {
         Ok(bits)
     }
 
+    fn explicit_bitfield_repr_size(
+        fields: &[rcc_hir::layout::FieldLayout],
+        index: usize,
+        ty: TyId,
+    ) -> Result<u64, CodegenError> {
+        let field = fields.get(index).ok_or_else(|| {
+            CodegenError::Internal(format!("record layout has no field at index {index}"))
+        })?;
+        let mut end = field.offset.checked_add(field.storage_size).ok_or_else(|| {
+            CodegenError::Internal("explicit bit-field representation overflowed".to_owned())
+        })?;
+        for other in fields.iter().skip(index + 1) {
+            if other.bit_width.is_none() && other.offset > field.offset && other.offset < end {
+                end = other.offset;
+            }
+        }
+        end.checked_sub(field.offset)
+            .filter(|size| *size > 0)
+            .ok_or_else(|| type_error(ty, "invalid explicit bit-field representation size"))
+    }
+
     fn bit_mask(bits: u32) -> Result<u64, CodegenError> {
         if bits == 0 || bits > 64 {
             return Err(CodegenError::Internal(format!(
@@ -7004,15 +7279,18 @@ pub mod backend {
                     }
                     lowered
                 }
-                RecordKind::Union => {
-                    let layout = self
-                        .layout_cx()
-                        .layout_of(ty)
-                        .map_err(|err| type_error(ty, err.to_string()))?;
-                    vec![self.context.i8_type().array_type(array_len(layout.size, ty)?).into()]
-                }
+                RecordKind::Union => match self.union_storage_chunks(ty)? {
+                    Some(chunks) => self.union_chunk_types(ty, &chunks)?,
+                    None => {
+                        let layout = self
+                            .layout_cx()
+                            .layout_of(ty)
+                            .map_err(|err| type_error(ty, err.to_string()))?;
+                        vec![self.context.i8_type().array_type(array_len(layout.size, ty)?).into()]
+                    }
+                },
             };
-            record.set_body(&field_types, explicit_layout && kind == RecordKind::Struct);
+            record.set_body(&field_types, explicit_layout);
             Ok(record)
         }
 
@@ -7058,9 +7336,10 @@ pub mod backend {
                     if field_layout.storage_size == 0 {
                         continue;
                     }
+                    let repr_size = explicit_bitfield_repr_size(&record_layout.fields, idx, ty)?;
                     let unit_end = field_layout
                         .offset
-                        .checked_add(field_layout.storage_size)
+                        .checked_add(repr_size)
                         .ok_or_else(|| type_error(ty, "explicit bit-field unit overflow"))?;
                     if unit_end <= offset {
                         continue;
@@ -7073,7 +7352,7 @@ pub mod backend {
                     if field_layout.offset > offset {
                         out.push(self.padding_type(field_layout.offset - offset, ty)?);
                     }
-                    let storage_bits = storage_bits_for_bitfield(field_layout.storage_size)?;
+                    let storage_bits = storage_bits_for_bitfield(repr_size)?;
                     out.push(self.context.custom_width_int_type(storage_bits).into());
                     offset = unit_end;
                     continue;
@@ -7108,6 +7387,62 @@ pub mod backend {
                 && matches!(self.tcx.get(field_ty), Ty::Array { len: None, is_vla: false, .. })
         }
 
+        fn union_storage_chunks(
+            &self,
+            ty: TyId,
+        ) -> Result<Option<Vec<UnionStorageChunk>>, CodegenError> {
+            let Ty::Record(def) = self.tcx.get(ty) else {
+                return Ok(None);
+            };
+            let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                CodegenError::Internal(format!("record definition {:?} is missing", def))
+            })?;
+            let DefKind::Record { kind: RecordKind::Union, fields, .. } = &def_data.kind else {
+                return Ok(None);
+            };
+
+            let layout_cx = self.layout_cx();
+            let mut pointer_offsets = Vec::new();
+            for field in fields {
+                collect_pointer_offsets(
+                    self.tcx,
+                    self.hir,
+                    &layout_cx,
+                    field.ty,
+                    0,
+                    &mut pointer_offsets,
+                )?;
+            }
+            pointer_offsets.sort_unstable();
+            pointer_offsets.dedup();
+
+            if pointer_offsets.is_empty() {
+                return Ok(None);
+            }
+
+            let layout = layout_cx.layout_of(ty).map_err(|err| type_error(ty, err.to_string()))?;
+            let pointer_size = self.target_info.layouts.pointer.size;
+            union_chunks_from_pointer_offsets(ty, layout.size, pointer_size, pointer_offsets)
+                .map(Some)
+        }
+
+        fn union_chunk_types(
+            &self,
+            ty: TyId,
+            chunks: &[UnionStorageChunk],
+        ) -> Result<Vec<BasicTypeEnum<'ctx>>, CodegenError> {
+            let mut fields = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                match chunk.kind {
+                    UnionStorageChunkKind::Bytes => {
+                        fields.push(self.padding_type(chunk.size, ty)?);
+                    }
+                    UnionStorageChunkKind::Pointer => fields.push(self.ptr_type().into()),
+                }
+            }
+            Ok(fields)
+        }
+
         fn padding_type(&self, size: u64, ty: TyId) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
             Ok(self.context.i8_type().array_type(array_len(size, ty)?).into())
         }
@@ -7140,6 +7475,115 @@ pub mod backend {
 
     fn type_error(ty: TyId, reason: impl Into<String>) -> CodegenError {
         CodegenError::TypeLowering { ty, reason: reason.into() }
+    }
+
+    fn union_chunks_from_pointer_offsets(
+        ty: TyId,
+        size: u64,
+        pointer_size: u64,
+        pointer_offsets: Vec<u64>,
+    ) -> Result<Vec<UnionStorageChunk>, CodegenError> {
+        if pointer_size == 0 {
+            return Err(type_error(ty, "target pointer size is zero"));
+        }
+
+        let mut chunks = Vec::new();
+        let mut cursor = 0_u64;
+        for offset in pointer_offsets {
+            if offset >= size || offset < cursor {
+                continue;
+            }
+            if offset > cursor {
+                chunks.push(UnionStorageChunk {
+                    offset: cursor,
+                    size: offset - cursor,
+                    kind: UnionStorageChunkKind::Bytes,
+                });
+            }
+            let end = offset
+                .checked_add(pointer_size)
+                .ok_or_else(|| type_error(ty, "union pointer storage chunk offset overflowed"))?;
+            if end > size {
+                return Err(type_error(
+                    ty,
+                    "union pointer storage chunk extends beyond union size",
+                ));
+            }
+            chunks.push(UnionStorageChunk {
+                offset,
+                size: pointer_size,
+                kind: UnionStorageChunkKind::Pointer,
+            });
+            cursor = end;
+        }
+
+        if cursor < size {
+            chunks.push(UnionStorageChunk {
+                offset: cursor,
+                size: size - cursor,
+                kind: UnionStorageChunkKind::Bytes,
+            });
+        }
+        Ok(chunks)
+    }
+
+    fn collect_pointer_offsets(
+        tcx: &TyCtxt,
+        hir: &HirCrate,
+        layout_cx: &LayoutCx<'_>,
+        ty: TyId,
+        base: u64,
+        out: &mut Vec<u64>,
+    ) -> Result<(), CodegenError> {
+        match tcx.get(ty) {
+            Ty::Ptr(_) => out.push(base),
+            Ty::Array { elem, len: Some(len), is_vla: false } => {
+                let elem_layout = layout_cx
+                    .layout_of(elem.ty)
+                    .map_err(|err| type_error(elem.ty, err.to_string()))?;
+                for idx in 0..*len {
+                    let offset = base
+                        .checked_add(idx.checked_mul(elem_layout.size).ok_or_else(|| {
+                            type_error(ty, "array pointer offset multiplication overflowed")
+                        })?)
+                        .ok_or_else(|| type_error(ty, "array pointer offset overflowed"))?;
+                    collect_pointer_offsets(tcx, hir, layout_cx, elem.ty, offset, out)?;
+                }
+            }
+            Ty::Record(def) => {
+                let def_data = hir.defs.get(*def).ok_or_else(|| {
+                    CodegenError::Internal(format!("record definition {:?} is missing", def))
+                })?;
+                let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                    return Err(type_error(ty, "record type does not name a record definition"));
+                };
+                let record_layout = layout_cx
+                    .record_layout_of(ty)
+                    .map_err(|err| type_error(ty, err.to_string()))?;
+                match kind {
+                    RecordKind::Struct => {
+                        for (field, field_layout) in fields.iter().zip(record_layout.fields.iter())
+                        {
+                            if field_layout.bit_width.is_some() {
+                                continue;
+                            }
+                            let offset =
+                                base.checked_add(field_layout.offset).ok_or_else(|| {
+                                    type_error(ty, "struct pointer offset overflowed")
+                                })?;
+                            collect_pointer_offsets(tcx, hir, layout_cx, field.ty, offset, out)?;
+                        }
+                    }
+                    RecordKind::Union => {
+                        for field in fields {
+                            collect_pointer_offsets(tcx, hir, layout_cx, field.ty, base, out)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------
@@ -7397,14 +7841,30 @@ pub mod backend {
                             })
                             .collect();
 
+                        let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+                        if let Some(chunks) = self.union_storage_chunks(ty)? {
+                            let values = self.build_union_chunk_values(
+                                ty,
+                                field.ty,
+                                &sub_entries,
+                                size,
+                                &chunks,
+                            )?;
+                            return Ok(struct_ty.const_named_struct(&values).into());
+                        }
+
                         let bytes = self.build_const_bytes(field.ty, &sub_entries, size)?;
                         let byte_array = const_array(self.context.i8_type().into(), &bytes);
-                        let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
                         return Ok(struct_ty.const_named_struct(&[byte_array.into()]).into());
                     }
 
-                    let byte_array_ty = self.context.i8_type().array_type(size);
                     let struct_ty = self.type_cx.basic_type_of(ty)?.into_struct_type();
+                    if let Some(chunks) = self.union_storage_chunks(ty)? {
+                        let values = self.zero_union_chunk_values(ty, &chunks)?;
+                        return Ok(struct_ty.const_named_struct(&values).into());
+                    }
+
+                    let byte_array_ty = self.context.i8_type().array_type(size);
                     Ok(struct_ty.const_named_struct(&[byte_array_ty.const_zero().into()]).into())
                 }
             }
@@ -7428,14 +7888,12 @@ pub mod backend {
                     if field_layout.storage_size == 0 {
                         continue;
                     }
-                    let unit_end = field_layout
-                        .offset
-                        .checked_add(field_layout.storage_size)
-                        .ok_or_else(|| {
-                            CodegenError::Internal(
-                                "explicit bit-field constant unit overflow".to_owned(),
-                            )
-                        })?;
+                    let repr_size = explicit_bitfield_repr_size(&record_layout.fields, i, ty)?;
+                    let unit_end = field_layout.offset.checked_add(repr_size).ok_or_else(|| {
+                        CodegenError::Internal(
+                            "explicit bit-field constant unit overflow".to_owned(),
+                        )
+                    })?;
                     if unit_end <= offset {
                         continue;
                     }
@@ -7453,7 +7911,7 @@ pub mod backend {
                             entries,
                             &record_layout,
                             field_layout.offset,
-                            field_layout.storage_size,
+                            repr_size,
                             ty,
                         )?
                         .into(),
@@ -7521,10 +7979,7 @@ pub mod backend {
                 let Some(width) = field_layout.bit_width else {
                     continue;
                 };
-                if width == 0
-                    || field_layout.offset != unit_offset
-                    || field_layout.storage_size != unit_size
-                {
+                if width == 0 || field_layout.offset != unit_offset {
                     continue;
                 }
                 let bit_offset = field_layout.bit_offset.ok_or_else(|| {
@@ -7532,6 +7987,9 @@ pub mod backend {
                         "bit-field constant layout is missing bit offset".to_owned(),
                     )
                 })?;
+                if u64::from(bit_offset) + u64::from(width) > unit_size * 8 {
+                    continue;
+                }
                 let sub_entries: Vec<GlobalInitEntry> = entries
                     .iter()
                     .filter(|e| {
@@ -7590,6 +8048,234 @@ pub mod backend {
             ty: TyId,
         ) -> Result<inkwell::values::ArrayValue<'ctx>, CodegenError> {
             Ok(self.context.i8_type().array_type(array_len(size, ty)?).const_zero())
+        }
+
+        fn union_storage_chunks(
+            &self,
+            ty: TyId,
+        ) -> Result<Option<Vec<UnionStorageChunk>>, CodegenError> {
+            let Ty::Record(def) = self.tcx.get(ty) else {
+                return Ok(None);
+            };
+            let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                CodegenError::Internal(format!("record definition {:?} is missing", def))
+            })?;
+            let DefKind::Record { kind: RecordKind::Union, fields, .. } = &def_data.kind else {
+                return Ok(None);
+            };
+
+            let layout_cx = self.layout_cx();
+            let mut pointer_offsets = Vec::new();
+            for field in fields {
+                collect_pointer_offsets(
+                    self.tcx,
+                    self.hir,
+                    &layout_cx,
+                    field.ty,
+                    0,
+                    &mut pointer_offsets,
+                )?;
+            }
+            pointer_offsets.sort_unstable();
+            pointer_offsets.dedup();
+            if pointer_offsets.is_empty() {
+                return Ok(None);
+            }
+
+            let layout = layout_cx.layout_of(ty).map_err(|err| type_error(ty, err.to_string()))?;
+            union_chunks_from_pointer_offsets(
+                ty,
+                layout.size,
+                self.target_info.layouts.pointer.size,
+                pointer_offsets,
+            )
+            .map(Some)
+        }
+
+        fn zero_union_chunk_values(
+            &self,
+            ty: TyId,
+            chunks: &[UnionStorageChunk],
+        ) -> Result<Vec<BasicValueEnum<'ctx>>, CodegenError> {
+            let mut values = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                match chunk.kind {
+                    UnionStorageChunkKind::Bytes => {
+                        values.push(self.padding_const(chunk.size, ty)?.into());
+                    }
+                    UnionStorageChunkKind::Pointer => values
+                        .push(self.context.ptr_type(AddressSpace::default()).const_null().into()),
+                }
+            }
+            Ok(values)
+        }
+
+        fn build_union_chunk_values(
+            &mut self,
+            union_ty: TyId,
+            active_ty: TyId,
+            entries: &[GlobalInitEntry],
+            union_size: u32,
+            chunks: &[UnionStorageChunk],
+        ) -> Result<Vec<BasicValueEnum<'ctx>>, CodegenError> {
+            let raw_bytes = self.build_const_bytes(active_ty, entries, union_size)?;
+            let mut values = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                match chunk.kind {
+                    UnionStorageChunkKind::Bytes => {
+                        let start = usize::try_from(chunk.offset).map_err(|_| {
+                            type_error(union_ty, "union byte chunk offset exceeds usize")
+                        })?;
+                        let end = start
+                            .checked_add(usize::try_from(chunk.size).map_err(|_| {
+                                type_error(union_ty, "union byte chunk size exceeds usize")
+                            })?)
+                            .ok_or_else(|| {
+                                type_error(union_ty, "union byte chunk range overflowed")
+                            })?;
+                        values.push(
+                            const_array(self.context.i8_type().into(), &raw_bytes[start..end])
+                                .into(),
+                        );
+                    }
+                    UnionStorageChunkKind::Pointer => {
+                        let value = self
+                            .pointer_const_at_offset(active_ty, entries, chunk.offset)?
+                            .unwrap_or_else(|| {
+                                self.raw_pointer_chunk_from_bytes(
+                                    &raw_bytes,
+                                    chunk.offset,
+                                    chunk.size,
+                                )
+                            });
+                        values.push(value.into());
+                    }
+                }
+            }
+            Ok(values)
+        }
+
+        fn pointer_const_at_offset(
+            &mut self,
+            ty: TyId,
+            entries: &[GlobalInitEntry],
+            target_offset: u64,
+        ) -> Result<Option<PointerValue<'ctx>>, CodegenError> {
+            let mut found = None;
+            for entry in entries {
+                if !matches!(self.tcx.get(entry.ty), Ty::Ptr(_)) {
+                    continue;
+                }
+                let Some((offset, _leaf_ty)) = self.init_path_offset(ty, &entry.path)? else {
+                    continue;
+                };
+                if offset != target_offset {
+                    continue;
+                }
+                let value = self.global_init_value_to_llvm(&entry.value, entry.ty)?;
+                let BasicValueEnum::PointerValue(ptr) = value else {
+                    return Err(type_error(entry.ty, "pointer initializer did not lower to ptr"));
+                };
+                found = Some(ptr);
+            }
+            Ok(found)
+        }
+
+        fn init_path_offset(
+            &self,
+            ty: TyId,
+            path: &[GlobalInitDesignator],
+        ) -> Result<Option<(u64, TyId)>, CodegenError> {
+            let mut current_ty = ty;
+            let mut offset = 0_u64;
+            let layout_cx = self.layout_cx();
+            for designator in path {
+                match designator {
+                    GlobalInitDesignator::Index(index) => {
+                        let Ty::Array { elem, .. } = self.tcx.get(current_ty) else {
+                            return Ok(None);
+                        };
+                        let elem_layout = layout_cx
+                            .layout_of(elem.ty)
+                            .map_err(|err| type_error(elem.ty, err.to_string()))?;
+                        offset = offset
+                            .checked_add(index.checked_mul(elem_layout.size).ok_or_else(|| {
+                                type_error(current_ty, "array initializer offset overflowed")
+                            })?)
+                            .ok_or_else(|| {
+                                type_error(current_ty, "array initializer offset overflowed")
+                            })?;
+                        current_ty = elem.ty;
+                    }
+                    GlobalInitDesignator::Field(index) => {
+                        let Ty::Record(def) = self.tcx.get(current_ty) else {
+                            return Ok(None);
+                        };
+                        let def_data = self.hir.defs.get(*def).ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "record definition {:?} is missing",
+                                def
+                            ))
+                        })?;
+                        let DefKind::Record { kind, fields, .. } = &def_data.kind else {
+                            return Ok(None);
+                        };
+                        let field = fields.get(*index as usize).ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "record {:?} has no field at index {}",
+                                def, index
+                            ))
+                        })?;
+                        if *kind == RecordKind::Struct {
+                            let record_layout = layout_cx
+                                .record_layout_of(current_ty)
+                                .map_err(|err| type_error(current_ty, err.to_string()))?;
+                            let field_layout =
+                                record_layout.fields.get(*index as usize).ok_or_else(|| {
+                                    CodegenError::Internal(format!(
+                                        "record {:?} layout has no field at index {}",
+                                        def, index
+                                    ))
+                                })?;
+                            offset = offset.checked_add(field_layout.offset).ok_or_else(|| {
+                                type_error(current_ty, "field initializer offset overflowed")
+                            })?;
+                        }
+                        current_ty = field.ty;
+                    }
+                }
+            }
+            Ok(Some((offset, current_ty)))
+        }
+
+        fn raw_pointer_chunk_from_bytes(
+            &self,
+            raw_bytes: &[BasicValueEnum<'ctx>],
+            offset: u64,
+            size: u64,
+        ) -> PointerValue<'ctx> {
+            let start = offset as usize;
+            let len = size as usize;
+            let mut packed = 0_u64;
+            for i in 0..len {
+                let idx = match self.target_info.endianness {
+                    Endianness::Little => i,
+                    Endianness::Big => len - 1 - i,
+                };
+                let byte = raw_bytes
+                    .get(start + idx)
+                    .and_then(|value| match value {
+                        BasicValueEnum::IntValue(int) => int.get_zero_extended_constant(),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+                    & 0xff;
+                packed |= byte << (i * 8);
+            }
+            let int_ty = self.context.custom_width_int_type(self.target_info.pointer_width);
+            int_ty
+                .const_int(packed, false)
+                .const_to_pointer(self.context.ptr_type(AddressSpace::default()))
         }
 
         #[allow(unsafe_code)]
@@ -9962,6 +10648,55 @@ mod tests {
     }
 
     #[cfg(feature = "llvm")]
+    fn codegen_gnu_builtin_call_ir(
+        tcx: &mut TyCtxt,
+        builtin_name: &str,
+        builtin_ty: TyId,
+        ret_ty: TyId,
+        args: Vec<Operand>,
+    ) -> String {
+        let (mut session, _cap) = Session::for_test();
+        session.opts.gnu_builtin_libcalls = true;
+        let mut defs = IndexVec::new();
+        let builtin = function_def(
+            &mut defs,
+            session.interner.intern(builtin_name),
+            builtin_ty,
+            FunctionDefOptions::default(),
+        );
+        let caller_ty = func_ty(tcx, ret_ty, Vec::new(), false);
+        let caller = function_def(
+            &mut defs,
+            session.interner.intern("__builtin_fixture"),
+            caller_ty,
+            FunctionDefOptions { has_body: true, ..FunctionDefOptions::default() },
+        );
+        let destination = (!matches!(tcx.get(ret_ty), Ty::Void))
+            .then_some(Place { base: Local(0), projection: Vec::new() });
+        let mut body = cfg_body(
+            ret_ty,
+            vec![
+                cfg_block(
+                    Vec::new(),
+                    TerminatorKind::Call {
+                        callee: call_global(builtin, builtin_ty),
+                        args,
+                        destination,
+                        target: Some(BasicBlockId(1)),
+                    },
+                ),
+                cfg_block(Vec::new(), TerminatorKind::Return),
+            ],
+        );
+        body.def = Some(caller);
+        let hir = hir_with_defs(defs);
+        let mut bodies = FxHashMap::default();
+        bodies.insert(caller, body);
+
+        codegen(&mut session, tcx, &hir, &bodies).unwrap().ir_text
+    }
+
+    #[cfg(feature = "llvm")]
     fn assert_codegen_fixture_mem2reg(
         tcx: &mut TyCtxt,
         name: &str,
@@ -10009,6 +10744,50 @@ mod tests {
         let ir = assert_codegen_fixture_verifies(&mut tcx, "__cfg_return", ret_ty, body);
 
         assert!(ir.contains("ret i32 42") || ir.contains("ret i32 %load"), "IR:\n{ir}");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn external_incomplete_array_global_const_returns_as_pointer() {
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.uchar), len: None, is_vla: false });
+        let ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.uchar)));
+        let arr_def =
+            global_def(&mut defs, session.interner.intern("qjsc_repl"), arr_ty, Linkage::External);
+        let body = cfg_body(
+            ptr_ty,
+            vec![cfg_block(
+                vec![Statement {
+                    kind: StatementKind::Assign {
+                        place: ret_slot(),
+                        rvalue: Rvalue::Use(Operand::Const(Const {
+                            kind: ConstKind::Global(arr_def),
+                            ty: ptr_ty,
+                        })),
+                    },
+                    span: DUMMY_SP,
+                }],
+                TerminatorKind::Return,
+            )],
+        );
+
+        let ir = codegen_fixture_ir_with_defs(
+            &mut session,
+            &mut tcx,
+            defs,
+            "__external_incomplete_array_ptr",
+            ptr_ty,
+            body,
+        );
+
+        assert!(ir.contains("@qjsc_repl = external global [0 x i8]"), "IR:\n{ir}");
+        assert!(
+            ir.contains("ret ptr @qjsc_repl") || ir.contains("store ptr @qjsc_repl"),
+            "IR:\n{ir}"
+        );
     }
 
     /// `if`-shaped CFG lowers a `SwitchInt` diamond and verifies as an LLVM module.
@@ -11037,6 +11816,68 @@ mod tests {
 
         assert!(artifact.ir_text.contains("declare i32 @callee(i32)"), "IR:\n{}", artifact.ir_text);
         assert!(artifact.ir_text.contains("call i32 @callee(i32 7)"), "IR:\n{}", artifact.ir_text);
+    }
+
+    /// GNU bit-count builtins lower to LLVM intrinsics instead of unresolved external calls.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn gnu_clz_ctz_builtins_emit_llvm_intrinsics() {
+        let mut tcx = TyCtxt::new();
+        let int_ty = tcx.int;
+        let uint_ty = tcx.uint;
+        let ulong_long_ty = tcx.ulong_long;
+        let clz_ty = func_ty(&mut tcx, int_ty, vec![uint_ty], false);
+        let clz_ir = codegen_gnu_builtin_call_ir(
+            &mut tcx,
+            "__builtin_clz",
+            clz_ty,
+            int_ty,
+            vec![int_const(uint_ty, 8)],
+        );
+        assert!(clz_ir.contains("llvm.ctlz.i32"), "IR:\n{clz_ir}");
+        assert!(!clz_ir.contains("call i32 @__builtin_clz"), "IR:\n{clz_ir}");
+
+        let ctzll_ty = func_ty(&mut tcx, int_ty, vec![ulong_long_ty], false);
+        let ctzll_ir = codegen_gnu_builtin_call_ir(
+            &mut tcx,
+            "__builtin_ctzll",
+            ctzll_ty,
+            int_ty,
+            vec![int_const(ulong_long_ty, 16)],
+        );
+        assert!(ctzll_ir.contains("llvm.cttz.i64"), "IR:\n{ctzll_ir}");
+        assert!(!ctzll_ir.contains("call i32 @__builtin_ctzll"), "IR:\n{ctzll_ir}");
+    }
+
+    /// GNU stack builtins lower inside the current function instead of becoming linker symbols.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn gnu_stack_builtins_emit_alloca_and_frameaddress_intrinsic() {
+        let mut tcx = TyCtxt::new();
+        let ulong_ty = tcx.ulong;
+        let uint_ty = tcx.uint;
+        let void_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.void)));
+        let alloca_ty = func_ty(&mut tcx, void_ptr, vec![ulong_ty], false);
+        let alloca_ir = codegen_gnu_builtin_call_ir(
+            &mut tcx,
+            "alloca",
+            alloca_ty,
+            void_ptr,
+            vec![int_const(ulong_ty, 16)],
+        );
+        assert!(alloca_ir.contains("alloca i8, i64 16"), "IR:\n{alloca_ir}");
+        assert!(!alloca_ir.contains("call ptr @alloca"), "IR:\n{alloca_ir}");
+
+        let frame_ty = func_ty(&mut tcx, void_ptr, vec![uint_ty], false);
+        let frame_ir = codegen_gnu_builtin_call_ir(
+            &mut tcx,
+            "__builtin_frame_address",
+            frame_ty,
+            void_ptr,
+            vec![int_const(uint_ty, 0)],
+        );
+        assert!(frame_ir.contains("llvm.frameaddress.p0"), "IR:\n{frame_ir}");
+        assert!(!frame_ir.contains("call ptr @__builtin_frame_address"), "IR:\n{frame_ir}");
     }
 
     /// Function pointer operands lower to LLVM indirect calls with the declared ABI type.
@@ -12981,6 +13822,74 @@ mod tests {
                 || ir.contains("[i8 1, i8 0, i8 0, i8 0, i8 5, i8 4, i8 3, i8 2]"),
             "IR:\n{ir}"
         );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn union_initializer_preserves_nested_pointer_relocation() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+
+        let int_ptr_ty = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+        let tab_arr_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(tcx.int), len: Some(4), is_vla: false });
+        let tab_name = session.interner.intern("tab");
+        let tab_def = global_def(&mut defs, tab_name, tab_arr_ty, Linkage::Internal);
+
+        let prop_list_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(int_ptr_ty), field(tcx.int)]);
+        let prop_list_ty = tcx.intern(Ty::Record(prop_list_def));
+        let two_ptrs_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(int_ptr_ty), field(int_ptr_ty)]);
+        let two_ptrs_ty = tcx.intern(Ty::Record(two_ptrs_def));
+        let union_def =
+            record_def(&mut defs, RecordKind::Union, vec![field(prop_list_ty), field(two_ptrs_ty)]);
+        let union_ty = tcx.intern(Ty::Record(union_def));
+        let entry_def =
+            record_def(&mut defs, RecordKind::Struct, vec![field(tcx.int), field(union_ty)]);
+        let entry_ty = tcx.intern(Ty::Record(entry_def));
+
+        let owner_name = session.interner.intern("owner");
+        let init = GlobalInit {
+            ty: entry_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![
+                        GlobalInitDesignator::Field(1),
+                        GlobalInitDesignator::Field(0),
+                        GlobalInitDesignator::Field(0),
+                    ],
+                    ty: int_ptr_ty,
+                    expr: None,
+                    value: GlobalInitValue::Address { def: Some(tab_def), offset: 0 },
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![
+                        GlobalInitDesignator::Field(1),
+                        GlobalInitDesignator::Field(0),
+                        GlobalInitDesignator::Field(1),
+                    ],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(16),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _owner = global_def_with_init(&mut defs, owner_name, entry_ty, Linkage::Internal, init);
+
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(ir.contains("ptr @tab"), "IR:\n{ir}");
+        assert!(ir.contains("inttoptr (i64 16 to ptr)"), "IR:\n{ir}");
     }
 
     #[cfg(feature = "llvm")]

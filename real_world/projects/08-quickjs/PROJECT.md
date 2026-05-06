@@ -1,6 +1,6 @@
 # 08 — QuickJS
 
-Status: object probe passes
+Status: full qjs rich runtime smoke passes
 
 Source: <https://bellard.org/quickjs/>
 
