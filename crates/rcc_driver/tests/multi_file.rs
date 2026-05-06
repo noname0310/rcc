@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(not(windows))]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 #[cfg(not(windows))]
 use std::process::Command;
@@ -26,6 +28,15 @@ impl TempDir {
     fn file(&self, name: &str, src: &str) -> PathBuf {
         let path = self.path.join(name);
         fs::write(&path, src).expect("write C file");
+        path
+    }
+
+    #[cfg(not(windows))]
+    fn executable(&self, name: &str, src: &str) -> PathBuf {
+        let path = self.file(name, src);
+        let mut perms = fs::metadata(&path).expect("stat temp executable").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod temp executable");
         path
     }
 }
@@ -132,6 +143,89 @@ fn e2e_multi_file_link_when_enabled() {
     assert_eq!(code, 0);
     let status = Command::new(&output).status().expect("run linked program");
     assert_eq!(status.code(), Some(7));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_links_existing_object_input_without_compiling() {
+    let dir = TempDir::new("link-existing-object");
+    let obj = dir.file("prebuilt.o", "fake object consumed by fake linker\n");
+    let output = dir.path.join("prog");
+    let log = dir.path.join("link.args");
+    let linker = dir.executable(
+        "fake-linker",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    out=\"$1\"\n  fi\n  shift || true\ndone\n[ -n \"$out\" ] || exit 2\n: > \"$out\"\n",
+            log.display()
+        ),
+    );
+
+    let output_status = Command::new(rcc_bin())
+        .env("RCC_LINKER_DRIVER", &linker)
+        .arg(&obj)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run rcc with prebuilt object");
+
+    assert!(
+        output_status.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output_status.stdout),
+        String::from_utf8_lossy(&output_status.stderr)
+    );
+    assert!(output.exists(), "fake linker should create the requested output");
+    let args = fs::read_to_string(&log).expect("read fake linker args");
+    assert!(args.contains("-fuse-ld=lld"), "{args}");
+    assert!(args.contains(obj.to_string_lossy().as_ref()), "{args}");
+    assert!(args.contains(output.to_string_lossy().as_ref()), "{args}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_links_mixed_source_and_existing_object_inputs_in_cli_order() {
+    if !llvm_backend_enabled_for_this_build() {
+        return;
+    }
+
+    let dir = TempDir::new("link-mixed-existing-object");
+    let main = dir.file("main.c", "int main(void) { return 0; }\n");
+    let prebuilt = dir.file("prebuilt.o", "fake object consumed by fake linker\n");
+    let output = dir.path.join("prog");
+    let log = dir.path.join("link.args");
+    let linker = dir.executable(
+        "fake-linker",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nout=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = -o ]; then\n    shift\n    out=\"$1\"\n  fi\n  shift || true\ndone\n[ -n \"$out\" ] || exit 2\n: > \"$out\"\n",
+            log.display()
+        ),
+    );
+
+    let output_status = Command::new(rcc_bin())
+        .env("RCC_LINKER_DRIVER", &linker)
+        .arg("-o")
+        .arg(&output)
+        .arg(&main)
+        .arg(&prebuilt)
+        .output()
+        .expect("run rcc with mixed source and prebuilt object");
+
+    assert!(
+        output_status.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output_status.stdout),
+        String::from_utf8_lossy(&output_status.stderr)
+    );
+    assert!(output.exists(), "fake linker should create the requested output");
+    let args = fs::read_to_string(&log).expect("read fake linker args");
+    let compiled_main = args.find("main.o").expect("compiled source object should be linked");
+    let prebuilt_obj = args
+        .find(prebuilt.to_string_lossy().as_ref())
+        .expect("existing object should be forwarded to linker");
+    assert!(
+        compiled_main < prebuilt_obj,
+        "source object should keep CLI order before existing object:\n{args}"
+    );
 }
 
 #[cfg(not(windows))]

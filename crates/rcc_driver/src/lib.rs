@@ -111,6 +111,9 @@ pub fn run_status(cli: Cli) -> DriverStatus {
     if cli.input.len() > 1 {
         return run_many(&cli, &opts);
     }
+    if first_input_kind(&cli) == InputKind::Linker {
+        return link_existing_inputs(&cli, &opts);
+    }
     let mut session = Session::new(opts);
     let result = pipeline::compile(&mut session, first_input(&cli));
     if let Err(msg) = &result {
@@ -124,6 +127,7 @@ fn classify_driver_error(message: &str) -> ExitCode {
         || message.starts_with("cannot specify -o")
         || message.starts_with("no input files")
         || message.starts_with("refusing to overwrite input file")
+        || message.starts_with("linker input")
         || message.starts_with("-pthread is unsupported")
     {
         ExitCode::Usage
@@ -345,6 +349,34 @@ fn is_known_ignored_feature_flag(flag: &str) -> bool {
     )
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum InputKind {
+    Source,
+    Linker,
+}
+
+fn first_input_kind(cli: &Cli) -> InputKind {
+    input_kind(first_input(cli))
+}
+
+fn input_kind(path: &Path) -> InputKind {
+    if is_linker_input(path) {
+        InputKind::Linker
+    } else {
+        InputKind::Source
+    }
+}
+
+fn is_linker_input(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "o" | "obj" | "a" | "so" | "dylib" | "lib"))
+}
+
+fn first_linker_input(inputs: &[PathBuf]) -> Option<&Path> {
+    inputs.iter().find(|input| input_kind(input) == InputKind::Linker).map(PathBuf::as_path)
+}
+
 fn run_many(cli: &Cli, base_opts: &Options) -> DriverStatus {
     if (cli.compile_only || cli.emit_assembly) && cli.output.is_some() {
         eprintln!("rcc: cannot specify -o with multiple input files when using -c or -S");
@@ -355,9 +387,17 @@ fn run_many(cli: &Cli, base_opts: &Options) -> DriverStatus {
         || !cli.emit.is_empty()
         || cli.emit_assembly
     {
+        if let Some(path) = first_linker_input(&cli.input) {
+            eprintln!("rcc: linker input {} cannot be used when not linking", path.display());
+            return DriverStatus { exit_code: ExitCode::Usage };
+        }
         return compile_many_without_link(cli, base_opts);
     }
     if cli.compile_only {
+        if let Some(path) = first_linker_input(&cli.input) {
+            eprintln!("rcc: linker input {} cannot be used when not linking", path.display());
+            return DriverStatus { exit_code: ExitCode::Usage };
+        }
         return compile_many_to_default_objects(cli, base_opts);
     }
     compile_many_and_link(cli, base_opts)
@@ -383,7 +423,13 @@ fn compile_many_to_default_objects(cli: &Cli, base_opts: &Options) -> DriverStat
     let jobs = cli
         .input
         .iter()
-        .map(|input| ObjectJob { input: input.clone(), output: default_output_path(input, "o") })
+        .enumerate()
+        .filter(|(_, input)| input_kind(input) == InputKind::Source)
+        .map(|(input_index, input)| ObjectJob {
+            input: input.clone(),
+            output: default_output_path(input, "o"),
+            input_index,
+        })
         .collect::<Vec<_>>();
     merge_object_results(
         &jobs,
@@ -395,7 +441,10 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
     let mut temps = TempObjects::default();
     let mut status = DriverStatus::SUCCESS;
     let mut jobs = Vec::with_capacity(cli.input.len());
-    for input in &cli.input {
+    for (input_index, input) in cli.input.iter().enumerate() {
+        if input_kind(input) == InputKind::Linker {
+            continue;
+        }
         let output = match temps.alloc(input) {
             Ok(output) => output,
             Err(msg) => {
@@ -404,12 +453,13 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
                 continue;
             }
         };
-        jobs.push(ObjectJob { input: input.clone(), output });
+        jobs.push(ObjectJob { input: input.clone(), output, input_index });
     }
+    let mut compiled_by_input = vec![None; cli.input.len()];
     let results = compile_object_jobs(jobs.clone(), base_opts, driver_jobs(cli, jobs.len()));
     for (job, compile_status) in jobs.iter().zip(results) {
         if compile_status.exit_code == ExitCode::Success {
-            temps.keep(job.output.clone());
+            compiled_by_input[job.input_index] = Some(job.output.clone());
         } else {
             let _ = fs::remove_file(&job.output);
             status = status.merge(compile_status);
@@ -423,7 +473,48 @@ fn compile_many_and_link(cli: &Cli, base_opts: &Options) -> DriverStatus {
         eprintln!("rcc: refusing to overwrite input file {}", output.display());
         return DriverStatus { exit_code: ExitCode::Usage };
     }
-    match pipeline::link_objects_with_options(temps.paths(), &output, &base_opts.link) {
+    let mut link_inputs = Vec::with_capacity(cli.input.len());
+    for (input_index, input) in cli.input.iter().enumerate() {
+        match input_kind(input) {
+            InputKind::Linker => link_inputs.push(input.clone()),
+            InputKind::Source => {
+                let Some(output) = compiled_by_input[input_index].clone() else {
+                    eprintln!("rcc: internal driver error: missing object for {}", input.display());
+                    return DriverStatus { exit_code: ExitCode::InfrastructureFailure };
+                };
+                temps.keep(&output);
+                link_inputs.push(output);
+            }
+        }
+    }
+    match pipeline::link_objects_with_options(&link_inputs, &output, &base_opts.link) {
+        Ok(()) => DriverStatus::SUCCESS,
+        Err(msg) => {
+            eprintln!("rcc: {msg}");
+            DriverStatus { exit_code: ExitCode::InfrastructureFailure }
+        }
+    }
+}
+
+fn link_existing_inputs(cli: &Cli, base_opts: &Options) -> DriverStatus {
+    if cli.compile_only
+        || cli.emit_assembly
+        || cli.preprocess_only
+        || !cli.emit.is_empty()
+        || matches!(base_opts.dependencies.mode, Some(rcc_session::DependencyMode::PreprocessOnly))
+    {
+        eprintln!(
+            "rcc: linker input {} cannot be used when not linking",
+            first_input(cli).display()
+        );
+        return DriverStatus { exit_code: ExitCode::Usage };
+    }
+    let output = cli.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
+    if cli.input.iter().any(|input| same_file_or_same_path(&output, input)) {
+        eprintln!("rcc: refusing to overwrite input file {}", output.display());
+        return DriverStatus { exit_code: ExitCode::Usage };
+    }
+    match pipeline::link_objects_with_options(&cli.input, &output, &base_opts.link) {
         Ok(()) => DriverStatus::SUCCESS,
         Err(msg) => {
             eprintln!("rcc: {msg}");
@@ -448,6 +539,7 @@ fn compile_one_to_object(input: &Path, output: &Path, base_opts: &Options) -> Dr
 struct ObjectJob {
     input: PathBuf,
     output: PathBuf,
+    input_index: usize,
 }
 
 fn compile_object_jobs(
@@ -800,7 +892,6 @@ fn default_output_path(input: &Path, extension: &str) -> PathBuf {
 #[derive(Default)]
 struct TempObjects {
     dir: Option<PathBuf>,
-    paths: Vec<PathBuf>,
 }
 
 impl TempObjects {
@@ -825,12 +916,10 @@ impl TempObjects {
         Ok(path)
     }
 
-    fn keep(&mut self, path: PathBuf) {
-        self.paths.push(path);
-    }
-
-    fn paths(&self) -> &[PathBuf] {
-        &self.paths
+    fn keep(&mut self, _path: &Path) {
+        // Keep the temporary directory alive until the linker has consumed the
+        // object. Drop removes the whole directory after `compile_many_and_link`
+        // returns.
     }
 }
 
