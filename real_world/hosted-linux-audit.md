@@ -20,7 +20,7 @@ state.
 | zlib | pass | mostly freestanding C with hosted link/run smoke | fixed by `tasks/04-preprocess/22-multiline-function-macro-invocation.md`, `tasks/09-codegen-llvm/30-external-incomplete-array-globals.md`, `tasks/08-cfg/28-string-literal-index-place.md`, `tasks/07-typeck/24-casted-string-global-initializer.md` |
 | LibTomMath | pass | `errno.h`, multi-input link scalability, platform guards | fixed by `tasks/15-builtin-rt/19-posix-errno-constants.md`, `tasks/10-driver/19-parallel-multi-input-object-builds.md`, `tasks/08-cfg/29-constant-condition-dead-branch-pruning.md` |
 | Lua | pass | `<stdlib.h>`, `-lm`, large hosted executable | fixed by `tasks/06-hir-lower/33-array-bound-ice-constants.md`, `tasks/15-builtin-rt/20-stdlib-exit-status-macros.md`, `tasks/09-codegen-llvm/31-lua-parser-runtime-regression.md` |
-| SQLite amalgamation | planned | large single translation unit, hosted declarations | no recorded blocker yet; see `real_world/projects/06-sqlite-amalgamation/PROJECT.md` |
+| SQLite amalgamation | manual PASS | large single translation unit, hosted declarations, host `-ldl -lm` link | `sqlite3.c` and `shell.c` compile/link/run with the recorded command in `real_world/projects/06-sqlite-amalgamation/PROJECT.md`; fixed blockers include octal character escapes in `#if`, block-scope typedef lookup for `va_arg`, `sizeof` member operand lowering, bodyless static function prototype declaration handling, and pointer-chain qualifier/object qualifier separation |
 | MuJS | pass | math/stdio/stdlib hosted declarations, JavaScript executable | fixed by `tasks/16-linux-glibc-compat/15-mujs-hosted-smoke.md` |
 | QuickJS | partial object probe | `<stdatomic.h>`, pthread/glibc headers, anonymous bit-field / ICE cases | tasks `16-06-gnu-header-attribute-tolerance.md`, `16-07-restrict-and-qualifier-aliases.md`, `16-09-pthread-header-shim.md`, `16-10-posix-core-type-shims.md`, plus `14-lang-extensions`/typeck follow-ups as needed |
 | GNU coreutils | bootstrap/configure scripted; generated `config.h` observed; `src/true.c` direct TU oracle passes host-vs-rcc runtime comparison | gnulib `config.h`, glibc/POSIX/GNU headers, generated replacement headers | fixed by tasks `16-21` through `16-24` |
@@ -135,10 +135,27 @@ must pass them through to the linker driver; it must not implement libm.
 ### SQLite
 
 Current record: `real_world/projects/06-sqlite-amalgamation/PROJECT.md`.
-No compile log has been recorded yet.  Expected hosted surfaces are large
-single-TU preprocessing, libc declarations, file APIs, and optional threading
-macros.  New failures must become concrete compiler tasks rather than probe
-workarounds.
+The local manual probe compiles the official amalgamation core and CLI shell as
+separate objects with `rcc --linux-gnu-hosted --std=c11`, links them with host
+`cc -ldl -lm`, and runs an in-memory `CREATE TABLE`/`INSERT`/`SELECT` smoke that
+prints `1`.  The CLI probe deliberately does not define
+`SQLITE_OMIT_VIRTUALTABLE`; that macro makes older object-only probes easier but
+removes ALTER TABLE / virtual-table function bodies while leaving parser-action
+references that fail at link time.
+
+Known blockers:
+
+| ID | Classification | Status |
+| --- | --- | --- |
+| SQLITE-001 | preprocessor `#if` octal character escape evaluation | fixed in `crates/rcc_preprocess/src/if_eval.rs` |
+| SQLITE-002 | block-scope typedef visibility inside `va_arg` type names | fixed in `crates/rcc_hir_lower/src/lib.rs` |
+| SQLITE-003 | `sizeof` member/arrow/index expression operand type lowering | fixed in `crates/rcc_hir_lower/src/lib.rs` |
+| SQLITE-004 | LLVM declarations for bodyless static function prototypes referenced by lowered IR | fixed in `crates/rcc_codegen_llvm/src/lib.rs` |
+| SQLITE-005 | pointer-chain qualifiers vs top-level object qualifiers for declarations such as `const char *const *azArg` | fixed in `crates/rcc_hir_lower/src/lib.rs` with typeck regressions |
+
+Runtime ownership: SQLite function bodies are compiled from upstream
+amalgamation sources by `rcc`; libc/libm/libdl and process startup remain host
+responsibilities.
 
 ### MuJS
 

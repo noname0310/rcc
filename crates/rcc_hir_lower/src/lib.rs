@@ -4984,7 +4984,15 @@ pub fn lower_expr(
         }
         rcc_ast::ExprKind::BuiltinVaArg { ap, ty } => {
             let ap_id = lower_expr(ap, body, scope, crate_, tcx, resolver, session);
-            let ty_id = lower_type_name(ty, DeclScope::Block, tcx, resolver, crate_, session);
+            let ty_id = lower_type_name_in_scope(
+                ty,
+                DeclScope::Block,
+                Some(scope),
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
             HirExprKind::BuiltinVaArg { ap: ap_id, ty: ty_id }
         }
         rcc_ast::ExprKind::BuiltinOffsetof { ty, designators } => {
@@ -5889,14 +5897,76 @@ fn lower_sizeof_operand_to_ty(
     session: &mut Session,
 ) -> TyId {
     let expr = peel_ast_parens(expr);
-    if let rcc_ast::ExprKind::Ident(sym) = expr.kind {
-        if let Some(Binding::Local(local)) = scope.and_then(|scope| scope.lookup(sym)) {
-            if let Some(body) = local_body {
-                return body.locals[local].ty;
-            }
-        }
+    if let Some(ty) =
+        lower_sizeof_expr_operand_to_ty(expr, scope, local_body, resolver, crate_, tcx, session)
+    {
+        return ty;
     }
     lower_typeof_expr_to_ty(expr, scope, local_body, resolver, crate_, tcx, session)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_sizeof_expr_operand_to_ty(
+    expr: &rcc_ast::Expr,
+    scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+    session: &mut Session,
+) -> Option<TyId> {
+    let expr = peel_ast_parens(expr);
+    match &expr.kind {
+        rcc_ast::ExprKind::Ident(sym) => {
+            if let Some(Binding::Local(local)) = scope.and_then(|scope| scope.lookup(*sym)) {
+                return local_body.map(|body| body.locals[local].ty);
+            }
+            Some(lower_typeof_ident_to_ty(
+                *sym, expr.span, scope, local_body, resolver, crate_, tcx, session,
+            ))
+        }
+        rcc_ast::ExprKind::Member { base, field } => {
+            let base_ty = lower_sizeof_expr_operand_to_ty(
+                base, scope, local_body, resolver, crate_, tcx, session,
+            )?;
+            record_field_ty(base_ty, *field, crate_, tcx)
+        }
+        rcc_ast::ExprKind::Arrow { base, field } => {
+            let base_ty = lower_sizeof_expr_operand_to_ty(
+                base, scope, local_body, resolver, crate_, tcx, session,
+            )?;
+            match tcx.get(base_ty) {
+                Ty::Ptr(q) => record_field_ty(q.ty, *field, crate_, tcx),
+                _ => None,
+            }
+        }
+        rcc_ast::ExprKind::Index { base, .. } => {
+            let base_ty = lower_sizeof_expr_operand_to_ty(
+                base, scope, local_body, resolver, crate_, tcx, session,
+            )?;
+            match tcx.get(base_ty) {
+                Ty::Array { elem, .. } => Some(elem.ty),
+                Ty::Ptr(q) => Some(q.ty),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn record_field_ty(
+    record_ty: TyId,
+    field: Symbol,
+    crate_: &HirCrate,
+    tcx: &TyCtxt,
+) -> Option<TyId> {
+    let Ty::Record(record) = tcx.get(record_ty) else {
+        return None;
+    };
+    let DefKind::Record { fields, .. } = &crate_.defs[*record].kind else {
+        return None;
+    };
+    fields.iter().find(|f| f.name == Some(field)).map(|f| f.ty)
 }
 
 fn peel_ast_parens(mut expr: &rcc_ast::Expr) -> &rcc_ast::Expr {
@@ -6729,7 +6799,7 @@ fn merge_type_quals(
 }
 
 fn declaration_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator) -> ObjectQuals {
-    match declarator.derived.last() {
+    match declarator.derived.first() {
         Some(DerivedDeclarator::Pointer(quals)) => object_quals_from_type_quals(quals),
         Some(_) => ObjectQuals::none(),
         None => object_quals_from_type_quals(&specs.quals),
@@ -6737,7 +6807,7 @@ fn declaration_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator)
 }
 
 fn parameter_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator) -> ObjectQuals {
-    match declarator.derived.last() {
+    match declarator.derived.first() {
         Some(DerivedDeclarator::Array(arr)) => object_quals_from_type_quals(&arr.quals),
         _ => declaration_object_quals(specs, declarator),
     }
