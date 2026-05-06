@@ -121,7 +121,11 @@ pub fn pp_to_token(session: &mut Session, pp: PpToken) -> Option<Token> {
                         primary: true,
                     });
                     session.handler.emit(&diag);
-                    TokenKind::FloatLit(FloatLiteral { value: 0.0, suffix: FloatSuffix::None })
+                    TokenKind::FloatLit(FloatLiteral {
+                        value: 0.0,
+                        suffix: FloatSuffix::None,
+                        imaginary: false,
+                    })
                 }
             }
         }
@@ -668,7 +672,11 @@ mod tests {
         let t = pp_to_token(&mut sess, pp).expect("float converts even on error");
         assert!(matches!(
             t.kind,
-            TokenKind::FloatLit(FloatLiteral { value: 0.0, suffix: FloatSuffix::None })
+            TokenKind::FloatLit(FloatLiteral {
+                value: 0.0,
+                suffix: FloatSuffix::None,
+                imaginary: false,
+            })
         ));
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1);

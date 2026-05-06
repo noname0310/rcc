@@ -29,11 +29,12 @@ use crate::Preprocessor;
 
 const MAX_INCLUDE_DEPTH: usize = 64;
 // Permit bounded active self-reentry so macro-controlled self-inclusion still
-// works. LibTomMath's `tommath_class.h` deliberately re-includes itself through
-// three macro-state passes (`LTM1`, `LTM2`, `LTM3`) before stopping, so the
-// active stack can contain four copies of the same file. Branching unguarded
-// self-includes are still cut before they grow exponentially under fuzzing.
-const MAX_SELF_INCLUDE_ACTIVE: usize = 4;
+// works. LibTomMath's `tommath_class.h` needs four active copies of the same
+// file, and TinyCC's `95_bitfields.c` builds a deeper macro-controlled include
+// tree before reaching its terminal `TEST == N` branches. Keep this budget well
+// below the global include-depth limit so fuzz-discovered cycles still stop
+// before they can grow the compiler stack substantially.
+const MAX_SELF_INCLUDE_ACTIVE: usize = 16;
 
 /// Resolve `name` against C99 §6.10.2 search rules.
 ///

@@ -1761,6 +1761,7 @@ fn ast_float_literal(p: &mut Parser<'_>, span: Span, lit: FloatLiteral) -> AstFl
             FloatSuffix::F => AstFloatSuffix::F,
             FloatSuffix::L => AstFloatSuffix::L,
         },
+        imaginary: lit.imaginary,
     }
 }
 

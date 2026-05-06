@@ -4432,8 +4432,29 @@ pub fn lower_expr(
             suffix: hir_int_suffix(lit.suffix),
         },
         rcc_ast::ExprKind::FloatLit(lit) => {
-            initial_ty = hir_float_literal_ty(lit.suffix, tcx);
-            HirExprKind::FloatConst(lit.value)
+            let component_ty = hir_float_literal_ty(lit.suffix, tcx);
+            if lit.imaginary {
+                let real = body.exprs.push(HirExpr {
+                    id: HirExprId(0),
+                    ty: component_ty,
+                    value_cat: ValueCat::RValue,
+                    span: expr.span,
+                    kind: HirExprKind::FloatConst(0.0),
+                });
+                body.exprs[real].id = real;
+                let imag = body.exprs.push(HirExpr {
+                    id: HirExprId(0),
+                    ty: component_ty,
+                    value_cat: ValueCat::RValue,
+                    span: expr.span,
+                    kind: HirExprKind::FloatConst(lit.value),
+                });
+                body.exprs[imag].id = imag;
+                HirExprKind::BuiltinComplex { real, imag }
+            } else {
+                initial_ty = component_ty;
+                HirExprKind::FloatConst(lit.value)
+            }
         }
         rcc_ast::ExprKind::CharLit(lit) => {
             initial_ty = char_literal_ty(lit.encoding, tcx);
@@ -5247,6 +5268,18 @@ fn hir_float_literal_ty(suffix: rcc_ast::FloatSuffix, tcx: &TyCtxt) -> TyId {
     }
 }
 
+fn hir_float_literal_ty_for_ast(lit: &rcc_ast::FloatLiteral, tcx: &TyCtxt) -> TyId {
+    let real = hir_float_literal_ty(lit.suffix, tcx);
+    if !lit.imaginary {
+        return real;
+    }
+    match lit.suffix {
+        rcc_ast::FloatSuffix::F => tcx.complex_float,
+        rcc_ast::FloatSuffix::None => tcx.complex_double,
+        rcc_ast::FloatSuffix::L => tcx.complex_long_double,
+    }
+}
+
 fn lower_predefined_function_name(
     ident: Symbol,
     span: Span,
@@ -5785,6 +5818,7 @@ fn lower_typedef_name_in_scope(
 fn lower_typeof_expr_to_ty(
     expr: &rcc_ast::Expr,
     scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     resolver: &Resolver,
     crate_: &HirCrate,
     tcx: &mut TyCtxt,
@@ -5792,9 +5826,9 @@ fn lower_typeof_expr_to_ty(
 ) -> TyId {
     let expr = peel_ast_parens(expr);
     match &expr.kind {
-        rcc_ast::ExprKind::Ident(sym) => {
-            lower_typeof_ident_to_ty(*sym, expr.span, scope, resolver, crate_, tcx, session)
-        }
+        rcc_ast::ExprKind::Ident(sym) => lower_typeof_ident_to_ty(
+            *sym, expr.span, scope, local_body, resolver, crate_, tcx, session,
+        ),
         rcc_ast::ExprKind::IntLit(lit) => match lit.suffix {
             rcc_ast::IntSuffix::None => tcx.int,
             rcc_ast::IntSuffix::U => tcx.uint,
@@ -5803,11 +5837,7 @@ fn lower_typeof_expr_to_ty(
             rcc_ast::IntSuffix::LL => tcx.long_long,
             rcc_ast::IntSuffix::ULL => tcx.ulong_long,
         },
-        rcc_ast::ExprKind::FloatLit(lit) => match lit.suffix {
-            rcc_ast::FloatSuffix::None => tcx.double,
-            rcc_ast::FloatSuffix::F => tcx.float,
-            rcc_ast::FloatSuffix::L => tcx.long_double,
-        },
+        rcc_ast::ExprKind::FloatLit(lit) => hir_float_literal_ty_for_ast(lit, tcx),
         rcc_ast::ExprKind::CharLit(lit) => char_literal_ty(lit.encoding, tcx),
         rcc_ast::ExprKind::StringLit(lit) => {
             let elem = string_literal_element_ty(lit, tcx);
@@ -5815,7 +5845,8 @@ fn lower_typeof_expr_to_ty(
             tcx.intern(Ty::Array { elem: Qual::plain(elem), len: Some(len), is_vla: false })
         }
         rcc_ast::ExprKind::Index { base, .. } => {
-            let base_ty = lower_typeof_expr_to_ty(base, scope, resolver, crate_, tcx, session);
+            let base_ty =
+                lower_typeof_expr_to_ty(base, scope, local_body, resolver, crate_, tcx, session);
             match tcx.get(base_ty) {
                 Ty::Array { elem, .. } => elem.ty,
                 Ty::Ptr(q) => q.ty,
@@ -5865,7 +5896,7 @@ fn lower_sizeof_operand_to_ty(
             }
         }
     }
-    lower_typeof_expr_to_ty(expr, scope, resolver, crate_, tcx, session)
+    lower_typeof_expr_to_ty(expr, scope, local_body, resolver, crate_, tcx, session)
 }
 
 fn peel_ast_parens(mut expr: &rcc_ast::Expr) -> &rcc_ast::Expr {
@@ -5875,10 +5906,12 @@ fn peel_ast_parens(mut expr: &rcc_ast::Expr) -> &rcc_ast::Expr {
     expr
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_typeof_ident_to_ty(
     sym: Symbol,
     span: Span,
     scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     resolver: &Resolver,
     crate_: &HirCrate,
     tcx: &TyCtxt,
@@ -5887,18 +5920,22 @@ fn lower_typeof_ident_to_ty(
     if let Some(binding) = scope.and_then(|scope| scope.lookup(sym)) {
         return match binding {
             Binding::Def(def) => def_type_for_typeof(def, span, crate_, tcx, session),
-            Binding::Local(_) => {
-                let name = session.interner.get(sym);
-                session
-                    .handler
-                    .struct_err(
-                        span,
-                        format!("GNU `typeof` of local identifier `{name}` is not lowered yet"),
-                    )
-                    .code(rcc_errors::codes::E0061)
-                    .emit();
-                tcx.error
-            }
+            Binding::Local(local) => local_body
+                .and_then(|body| body.locals.get(local).map(|decl| decl.ty))
+                .unwrap_or_else(|| {
+                    let name = session.interner.get(sym);
+                    session
+                        .handler
+                        .struct_err(
+                            span,
+                            format!(
+                                "cannot determine type of local identifier `{name}` for GNU `typeof`"
+                            ),
+                        )
+                        .code(rcc_errors::codes::E0061)
+                        .emit();
+                    tcx.error
+                }),
         };
     }
 
@@ -5974,8 +6011,15 @@ fn lower_type_from_parts_in_scope(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    let base =
-        lower_specs_to_base_ty_in_scope(specs, typedef_scope, tcx, resolver, crate_, session);
+    let base = lower_specs_to_base_ty_in_scope(
+        specs,
+        typedef_scope,
+        local_body,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    );
     if base == tcx.error {
         return tcx.error;
     }
@@ -6432,13 +6476,14 @@ fn lower_specs_to_base_ty(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    lower_specs_to_base_ty_in_scope(specs, None, tcx, resolver, crate_, session)
+    lower_specs_to_base_ty_in_scope(specs, None, None, tcx, resolver, crate_, session)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn lower_specs_to_base_ty_in_scope(
     specs: &rcc_ast::DeclSpecs,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
@@ -6480,6 +6525,7 @@ fn lower_specs_to_base_ty_in_scope(
                 return lower_typeof_expr_to_ty(
                     expr,
                     typedef_scope,
+                    local_body,
                     resolver,
                     crate_,
                     tcx,
@@ -12030,7 +12076,12 @@ mod tests {
         let value = raw.trim_end_matches(['f', 'F', 'l', 'L']).parse::<f64>().unwrap();
         Expr {
             id: NodeId(0),
-            kind: ExprKind::FloatLit(rcc_ast::FloatLiteral { text: s, value, suffix }),
+            kind: ExprKind::FloatLit(rcc_ast::FloatLiteral {
+                text: s,
+                value,
+                suffix,
+                imaginary: false,
+            }),
             span: DUMMY_SP,
         }
     }

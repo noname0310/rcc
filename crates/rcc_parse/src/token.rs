@@ -91,6 +91,8 @@ pub struct FloatLiteral {
     pub value: f64,
     /// Suffix-derived kind.
     pub suffix: FloatSuffix,
+    /// GNU/C99 imaginary suffix (`i`/`I`/`j`/`J`).
+    pub imaginary: bool,
 }
 
 /// Float suffix.

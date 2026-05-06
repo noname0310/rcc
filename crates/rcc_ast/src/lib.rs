@@ -654,6 +654,8 @@ pub struct FloatLiteral {
     pub value: f64,
     /// Literal suffix.
     pub suffix: FloatSuffix,
+    /// Whether the source literal used the imaginary suffix.
+    pub imaginary: bool,
 }
 
 /// Floating-literal suffix.

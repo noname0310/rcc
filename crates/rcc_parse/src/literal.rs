@@ -290,26 +290,47 @@ fn parse_suffix(s: &[u8]) -> Result<IntSuffix, Diagnostic> {
 /// - Malformed decimal mantissa / exponent (e.g. `1.0ff`, `1e`).
 /// - Hex float with no digits, no `p` / `P` exponent, or trailing
 ///   junk (e.g. `0x1.0`, `0x1p`, `0x1.0p0q`).
-/// - Invalid suffix (more than one of `f`/`F`/`l`/`L`, or a letter
-///   outside that set).
+/// - Invalid suffix (more than one of `f`/`F`/`l`/`L`, more than one
+///   imaginary marker `i`/`I`/`j`/`J`, or a letter outside that set).
 pub fn decode_float(text: &str) -> Result<FloatLiteral, Diagnostic> {
     let bytes = text.as_bytes();
     if bytes.is_empty() {
         return Err(plain_err("empty floating literal"));
     }
 
-    // Strip the trailing floating-suffix letter if present. C99
-    // §6.4.4.2 permits exactly one of `f`/`F`/`l`/`L`, so a single
-    // final letter is enough to disambiguate. For hex floats the
-    // last mantissa character before any suffix is always a decimal
-    // exponent digit (because the `p`/`P` exponent is mandatory and
-    // its digit sequence is decimal), so `f`/`F` at the tail cannot
-    // be mistaken for a hex digit.
-    let (mantissa_bytes, suffix) = match bytes.last() {
-        Some(&b'f') | Some(&b'F') => (&bytes[..bytes.len() - 1], FloatSuffix::F),
-        Some(&b'l') | Some(&b'L') => (&bytes[..bytes.len() - 1], FloatSuffix::L),
-        _ => (bytes, FloatSuffix::None),
-    };
+    // Strip GNU/C99 complex imaginary markers used by glibc's <complex.h>
+    // (`_Complex_I` is `__extension__ 1.0iF`). GCC accepts both orders
+    // around the real suffix (`1.0iF`, `1.0Fi`), so consume at most one
+    // imaginary marker and at most one real floating suffix from the tail.
+    let mut end = bytes.len();
+    let mut suffix = FloatSuffix::None;
+    let mut imaginary = false;
+    let mut consumed = true;
+    while consumed {
+        consumed = false;
+        if end == 0 {
+            break;
+        }
+        match bytes[end - 1] {
+            b'f' | b'F' if suffix == FloatSuffix::None => {
+                suffix = FloatSuffix::F;
+                end -= 1;
+                consumed = true;
+            }
+            b'l' | b'L' if suffix == FloatSuffix::None => {
+                suffix = FloatSuffix::L;
+                end -= 1;
+                consumed = true;
+            }
+            b'i' | b'I' | b'j' | b'J' if !imaginary => {
+                imaginary = true;
+                end -= 1;
+                consumed = true;
+            }
+            _ => {}
+        }
+    }
+    let mantissa_bytes = &bytes[..end];
 
     // Reject a bare suffix with no mantissa (`"f"` etc.) up front so
     // the decimal / hex decoders never see an empty slice.
@@ -327,7 +348,7 @@ pub fn decode_float(text: &str) -> Result<FloatLiteral, Diagnostic> {
         parse_decimal_float(mantissa_bytes)?
     };
 
-    Ok(FloatLiteral { value, suffix })
+    Ok(FloatLiteral { value, suffix, imaginary })
 }
 
 /// Decode a decimal floating constant (minus any stripped suffix).
@@ -1060,6 +1081,23 @@ mod tests {
         let lit = fok("3.14e-10f");
         assert!((lit.value - 3.14e-10).abs() < 1e-20, "got {}", lit.value);
         assert_eq!(lit.suffix, FloatSuffix::F);
+        assert!(!lit.imaginary);
+    }
+
+    #[test]
+    fn decimal_imaginary_suffix_used_by_glibc_complex_h() {
+        let lit = fok("1.0iF");
+        assert_eq!(lit.value, 1.0);
+        assert_eq!(lit.suffix, FloatSuffix::F);
+        assert!(lit.imaginary);
+    }
+
+    #[test]
+    fn decimal_imaginary_suffix_accepts_gcc_order_variant() {
+        let lit = fok("1.0Fi");
+        assert_eq!(lit.value, 1.0);
+        assert_eq!(lit.suffix, FloatSuffix::F);
+        assert!(lit.imaginary);
     }
 
     #[test]

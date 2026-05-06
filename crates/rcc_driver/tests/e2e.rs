@@ -12,7 +12,7 @@ mod linux {
 
     use rcc_driver::pipeline;
     use rcc_errors::{CaptureEmitter, Handler};
-    use rcc_session::{LanguageStandard, OptLevel, Options, Session};
+    use rcc_session::{LanguageStandard, OptLevel, Options, Session, TargetInfo};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -114,13 +114,34 @@ mod linux {
     fn compile_fixture_with_options(
         fixture: &Fixture,
         exe: &Path,
-        options: Options,
+        mut options: Options,
     ) -> Result<(), String> {
         let cap = CaptureEmitter::new();
+        let captured = cap.clone();
         let handler = Handler::with_emitter(Box::new(cap));
-        let mut session =
-            Session::with_handler(Options { output: Some(exe.to_path_buf()), ..options }, handler);
-        pipeline::compile(&mut session, &fixture.c_path)
+        if options.target == TargetInfo::baseline() {
+            options.target = TargetInfo::host();
+        }
+        if options.system_include_paths.is_empty() {
+            options.system_include_paths = rcc_preprocess::include::discover_system_include_paths(
+                &options.target,
+                options.sysroot.as_deref(),
+            );
+        }
+        options.output = Some(exe.to_path_buf());
+        let mut session = Session::with_handler(options, handler);
+        pipeline::compile(&mut session, &fixture.c_path)?;
+        let diagnostics = captured.diagnostics();
+        if session.handler.has_errors() {
+            return Err(format!("diagnostics were emitted: {diagnostics:#?}"));
+        }
+        if !exe.is_file() {
+            return Err(format!(
+                "compiler returned success but did not create {}; diagnostics: {diagnostics:#?}",
+                exe.display()
+            ));
+        }
+        Ok(())
     }
 
     fn run_with_timeout(exe: &Path, timeout: Duration) -> io::Result<RunResult> {
