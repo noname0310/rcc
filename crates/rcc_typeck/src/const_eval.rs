@@ -341,12 +341,8 @@ impl<'a> ConstEval<'a> {
     /// * string literals, which are addressable static array objects.
     /// * `func` where `func` is a function designator.
     /// * `&arr[N]` — folded to `(arr, N * sizeof(elem))`.
+    /// * `&obj.field` — folded with the shared record-layout service.
     /// * `(T*) 0` and `(T*) 0 + N` — folded to `(None, N * sizeof(T))`.
-    ///
-    /// `&obj.field` / `&obj->field` would require record layout
-    /// (filled by codegen) and so currently returns `(Some(def), 0)`
-    /// — the codegen pass adds the field offset when materialising
-    /// the constant initialiser. Tests pin the documented behaviour.
     pub fn eval_address(&mut self, expr: HirExprId) -> Option<(Option<DefId>, i128)> {
         let body = self.body?;
         let e = body.exprs.get(expr)?;
@@ -420,8 +416,8 @@ impl<'a> ConstEval<'a> {
         }
     }
 
-    /// Body of `eval_address` for the `&expr` case. Handles
-    /// `&global`, `&arr[N]`, and the field-offset deferred case.
+    /// Body of `eval_address` for the `&expr` case. Handles `&global`,
+    /// `&arr[N]`, and nested field/index lvalues.
     fn eval_address_of(&mut self, operand: HirExprId) -> Option<(Option<DefId>, i128)> {
         let body = self.body?;
         let e = body.exprs.get(operand)?;
@@ -449,13 +445,10 @@ impl<'a> ConstEval<'a> {
                 Some((base_def, total))
             }
             HirExprKind::UnresolvedField { .. } => None,
-            HirExprKind::Field { base, .. } => {
-                // `&obj.field` — record-layout-dependent. We expose
-                // `(Some(base_def), 0)` and let the codegen pass add
-                // the field offset; the deferred behaviour is pinned
-                // by `field_offset_deferred_to_codegen` below.
-                let (base_def, base_off) = self.eval_address(base)?;
-                Some((base_def, base_off))
+            HirExprKind::Field { base, field_index } => {
+                let (base_def, base_off) = self.eval_address_of(base)?;
+                let field_off = self.field_offset(body.exprs.get(base)?.ty, field_index)?;
+                Some((base_def, base_off.checked_add(field_off)?))
             }
             HirExprKind::Deref(inner) => {
                 // `&*p` ≡ `p` (C99 §6.5.3.2p3).
@@ -506,6 +499,19 @@ impl<'a> ConstEval<'a> {
             }
             _ => None,
         }
+    }
+
+    fn field_offset(&self, record_ty: TyId, field_index: u32) -> Option<i128> {
+        let defs = self.defs?;
+        let layout = LayoutCx::with_defs(self.tcx, defs).record_layout_of(record_ty).ok()?;
+        let field = layout.fields.get(field_index as usize)?;
+        // C forbids forming a pointer to a bit-field. Keeping this as `None`
+        // makes such an initializer fail the same constant-expression gate as
+        // any other non-addressable lvalue.
+        if field.bit_width.is_some() {
+            return None;
+        }
+        Some(i128::from(field.offset))
     }
 
     /// Element size of the pointee of a pointer-typed expression, or
@@ -1604,35 +1610,73 @@ mod tests {
         assert_eq!(ce.eval_address(addr), None);
     }
 
-    /// `&obj.field` where `obj` is a global struct: documented as
-    /// `(Some(def), 0)` — the field offset is filled by codegen.
+    /// `&arr[1].field` is a valid static initializer address constant.
     #[test]
-    fn eval_address_field_offset_deferred_to_codegen() {
-        use rcc_hir::{Def, Linkage, Qual};
+    fn eval_address_field_adds_record_layout_offset() {
+        use rcc_hir::{Def, Field, Linkage, ObjectQuals, Qual, RecordKind};
         let mut tcx = TyCtxt::new();
         let mut body = Body::default();
         let mut defs: IndexVec<DefId, Def> = IndexVec::new();
-        let did = defs.push(Def {
+        let record = defs.push(Def {
             id: DefId(0),
             name: rcc_span::Symbol(0),
             span: DUMMY_SP,
+            kind: DefKind::Record {
+                kind: RecordKind::Struct,
+                packed: false,
+                ms_bitfields: false,
+                align_override: None,
+                scalar_storage_order: None,
+                layout: None,
+                fields: vec![
+                    Field {
+                        name: None,
+                        ty: tcx.int,
+                        quals: ObjectQuals::none(),
+                        align_override: None,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                    Field {
+                        name: None,
+                        ty: tcx.int,
+                        quals: ObjectQuals::none(),
+                        align_override: None,
+                        offset: None,
+                        bit_width: None,
+                        span: DUMMY_SP,
+                    },
+                ],
+            },
+        });
+        defs[record].id = record;
+        let record_ty = tcx.intern(Ty::Record(record));
+        let array_ty =
+            tcx.intern(Ty::Array { elem: Qual::plain(record_ty), len: Some(2), is_vla: false });
+        let array = defs.push(Def {
+            id: DefId(0),
+            name: rcc_span::Symbol(1),
+            span: DUMMY_SP,
             kind: DefKind::Global {
-                ty: tcx.int,
-                quals: rcc_hir::ObjectQuals::none(),
+                ty: array_ty,
+                quals: ObjectQuals::none(),
                 thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },
         });
-        defs[did].id = did;
-        let r = push(&mut body, tcx.int, HirExprKind::DefRef(did));
-        let f = push(&mut body, tcx.int, HirExprKind::Field { base: r, field_index: 1 });
+        defs[array].id = array;
+
+        let array_ref = push(&mut body, array_ty, HirExprKind::DefRef(array));
+        let one = push(&mut body, tcx.int, HirExprKind::IntConst(1));
+        let elem = push(&mut body, record_ty, HirExprKind::Index { base: array_ref, index: one });
+        let field = push(&mut body, tcx.int, HirExprKind::Field { base: elem, field_index: 1 });
         let int_ptr = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
-        let addr = push(&mut body, int_ptr, HirExprKind::AddressOf(f));
+        let addr = push(&mut body, int_ptr, HirExprKind::AddressOf(field));
         let mut ce = ConstEval::with_defs_and_session(&tcx, Some(&body), Some(&defs), None);
-        // Per the documentation in `eval_address_of`, the field
-        // offset is left at 0; the codegen pass adds it later.
-        assert_eq!(ce.eval_address(addr), Some((Some(did), 0)));
+
+        assert_eq!(ce.eval_address(addr), Some((Some(array), 12)));
     }
 
     /// Unified `eval_scalar` dispatches: ints stay int, floats stay

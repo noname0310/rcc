@@ -7014,6 +7014,47 @@ pub mod backend {
         Ok(bits)
     }
 
+    fn bitfield_storage_type<'ctx>(
+        context: &'ctx Context,
+        storage_size: u64,
+        ty: TyId,
+    ) -> Result<BasicTypeEnum<'ctx>, CodegenError> {
+        let storage_bits = storage_bits_for_bitfield(storage_size)?;
+        if bitfield_storage_uses_integer_type(storage_size) {
+            return Ok(context.custom_width_int_type(storage_bits).into());
+        }
+        Ok(context.i8_type().array_type(array_len(storage_size, ty)?).into())
+    }
+
+    fn bitfield_storage_uses_integer_type(storage_size: u64) -> bool {
+        matches!(storage_size, 1 | 2 | 4 | 8)
+    }
+
+    fn packed_storage_byte(
+        packed: u64,
+        unit_size: u64,
+        byte_index: u64,
+        target: Endianness,
+        storage_bits: u32,
+    ) -> Result<u64, CodegenError> {
+        let bit_shift = match target {
+            Endianness::Little => byte_index.checked_mul(8),
+            Endianness::Big => unit_size
+                .checked_sub(byte_index)
+                .and_then(|value| value.checked_sub(1))
+                .and_then(|value| value.checked_mul(8)),
+        }
+        .ok_or_else(|| {
+            CodegenError::Internal("bit-field storage byte shift overflowed".to_owned())
+        })?;
+        if bit_shift >= u64::from(storage_bits) {
+            return Err(CodegenError::Internal(
+                "bit-field storage byte shift exceeds storage size".to_owned(),
+            ));
+        }
+        Ok((packed >> bit_shift) & 0xff)
+    }
+
     fn explicit_bitfield_repr_size(
         fields: &[rcc_hir::layout::FieldLayout],
         index: usize,
@@ -7500,8 +7541,7 @@ pub mod backend {
                     if field_layout.offset > offset {
                         out.push(self.padding_type(field_layout.offset - offset, ty)?);
                     }
-                    let storage_bits = storage_bits_for_bitfield(repr_size)?;
-                    out.push(self.context.custom_width_int_type(storage_bits).into());
+                    out.push(bitfield_storage_type(self.context, repr_size, ty)?);
                     offset = unit_end;
                     continue;
                 }
@@ -8046,24 +8086,42 @@ pub mod backend {
                         continue;
                     }
                     if field_layout.offset < offset {
-                        values.push(self.padding_const(unit_end - offset, ty)?.into());
+                        let skip_bytes =
+                            offset.checked_sub(field_layout.offset).ok_or_else(|| {
+                                CodegenError::Internal(
+                                    "explicit bit-field overlap underflowed".to_owned(),
+                                )
+                            })?;
+                        let tail_size = unit_end.checked_sub(offset).ok_or_else(|| {
+                            CodegenError::Internal("explicit bit-field tail underflowed".to_owned())
+                        })?;
+                        values.push(
+                            self.build_bitfield_tail_padding_const(
+                                fields,
+                                entries,
+                                &record_layout,
+                                field_layout.offset,
+                                repr_size,
+                                skip_bytes,
+                                tail_size,
+                                ty,
+                            )?
+                            .into(),
+                        );
                         offset = unit_end;
                         continue;
                     }
                     if field_layout.offset > offset {
                         values.push(self.padding_const(field_layout.offset - offset, ty)?.into());
                     }
-                    values.push(
-                        self.build_bitfield_storage_const(
-                            fields,
-                            entries,
-                            &record_layout,
-                            field_layout.offset,
-                            repr_size,
-                            ty,
-                        )?
-                        .into(),
-                    );
+                    values.push(self.build_bitfield_storage_const(
+                        fields,
+                        entries,
+                        &record_layout,
+                        field_layout.offset,
+                        repr_size,
+                        ty,
+                    )?);
                     offset = unit_end;
                     continue;
                 }
@@ -8111,6 +8169,43 @@ pub mod backend {
             Ok(struct_ty.const_named_struct(&values).into())
         }
 
+        fn build_bitfield_tail_padding_const(
+            &mut self,
+            fields: &[rcc_hir::Field],
+            entries: &[GlobalInitEntry],
+            record_layout: &rcc_hir::layout::RecordLayout,
+            unit_offset: u64,
+            unit_size: u64,
+            skip_bytes: u64,
+            tail_size: u64,
+            ty: TyId,
+        ) -> Result<inkwell::values::ArrayValue<'ctx>, CodegenError> {
+            let storage_bits = storage_bits_for_bitfield(unit_size)?;
+            let packed = self.pack_bitfield_storage_const(
+                fields,
+                entries,
+                record_layout,
+                unit_offset,
+                unit_size,
+            )?;
+            let tail_len = array_len(tail_size, ty)?;
+            let mut bytes = Vec::with_capacity(tail_len as usize);
+            for i in 0..tail_size {
+                let byte_index = skip_bytes.checked_add(i).ok_or_else(|| {
+                    CodegenError::Internal("bit-field tail byte index overflowed".to_owned())
+                })?;
+                let byte = packed_storage_byte(
+                    packed,
+                    unit_size,
+                    byte_index,
+                    self.target_info.endianness,
+                    storage_bits,
+                )?;
+                bytes.push(self.context.i8_type().const_int(byte, false).into());
+            }
+            Ok(const_array(self.context.i8_type().into(), &bytes))
+        }
+
         fn build_bitfield_storage_const(
             &mut self,
             fields: &[rcc_hir::Field],
@@ -8119,7 +8214,45 @@ pub mod backend {
             unit_offset: u64,
             unit_size: u64,
             _ty: TyId,
-        ) -> Result<IntValue<'ctx>, CodegenError> {
+        ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+            let storage_bits = storage_bits_for_bitfield(unit_size)?;
+            let packed = self.pack_bitfield_storage_const(
+                fields,
+                entries,
+                record_layout,
+                unit_offset,
+                unit_size,
+            )?;
+            if bitfield_storage_uses_integer_type(unit_size) {
+                return Ok(self
+                    .context
+                    .custom_width_int_type(storage_bits)
+                    .const_int(packed, false)
+                    .into());
+            }
+            let len = array_len(unit_size, _ty)?;
+            let mut bytes = Vec::with_capacity(len as usize);
+            for byte_index in 0..unit_size {
+                let byte = packed_storage_byte(
+                    packed,
+                    unit_size,
+                    byte_index,
+                    self.target_info.endianness,
+                    storage_bits,
+                )?;
+                bytes.push(self.context.i8_type().const_int(byte, false).into());
+            }
+            Ok(const_array(self.context.i8_type().into(), &bytes).into())
+        }
+
+        fn pack_bitfield_storage_const(
+            &mut self,
+            fields: &[rcc_hir::Field],
+            entries: &[GlobalInitEntry],
+            record_layout: &rcc_hir::layout::RecordLayout,
+            unit_offset: u64,
+            unit_size: u64,
+        ) -> Result<u64, CodegenError> {
             let storage_bits = storage_bits_for_bitfield(unit_size)?;
             let mut packed = 0_u64;
             for (i, field) in fields.iter().enumerate() {
@@ -8187,7 +8320,7 @@ pub mod backend {
             ) {
                 packed = byteswap_packed_bits(packed, storage_bits)?;
             }
-            Ok(self.context.custom_width_int_type(storage_bits).const_int(packed, false))
+            Ok(packed)
         }
 
         fn padding_const(
@@ -13943,6 +14076,108 @@ mod tests {
         let ir = cx.ir_text();
         // { i32, i32 } { i32 1, i32 2 }
         assert!(ir.contains("{ i32 1, i32 2 }"), "IR:\n{ir}");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn overlapping_bitfield_global_init_populates_padding_bytes() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![field(tcx.short), bitfield(tcx.int, 16), bitfield(tcx.uint, 18)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let name = session.interner.intern("s");
+        let init = GlobalInit {
+            ty: rec_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(0)],
+                    ty: tcx.short,
+                    expr: None,
+                    value: GlobalInitValue::Int(0x4e56),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(1)],
+                    ty: tcx.int,
+                    expr: None,
+                    value: GlobalInitValue::Int(-162),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _g = global_def_with_init(&mut defs, name, rec_ty, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(
+            ir.contains("[2 x i8] c\"^\\FF\"") || ir.contains("[2 x i8] [i8 94, i8 -1]"),
+            "overlapped bit-field bytes must not be zero padding:\n{ir}"
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn odd_sized_bitfield_storage_uses_byte_array_in_struct_constants() {
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let rec = record_def(
+            &mut defs,
+            RecordKind::Struct,
+            vec![bitfield(tcx.uint, 24), field(tcx.schar), bitfield(tcx.uint, 28)],
+        );
+        let rec_ty = tcx.intern(Ty::Record(rec));
+        let name = session.interner.intern("s");
+        let init = GlobalInit {
+            ty: rec_ty,
+            entries: vec![
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(0)],
+                    ty: tcx.uint,
+                    expr: None,
+                    value: GlobalInitValue::Int(4005),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(1)],
+                    ty: tcx.schar,
+                    expr: None,
+                    value: GlobalInitValue::Int(-45),
+                    span: DUMMY_SP,
+                },
+                GlobalInitEntry {
+                    path: vec![GlobalInitDesignator::Field(2)],
+                    ty: tcx.uint,
+                    expr: None,
+                    value: GlobalInitValue::Int(6184),
+                    span: DUMMY_SP,
+                },
+            ],
+        };
+        let _g = global_def_with_init(&mut defs, name, rec_ty, Linkage::Internal, init);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+        cx.declare_all().unwrap();
+        backend::GlobalCx::new(&cx).materialize_all_globals().unwrap();
+
+        let ir = cx.ir_text();
+        assert!(
+            ir.contains("%rcc.record.0 = type <{ [3 x i8], i8, i32 }>"),
+            "24-bit storage must not be an i24 struct field:\n{ir}"
+        );
+        assert!(ir.contains("[3 x i8] c\"\\A5\\0F\\00\", i8 -45"), "IR:\n{ir}");
     }
 
     /// GlobalInitValue::Error is rejected before emitting invalid IR.
