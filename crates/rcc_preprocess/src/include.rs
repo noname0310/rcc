@@ -517,6 +517,26 @@ impl Preprocessor<'_> {
                 && active_count < MAX_SELF_INCLUDE_ACTIVE
                 && self.mark_self_include_reentry(current_file);
             if !finite_self_include {
+                // Ad-hoc guard detection on cycle entry: a header may
+                // be guarded with `#ifndef X / #define X / ... / #endif`
+                // but the guard cache is populated only after the first
+                // inclusion completes. Cross-file mutual inclusion (e.g.
+                // curl.h → multi.h → curl.h) hits this path before the
+                // guard cache is set. If the file does have a guard and
+                // the guard symbol is already defined, the second
+                // inclusion would expand to nothing — silent skip.
+                if !self.include_guards.contains_key(&new_file) {
+                    let src = self.session.source_map.read().unwrap().file(new_file).src.clone();
+                    let raw: Vec<PpToken> = rcc_lexer::tokenize(new_file, &src).collect();
+                    if let Some(guard) = detect_guard(&raw, &src, &mut self.session.interner) {
+                        self.include_guards.insert(new_file, guard);
+                    }
+                }
+                if let Some(&guard_sym) = self.include_guards.get(&new_file) {
+                    if self.macros.is_defined(guard_sym) {
+                        return Vec::new();
+                    }
+                }
                 let edge = (current_file, new_file);
                 if !self.diagnosed_include_cycles.contains_key(&edge) {
                     self.session.handler.emit(&recursive_include_cycle(directive_span, &resolved));
@@ -1534,6 +1554,50 @@ int ltm_terminal_marker;
     }
 
     // ── 04-04 include-guard optimisation ────────────────────────────
+
+    #[test]
+    fn cross_file_mutual_include_through_completed_guards_is_silent() {
+        // Real-world pattern from `curl/curl.h` ↔ `curl/multi.h`: the
+        // outer header guards itself with `#ifndef A_H / #define A_H`,
+        // includes a partner header, and the partner re-includes the
+        // outer header. The guard symbol is already defined at the
+        // recursive entry, so the cycle is benign — it must skip
+        // silently without an E0021 diagnostic.
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_mutual_guards__");
+        let main_path = root.join("main.c");
+        let a_path = root.join("a.h");
+        let b_path = root.join("b.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"a.h\"\n"));
+        sess.add_virtual_file(
+            a_path.clone(),
+            Arc::from("#ifndef A_H\n#define A_H\nint a_marker;\n#include \"b.h\"\n#endif\n"),
+        );
+        sess.add_virtual_file(
+            b_path.clone(),
+            Arc::from("#ifndef B_H\n#define B_H\nint b_marker;\n#include \"a.h\"\n#endif\n"),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = joined_token_text(&sess, &out);
+
+        assert!(
+            cap.diagnostics().is_empty(),
+            "guarded mutual include must not diagnose: {:?}",
+            cap.diagnostics()
+        );
+        assert_eq!(
+            text.matches("a_marker").count(),
+            1,
+            "outer header body must appear exactly once: {text}"
+        );
+        assert_eq!(
+            text.matches("b_marker").count(),
+            1,
+            "partner header body must appear exactly once: {text}"
+        );
+    }
 
     #[test]
     fn guarded_header_is_skipped_on_repeat_include() {

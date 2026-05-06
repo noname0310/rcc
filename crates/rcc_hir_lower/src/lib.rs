@@ -8278,7 +8278,18 @@ fn assign_def_ids(
                                 kind: DefKind::Typedef(tcx.error),
                             });
                             crate_.defs[id].id = id;
-                            if !duplicate_in_decl {
+                            // Preserve the earliest file-scope typedef binding in the
+                            // resolver: cross-decl redefinitions (e.g. stdint.h followed
+                            // by netinet/in.h both providing `typedef ... uint8_t`) must
+                            // not invalidate uses of the name made between the two
+                            // declarations. Pass 2 fills typedef slots in source order,
+                            // so uses interleaved with later redefs would otherwise
+                            // resolve to a still-unfinalised slot (Ty::Error).
+                            let existing_typedef = !duplicate_in_decl
+                                && resolver.ordinary.get(&name).is_some_and(|&existing| {
+                                    matches!(crate_.defs[existing].kind, DefKind::Typedef(_))
+                                });
+                            if !duplicate_in_decl && !existing_typedef {
                                 resolver.ordinary.insert(name, id);
                             }
                             if is_function_typedef {

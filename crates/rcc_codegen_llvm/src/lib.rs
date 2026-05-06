@@ -1866,6 +1866,9 @@ pub mod backend {
                     let elem_ty = self.type_cx().basic_type_of_qual(*elem)?;
                     return Ok(elem_ty.array_type(0).into());
                 }
+                if self.is_incomplete_record(ty) {
+                    return Ok(self.context.i8_type().array_type(0).into());
+                }
             }
             self.type_cx().basic_type_of(ty)
         }
@@ -1884,8 +1887,24 @@ pub mod backend {
                         .map(|layout| layout.align)
                         .map_err(|err| type_lowering_error(elem.ty, err.to_string()));
                 }
+                if self.is_incomplete_record(ty) {
+                    return Ok(1);
+                }
             }
             self.local_storage_align(ty)
+        }
+
+        fn is_incomplete_record(&self, ty: TyId) -> bool {
+            let Ty::Record(def) = self.tcx.get(ty) else {
+                return false;
+            };
+            let Some(def_data) = self.hir.defs.get(*def) else {
+                return false;
+            };
+            let DefKind::Record { fields, layout, .. } = &def_data.kind else {
+                return false;
+            };
+            fields.is_empty() && layout.is_none()
         }
 
         fn apply_common_function_attrs(&self, function: FunctionValue<'ctx>, attrs: CommonAttrs) {
@@ -9921,6 +9940,41 @@ mod tests {
         assert!(
             cx.ir_text().contains("@deflate_copyright = external global [0 x i8]"),
             "external incomplete arrays need an LLVM declaration type:\n{}",
+            cx.ir_text()
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn llvm_external_incomplete_record_global_uses_zero_length_placeholder() {
+        use inkwell::module::Linkage as LlvmLinkage;
+
+        // Real-world pattern from curl: every `extern const struct Curl_protocol
+        // Curl_protocol_*;` declaration in lib/*.h exposes the symbol while the
+        // `struct Curl_protocol` body lives in a different translation unit.
+        // The LLVM declaration must succeed without a complete record layout;
+        // a zero-byte `[0 x i8]` placeholder is the canonical shape.
+        let context = inkwell::context::Context::create();
+        let (mut session, _cap) = Session::for_test();
+        let mut tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let opaque = record_def(&mut defs, RecordKind::Struct, Vec::new());
+        let opaque_ty = tcx.intern(Ty::Record(opaque));
+        let name = session.interner.intern("Curl_protocol_http");
+        let global = global_def(&mut defs, name, opaque_ty, Linkage::External);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+        let mut cx = backend::CodegenCx::new(&context, &mut session, &tcx, &hir, &bodies);
+
+        cx.declare_all().unwrap();
+        cx.module().verify().unwrap();
+
+        let decl = cx.global_decl(global).unwrap();
+        assert_eq!(decl.get_linkage(), LlvmLinkage::External);
+        assert!(decl.get_initializer().is_none());
+        assert!(
+            cx.ir_text().contains("@Curl_protocol_http = external global [0 x i8]"),
+            "external incomplete records need a zero-length LLVM declaration type:\n{}",
             cx.ir_text()
         );
     }

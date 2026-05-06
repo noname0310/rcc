@@ -16,6 +16,7 @@ with larger build systems and more platform assumptions.
 | 09 | GNU coreutils | <https://github.com/coreutils/coreutils> | host-bootstrap/configure first, then compile one small utility with `rcc` | run that utility against host output once linkage works | glibc/POSIX/GNU userland target with heavy gnulib and hosted-header assumptions |
 | 10 | Toybox | <https://github.com/landley/toybox> | build a tiny hosted Linux applet subset before broader defconfig coverage | run selected applets against host output | broad POSIX/glibc userland surface with a smaller dependency model than coreutils |
 | 11 | libuv | <https://github.com/libuv/libuv> | compile the Linux static library source set | run one event-loop or filesystem smoke against host output | pthread/epoll/process/fs stress target after the userland applet probes |
+| 12 | curl | <https://github.com/curl/curl> | drive the upstream CMake build with `rcc` as `CMAKE_C_COMPILER` to compile the static `libcurl.a` and link the `src/curl` CLI | issue a real HTTP `GET http://example.com/` and assert the body | full multi-target CMake build with cross-file mutual `#include` chains, broad GNU/POSIX header surface, and a network-positive runtime smoke |
 
 ## Start rule
 

@@ -953,6 +953,38 @@ fn typedef_array_bound_sizeof_sees_prior_completed_global_array() {
 }
 
 #[test]
+fn cross_decl_typedef_redef_keeps_earliest_resolver_binding() {
+    // Real-world pattern from curl: a translation unit pulls in stdint.h
+    // (which provides `typedef unsigned char uint8_t;`) and then
+    // netinet/in.h (which redefines `typedef __uint8_t uint8_t;` to the
+    // same compatible type). Uses of `uint8_t` in declarations between
+    // the two typedefs must keep resolving through the first binding,
+    // whose pass-2 finalised slot is already a real `unsigned char`.
+    // Otherwise the resolver flips to the still-`tcx.error` second
+    // typedef and the cascading `Ty::Error` is reported as E0088 against
+    // the interleaved declarations.
+    let src = r#"
+        typedef unsigned char uint8_t;
+        typedef int writer_cb(void *ctx, const uint8_t *buf, unsigned long n);
+        typedef unsigned char __uint8_t;
+        typedef __uint8_t uint8_t;
+    "#;
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(
+        cap.diagnostics().is_empty(),
+        "interleaved typedef redefinition must not emit diagnostics: {:?}",
+        cap.diagnostics()
+    );
+
+    let typedef_count =
+        hir.defs.iter().filter(|def| matches!(def.kind, DefKind::Typedef(_))).count();
+    assert!(
+        typedef_count >= 4,
+        "all four typedef defs must be created (uint8_t, writer_cb, __uint8_t, uint8_t-redef): got {typedef_count}"
+    );
+}
+
+#[test]
 fn gnu_aligned_attribute_sets_record_layout_override() {
     let src = r#"
         typedef struct x { int a; int b; } __attribute__((aligned(32))) X;
