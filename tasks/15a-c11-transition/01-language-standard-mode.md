@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-01: Language Standard Mode
 
 **Phase:** 15a-c11-transition  

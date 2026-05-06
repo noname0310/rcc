@@ -55,6 +55,27 @@ pub enum OptLevel {
     Aggressive,
 }
 
+/// C language standard mode selected by `-std=...`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LanguageStandard {
+    /// ISO C99 (`__STDC_VERSION__ == 199901L`).
+    #[default]
+    C99,
+    /// ISO C11 (`__STDC_VERSION__ == 201112L`).
+    C11,
+}
+
+impl LanguageStandard {
+    /// Value exposed by the predefined `__STDC_VERSION__` macro.
+    #[must_use]
+    pub const fn stdc_version_macro(self) -> &'static str {
+        match self {
+            Self::C99 => "199901L",
+            Self::C11 => "201112L",
+        }
+    }
+}
+
 /// CLI / driver options. Intentionally plain data for easy wiring by clap.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -70,6 +91,8 @@ pub struct Options {
     pub cli_undefines: Vec<String>,
     /// Target-specific C layout and backend metadata.
     pub target: TargetInfo,
+    /// Selected ISO C language standard.
+    pub language_standard: LanguageStandard,
     /// What to emit (may be multiple).
     pub emit: Vec<EmitKind>,
     /// Output path. `None` = stdout / default.
@@ -289,6 +312,7 @@ impl Default for Options {
             cli_defines: Vec::new(),
             cli_undefines: Vec::new(),
             target: TargetInfo::baseline(),
+            language_standard: LanguageStandard::default(),
             emit: Vec::new(),
             output: None,
             save_temps: None,

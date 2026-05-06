@@ -1,16 +1,18 @@
 # Hosted Linux Mode
 
-`rcc` is a C99-first compiler.  Hosted Linux support is an explicit
+`rcc` is a C99-first compiler with an explicit C11 mode.  Hosted Linux support is an explicit
 compatibility policy selected with:
 
 ```sh
-rcc --linux-gnu-hosted --std=c99 input.c
+rcc --linux-gnu-hosted --std=c11 input.c
 ```
 
 The flag means "compile for a Linux glibc/POSIX hosted environment".  It does
 not mean "accept every GNU C extension".  GNU syntax remains behind the existing
 feature flags such as `-fgnu-attributes`, `-fgnu-typeof`, `-fgnu-inline-asm`,
-and `-fgnu-implicit-function-declaration`.
+and `-fgnu-implicit-function-declaration`.  Hosted mode also does not choose a
+language standard: use `-std=c99` or `-std=c11` explicitly when the source needs
+a particular ISO mode.
 
 In this mode the driver installs feature-test macros through the same path as
 ordinary command-line `-D` definitions:
@@ -60,7 +62,9 @@ Strict C99 remains the default:
 rcc --std=c99 input.c
 ```
 
-`--linux-gnu-hosted` does not enable GNU syntax extensions by itself.  For
+`-std=c11` enables C11 language/preprocessor semantics as they are implemented,
+including `__STDC_VERSION__ == 201112L`.  `--linux-gnu-hosted` does not enable
+GNU syntax extensions or change the selected ISO standard by itself.  For
 example, GNU binary integer literals still require:
 
 ```sh

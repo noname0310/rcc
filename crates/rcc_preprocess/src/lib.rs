@@ -453,7 +453,10 @@ impl<'a> Preprocessor<'a> {
     pub fn install_predefined(&mut self) {
         self.install_static_predefined("__STDC__", "1");
         self.install_static_predefined("__STDC_HOSTED__", "1");
-        self.install_static_predefined("__STDC_VERSION__", "199901L");
+        self.install_static_predefined(
+            "__STDC_VERSION__",
+            self.session.opts.language_standard.stdc_version_macro(),
+        );
         let (date, time) = current_date_time();
         self.install_static_predefined("__DATE__", &format!("\"{date}\""));
         self.install_static_predefined("__TIME__", &format!("\"{time}\""));
@@ -1880,6 +1883,19 @@ mod run_tests {
         let mut pp = Preprocessor::new(&mut sess);
         let out = pp.run(id);
         assert_eq!(joined_text(&pp, &out), "199901L");
+        assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
+    }
+
+    #[test]
+    fn predefined_stdc_version_expands_to_201112l_in_c11_mode() {
+        let opts = rcc_session::Options {
+            language_standard: rcc_session::LanguageStandard::C11,
+            ..rcc_session::Options::default()
+        };
+        let (mut sess, id, cap) = seed_with_opts(opts, "__STDC_VERSION__\n");
+        let mut pp = Preprocessor::new(&mut sess);
+        let out = pp.run(id);
+        assert_eq!(joined_text(&pp, &out), "201112L");
         assert!(cap.diagnostics().is_empty(), "unexpected diagnostics: {:?}", cap.diagnostics());
     }
 

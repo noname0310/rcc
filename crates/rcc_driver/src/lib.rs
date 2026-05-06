@@ -13,7 +13,9 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use rcc_session::{EmitKind, LinkOptions, Options, Os, Session, TargetInfo, WarningConfig};
+use rcc_session::{
+    EmitKind, LanguageStandard, LinkOptions, Options, Os, Session, TargetInfo, WarningConfig,
+};
 
 pub mod cli;
 mod deps;
@@ -138,7 +140,9 @@ fn classify_driver_error(message: &str) -> ExitCode {
 
 fn validate_driver_cli(cli: &Cli) -> Result<(), String> {
     if cli.ansi {
-        return Err("unsupported standard '-ansi'; only -std=c99 is supported".to_owned());
+        return Err(
+            "unsupported standard '-ansi'; supported standards: -std=c99, -std=c11".to_owned()
+        );
     }
     if cli.input.is_empty() && !(cli.show_version || cli.print_search_dirs) {
         return Err("no input files".to_owned());
@@ -648,6 +652,7 @@ pub fn options_from_cli(cli: &Cli) -> Options {
         cli_defines,
         cli_undefines: cli.undefines.clone(),
         target,
+        language_standard: cli.standard.unwrap_or(LanguageStandard::C99),
         emit,
         output,
         save_temps: cli.save_temps.clone(),

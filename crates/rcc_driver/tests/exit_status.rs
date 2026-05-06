@@ -144,7 +144,7 @@ fn clap_cli_misuse_exits_with_usage_failure() {
 
 #[test]
 fn unsupported_standard_exits_with_usage_failure() {
-    let output = Command::new(rcc_bin()).arg("-std=c11").arg("hello.c").output().expect("run rcc");
+    let output = Command::new(rcc_bin()).arg("-std=c17").arg("hello.c").output().expect("run rcc");
 
     assert_eq!(output.status.code(), Some(ExitCode::Usage.code()));
 }

@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rcc_driver::{options_from_cli, run, run_status, Cli, ExitCode};
-use rcc_session::OptLevel;
+use rcc_session::{LanguageStandard, OptLevel};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -54,8 +54,18 @@ fn std_c99_is_accepted_and_preserves_default_options() {
     let cli = parse(&["rcc", "-std=c99", "hello.c"]);
     let opts = options_from_cli(&cli);
 
-    assert_eq!(cli.standard.as_deref(), Some("c99"));
+    assert_eq!(cli.standard, Some(LanguageStandard::C99));
+    assert_eq!(opts.language_standard, LanguageStandard::C99);
     assert_eq!(opts.emit, Vec::new());
+}
+
+#[test]
+fn std_c11_sets_session_language_standard() {
+    let cli = parse(&["rcc", "-std=c11", "hello.c"]);
+    let opts = options_from_cli(&cli);
+
+    assert_eq!(cli.standard, Some(LanguageStandard::C11));
+    assert_eq!(opts.language_standard, LanguageStandard::C11);
 }
 
 #[test]
@@ -69,9 +79,37 @@ fn cli_undefine_spelling_maps_to_session_options() {
 
 #[test]
 fn unsupported_std_is_rejected_during_cli_parse() {
-    let err = Cli::try_parse_from(["rcc", "-std=c11", "hello.c"]).unwrap_err().to_string();
+    let err = Cli::try_parse_from(["rcc", "-std=c17", "hello.c"]).unwrap_err().to_string();
 
-    assert!(err.contains("unsupported standard 'c11'"), "{err}");
+    assert!(err.contains("unsupported standard 'c17'"), "{err}");
+    assert!(err.contains("c99, c11"), "{err}");
+}
+
+#[test]
+fn std_flag_controls_stdc_version_predefine() {
+    for (standard, expected) in [("c99", "199901L"), ("c11", "201112L")] {
+        let input = TempCFile::new(
+            &format!("stdc-version-{standard}"),
+            "long version = __STDC_VERSION__;\n",
+        );
+        let output = input.sibling("i");
+        let result = Command::new(rcc_bin())
+            .arg(format!("-std={standard}"))
+            .arg("-E")
+            .arg("-o")
+            .arg(&output)
+            .arg(&input.path)
+            .output()
+            .expect("run rcc");
+
+        assert!(
+            result.status.success(),
+            "{standard} stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let preprocessed = fs::read_to_string(&output).expect("read preprocessed output");
+        assert!(preprocessed.contains(expected), "{standard}: {preprocessed}");
+    }
 }
 
 #[test]
@@ -231,6 +269,7 @@ fn linux_gnu_hosted_flag_sets_policy_without_gnu_syntax_flags() {
     let cli = parse(&["rcc", "--linux-gnu-hosted", "hello.c"]);
     let opts = options_from_cli(&cli);
 
+    assert_eq!(opts.language_standard, LanguageStandard::C99);
     assert!(opts.linux_gnu_hosted);
     assert!(!opts.gnu_binary_integer_literals);
     assert!(!opts.gnu_statement_expressions);

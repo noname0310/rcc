@@ -5,13 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{error::ErrorKind, ArgAction, Parser};
-use rcc_session::{EmitKind, OptLevel, TargetInfo, TargetTriple};
+use rcc_session::{EmitKind, LanguageStandard, OptLevel, TargetInfo, TargetTriple};
 
 use crate::ExitCode;
 
 /// The `rcc` command-line interface.
 #[derive(Debug, Parser, Clone)]
-#[command(name = "rcc", about = "rcc: a Rust-based C99 compiler", disable_version_flag = true)]
+#[command(name = "rcc", about = "rcc: a Rust-based C99/C11 compiler", disable_version_flag = true)]
 pub struct Cli {
     /// Input `.c` file(s).
     pub input: Vec<PathBuf>,
@@ -106,9 +106,9 @@ pub struct Cli {
     #[arg(long = "target", value_parser = parse_target)]
     pub target: Option<TargetInfo>,
 
-    /// C language standard (`-std=c99` only for now).
+    /// C language standard (`-std=c99` or `-std=c11`).
     #[arg(long = "std", value_name = "STANDARD", value_parser = parse_standard)]
-    pub standard: Option<String>,
+    pub standard: Option<LanguageStandard>,
 
     /// GCC compatibility alias for C89 mode. Parsed, but currently unsupported.
     #[arg(long = "ansi", action = ArgAction::SetTrue)]
@@ -472,9 +472,10 @@ fn parse_target(raw: &str) -> Result<TargetInfo, String> {
     TargetInfo::from_triple(&triple).map_err(|err| err.to_string())
 }
 
-fn parse_standard(raw: &str) -> Result<String, String> {
+fn parse_standard(raw: &str) -> Result<LanguageStandard, String> {
     match raw {
-        "c99" => Ok(raw.to_owned()),
-        other => Err(format!("unsupported standard '{other}'; only c99 is supported")),
+        "c99" => Ok(LanguageStandard::C99),
+        "c11" => Ok(LanguageStandard::C11),
+        other => Err(format!("unsupported standard '{other}'; supported standards: c99, c11")),
     }
 }
