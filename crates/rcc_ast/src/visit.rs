@@ -4,7 +4,7 @@
 use crate::{
     Block, BlockItem, Decl, Declarator, EnumSpec, Expr, ExprKind, ExternalDecl, FieldDecl,
     FunctionDef, InitDeclarator, Initializer, InlineAsm, OffsetofDesignator, ParamDecl, RecordSpec,
-    Stmt, StmtKind, TranslationUnit, TypeName,
+    StaticAssert, Stmt, StmtKind, TranslationUnit, TypeName,
 };
 
 /// Walk the AST read-only.
@@ -20,6 +20,10 @@ pub trait Visitor: Sized {
     /// Override to visit a declaration.
     fn visit_decl(&mut self, d: &Decl) {
         walk_decl(self, d);
+    }
+    /// Override to visit a static assertion declaration.
+    fn visit_static_assert(&mut self, a: &StaticAssert) {
+        walk_static_assert(self, a);
     }
     /// Override to visit a function definition.
     fn visit_function_def(&mut self, f: &FunctionDef) {
@@ -39,6 +43,9 @@ pub trait Visitor: Sized {
             for f in fs {
                 self.visit_field(f);
             }
+        }
+        for a in &r.static_asserts {
+            self.visit_static_assert(a);
         }
     }
     /// Override to visit an enum specifier.
@@ -79,6 +86,7 @@ pub fn walk_external_decl<V: Visitor>(v: &mut V, d: &ExternalDecl) {
     match d {
         ExternalDecl::Function(f) => v.visit_function_def(f),
         ExternalDecl::Decl(d) => v.visit_decl(d),
+        ExternalDecl::StaticAssert(a) => v.visit_static_assert(a),
     }
 }
 
@@ -87,6 +95,11 @@ pub fn walk_decl<V: Visitor>(v: &mut V, d: &Decl) {
     for id in &d.inits {
         v.visit_init_declarator(id);
     }
+}
+
+/// Default descent for `StaticAssert`.
+pub fn walk_static_assert<V: Visitor>(v: &mut V, a: &StaticAssert) {
+    v.visit_expr(&a.expr);
 }
 
 /// Default descent for `FunctionDef`.
@@ -117,6 +130,7 @@ pub fn walk_block<V: Visitor>(v: &mut V, b: &Block) {
 pub fn walk_block_item<V: Visitor>(v: &mut V, b: &BlockItem) {
     match b {
         BlockItem::Decl(d) => v.visit_decl(d),
+        BlockItem::StaticAssert(a) => v.visit_static_assert(a),
         BlockItem::Stmt(s) => v.visit_stmt(s),
     }
 }

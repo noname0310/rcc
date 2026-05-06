@@ -13,7 +13,7 @@
 
 use rcc_ast::{
     BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl, OffsetofDesignator,
-    RecordSpec, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec,
+    RecordSpec, StaticAssert, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec,
 };
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
@@ -41,6 +41,7 @@ pub fn lower(ast: &TranslationUnit, tcx: &mut TyCtxt, session: &mut Session) -> 
     finalize_file_scope_typedef_def_types(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_tag_definitions(ast, tcx, session, &mut crate_, &mut resolver);
     finalize_file_scope_def_types(ast, tcx, session, &mut crate_, &mut resolver);
+    check_file_scope_static_asserts(ast, tcx, session, &mut crate_, &mut resolver);
     lower_function_bodies(ast, tcx, session, &mut crate_, &mut resolver);
     crate_
 }
@@ -190,6 +191,59 @@ fn lower_function_bodies(
         resolver.current_function = None;
 
         crate_.bodies.insert(def_id, body);
+    }
+}
+
+fn check_file_scope_static_asserts(
+    ast: &TranslationUnit,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    crate_: &mut HirCrate,
+    resolver: &mut Resolver,
+) {
+    for ext_decl in &ast.decls {
+        if let ExternalDecl::StaticAssert(assertion) = ext_decl {
+            check_static_assert(assertion, DeclScope::File, None, tcx, resolver, crate_, session);
+        }
+    }
+}
+
+fn check_static_assert(
+    assertion: &StaticAssert,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) {
+    let Some(value) = eval_array_bound_as_i128(
+        &assertion.expr,
+        scope,
+        typedef_scope,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    ) else {
+        session
+            .handler
+            .struct_err(
+                assertion.expr.span,
+                "static assertion expression is not an integer constant expression",
+            )
+            .code(rcc_errors::codes::E0089)
+            .emit();
+        return;
+    };
+
+    if value == 0 {
+        let message = String::from_utf8_lossy(&assertion.message.bytes);
+        session
+            .handler
+            .struct_err(assertion.expr.span, format!("static assertion failed: {message}"))
+            .code(rcc_errors::codes::E0089)
+            .emit();
     }
 }
 
@@ -868,6 +922,9 @@ fn walk_block_item_labels(
     match item {
         BlockItem::Stmt(stmt) => walk_stmt_labels(stmt, resolver, session, pass),
         BlockItem::Decl(decl) => walk_decl_labels(decl, resolver, session, pass),
+        BlockItem::StaticAssert(assertion) => {
+            walk_expr_labels(&assertion.expr, resolver, session, pass);
+        }
     }
 }
 
@@ -907,6 +964,9 @@ fn walk_decl_specs_labels(
                             }
                         }
                     }
+                }
+                for assertion in &record.static_asserts {
+                    walk_expr_labels(&assertion.expr, resolver, session, pass);
                 }
             }
             TypeSpec::Enum(en) => {
@@ -1247,6 +1307,18 @@ pub fn lower_stmt(
                 }
                 BlockItem::Decl(d) => {
                     lower_for_init_decl(d, stmt.span, body, scope, crate_, tcx, resolver, session)
+                }
+                BlockItem::StaticAssert(assertion) => {
+                    check_static_assert(
+                        assertion,
+                        DeclScope::Block,
+                        Some(&*scope),
+                        tcx,
+                        resolver,
+                        crate_,
+                        session,
+                    );
+                    None
                 }
             });
             let cond_id =
@@ -1982,6 +2054,17 @@ fn lower_block_items(
             BlockItem::Decl(decl) => {
                 lower_block_decl(decl, body, scope, crate_, tcx, resolver, session, &mut out);
             }
+            BlockItem::StaticAssert(assertion) => {
+                check_static_assert(
+                    assertion,
+                    DeclScope::Block,
+                    Some(&*scope),
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                );
+            }
         }
     }
     resolver.pop_tag_scope();
@@ -2029,6 +2112,17 @@ fn lower_stmt_expr_block(
             }
             BlockItem::Decl(decl) => {
                 lower_block_decl(decl, body, &mut scope, crate_, tcx, resolver, session, &mut out);
+            }
+            BlockItem::StaticAssert(assertion) => {
+                check_static_assert(
+                    assertion,
+                    DeclScope::Block,
+                    Some(&scope),
+                    tcx,
+                    resolver,
+                    crate_,
+                    session,
+                );
             }
         }
     }
@@ -7351,6 +7445,10 @@ pub fn lower_record(
         };
     };
 
+    for assertion in &spec.static_asserts {
+        check_static_assert(assertion, DeclScope::Block, None, tcx, resolver, crate_, session);
+    }
+
     for fd in field_decls {
         // Lower shared specifiers once per field-decl group.
         let base = lower_specs_to_base_ty(&fd.specs, tcx, resolver, crate_, session);
@@ -7771,6 +7869,7 @@ fn assign_def_ids(
                     }
                 }
             }
+            ExternalDecl::StaticAssert(_) => {}
         }
     }
 }
@@ -8334,6 +8433,7 @@ mod tests {
                     kind: rcc_ast::RecordKind::Struct,
                     tag: Some(tag),
                     fields: Some(Vec::new()),
+                    static_asserts: Vec::new(),
                     span: DUMMY_SP,
                     attrs: Vec::new(),
                 }));
@@ -8570,6 +8670,7 @@ mod tests {
                         kind: rcc_ast::RecordKind::Struct,
                         tag: Some(tag),
                         fields: Some(Vec::new()),
+                        static_asserts: Vec::new(),
                         span: DUMMY_SP,
                         attrs: Vec::new(),
                     }));
@@ -8601,6 +8702,7 @@ mod tests {
                         kind: rcc_ast::RecordKind::Struct,
                         tag: Some(tag),
                         fields: None, // no definition
+                        static_asserts: Vec::new(),
                         span: DUMMY_SP,
                         attrs: Vec::new(),
                     }));
@@ -10075,7 +10177,15 @@ mod tests {
         tag: Option<Symbol>,
         fields: Option<Vec<FieldDecl>>,
     ) -> RecordSpec {
-        RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP, attrs: Vec::new() }
+        RecordSpec {
+            id: NodeId(0),
+            kind,
+            tag,
+            fields,
+            static_asserts: Vec::new(),
+            span: DUMMY_SP,
+            attrs: Vec::new(),
+        }
     }
 
     #[test]

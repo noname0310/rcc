@@ -632,7 +632,15 @@ fn record_spec(
     tag: Option<Symbol>,
     fields: Option<Vec<FieldDecl>>,
 ) -> RecordSpec {
-    RecordSpec { id: NodeId(0), kind, tag, fields, span: DUMMY_SP, attrs: Vec::new() }
+    RecordSpec {
+        id: NodeId(0),
+        kind,
+        tag,
+        fields,
+        static_asserts: Vec::new(),
+        span: DUMMY_SP,
+        attrs: Vec::new(),
+    }
 }
 
 fn named_field(name: Symbol, type_specs: Vec<TypeSpec>) -> FieldDecl {
@@ -1021,6 +1029,68 @@ fn c11_noreturn_does_not_change_function_pointer_compatibility() {
         "{:#?}",
         cap.diagnostics()
     );
+}
+
+#[test]
+fn c11_static_assert_accepts_file_block_and_sizeof_constant_expression() {
+    let src = r#"
+        _Static_assert(1, "file");
+        _Static_assert(sizeof(int) == 4, "int size");
+        void f(void) {
+            _Static_assert(1, "block");
+        }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_static_assert_false_reports_message_before_codegen() {
+    let src = r#"
+        _Static_assert(0, "broken assumption");
+        int main(void) { return 0; }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().any(|d| {
+            d.code == Some(rcc_errors::codes::E0089) && d.message.contains("broken assumption")
+        }),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_static_assert_in_record_does_not_create_field() {
+    let src = r#"
+        struct S {
+            _Static_assert(sizeof(int) == 4, "layout");
+            int x;
+        };
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+
+    let record = hir
+        .defs
+        .iter()
+        .find_map(|def| match &def.kind {
+            DefKind::Record { fields, .. } => Some(fields),
+            _ => None,
+        })
+        .expect("record definition");
+    assert_eq!(record.len(), 1);
 }
 
 #[test]

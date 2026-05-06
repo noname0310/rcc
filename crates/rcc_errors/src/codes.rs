@@ -91,6 +91,7 @@ pub const ALL_CODES: &[(&str, &str)] = &[
     (E0086, E0086_DESC),
     (E0087, E0087_DESC),
     (E0088, E0088_DESC),
+    (E0089, E0089_DESC),
     (W0001, W0001_DESC),
     (W0002, W0002_DESC),
     (W0003, W0003_DESC),
@@ -644,6 +645,14 @@ const E0087_DESC: &str = "invalid member access";
 /// the unsupported shape.
 pub const E0088: &str = "E0088";
 const E0088_DESC: &str = "typed HIR invariant violation";
+
+/// Invalid C11 static assertion.
+///
+/// `_Static_assert` requires an integer constant expression. If that
+/// expression evaluates to zero, the assertion fails and the diagnostic
+/// includes the user-provided message string.
+pub const E0089: &str = "E0089";
+const E0089_DESC: &str = "invalid static assertion";
 
 // ── Warning block: W0001.. ──────────────────────────────────────────
 

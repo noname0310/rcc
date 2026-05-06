@@ -940,6 +940,10 @@ pub fn parse_block_item(p: &mut Parser<'_>) -> Option<BlockItem> {
         let stmt = parse_stmt(p)?;
         return Some(BlockItem::Stmt(Box::new(stmt)));
     }
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Keyword(Keyword::StaticAssert))) {
+        let assertion = crate::decl::parse_static_assert_decl(p)?;
+        return Some(BlockItem::StaticAssert(assertion));
+    }
     if looks_like_decl(p) || crate::attr::peek_attribute(p) {
         let before = p.cursor;
         if let Some(decl) = crate::decl::parse_declaration(p) {
@@ -983,6 +987,7 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
                     | Keyword::Restrict
                     | Keyword::Inline
                     | Keyword::Noreturn
+                    | Keyword::StaticAssert
                     | Keyword::Struct
                     | Keyword::Union
                     | Keyword::Enum
@@ -1181,7 +1186,7 @@ mod tests {
                         },
                         other => panic!("expected Expr(Some(..)), got {other:?}"),
                     },
-                    BlockItem::Decl(_) => panic!("decl parsing not expected here yet"),
+                    other => panic!("decl parsing not expected here yet, got {other:?}"),
                 }
                 assert_eq!(block.span.lo.0, 0);
                 assert_eq!(block.span.hi.0, 4);
@@ -1223,7 +1228,7 @@ mod tests {
                     assert_eq!(block.items.len(), 1, "outer levels wrap exactly one stmt");
                     match block.items.into_iter().next().unwrap() {
                         BlockItem::Stmt(inner) => *inner,
-                        BlockItem::Decl(_) => panic!("no decls expected"),
+                        other => panic!("no decls expected, got {other:?}"),
                     }
                 }
                 other => panic!("expected Compound at level {level}, got {other:?}"),
@@ -1392,7 +1397,7 @@ mod tests {
                     BlockItem::Stmt(inner) => {
                         assert!(matches!(inner.kind, StmtKind::Expr(Some(_))));
                     }
-                    BlockItem::Decl(_) => panic!("expression-init should not parse as a decl"),
+                    other => panic!("expression-init should not parse as a decl, got {other:?}"),
                 }
                 assert!(cond.is_some());
                 assert!(step.is_some());
@@ -1416,7 +1421,7 @@ mod tests {
                     BlockItem::Decl(decl) => {
                         assert_eq!(decl.inits.len(), 1);
                     }
-                    BlockItem::Stmt(_) => panic!("declaration-init should parse as a decl"),
+                    other => panic!("declaration-init should parse as a decl, got {other:?}"),
                 }
                 assert!(cond.is_some());
                 assert!(step.is_some());

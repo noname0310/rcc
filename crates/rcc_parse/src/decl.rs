@@ -66,7 +66,7 @@
 use rcc_ast::{
     ArrayDeclarator, Decl, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Enumerator, Expr,
     ExternalDecl, FieldDecl, FieldDeclarator, FunctionDeclarator, FunctionDef, InitDeclarator,
-    ParamDecl, RecordKind, RecordSpec, StorageClass, TypeName, TypeQuals, TypeSpec,
+    ParamDecl, RecordKind, RecordSpec, StaticAssert, StorageClass, TypeName, TypeQuals, TypeSpec,
 };
 use rcc_errors::codes;
 use rcc_lexer::Punct;
@@ -807,11 +807,13 @@ pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordS
 
     let mut end_span = tag.map(|(_, s)| s).unwrap_or(kw_span);
     let mut fields: Option<Vec<FieldDecl>> = None;
+    let mut static_asserts = Vec::new();
 
     if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::LBrace))) {
-        let (fs, close) = parse_struct_body(p);
+        let (fs, asserts, close) = parse_struct_body(p);
         end_span = close;
         fields = Some(fs);
+        static_asserts = asserts;
     } else if tag.is_none() {
         let name = match kind {
             RecordKind::Struct => "struct",
@@ -825,7 +827,15 @@ pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordS
     }
 
     let id = p.fresh_id();
-    RecordSpec { id, kind, tag: tag.map(|(sym, _)| sym), fields, span: kw_span.to(end_span), attrs }
+    RecordSpec {
+        id,
+        kind,
+        tag: tag.map(|(sym, _)| sym),
+        fields,
+        static_asserts,
+        span: kw_span.to(end_span),
+        attrs,
+    }
 }
 
 /// Parse a `{ field-decl* }` struct/union body. Cursor must be on
@@ -836,17 +846,18 @@ pub(crate) fn parse_record_spec(p: &mut Parser<'_>, kind: RecordKind) -> RecordS
 /// to the next `;` or the surrounding `}` so the remaining fields
 /// still parse; bracket depth is tracked to stay inside the current
 /// body level when skipping.
-fn parse_struct_body(p: &mut Parser<'_>) -> (Vec<FieldDecl>, Span) {
+fn parse_struct_body(p: &mut Parser<'_>) -> (Vec<FieldDecl>, Vec<StaticAssert>, Span) {
     // Caller has already confirmed the cursor is on `{`.
     let open = p.bump().expect("caller peeked `{`").span;
     let mut fields: Vec<FieldDecl> = Vec::new();
+    let mut static_asserts: Vec<StaticAssert> = Vec::new();
 
     loop {
         match p.peek() {
             Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RBrace)) => {
                 let close = tok.span;
                 p.bump();
-                return (fields, close);
+                return (fields, static_asserts, close);
             }
             Some(_) => {}
             None => {
@@ -856,8 +867,20 @@ fn parse_struct_body(p: &mut Parser<'_>) -> (Vec<FieldDecl>, Span) {
                     .label(open, "unclosed `{` here")
                     .code(codes::E0061)
                     .emit();
-                return (fields, open);
+                return (fields, static_asserts, open);
             }
+        }
+
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Keyword(Keyword::StaticAssert))) {
+            if let Some(assertion) = parse_static_assert_decl(p) {
+                static_asserts.push(assertion);
+            } else {
+                skip_to_semi_or_rbrace(p);
+                if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::Semi))) {
+                    p.bump();
+                }
+            }
+            continue;
         }
 
         match parse_field_decl(p) {
@@ -1195,6 +1218,83 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
     }
 }
 
+/// Parse C11 §6.7.10 `static_assert-declaration`.
+///
+/// ```text
+/// static_assert-declaration:
+///     _Static_assert ( constant-expression , string-literal ) ;
+/// ```
+///
+/// The expression is parsed with the same comma-excluding entry point used by
+/// other constant-expression slots. Constness and truth-value evaluation live
+/// in HIR lowering, where typedef and tag information is available.
+pub(crate) fn parse_static_assert_decl(p: &mut Parser<'_>) -> Option<StaticAssert> {
+    let start = p.cur_span();
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(start, "C11 `_Static_assert` declaration requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+    match p.peek().map(|t| &t.kind) {
+        Some(TokenKind::Keyword(Keyword::StaticAssert)) => {
+            p.bump();
+        }
+        _ => return None,
+    }
+
+    expect_punct(p, Punct::LParen, "expected `(` after `_Static_assert`")?;
+    let expr = crate::expr::parse_assignment_expression(p)?;
+    expect_punct(p, Punct::Comma, "expected `,` after static assertion expression")?;
+
+    let (message, message_span) = match p.peek().cloned() {
+        Some(tok) => match tok.kind {
+            TokenKind::StringLit(lit) => {
+                let message = crate::expr::ast_string_literal(p, tok.span, lit);
+                p.bump();
+                (message, tok.span)
+            }
+            _ => {
+                p.session
+                    .handler
+                    .struct_err(tok.span, "expected string literal in static assertion")
+                    .code(codes::E0061)
+                    .emit();
+                return None;
+            }
+        },
+        None => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected string literal in static assertion")
+                .code(codes::E0061)
+                .emit();
+            return None;
+        }
+    };
+
+    let close = expect_punct(p, Punct::RParen, "expected `)` after static assertion message")
+        .unwrap_or(message_span);
+    let end = expect_punct(p, Punct::Semi, "expected `;` after static assertion").unwrap_or(close);
+    let id = p.fresh_id();
+    Some(StaticAssert { id, span: start.to(end), expr, message })
+}
+
+fn expect_punct(p: &mut Parser<'_>, want: Punct, msg: &str) -> Option<Span> {
+    match p.peek() {
+        Some(t) if matches!(t.kind, TokenKind::Punct(pp) if pp == want) => {
+            let s = t.span;
+            p.bump();
+            Some(s)
+        }
+        _ => {
+            p.session.handler.struct_err(p.cur_span(), msg).code(codes::E0061).emit();
+            None
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //  External declarations (C99 §6.9)
 // ─────────────────────────────────────────────────────────────────────
@@ -1224,6 +1324,11 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
 pub fn parse_external_decl(p: &mut Parser<'_>) -> Option<ExternalDecl> {
     let start = p.cur_span();
     let extension_spans = consume_gnu_extension_prefixes(p);
+    if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Keyword(Keyword::StaticAssert))) {
+        let assertion = parse_static_assert_decl(p)?;
+        warn_gnu_extension_prefixes(p, &extension_spans);
+        return Some(ExternalDecl::StaticAssert(assertion));
+    }
     let specs = parse_decl_specs(p)?;
     warn_gnu_extension_prefixes(p, &extension_spans);
 
@@ -3736,7 +3841,7 @@ mod tests {
                 assert!(fd.kr_decls.is_empty());
                 assert_eq!(fd.body.items.len(), 1, "body has one item");
             }
-            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+            other => panic!("expected FunctionDef, got {other:?}"),
         }
     }
 
@@ -3754,7 +3859,7 @@ mod tests {
                 let (sym, _) = d.name.expect("declarator has a name");
                 assert_eq!(sess.interner.get(sym), "f");
             }
-            ExternalDecl::Function(_) => panic!("expected Decl, got FunctionDef"),
+            other => panic!("expected Decl, got {other:?}"),
         }
     }
 
@@ -3771,7 +3876,7 @@ mod tests {
                 assert_eq!(sess.interner.get(sym), "f");
                 assert!(fd.body.items.is_empty(), "empty body");
             }
-            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+            other => panic!("expected FunctionDef, got {other:?}"),
         }
     }
 
@@ -3790,7 +3895,7 @@ mod tests {
                 assert_eq!(sess.interner.get(sym), "x");
                 assert!(decl.inits[0].init.is_some(), "has initializer");
             }
-            ExternalDecl::Function(_) => panic!("expected Decl, got FunctionDef"),
+            other => panic!("expected Decl, got {other:?}"),
         }
     }
 
@@ -3828,7 +3933,7 @@ mod tests {
                     other => panic!("expected Stmt, got {other:?}"),
                 }
             }
-            ExternalDecl::Decl(_) => panic!("expected FunctionDef"),
+            other => panic!("expected FunctionDef, got {other:?}"),
         }
     }
 
@@ -3860,7 +3965,7 @@ mod tests {
                 assert_eq!(fd.kr_decls.len(), 2, "expected 2 K&R decls, got {:?}", fd.kr_decls);
                 assert_eq!(fd.body.items.len(), 1, "body has one item");
             }
-            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+            other => panic!("expected FunctionDef, got {other:?}"),
         }
     }
 
@@ -3881,7 +3986,7 @@ mod tests {
                 assert_eq!(sess.interner.get(sym), "g");
                 assert_eq!(fd.kr_decls.len(), 1);
             }
-            ExternalDecl::Decl(_) => panic!("expected FunctionDef, got Decl"),
+            other => panic!("expected FunctionDef, got {other:?}"),
         }
     }
 

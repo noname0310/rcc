@@ -863,6 +863,46 @@ fn c99_noreturn_function_specifier_is_diagnosed() {
 }
 
 #[test]
+fn c11_static_assert_parses_file_block_and_record_scope() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        r#"
+        _Static_assert(1, "file");
+        struct S {
+            _Static_assert(sizeof(int) == 4, "field");
+            int x;
+        };
+        void f(void) {
+            _Static_assert(1, "block");
+        }
+        "#,
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+    assert!(matches!(tu.decls[0], ExternalDecl::StaticAssert(_)));
+
+    let ExternalDecl::Decl(record_decl) = &tu.decls[1] else {
+        panic!("expected record declaration");
+    };
+    let TypeSpec::Record(record) = &record_decl.specs.type_specs[0] else {
+        panic!("expected record spec");
+    };
+    assert_eq!(record.static_asserts.len(), 1);
+    assert_eq!(record.fields.as_ref().expect("record fields").len(), 1);
+
+    let ExternalDecl::Function(func) = &tu.decls[2] else {
+        panic!("expected function definition");
+    };
+    assert!(matches!(func.body.items[0], BlockItem::StaticAssert(_)));
+}
+
+#[test]
+fn c99_static_assert_declaration_is_diagnosed() {
+    let errors = parse_err(r#"_Static_assert(1, "needs c11");"#);
+    assert!(errors.iter().any(|d| d.message.contains("requires `-std=c11`")), "{errors:#?}");
+}
+
+#[test]
 fn s6_7_5_pointer_declarator() {
     parse_ok("int *p;");
     parse_ok("const int *p;");

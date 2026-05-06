@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-04: Static Assert Declarations
 
 **Phase:** 15a-c11-transition  
@@ -21,12 +23,12 @@ layout and feature assumptions without falling into parser recovery.
 
 ## Acceptance
 
-- [ ] `_Static_assert(1, "ok");` is accepted at file scope and block scope.
-- [ ] `_Static_assert(sizeof(int) == 4, "int size");` evaluates through the
+- [x] `_Static_assert(1, "ok");` is accepted at file scope and block scope.
+- [x] `_Static_assert(sizeof(int) == 4, "int size");` evaluates through the
       same constant-expression path used by array bounds and initializers.
-- [ ] A false assertion fails before codegen with a stable diagnostic.
-- [ ] Struct-scope static assertions do not create fields or affect layout.
-- [ ] C99-mode behavior is explicit and tested.
+- [x] A false assertion fails before codegen with a stable diagnostic.
+- [x] Struct-scope static assertions do not create fields or affect layout.
+- [x] C99-mode behavior is explicit and tested.
 
 ## References
 

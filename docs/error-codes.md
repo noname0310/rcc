@@ -1010,6 +1010,22 @@ semantic check can be routed back to the responsible phase.
 
 ---
 
+## E0089 — invalid static assertion
+
+A C11 `_Static_assert` declaration must contain an integer constant
+expression. If the expression is not constant, or if it evaluates to
+zero, compilation stops before CFG/codegen.
+
+```c
+_Static_assert(sizeof(int) == 4, "int size");  // OK on rcc targets
+_Static_assert(0, "broken assumption");        // error[E0089]
+```
+
+When the assertion evaluates to zero, the diagnostic includes the
+user-provided message string.
+
+---
+
 ## W0001 — unknown #pragma directive
 
 C99 §6.10.6 lets an implementation ignore any `#pragma` it does not

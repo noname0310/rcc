@@ -35,6 +35,8 @@ pub enum ExternalDecl {
     Function(FunctionDef),
     /// A declaration list (typedef / extern / static / variable / tag).
     Decl(Decl),
+    /// C11 `_Static_assert` declaration.
+    StaticAssert(StaticAssert),
 }
 
 /// A `declaration` (one `declaration-specifiers init-declarator-list ;`).
@@ -48,6 +50,20 @@ pub struct Decl {
     pub specs: DeclSpecs,
     /// Init declarator list.
     pub inits: Vec<InitDeclarator>,
+}
+
+/// A C11 `_Static_assert ( constant-expression, string-literal ) ;`
+/// declaration.
+#[derive(Debug, Clone)]
+pub struct StaticAssert {
+    /// Node id.
+    pub id: NodeId,
+    /// Span.
+    pub span: Span,
+    /// Assertion expression.
+    pub expr: Expr,
+    /// Diagnostic message literal.
+    pub message: StringLiteral,
 }
 
 /// An `init-declarator`.
@@ -180,6 +196,8 @@ pub struct RecordSpec {
     pub tag: Option<Symbol>,
     /// `Some` when the specifier defines fields; `None` for a bare tag reference.
     pub fields: Option<Vec<FieldDecl>>,
+    /// C11 static assertions in the record body. They do not create fields.
+    pub static_asserts: Vec<StaticAssert>,
     /// Span.
     pub span: Span,
     /// GNU attributes attached to the record specifier.
@@ -455,6 +473,8 @@ pub struct Block {
 pub enum BlockItem {
     /// A declaration.
     Decl(Decl),
+    /// C11 `_Static_assert` declaration.
+    StaticAssert(StaticAssert),
     /// A statement.
     Stmt(Box<Stmt>),
 }
