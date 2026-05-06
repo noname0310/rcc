@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-05: `_Alignof`, `_Alignas`, and `stdalign.h`
 
 **Phase:** 15a-c11-transition  
@@ -21,11 +23,11 @@ feeds the existing layout service instead of duplicating target-layout logic.
 
 ## Acceptance
 
-- [ ] `_Alignof(int)` folds to the target ABI alignment.
-- [ ] `_Alignas(16) int x;` affects object alignment in HIR/layout metadata.
-- [ ] Invalid alignments such as `_Alignas(3)` are diagnosed.
-- [ ] `#include <stdalign.h>` exposes `alignas` and `alignof` in C11 mode.
-- [ ] No layout regression for existing structs, arrays, and bitfields.
+- [x] `_Alignof(int)` folds to the target ABI alignment.
+- [x] `_Alignas(16) int x;` affects object alignment in HIR/layout metadata.
+- [x] Invalid alignments such as `_Alignas(3)` are diagnosed.
+- [x] `#include <stdalign.h>` exposes `alignas` and `alignof` in C11 mode.
+- [x] No layout regression for existing structs, arrays, and bitfields.
 
 ## References
 

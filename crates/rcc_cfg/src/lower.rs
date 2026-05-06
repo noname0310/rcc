@@ -4296,6 +4296,7 @@ mod tests {
             name: None,
             ty: TyId(0),
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

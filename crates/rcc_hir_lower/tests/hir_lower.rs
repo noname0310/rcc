@@ -1094,6 +1094,98 @@ fn c11_static_assert_in_record_does_not_create_field() {
 }
 
 #[test]
+fn c11_alignof_folds_in_static_assert() {
+    let src = r#"
+        _Static_assert(_Alignof(int) == 4, "int alignment");
+        int main(void) { return 0; }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_alignas_lowers_global_local_and_field_overrides() {
+    let src = r#"
+        _Alignas(16) int g;
+        struct S {
+            _Alignas(16) int x;
+            char y;
+        };
+        void f(void) {
+            _Alignas(16) int x;
+        }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, mut tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+
+    assert!(
+        hir.def_attrs.iter().any(|(id, attrs)| {
+            attrs.align_override == Some(16) && matches!(hir.defs[*id].kind, DefKind::Global { .. })
+        }),
+        "expected aligned global attrs in {:#?}",
+        hir.def_attrs
+    );
+
+    let body = hir.bodies.values().next().expect("function body");
+    assert!(
+        body.local_attrs.values().any(|attrs| attrs.align_override == Some(16)),
+        "expected aligned local attrs in {:#?}",
+        body.local_attrs
+    );
+
+    let (record_def, fields) = hir
+        .defs
+        .iter_enumerated()
+        .find_map(|(id, def)| match &def.kind {
+            DefKind::Record { fields, .. } if fields.len() == 2 => Some((id, fields)),
+            _ => None,
+        })
+        .expect("record definition");
+    assert_eq!(fields[0].align_override, Some(16));
+
+    let record_ty = tcx.intern(Ty::Record(record_def));
+    let layout = LayoutCx::with_defs(&tcx, &hir.defs).layout_of(record_ty).expect("record layout");
+    assert!(layout.align >= 16, "layout: {layout:?}");
+}
+
+#[test]
+fn c11_alignas_type_name_uses_layout_service() {
+    let src = "_Alignas(long double) int g;";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+    let global_attrs = hir.def_attrs.values().next().copied().expect("global attrs");
+    assert_eq!(global_attrs.align_override, Some(16));
+}
+
+#[test]
+fn c11_invalid_alignas_is_diagnosed() {
+    let src = "_Alignas(3) int g;";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().any(|d| d.code == Some(rcc_errors::codes::E0061)
+            && d.message.contains("invalid `_Alignas` alignment")),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn gnu_common_global_and_local_unused_attrs_lower() {
     let src = r#"
         int g __attribute__((unused, visibility("default"), section(".data.rcc")));

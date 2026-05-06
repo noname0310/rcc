@@ -12,8 +12,9 @@
 #![warn(missing_docs)]
 
 use rcc_ast::{
-    BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl, OffsetofDesignator,
-    RecordSpec, StaticAssert, Stmt, StmtKind, StorageClass, TranslationUnit, TypeSpec,
+    AlignSpec, AlignSpecKind, BlockItem, Declarator, DerivedDeclarator, EnumSpec, ExternalDecl,
+    OffsetofDesignator, RecordSpec, StaticAssert, Stmt, StmtKind, StorageClass, TranslationUnit,
+    TypeSpec,
 };
 use rcc_data_structures::FxHashMap;
 use rcc_data_structures::FxHashSet;
@@ -2225,8 +2226,10 @@ fn lower_block_decl(
                 ty,
                 &decl.specs,
                 &init_decl.declarator,
+                scope,
                 crate_,
                 resolver,
+                tcx,
                 session,
             );
             scope.insert(name, Binding::Def(def_id));
@@ -2288,7 +2291,16 @@ fn lower_block_decl(
             is_param: false,
             span: decl.span,
         });
-        let attrs = lower_common_attrs(&decl.specs, &init_decl.declarator, session);
+        let attrs = lower_common_attrs_with_align(
+            &decl.specs,
+            &init_decl.declarator,
+            DeclScope::Block,
+            Some(scope),
+            tcx,
+            resolver,
+            crate_,
+            session,
+        );
         merge_local_attrs(body, local, attrs);
         if !duplicate {
             scope.insert(name, Binding::Local(local));
@@ -2341,11 +2353,22 @@ fn lower_block_scope_extern_object_decl(
     ty: TyId,
     specs: &rcc_ast::DeclSpecs,
     declarator: &Declarator,
+    scope: &ScopeStack,
     crate_: &mut HirCrate,
-    resolver: &Resolver,
+    resolver: &mut Resolver,
+    tcx: &mut TyCtxt,
     session: &mut Session,
 ) -> DefId {
-    let attrs = lower_common_attrs(specs, declarator, session);
+    let attrs = lower_common_attrs_with_align(
+        specs,
+        declarator,
+        DeclScope::Block,
+        Some(scope),
+        tcx,
+        resolver,
+        crate_,
+        session,
+    );
     if let Some(def_id) = resolver
         .ordinary
         .get(&name)
@@ -2416,7 +2439,16 @@ fn lower_block_scope_static_object_decl(
         },
     });
     crate_.defs[def_id].id = def_id;
-    let attrs = lower_common_attrs(specs, &init_decl.declarator, session);
+    let attrs = lower_common_attrs_with_align(
+        specs,
+        &init_decl.declarator,
+        DeclScope::Block,
+        Some(scope),
+        tcx,
+        resolver,
+        crate_,
+        session,
+    );
     merge_def_attrs(crate_, def_id, attrs);
     if let Some((_init, init_body)) = global_init {
         if !init_body.exprs.is_empty() {
@@ -7466,7 +7498,16 @@ pub fn lower_record(
                             name: None,
                             ty: base,
                             quals: object_quals_from_type_quals(&fd.specs.quals),
-                            align_override: aligned_attr_override(&fd.specs.attrs, session),
+                            align_override: field_align_override(
+                                &fd.specs,
+                                &[],
+                                DeclScope::Block,
+                                None,
+                                tcx,
+                                resolver,
+                                crate_,
+                                session,
+                            ),
                             offset: None,
                             bit_width,
                             span: fd.span,
@@ -7524,9 +7565,14 @@ pub fn lower_record(
                         name,
                         ty,
                         quals: declaration_object_quals(&fd.specs, decl),
-                        align_override: field_aligned_attr_override(
-                            &fd.specs.attrs,
+                        align_override: field_align_override(
+                            &fd.specs,
                             &decl.attrs,
+                            DeclScope::Block,
+                            None,
+                            tcx,
+                            resolver,
+                            crate_,
                             session,
                         ),
                         offset: None,
@@ -7562,16 +7608,31 @@ fn find_anon_record_in_specs(specs: &rcc_ast::DeclSpecs) -> Option<&RecordSpec> 
     None
 }
 
-fn field_aligned_attr_override(
-    spec_attrs: &[rcc_ast::Attribute],
+fn field_align_override(
+    specs: &rcc_ast::DeclSpecs,
     declarator_attrs: &[rcc_ast::Attribute],
-    session: &Session,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
 ) -> Option<u32> {
-    spec_attrs
+    let attr_align = specs
+        .attrs
         .iter()
         .chain(declarator_attrs)
         .filter_map(|attr| aligned_attr_value(attr, session))
-        .max()
+        .max();
+    let mut align = attr_align;
+    for spec in &specs.align_specs {
+        if let Some(value) =
+            align_spec_value(spec, scope, typedef_scope, tcx, resolver, crate_, session)
+        {
+            align = Some(align.map_or(value, |existing| existing.max(value)));
+        }
+    }
+    align
 }
 
 /// Validate a bit-field width expression against the field type.
@@ -7919,6 +7980,120 @@ fn lower_common_attrs(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_common_attrs_with_align(
+    specs: &rcc_ast::DeclSpecs,
+    declarator: &rcc_ast::Declarator,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> CommonAttrs {
+    let mut out = lower_common_attrs(specs, declarator, session);
+    for spec in &specs.align_specs {
+        if let Some(align) =
+            align_spec_value(spec, scope, typedef_scope, tcx, resolver, crate_, session)
+        {
+            out.align_override =
+                Some(out.align_override.map_or(align, |existing| existing.max(align)));
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn align_spec_value(
+    spec: &AlignSpec,
+    scope: DeclScope,
+    typedef_scope: Option<&ScopeStack>,
+    tcx: &mut TyCtxt,
+    resolver: &mut Resolver,
+    crate_: &mut HirCrate,
+    session: &mut Session,
+) -> Option<u32> {
+    let value = match &spec.kind {
+        AlignSpecKind::Type(type_name) => {
+            let ty = lower_type_name_in_scope(
+                type_name,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
+            let layout = match LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty) {
+                Ok(layout) => layout,
+                Err(err) => {
+                    session
+                        .handler
+                        .struct_err(
+                            spec.span,
+                            format!("cannot apply `_Alignas` to type without layout: {err}"),
+                        )
+                        .code(rcc_errors::codes::E0061)
+                        .emit();
+                    return None;
+                }
+            };
+            i128::from(layout.align)
+        }
+        AlignSpecKind::Expr(expr) => {
+            match eval_array_bound_as_i128(
+                expr,
+                scope,
+                typedef_scope,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            ) {
+                Some(value) => value,
+                None => {
+                    session
+                        .handler
+                        .struct_err(
+                            spec.span,
+                            "`_Alignas` requires an integer constant expression".to_owned(),
+                        )
+                        .code(rcc_errors::codes::E0061)
+                        .emit();
+                    return None;
+                }
+            }
+        }
+    };
+    validate_alignas_value(value, spec.span, session)
+}
+
+fn validate_alignas_value(value: i128, span: Span, session: &mut Session) -> Option<u32> {
+    let Ok(value) = u32::try_from(value) else {
+        session
+            .handler
+            .struct_err(span, format!("invalid `_Alignas` alignment {value}"))
+            .code(rcc_errors::codes::E0061)
+            .emit();
+        return None;
+    };
+    if value == 0 {
+        return None;
+    }
+    if !value.is_power_of_two() {
+        session
+            .handler
+            .struct_err(
+                span,
+                format!("invalid `_Alignas` alignment {value}: expected a power of two"),
+            )
+            .code(rcc_errors::codes::E0061)
+            .emit();
+        return None;
+    }
+    Some(value)
+}
+
 fn merge_def_attrs(crate_: &mut HirCrate, def: DefId, attrs: CommonAttrs) {
     if attrs.is_empty() {
         return;
@@ -8233,7 +8408,16 @@ fn finalize_file_scope_def_types(
             if let Some(init) = &init_decl.init {
                 ty = complete_initializer_type(ty, init, tcx, crate_);
             }
-            let attrs = lower_common_attrs(&decl.specs, &init_decl.declarator, session);
+            let attrs = lower_common_attrs_with_align(
+                &decl.specs,
+                &init_decl.declarator,
+                DeclScope::File,
+                None,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            );
             merge_def_attrs(crate_, def_id, attrs);
             let has_explicit_init = init_decl.init.is_some();
             let global_init = if let Some(init) = &init_decl.init {

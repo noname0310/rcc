@@ -987,6 +987,7 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
                     | Keyword::Restrict
                     | Keyword::Inline
                     | Keyword::Noreturn
+                    | Keyword::Alignas
                     | Keyword::StaticAssert
                     | Keyword::Struct
                     | Keyword::Union

@@ -312,6 +312,8 @@ pub struct CommonAttrs {
     pub section: Option<Symbol>,
     /// `__attribute__((weak))`.
     pub weak: bool,
+    /// Requested object alignment from C11 `_Alignas` or GNU `aligned`.
+    pub align_override: Option<u32>,
 }
 
 impl CommonAttrs {
@@ -327,6 +329,10 @@ impl CommonAttrs {
             self.section = other.section;
         }
         self.weak |= other.weak;
+        if let Some(align) = other.align_override {
+            self.align_override =
+                Some(self.align_override.map_or(align, |existing| existing.max(align)));
+        }
     }
 
     /// True when all attributes are at their default value.

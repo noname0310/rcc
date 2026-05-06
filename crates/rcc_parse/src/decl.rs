@@ -64,9 +64,10 @@
 //! — the parser's job here is purely syntactic.
 
 use rcc_ast::{
-    ArrayDeclarator, Decl, DeclSpecs, Declarator, DerivedDeclarator, EnumSpec, Enumerator, Expr,
-    ExternalDecl, FieldDecl, FieldDeclarator, FunctionDeclarator, FunctionDef, InitDeclarator,
-    ParamDecl, RecordKind, RecordSpec, StaticAssert, StorageClass, TypeName, TypeQuals, TypeSpec,
+    AlignSpec, AlignSpecKind, ArrayDeclarator, Decl, DeclSpecs, Declarator, DerivedDeclarator,
+    EnumSpec, Enumerator, Expr, ExternalDecl, FieldDecl, FieldDeclarator, FunctionDeclarator,
+    FunctionDef, InitDeclarator, ParamDecl, RecordKind, RecordSpec, StaticAssert, StorageClass,
+    TypeName, TypeQuals, TypeSpec,
 };
 use rcc_errors::codes;
 use rcc_lexer::Punct;
@@ -298,6 +299,11 @@ fn consume_kw_specifier(
                 specs.func_specs.noreturn = true;
             }
             p.bump();
+        }
+        Keyword::Alignas => {
+            if let Some(align) = parse_alignas_specifier(p, span) {
+                specs.align_specs.push(align);
+            }
         }
 
         // ── type-specifier — simple keywords ─────────────────────
@@ -911,7 +917,8 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
         && !specs.quals.volatile
         && !specs.quals.restrict
         && !specs.func_specs.inline
-        && !specs.func_specs.noreturn;
+        && !specs.func_specs.noreturn
+        && specs.align_specs.is_empty();
     if specs_empty {
         p.session
             .handler
@@ -1216,6 +1223,32 @@ fn skip_until_comma_or_rbrace(p: &mut Parser<'_>) {
             }
         }
     }
+}
+
+fn parse_alignas_specifier(p: &mut Parser<'_>, start: Span) -> Option<AlignSpec> {
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(start, "C11 `_Alignas` alignment specifier requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+    match p.peek().map(|t| &t.kind) {
+        Some(TokenKind::Keyword(Keyword::Alignas)) => {
+            p.bump();
+        }
+        _ => return None,
+    }
+
+    expect_punct(p, Punct::LParen, "expected `(` after `_Alignas`")?;
+    let kind = if starts_type_name_at_cursor(p) {
+        AlignSpecKind::Type(parse_type_name(p))
+    } else {
+        AlignSpecKind::Expr(crate::expr::parse_assignment_expression(p)?)
+    };
+    let close =
+        expect_punct(p, Punct::RParen, "expected `)` after `_Alignas` operand").unwrap_or(start);
+    Some(AlignSpec { span: start.to(close), kind })
 }
 
 /// Parse C11 §6.7.10 `static_assert-declaration`.
@@ -1528,6 +1561,7 @@ fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
                 | Keyword::Restrict
                 | Keyword::Inline
                 | Keyword::Noreturn
+                | Keyword::Alignas
                 | Keyword::Struct
                 | Keyword::Union
                 | Keyword::Enum
@@ -1564,7 +1598,8 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
         && !specs.quals.volatile
         && !specs.quals.restrict
         && !specs.func_specs.inline
-        && !specs.func_specs.noreturn;
+        && !specs.func_specs.noreturn
+        && specs.align_specs.is_empty();
     if specs_empty {
         p.cursor = saved_cursor;
         return None;
@@ -1815,6 +1850,15 @@ fn validate_type_name_specs(p: &mut Parser<'_>, specs: &mut DeclSpecs, start: Sp
         specs.func_specs.inline = false;
         specs.func_specs.noreturn = false;
         p.session.handler.struct_err(span, message).code(codes::E0061).emit();
+    }
+
+    if !specs.align_specs.is_empty() {
+        specs.align_specs.clear();
+        p.session
+            .handler
+            .struct_err(span, "`_Alignas` alignment specifier is not allowed in a type name")
+            .code(codes::E0061)
+            .emit();
     }
 
     if specs.type_specs.is_empty() {

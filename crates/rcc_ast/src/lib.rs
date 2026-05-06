@@ -105,8 +105,28 @@ pub struct DeclSpecs {
     pub quals: TypeQuals,
     /// Function specifier(s), e.g. `inline`.
     pub func_specs: FuncSpecs,
+    /// C11 alignment specifiers, e.g. `_Alignas(16)`.
+    pub align_specs: Vec<AlignSpec>,
     /// GNU attributes written in declaration-specifier position.
     pub attrs: Vec<Attribute>,
+}
+
+/// A C11 alignment specifier.
+#[derive(Debug, Clone)]
+pub struct AlignSpec {
+    /// Full span.
+    pub span: Span,
+    /// Requested alignment spelling.
+    pub kind: AlignSpecKind,
+}
+
+/// C11 alignment specifier payload.
+#[derive(Debug, Clone)]
+pub enum AlignSpecKind {
+    /// `_Alignas(type-name)`.
+    Type(TypeName),
+    /// `_Alignas(constant-expression)`.
+    Expr(Expr),
 }
 
 /// Storage class keywords.
@@ -831,6 +851,7 @@ impl Default for DeclSpecs {
             type_specs: Vec::new(),
             quals: TypeQuals::default(),
             func_specs: FuncSpecs::default(),
+            align_specs: Vec::new(),
             attrs: Vec::new(),
         }
     }

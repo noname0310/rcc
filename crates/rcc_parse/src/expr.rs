@@ -591,6 +591,9 @@ pub fn parse_prefix_unary(p: &mut Parser<'_>) -> Option<Expr> {
     if matches!(tok.kind, TokenKind::Keyword(Keyword::Sizeof)) {
         return parse_sizeof(p);
     }
+    if matches!(tok.kind, TokenKind::Keyword(Keyword::Alignof)) {
+        return parse_c11_alignof(p);
+    }
     if let TokenKind::Ident(sym) = tok.kind {
         if is_gnu_alignof_name(p, sym) {
             return parse_gnu_alignof(p);
@@ -735,6 +738,39 @@ fn parse_gnu_alignof(p: &mut Parser<'_>) -> Option<Expr> {
     let span = op_span.to(operand.span);
     let id = p.fresh_id();
     Some(Expr { id, kind: ExprKind::AlignofExpr(Box::new(operand)), span })
+}
+
+fn parse_c11_alignof(p: &mut Parser<'_>) -> Option<Expr> {
+    let op_span = p.cur_span();
+    p.bump(); // `_Alignof`
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(op_span, "C11 `_Alignof` operator requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+
+    let lparen_span = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) => {
+            let span = tok.span;
+            p.bump();
+            span
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `(` after `_Alignof`")
+                .code(codes::E0061)
+                .emit();
+            return None;
+        }
+    };
+    let ty = parse_type_name(p);
+    let end_span = expect_rparen_after_type(p, lparen_span, "_Alignof");
+    let span = op_span.to(end_span.unwrap_or(op_span));
+    let id = p.fresh_id();
+    Some(Expr { id, kind: ExprKind::AlignofType(ty), span })
 }
 
 /// One-token lookahead: does the token immediately after the current

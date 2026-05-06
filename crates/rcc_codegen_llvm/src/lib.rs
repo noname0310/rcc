@@ -1795,7 +1795,9 @@ pub mod backend {
                 .get_global(&name)
                 .unwrap_or_else(|| self.module.add_global(global_ty, None, &name));
             global.set_linkage(linkage);
-            let align = self.global_storage_align(ty, linkage, needs_zero_initializer)?;
+            let align = self
+                .global_storage_align(ty, linkage, needs_zero_initializer)?
+                .max(attrs.align_override.unwrap_or(1));
             if align > 1 {
                 global.set_alignment(align);
             }
@@ -2140,7 +2142,8 @@ pub mod backend {
                     locals.push(placeholder);
                 } else {
                     let storage_ty = self.local_storage_type(decl.ty)?;
-                    let align = self.local_storage_align(decl.ty)?;
+                    let align =
+                        self.local_storage_align(decl.ty)?.max(decl.align_override.unwrap_or(1));
                     let alloca = self.build_entry_alloca(
                         function,
                         storage_ty,
@@ -2202,6 +2205,26 @@ pub mod backend {
                             &self.local_storage_name(local, decl),
                         )
                         .map_err(builder_error)?;
+                    let align = self
+                        .layout_cx()
+                        .layout_of(elem.ty)
+                        .map(|layout| layout.align)
+                        .map_err(|err| type_lowering_error(elem.ty, err.to_string()))?
+                        .max(decl.align_override.unwrap_or(1));
+                    if align > 1 {
+                        let inst = alloca.as_instruction().ok_or_else(|| {
+                            CodegenError::Internal(format!(
+                                "VLA alloca `{}` is not an instruction",
+                                self.local_storage_name(local, decl)
+                            ))
+                        })?;
+                        inst.set_alignment(align).map_err(|err| {
+                            CodegenError::Internal(format!(
+                                "failed to set alignment {align} on VLA alloca `{}`: {err}",
+                                self.local_storage_name(local, decl)
+                            ))
+                        })?;
+                    }
                     locals[local] = alloca;
                     Ok(())
                 }
@@ -9972,6 +9995,7 @@ mod tests {
             name,
             ty,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param,
             span: DUMMY_SP,
@@ -10121,6 +10145,7 @@ mod tests {
             name,
             ty,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: Some(vla_len),
             is_param: false,
             span: DUMMY_SP,
@@ -12215,6 +12240,7 @@ mod tests {
             name: None,
             ty: tcx.void,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12224,6 +12250,7 @@ mod tests {
             name: Some(Symbol(100)),
             ty: tcx.int,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: true,
             span: DUMMY_SP,
@@ -12233,6 +12260,7 @@ mod tests {
             name: Some(Symbol(101)),
             ty: tcx.int,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12243,6 +12271,7 @@ mod tests {
             name: Some(Symbol(102)),
             ty: int_ptr,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12364,6 +12393,7 @@ mod tests {
             name: None,
             ty: tcx.void,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12372,6 +12402,7 @@ mod tests {
             name: Some(Symbol(200)),
             ty: rec_ty,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12425,6 +12456,7 @@ mod tests {
             name: None,
             ty: tcx.void,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12433,6 +12465,7 @@ mod tests {
             name: Some(Symbol(300)),
             ty: arr_ty,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12491,6 +12524,7 @@ mod tests {
             name: None,
             ty: tcx.void,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12499,6 +12533,7 @@ mod tests {
             name: Some(Symbol(301)),
             ty: outer_ptr,
             quals: rcc_hir::ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12694,6 +12729,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12702,6 +12738,7 @@ mod tests {
             name: Some(Symbol(1)),
             ty: tcx.int,
             quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12736,6 +12773,7 @@ mod tests {
             name: None,
             ty: tcx.int,
             quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12767,6 +12805,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12807,6 +12846,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12815,6 +12855,7 @@ mod tests {
             name: None,
             ty: v_int_ptr,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12849,6 +12890,7 @@ mod tests {
             name: None,
             ty: tcx.int,
             quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12884,6 +12926,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12892,6 +12935,7 @@ mod tests {
             name: None,
             ty: int_ptr,
             quals: ObjectQuals { is_volatile: true, ..ObjectQuals::none() },
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12939,6 +12983,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12947,6 +12992,7 @@ mod tests {
             name: None,
             ty: v_int_ptr,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -12992,6 +13038,7 @@ mod tests {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,
@@ -13000,6 +13047,7 @@ mod tests {
             name: None,
             ty: arr_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

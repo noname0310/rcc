@@ -7,8 +7,8 @@
 use rcc_data_structures::{FxHashMap, IndexVec};
 use rcc_errors::{codes, DiagnosticBuilder, Level};
 use rcc_hir::{
-    Body as HirBody, DefId, DefKind, HirCrate, HirExprKind, LayoutCx, LayoutError, Local,
-    ObjectQuals, Ty, TyCtxt, TyId,
+    Body as HirBody, CommonAttrs, DefId, DefKind, HirCrate, HirExprKind, LayoutCx, LayoutError,
+    Local, ObjectQuals, Ty, TyCtxt, TyId,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -43,14 +43,17 @@ pub fn build_bodies(session: &mut Session, tcx: &TyCtxt, hir: &HirCrate) -> FxHa
         let mut local_map = LocalMap::new();
         for (hir_local, decl) in hir_body.locals.iter_enumerated().filter(|(_, decl)| decl.is_param)
         {
-            let cfg_local =
-                builder.alloc_param_decl_with_quals(decl.name, decl.ty, decl.quals, decl.span);
+            let attrs = hir_body.local_attrs.get(&hir_local).copied().unwrap_or_default();
+            let cfg_local = builder
+                .alloc_param_decl_with_attrs(decl.name, decl.ty, decl.quals, attrs, decl.span);
             local_map.insert(hir_local, cfg_local);
         }
         for (hir_local, decl) in
             hir_body.locals.iter_enumerated().filter(|(_, decl)| !decl.is_param)
         {
-            let cfg_local = builder.local_with_quals(decl.ty, decl.name, decl.quals, decl.span);
+            let attrs = hir_body.local_attrs.get(&hir_local).copied().unwrap_or_default();
+            let cfg_local =
+                builder.local_with_attrs(decl.ty, decl.name, decl.quals, attrs, decl.span);
             local_map.insert(hir_local, cfg_local);
         }
 
@@ -423,6 +426,7 @@ impl BodyBuilder {
             name: None,
             ty: ret_ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span,
@@ -459,6 +463,18 @@ impl BodyBuilder {
         quals: ObjectQuals,
         span: Span,
     ) -> Local {
+        self.alloc_param_decl_with_attrs(name, ty, quals, CommonAttrs::default(), span)
+    }
+
+    /// Allocate a parameter slot with object qualifiers and common attrs preserved from HIR.
+    pub fn alloc_param_decl_with_attrs(
+        &mut self,
+        name: Option<Symbol>,
+        ty: TyId,
+        quals: ObjectQuals,
+        attrs: CommonAttrs,
+        span: Span,
+    ) -> Local {
         debug_assert_eq!(
             self.phase,
             AllocPhase::Params,
@@ -466,7 +482,15 @@ impl BodyBuilder {
              and do not interleave alloc_user_local/alloc_temp before parameters)",
             self.phase
         );
-        self.locals.push(LocalDecl { name, ty, quals, vla_len: None, is_param: true, span })
+        self.locals.push(LocalDecl {
+            name,
+            ty,
+            quals,
+            align_override: attrs.align_override,
+            vla_len: None,
+            is_param: true,
+            span,
+        })
     }
 
     /// Allocate a user-declared local. Closes the parameter run on the first
@@ -483,6 +507,18 @@ impl BodyBuilder {
         quals: ObjectQuals,
         span: Span,
     ) -> Local {
+        self.alloc_user_local_with_attrs(name, ty, quals, CommonAttrs::default(), span)
+    }
+
+    /// Allocate a user-declared local with object qualifiers and common attrs preserved from HIR.
+    pub fn alloc_user_local_with_attrs(
+        &mut self,
+        name: Symbol,
+        ty: TyId,
+        quals: ObjectQuals,
+        attrs: CommonAttrs,
+        span: Span,
+    ) -> Local {
         debug_assert!(
             self.phase != AllocPhase::ReturnSlot,
             "alloc_user_local: return slot has not been allocated yet"
@@ -492,6 +528,7 @@ impl BodyBuilder {
             name: Some(name),
             ty,
             quals,
+            align_override: attrs.align_override,
             vla_len: None,
             is_param: false,
             span,
@@ -510,6 +547,7 @@ impl BodyBuilder {
             name: None,
             ty,
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span,
@@ -530,8 +568,20 @@ impl BodyBuilder {
         quals: ObjectQuals,
         span: Span,
     ) -> Local {
+        self.local_with_attrs(ty, name, quals, CommonAttrs::default(), span)
+    }
+
+    /// Allocate a source local with qualifiers/common attrs, or an unqualified temp.
+    pub fn local_with_attrs(
+        &mut self,
+        ty: TyId,
+        name: Option<Symbol>,
+        quals: ObjectQuals,
+        attrs: CommonAttrs,
+        span: Span,
+    ) -> Local {
         match name {
-            Some(sym) => self.alloc_user_local_with_quals(sym, ty, quals, span),
+            Some(sym) => self.alloc_user_local_with_attrs(sym, ty, quals, attrs, span),
             None => self.alloc_temp(ty, span),
         }
     }
@@ -1229,6 +1279,7 @@ mod tests {
             name: None,
             ty: dummy_ty(),
             quals: ObjectQuals::none(),
+            align_override: None,
             vla_len: None,
             is_param: false,
             span: DUMMY_SP,

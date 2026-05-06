@@ -64,10 +64,13 @@ fn compile_with(
     emit: Vec<EmitKind>,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
+    compile_with_options(input, Options { emit, output, ..Options::default() })
+}
+
+fn compile_with_options(input: &TempCFile, opts: Options) -> Result<(), String> {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap));
-    let mut session =
-        Session::with_handler(Options { emit, output, ..Options::default() }, handler);
+    let mut session = Session::with_handler(opts, handler);
     pipeline::compile(&mut session, &input.path)
 }
 
@@ -214,6 +217,35 @@ fn freestanding_headers_typecheck_without_backend() {
 
     let hir = read(&output.path);
     assert!(hir.contains("HirCrate"), "hir:\n{hir}");
+}
+
+#[test]
+fn stdalign_header_typechecks_in_c11_mode_without_backend() {
+    let input = TempCFile::new(
+        "stdalign",
+        r#"
+        #include <stdalign.h>
+        alignas(16) int g;
+        _Static_assert(alignof(int) == 4, "int alignment");
+        int f(void) { return sizeof(g); }
+        "#,
+    );
+    let output = TempOutput::new("stdalign");
+
+    compile_with_options(
+        &input,
+        Options {
+            emit: vec![EmitKind::Hir],
+            output: Some(output.path.clone()),
+            language_standard: rcc_session::LanguageStandard::C11,
+            ..Options::default()
+        },
+    )
+    .expect("stdalign.h should expose C11 alignas/alignof macros without LLVM");
+
+    let hir = read(&output.path);
+    assert!(hir.contains("align_override: Some("), "hir:\n{hir}");
+    assert!(hir.contains("16"), "hir:\n{hir}");
 }
 
 #[test]

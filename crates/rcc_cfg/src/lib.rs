@@ -50,6 +50,8 @@ pub struct LocalDecl {
     pub ty: TyId,
     /// Object qualifiers preserved from HIR for codegen access policy.
     pub quals: ObjectQuals,
+    /// Requested stack alignment from C11 `_Alignas` or GNU `aligned`.
+    pub align_override: Option<u32>,
     /// Runtime element-count local for a VLA allocation.
     pub vla_len: Option<Local>,
     /// Whether this is a function parameter.

@@ -903,6 +903,52 @@ fn c99_static_assert_declaration_is_diagnosed() {
 }
 
 #[test]
+fn c11_alignof_and_alignas_parse() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        r#"
+        int a[_Alignof(int)];
+        _Alignas(16) int x;
+        _Alignas(long double) int y;
+        "#,
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+
+    let ExternalDecl::Decl(array_decl) = &tu.decls[0] else {
+        panic!("expected array declaration");
+    };
+    let DerivedDeclarator::Array(array) = &array_decl.inits[0].declarator.derived[0] else {
+        panic!("expected array declarator");
+    };
+    match &array.size.as_ref().expect("array size").kind {
+        ExprKind::AlignofType(ty) => {
+            assert!(matches!(ty.specs.type_specs.as_slice(), [TypeSpec::Int]));
+        }
+        other => panic!("expected AlignofType, got {other:?}"),
+    }
+
+    let ExternalDecl::Decl(x_decl) = &tu.decls[1] else {
+        panic!("expected aligned object declaration");
+    };
+    assert_eq!(x_decl.specs.align_specs.len(), 1);
+    assert!(matches!(x_decl.specs.align_specs[0].kind, AlignSpecKind::Expr(_)));
+
+    let ExternalDecl::Decl(y_decl) = &tu.decls[2] else {
+        panic!("expected type aligned object declaration");
+    };
+    assert_eq!(y_decl.specs.align_specs.len(), 1);
+    assert!(matches!(y_decl.specs.align_specs[0].kind, AlignSpecKind::Type(_)));
+}
+
+#[test]
+fn c99_alignof_and_alignas_are_diagnosed() {
+    let errors = parse_err("_Alignas(16) int x; int y[_Alignof(int)];");
+    assert!(errors.iter().any(|d| d.message.contains("`_Alignas`")), "{errors:#?}");
+    assert!(errors.iter().any(|d| d.message.contains("`_Alignof`")), "{errors:#?}");
+}
+
+#[test]
 fn s6_7_5_pointer_declarator() {
     parse_ok("int *p;");
     parse_ok("const int *p;");

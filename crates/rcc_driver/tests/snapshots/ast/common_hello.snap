@@ -1,5 +1,6 @@
 ---
 source: crates/rcc_driver/tests/support/mod.rs
+assertion_line: 35
 ---
 TranslationUnit {
     decls: [
@@ -44,6 +45,7 @@ TranslationUnit {
                         inline: false,
                         noreturn: false,
                     },
+                    align_specs: [],
                     attrs: [],
                 },
                 declarator: Declarator {
@@ -135,6 +137,7 @@ TranslationUnit {
                                         inline: false,
                                         noreturn: false,
                                     },
+                                    align_specs: [],
                                     attrs: [],
                                 },
                                 inits: [

@@ -391,6 +391,19 @@ fn volatile_local_metadata_survives_to_cfg() {
 }
 
 #[test]
+fn c11_alignas_local_metadata_survives_to_cfg() {
+    let opts =
+        Options { language_standard: rcc_session::LanguageStandard::C11, ..Options::default() };
+    let lowered =
+        lower_checked_with_options("alignas-metadata", "int f(void) { _Alignas(16) int x; }", opts);
+    let body = only_body(&lowered);
+    assert!(
+        body.locals.iter().any(|decl| decl.align_override == Some(16)),
+        "C11 `_Alignas` should reach CFG LocalDecl metadata"
+    );
+}
+
+#[test]
 fn gnu_vector_initializer_reaches_cfg_as_vector_rvalue() {
     let src = r#"
         typedef int v4si __attribute__((vector_size(16)));

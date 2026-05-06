@@ -2,9 +2,10 @@
 //! override any you care about.
 
 use crate::{
-    Block, BlockItem, Decl, Declarator, EnumSpec, Expr, ExprKind, ExternalDecl, FieldDecl,
-    FunctionDef, InitDeclarator, Initializer, InlineAsm, OffsetofDesignator, ParamDecl, RecordSpec,
-    StaticAssert, Stmt, StmtKind, TranslationUnit, TypeName,
+    AlignSpec, AlignSpecKind, Block, BlockItem, Decl, Declarator, EnumSpec, Expr, ExprKind,
+    ExternalDecl, FieldDecl, FunctionDef, InitDeclarator, Initializer, InlineAsm,
+    OffsetofDesignator, ParamDecl, RecordSpec, StaticAssert, Stmt, StmtKind, TranslationUnit,
+    TypeName,
 };
 
 /// Walk the AST read-only.
@@ -20,6 +21,10 @@ pub trait Visitor: Sized {
     /// Override to visit a declaration.
     fn visit_decl(&mut self, d: &Decl) {
         walk_decl(self, d);
+    }
+    /// Override to visit an alignment specifier.
+    fn visit_align_spec(&mut self, a: &AlignSpec) {
+        walk_align_spec(self, a);
     }
     /// Override to visit a static assertion declaration.
     fn visit_static_assert(&mut self, a: &StaticAssert) {
@@ -92,8 +97,19 @@ pub fn walk_external_decl<V: Visitor>(v: &mut V, d: &ExternalDecl) {
 
 /// Default descent for `Decl`.
 pub fn walk_decl<V: Visitor>(v: &mut V, d: &Decl) {
+    for align in &d.specs.align_specs {
+        v.visit_align_spec(align);
+    }
     for id in &d.inits {
         v.visit_init_declarator(id);
+    }
+}
+
+/// Default descent for `AlignSpec`.
+pub fn walk_align_spec<V: Visitor>(v: &mut V, a: &AlignSpec) {
+    match &a.kind {
+        AlignSpecKind::Type(ty) => v.visit_type_name(ty),
+        AlignSpecKind::Expr(expr) => v.visit_expr(expr),
     }
 }
 
