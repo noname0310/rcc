@@ -18,7 +18,7 @@ Status legend:
 | --- | --- | --- | --- | --- | --- | --- |
 | MuJS | PASS | PASS | PASS | PASS | PASS | none; smoke output matches host |
 | GNU coreutils `src/true` | PASS | PASS | PASS | PASS | PASS | none; direct TU oracle exits 0 with empty stdout/stderr for host and rcc |
-| SQLite amalgamation | PASS | PASS | PASS | PASS | PASS | none for recorded manual CLI smoke; command is documented in `projects/06-sqlite-amalgamation/PROJECT.md` |
+| SQLite amalgamation | PASS | PASS | PASS | PASS | PASS | none; checked-in wrapper downloads the official amalgamation into project-local `upstream/` |
 | Toybox applet smoke | PASS | BLOCKED | TODO | TODO | TODO | `tasks/16-linux-glibc-compat/25-toybox-applet-hosted-surface.md` |
 
 ## MuJS
@@ -80,14 +80,16 @@ flag orchestration, not replacement libc bodies.
 
 ## SQLite amalgamation
 
-Manual CLI probe command sequence is recorded in
-`projects/06-sqlite-amalgamation/PROJECT.md`.  The recorded run compiles
-`sqlite3.c` and `shell.c` separately with `rcc --linux-gnu-hosted --std=c11`,
-links them with host `cc -ldl -lm`, and runs an in-memory SQL smoke.
+CLI probe command sequence is recorded in
+`projects/06-sqlite-amalgamation/PROJECT.md`. The wrapper downloads the
+official amalgamation into this project's ignored `upstream/` directory,
+compiles `sqlite3.c` and `shell.c` separately with
+`rcc --linux-gnu-hosted --std=c11`, links them with host `cc -ldl -lm`, and runs
+an in-memory SQL smoke.
 
 | Stage | Status | Evidence | Next task |
 | --- | --- | --- | --- |
-| Source acquisition | PASS | Local probe used official amalgamation files under `sqlite/sqlite-amalgamation-3530000/`. A checked-in wrapper should use this project's `upstream/` policy. | none |
+| Source acquisition | PASS | Wrapper uses official amalgamation files under `real_world/projects/06-sqlite-amalgamation/upstream/sqlite-amalgamation-3530000/`, downloading the zip on demand. | none |
 | Header/config | PASS | Hosted Linux mode plus SQLite feature macros cover the recorded CLI smoke; `SQLITE_OMIT_VIRTUALTABLE` is intentionally not used. | none |
 | Syntax/HIR | PASS | `sqlite3.c` and `shell.c` compile through preprocessing, parsing, HIR lowering, and typeck. | none |
 | Object | PASS | `sqlite3.rcc.o` and `shell.rcc.o` are emitted by the LLVM backend. | none |

@@ -5,10 +5,10 @@
 - Project: SQLite amalgamation
 - Upstream: <https://www.sqlite.org/>
 - Build reference: <https://www.sqlite.org/howtocompile.html>
-- Local probe source: `sqlite/sqlite-amalgamation-3530000/`
-- Wrapper source policy: a checked-in wrapper should download or unpack the
-  official amalgamation into ignored `upstream/`; current local manual evidence
-  uses the ignored repository-root `sqlite/` probe tree.
+- Local probe source:
+  `real_world/projects/06-sqlite-amalgamation/upstream/sqlite-amalgamation-3530000/`
+- Wrapper source policy: the checked-in wrapper downloads the selected official
+  amalgamation zip into ignored project-local `upstream/` when it is missing.
 
 The wrapper must not edit upstream `sqlite3.c`, `sqlite3.h`, `sqlite3ext.h`, or
 `shell.c`. All adaptation belongs in wrapper scripts and build flags.
@@ -38,8 +38,8 @@ builds `rcc` with LLVM support first. Set `RCC_BUILD=1` to force rebuilding or
 Equivalent command sequence from the repository root:
 
 ```sh
-./target/debug/rcc sqlite/sqlite-amalgamation-3530000/sqlite3.c \
-  -c -o sqlite/sqlite-amalgamation-3530000/sqlite3.rcc.o \
+./target/debug/rcc real_world/projects/06-sqlite-amalgamation/upstream/sqlite-amalgamation-3530000/sqlite3.c \
+  -c -o real_world/projects/06-sqlite-amalgamation/build/sqlite3.rcc.o \
   --linux-gnu-hosted --std=c11 -w \
   -DSQLITE_THREADSAFE=0 \
   -DSQLITE_OMIT_LOAD_EXTENSION \
@@ -47,23 +47,23 @@ Equivalent command sequence from the repository root:
   -DSQLITE_OMIT_SHARED_CACHE \
   -DSQLITE_DEFAULT_MEMSTATUS=0
 
-./target/debug/rcc sqlite/sqlite-amalgamation-3530000/shell.c \
-  -c -o sqlite/sqlite-amalgamation-3530000/shell.rcc.o \
+./target/debug/rcc real_world/projects/06-sqlite-amalgamation/upstream/sqlite-amalgamation-3530000/shell.c \
+  -c -o real_world/projects/06-sqlite-amalgamation/build/shell.rcc.o \
   --linux-gnu-hosted --std=c11 -w \
-  -I sqlite/sqlite-amalgamation-3530000 \
+  -I real_world/projects/06-sqlite-amalgamation/upstream/sqlite-amalgamation-3530000 \
   -DSQLITE_THREADSAFE=0 \
   -DSQLITE_OMIT_LOAD_EXTENSION \
   -DSQLITE_OMIT_PROGRESS_CALLBACK \
   -DSQLITE_OMIT_SHARED_CACHE \
   -DSQLITE_DEFAULT_MEMSTATUS=0
 
-cc sqlite/sqlite-amalgamation-3530000/sqlite3.rcc.o \
-   sqlite/sqlite-amalgamation-3530000/shell.rcc.o \
-   -o sqlite/sqlite-amalgamation-3530000/sqlite3.rcc \
+cc real_world/projects/06-sqlite-amalgamation/build/sqlite3.rcc.o \
+   real_world/projects/06-sqlite-amalgamation/build/shell.rcc.o \
+   -o real_world/projects/06-sqlite-amalgamation/build/sqlite3.rcc \
    -ldl -lm
 
 printf 'CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT * FROM t;\n' \
-  | sqlite/sqlite-amalgamation-3530000/sqlite3.rcc :memory:
+  | real_world/projects/06-sqlite-amalgamation/build/sqlite3.rcc :memory:
 ```
 
 Expected stdout:
@@ -100,8 +100,7 @@ fail during the CLI link.
   - `logs/`
   - `scratch/`
 - Local ignored source probe:
-  - repository-root `sqlite/`
-  - future checked-in wrapper source under project-local ignored `upstream/`
+  - project-local `upstream/`
 - Build flags listed above.
 
 ## Disallowed adaptation checklist

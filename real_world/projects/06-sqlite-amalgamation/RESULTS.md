@@ -8,7 +8,9 @@ Command:
 bash real_world/projects/06-sqlite-amalgamation/scripts/run-cli-smoke.sh
 ```
 
-Equivalent manual command sequence is recorded in `PROJECT.md` and `plan.md`.
+Equivalent command sequence is recorded in `PROJECT.md` and `plan.md`. The
+wrapper downloads the official amalgamation into this project's ignored
+`upstream/` directory when it is missing.
 
 Result:
 
@@ -23,7 +25,7 @@ Runtime command:
 
 ```sh
 printf 'CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT * FROM t;\n' \
-  | sqlite/sqlite-amalgamation-3530000/sqlite3.rcc :memory:
+  | real_world/projects/06-sqlite-amalgamation/build/sqlite3.rcc :memory:
 ```
 
 Runtime stdout:
@@ -53,8 +55,7 @@ CLI link.
 
 ## Upstream source policy
 
-The wrapper does not modify upstream C or header files. The current manual probe
-uses the ignored repository-root `sqlite/sqlite-amalgamation-3530000/` directory.
-Future checked-in source acquisition should place the official amalgamation under
-this project directory's ignored `upstream/` tree, with generated outputs under
+The wrapper does not modify upstream C or header files. It downloads and
+extracts the official `sqlite-amalgamation-3530000.zip` archive into this
+project directory's ignored `upstream/` tree, with generated outputs under
 ignored `build/`, `logs/`, `artifacts/`, or `scratch/` directories.

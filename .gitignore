@@ -66,4 +66,3 @@ real_world/projects/*/scratch/
 # build artifacts local.
 crates/rcc_compiler_package/Cargo.lock
 crates/rcc_compiler_package/target/
-sqlite/

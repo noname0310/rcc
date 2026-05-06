@@ -5,7 +5,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
 repo_root="$(cd "${project_dir}/../../.." && pwd)"
 
-sqlite_src="${SQLITE_SRC:-${repo_root}/sqlite/sqlite-amalgamation-3530000}"
+sqlite_version="${SQLITE_VERSION:-3530000}"
+sqlite_year="${SQLITE_YEAR:-2026}"
+sqlite_archive="sqlite-amalgamation-${sqlite_version}.zip"
+sqlite_url="${SQLITE_URL:-https://www.sqlite.org/${sqlite_year}/${sqlite_archive}}"
+sqlite_sha3="${SQLITE_SHA3_256:-c2325c53b3b41761469f91cfb078e96882ac5d85bac10c11b0bd8f253b031e5b}"
+default_sqlite_src="${project_dir}/upstream/sqlite-amalgamation-${sqlite_version}"
+sqlite_src="${SQLITE_SRC:-${default_sqlite_src}}"
 build_dir="${project_dir}/build"
 logs_dir="${project_dir}/logs"
 artifacts_dir="${project_dir}/artifacts"
@@ -15,6 +21,64 @@ host_cc="${HOST_CC:-cc}"
 llvm_prefix="${LLVM_SYS_181_PREFIX:-/usr/lib/llvm-18}"
 
 mkdir -p "${build_dir}" "${logs_dir}" "${artifacts_dir}"
+
+sha3_256() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha3-256 "$1" | awk '{print tolower($NF)}'
+    elif command -v sha3sum >/dev/null 2>&1; then
+        sha3sum -a 256 "$1" | awk '{print tolower($1)}'
+    else
+        echo "Neither openssl nor sha3sum is available for SQLite archive verification." >&2
+        return 127
+    fi
+}
+
+ensure_default_sqlite_source() {
+    if [[ -f "${default_sqlite_src}/sqlite3.c" ]] && [[ -f "${default_sqlite_src}/shell.c" ]]; then
+        return
+    fi
+
+    if [[ "${sqlite_src}" != "${default_sqlite_src}" ]]; then
+        return
+    fi
+
+    local upstream_dir="${project_dir}/upstream"
+    local cache_dir="${upstream_dir}/.cache"
+    local archive_path="${cache_dir}/${sqlite_archive}"
+    local extract_tmp=""
+
+    mkdir -p "${cache_dir}"
+
+    if [[ ! -f "${archive_path}" ]]; then
+        echo "Downloading SQLite amalgamation ${sqlite_version} from ${sqlite_url}" >&2
+        curl -fsSL "${sqlite_url}" -o "${archive_path}"
+    fi
+
+    local actual_sha3
+    actual_sha3="$(sha3_256 "${archive_path}")"
+    if [[ "${actual_sha3}" != "${sqlite_sha3}" ]]; then
+        echo "SQLite archive SHA3-256 mismatch: ${archive_path}" >&2
+        echo "  expected: ${sqlite_sha3}" >&2
+        echo "  actual:   ${actual_sha3}" >&2
+        exit 2
+    fi
+
+    if ! command -v unzip >/dev/null 2>&1; then
+        echo "unzip is required to extract ${sqlite_archive}" >&2
+        exit 2
+    fi
+
+    extract_tmp="$(mktemp -d "${upstream_dir}/.extract.XXXXXX")"
+    trap 'rm -rf "${extract_tmp:-}"' EXIT
+    unzip -q "${archive_path}" -d "${extract_tmp}"
+    if [[ ! -d "${extract_tmp}/sqlite-amalgamation-${sqlite_version}" ]]; then
+        echo "SQLite archive did not contain sqlite-amalgamation-${sqlite_version}/" >&2
+        exit 2
+    fi
+    mv "${extract_tmp}/sqlite-amalgamation-${sqlite_version}" "${default_sqlite_src}"
+}
+
+ensure_default_sqlite_source
 
 if [[ ! -f "${sqlite_src}/sqlite3.c" ]] || [[ ! -f "${sqlite_src}/shell.c" ]]; then
     echo "SQLite amalgamation source is incomplete: ${sqlite_src}" >&2
