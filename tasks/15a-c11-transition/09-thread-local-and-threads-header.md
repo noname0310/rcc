@@ -1,5 +1,7 @@
 # 15a-09: `_Thread_local` and `threads.h`
 
+> ✓ done — 2026-05-06
+
 **Phase:** 15a-c11-transition  
 **Depends on:** 15a-08-atomic-types-and-stdatomic  
 **Milestone:** c11-transition
@@ -24,10 +26,10 @@ runtime.
 
 ## Acceptance
 
-- [ ] `_Thread_local int x;` emits TLS LLVM IR on x86_64 Linux.
-- [ ] `thread_local` from a C11 resource header maps to `_Thread_local`.
-- [ ] `<threads.h>` parses and lowers under `-std=c11 --linux-gnu-hosted`.
-- [ ] A Linux smoke test using `thrd_create` either links/runs or records a
+- [x] `_Thread_local int x;` emits TLS LLVM IR on x86_64 Linux.
+- [x] `thread_local` from a C11 resource header maps to `_Thread_local`.
+- [x] `<threads.h>` parses and lowers under `-std=c11 --linux-gnu-hosted`.
+- [x] A Linux smoke test using `thrd_create` either links/runs or records a
       precise host-runtime blocker.
 
 ## References

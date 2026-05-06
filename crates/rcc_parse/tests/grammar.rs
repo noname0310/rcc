@@ -822,6 +822,38 @@ fn s6_7_1_storage_class_typedef() {
 }
 
 #[test]
+fn c11_thread_local_storage_class_parses_and_combines_with_static_extern() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        "_Thread_local int x; static _Thread_local int y; extern _Thread_local int z;",
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+    for decl in &tu.decls {
+        let ExternalDecl::Decl(decl) = decl else {
+            panic!("expected declaration");
+        };
+        assert!(decl.specs.thread_local, "expected thread-local specs: {:?}", decl.specs);
+    }
+}
+
+#[test]
+fn c11_thread_local_requires_c11_mode_and_rejects_typedef_combination() {
+    let (_tu, diags, _cap) = parse_snippet("_Thread_local int x;");
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0061)),
+        "expected C11 mode diagnostic, got {diags:?}"
+    );
+
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_tu, diags, _cap) = parse_snippet_with_options("typedef _Thread_local int T;", opts);
+    assert!(
+        diags.iter().any(|d| d.code == Some(rcc_errors::codes::E0060)),
+        "expected storage-class conflict, got {diags:?}"
+    );
+}
+
+#[test]
 fn s6_7_3_type_qualifiers() {
     parse_ok("const int x = 0;");
     parse_ok("volatile int y;");

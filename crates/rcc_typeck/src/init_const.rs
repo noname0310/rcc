@@ -258,6 +258,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::External,
                 init: None,
             },
@@ -292,6 +293,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.char_,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },

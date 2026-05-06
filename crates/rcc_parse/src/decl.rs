@@ -5,7 +5,7 @@
 //! §6.7.4 allow to appear in any order:
 //!
 //! - *storage-class-specifier*   — `typedef`, `extern`, `static`,
-//!   `auto`, `register`.
+//!   `auto`, `register`, and C11 `_Thread_local`.
 //! - *type-specifier*            — `void`, `char`, `short`, `int`,
 //!   `long`, `float`, `double`, `signed`, `unsigned`, `_Bool`,
 //!   `_Complex`, `_Imaginary`, a `struct`/`union`/`enum` specifier,
@@ -256,6 +256,7 @@ fn consume_kw_specifier(
         Keyword::Static => accept_storage(p, specs, StorageClass::Static, "static", span),
         Keyword::Auto => accept_storage(p, specs, StorageClass::Auto, "auto", span),
         Keyword::Register => accept_storage(p, specs, StorageClass::Register, "register", span),
+        Keyword::ThreadLocal => accept_thread_local_storage(p, specs, span),
 
         // ── type-qualifier ───────────────────────────────────────
         Keyword::Const => {
@@ -359,6 +360,13 @@ fn accept_storage(
     name: &str,
     span: Span,
 ) {
+    if specs.thread_local && !matches!(new, StorageClass::Extern | StorageClass::Static) {
+        p.session
+            .handler
+            .struct_err(span, format!("cannot combine `{name}` with `_Thread_local`"))
+            .code(codes::E0060)
+            .emit();
+    }
     match specs.storage {
         None => {
             specs.storage = Some(new);
@@ -384,6 +392,37 @@ fn accept_storage(
                 .emit();
         }
     }
+    p.bump();
+}
+
+fn accept_thread_local_storage(p: &mut Parser<'_>, specs: &mut DeclSpecs, span: Span) {
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(span, "C11 `_Thread_local` storage-class specifier requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+    if specs.thread_local {
+        p.session
+            .handler
+            .struct_err(span, "duplicate `_Thread_local` storage-class specifier")
+            .code(codes::E0060)
+            .emit();
+    } else if matches!(
+        specs.storage,
+        Some(StorageClass::Typedef | StorageClass::Auto | StorageClass::Register)
+    ) {
+        p.session
+            .handler
+            .struct_err(
+                span,
+                "cannot combine `_Thread_local` with previous storage-class specifier",
+            )
+            .code(codes::E0060)
+            .emit();
+    }
+    specs.thread_local = true;
     p.bump();
 }
 
@@ -1638,6 +1677,7 @@ fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
                 | Keyword::Static
                 | Keyword::Auto
                 | Keyword::Register
+                | Keyword::ThreadLocal
                 | Keyword::Void
                 | Keyword::Char
                 | Keyword::Short

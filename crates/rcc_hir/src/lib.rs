@@ -110,6 +110,8 @@ pub enum DefKind {
         ty: TyId,
         /// Qualifiers that apply to the global object itself.
         quals: ObjectQuals,
+        /// C11 thread-local storage duration.
+        thread_local: bool,
         /// Linkage kind.
         linkage: Linkage,
         /// Lowered static initializer, if this file-scope object has one.

@@ -99,6 +99,9 @@ pub struct DeclSpecs {
     pub span: Span,
     /// Storage class specifier (at most one).
     pub storage: Option<StorageClass>,
+    /// C11 `_Thread_local` storage-class specifier. Kept separate because it
+    /// may be combined with `static` or `extern`.
+    pub thread_local: bool,
     /// Type specifiers in declaration order (combined later by `rcc_hir_lower`).
     pub type_specs: Vec<TypeSpec>,
     /// Type qualifiers (may repeat; deduped in lowering).
@@ -870,6 +873,7 @@ impl Default for DeclSpecs {
         Self {
             span: rcc_span::DUMMY_SP,
             storage: None,
+            thread_local: false,
             type_specs: Vec::new(),
             quals: TypeQuals::default(),
             func_specs: FuncSpecs::default(),

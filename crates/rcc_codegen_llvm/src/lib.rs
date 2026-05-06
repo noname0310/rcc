@@ -984,7 +984,7 @@ pub mod backend {
     use inkwell::OptimizationLevel;
     use inkwell::{
         AddressSpace, AtomicOrdering, FloatPredicate, GlobalVisibility, InlineAsmDialect,
-        IntPredicate,
+        IntPredicate, ThreadLocalMode,
     };
     use rcc_cfg::UnOp;
     use rcc_cfg::{
@@ -1780,11 +1780,11 @@ pub mod backend {
                 return Ok(global);
             }
 
-            let (name, ty, linkage, attrs, needs_zero_initializer) = {
+            let (name, ty, linkage, thread_local, attrs, needs_zero_initializer) = {
                 let def_data = self.hir.defs.get(def).ok_or_else(|| {
                     CodegenError::Internal(format!("global definition {def:?} is missing"))
                 })?;
-                let DefKind::Global { ty, linkage, init, .. } = &def_data.kind else {
+                let DefKind::Global { ty, linkage, thread_local, init, .. } = &def_data.kind else {
                     return Err(CodegenError::Internal(format!(
                         "definition {def:?} is not a global"
                     )));
@@ -1796,6 +1796,7 @@ pub mod backend {
                     self.def_name(def_data),
                     *ty,
                     llvm_linkage,
+                    *thread_local,
                     attrs,
                     init.is_some() || llvm_linkage != LlvmLinkage::External,
                 )
@@ -1811,6 +1812,10 @@ pub mod backend {
                 .max(attrs.align_override.unwrap_or(1));
             if align > 1 {
                 global.set_alignment(align);
+            }
+            if thread_local {
+                global.set_thread_local(true);
+                global.set_thread_local_mode(Some(ThreadLocalMode::GeneralDynamicTLSModel));
             }
             self.apply_common_global_attrs(global, attrs);
             if needs_zero_initializer && global.get_initializer().is_none() {
@@ -8888,9 +8893,9 @@ mod tests {
     use rcc_hir::{DefKind, Field, IntRank, Qual, RecordKind};
     #[cfg(feature = "llvm")]
     use rcc_hir::{Linkage, ObjectQuals};
-    #[cfg(feature = "llvm")]
-    use rcc_session::Options;
     use rcc_session::Session;
+    #[cfg(feature = "llvm")]
+    use rcc_session::{EmitKind, Options};
     use rcc_span::{Symbol, DUMMY_SP};
 
     use super::*;
@@ -9119,7 +9124,36 @@ mod tests {
             id: DefId(0),
             name,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty, quals: ObjectQuals::none(), linkage, init: None },
+            kind: DefKind::Global {
+                ty,
+                quals: ObjectQuals::none(),
+                thread_local: false,
+                linkage,
+                init: None,
+            },
+        });
+        defs[id].id = id;
+        id
+    }
+
+    #[cfg(feature = "llvm")]
+    fn thread_local_global_def(
+        defs: &mut IndexVec<DefId, Def>,
+        name: Symbol,
+        ty: TyId,
+        linkage: Linkage,
+    ) -> DefId {
+        let id = defs.push(Def {
+            id: DefId(0),
+            name,
+            span: DUMMY_SP,
+            kind: DefKind::Global {
+                ty,
+                quals: ObjectQuals::none(),
+                thread_local: true,
+                linkage,
+                init: Some(GlobalInit { ty, entries: Vec::new() }),
+            },
         });
         defs[id].id = id;
         id
@@ -12889,6 +12923,27 @@ mod tests {
         assert!(ir.contains("store atomic"), "expected atomic store in:\n{ir}");
     }
 
+    /// C11 `_Thread_local` file-scope objects become LLVM TLS globals.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn thread_local_global_emits_llvm_tls_global() {
+        let (mut session, _cap) = Session::for_test();
+        session.opts.emit = vec![EmitKind::LlvmIr];
+        let tcx = TyCtxt::new();
+        let mut defs = IndexVec::new();
+        let name = session.interner.intern("tls_counter");
+        let _global = thread_local_global_def(&mut defs, name, tcx.int, Linkage::External);
+        let hir = hir_with_defs(defs);
+        let bodies = FxHashMap::default();
+
+        let ir = codegen(&mut session, &tcx, &hir, &bodies).unwrap().ir_text;
+        assert!(
+            ir.contains("@tls_counter = thread_local global i32 zeroinitializer")
+                || ir.contains("@tls_counter = thread_local global i32 0"),
+            "expected thread_local LLVM global in:\n{ir}"
+        );
+    }
+
     /// Non-volatile loads are plain `load`, not `load volatile`.
     #[cfg(feature = "llvm")]
     #[test]
@@ -13554,7 +13609,13 @@ mod tests {
             id: DefId(0),
             name,
             span: DUMMY_SP,
-            kind: DefKind::Global { ty, quals: ObjectQuals::none(), linkage, init: Some(init) },
+            kind: DefKind::Global {
+                ty,
+                quals: ObjectQuals::none(),
+                thread_local: false,
+                linkage,
+                init: Some(init),
+            },
         });
         defs[id].id = id;
         id
@@ -14229,6 +14290,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: char_arr_ty,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: Some(str_init),
             },
@@ -14279,6 +14341,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: char_arr_ty,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: Some(str_init),
             },

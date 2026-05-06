@@ -159,6 +159,41 @@ int probe(uint32_t *p) {
 "#,
         },
         Fixture {
+            name: "threads-c11-surface",
+            reason: "C11 hosted projects may use thread_local plus thrd/mtx/cnd/tss declarations",
+            args: &["-std=c11", "-pthread"],
+            source: r#"
+#include <threads.h>
+
+thread_local int tls_counter;
+
+static int worker(void *arg) {
+    tls_counter = arg != 0;
+    return tls_counter;
+}
+
+int probe(void) {
+    thrd_t thread;
+    mtx_t mutex;
+    cnd_t cond;
+    tss_t key;
+    once_flag once = ONCE_FLAG_INIT;
+    int result = 0;
+    mtx_init(&mutex, mtx_plain);
+    cnd_init(&cond);
+    tss_create(&key, 0);
+    call_once(&once, thrd_yield);
+    if (thrd_create(&thread, worker, &result) == thrd_success)
+        thrd_join(thread, &result);
+    cnd_signal(&cond);
+    cnd_destroy(&cond);
+    mtx_destroy(&mutex);
+    tss_delete(key);
+    return result;
+}
+"#,
+        },
+        Fixture {
             name: "coreutils-posix-declaration-sweep",
             reason: "GNU coreutils true probe reaches gnulib wrappers for unlocked stdio, at-functions, errno, and wide-char width",
             args: &[],

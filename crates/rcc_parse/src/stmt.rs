@@ -970,6 +970,7 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
                     | Keyword::Static
                     | Keyword::Auto
                     | Keyword::Register
+                    | Keyword::ThreadLocal
                     | Keyword::Void
                     | Keyword::Char
                     | Keyword::Short

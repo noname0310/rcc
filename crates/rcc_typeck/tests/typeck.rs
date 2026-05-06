@@ -1673,6 +1673,7 @@ fn fixture_e0084_address_of_global_silent() {
         kind: DefKind::Global {
             ty: tcx.int,
             quals: rcc_hir::ObjectQuals::none(),
+            thread_local: false,
             linkage: Linkage::External,
             init: None,
         },

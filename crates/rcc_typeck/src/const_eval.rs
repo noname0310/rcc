@@ -1406,6 +1406,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::External,
                 init: None,
             },
@@ -1439,6 +1440,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: arr_ty,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },
@@ -1473,6 +1475,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: arr_ty,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },
@@ -1515,6 +1518,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: str_ty,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },
@@ -1613,6 +1617,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },
@@ -1646,6 +1651,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: rcc_hir::ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::Internal,
                 init: None,
             },

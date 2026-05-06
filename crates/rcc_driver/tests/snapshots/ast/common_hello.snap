@@ -33,6 +33,7 @@ TranslationUnit {
                         ),
                     },
                     storage: None,
+                    thread_local: false,
                     type_specs: [
                         Int,
                     ],
@@ -126,6 +127,7 @@ TranslationUnit {
                                         ),
                                     },
                                     storage: None,
+                                    thread_local: false,
                                     type_specs: [
                                         Int,
                                     ],

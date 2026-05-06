@@ -1337,6 +1337,45 @@ fn c11_invalid_atomic_object_types_are_diagnosed() {
 }
 
 #[test]
+fn c11_thread_local_globals_lower_to_tls_defs() {
+    let src = "_Thread_local int x; static _Thread_local int y; extern _Thread_local int z;";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().all(|d| d.level != rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+
+    let globals = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { thread_local, linkage, .. } => Some((thread_local, linkage)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        globals,
+        vec![(true, Linkage::External), (true, Linkage::Internal), (true, Linkage::External)]
+    );
+}
+
+#[test]
+fn c11_thread_local_block_scope_requires_static_or_extern() {
+    let src = "int f(void) { _Thread_local int x; return 0; }";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("block-scope declarations must also use")),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn gnu_common_global_and_local_unused_attrs_lower() {
     let src = r#"
         int g __attribute__((unused, visibility("default"), section(".data.rcc")));

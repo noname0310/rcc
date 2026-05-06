@@ -2168,6 +2168,18 @@ fn lower_block_decl(
     out: &mut Vec<HirStmtId>,
 ) {
     let is_typedef = decl.specs.storage == Some(StorageClass::Typedef);
+    if decl.specs.thread_local
+        && !matches!(decl.specs.storage, Some(StorageClass::Static | StorageClass::Extern))
+    {
+        session
+            .handler
+            .struct_err(
+                decl.span,
+                "`_Thread_local` block-scope declarations must also use `static` or `extern`",
+            )
+            .code(rcc_errors::codes::E0060)
+            .emit();
+    }
 
     if decl.inits.is_empty() {
         materialize_tag_definitions_in_specs(&decl.specs, tcx, resolver, crate_, session);
@@ -2402,6 +2414,7 @@ fn lower_block_scope_extern_object_decl(
         kind: DefKind::Global {
             ty,
             quals: declaration_object_quals(specs, declarator),
+            thread_local: specs.thread_local,
             linkage: Linkage::External,
             init: None,
         },
@@ -2450,6 +2463,7 @@ fn lower_block_scope_static_object_decl(
         kind: DefKind::Global {
             ty,
             quals: declaration_object_quals(specs, &init_decl.declarator),
+            thread_local: specs.thread_local,
             linkage: Linkage::Internal,
             init: global_init.as_ref().map(|(init, _)| init.clone()),
         },
@@ -3615,6 +3629,7 @@ fn materialize_file_scope_compound_literal(
         kind: DefKind::Global {
             ty,
             quals: ObjectQuals::none(),
+            thread_local: false,
             linkage: Linkage::Internal,
             init: None,
         },
@@ -5343,6 +5358,7 @@ fn intern_string_literal(
         kind: DefKind::Global {
             ty: array_ty,
             quals: ObjectQuals::none(),
+            thread_local: false,
             linkage: Linkage::Internal,
             init: Some(init),
         },
@@ -7998,6 +8014,7 @@ fn assign_def_ids(
                                             &decl.specs,
                                             &init_decl.declarator,
                                         ),
+                                        thread_local: decl.specs.thread_local,
                                         linkage,
                                         init: None,
                                     },
@@ -8558,9 +8575,10 @@ fn finalize_file_scope_def_types(
                         *no_instrument_function |= flags.no_instrument_function;
                     }
                 }
-                DefKind::Global { ty: slot, quals, init, .. } => {
+                DefKind::Global { ty: slot, quals, thread_local, init, .. } => {
                     *slot = ty;
                     *quals = declaration_object_quals(&decl.specs, &init_decl.declarator);
+                    *thread_local = decl.specs.thread_local;
                     if has_explicit_init || init.is_none() {
                         *init = global_init;
                     }
@@ -9788,6 +9806,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::External,
                 init: None,
             },
@@ -11377,6 +11396,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::External,
                 init: None,
             },
@@ -12478,6 +12498,7 @@ mod tests {
             kind: DefKind::Global {
                 ty: tcx.int,
                 quals: ObjectQuals::none(),
+                thread_local: false,
                 linkage: Linkage::External,
                 init: None,
             },
