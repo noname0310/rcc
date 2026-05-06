@@ -2,6 +2,7 @@
 set -euo pipefail
 
 prefix=/usr/lib/llvm-18
+lib_dir=${prefix}/lib
 
 emit_prefix() {
   if [[ -n "${GITHUB_ENV:-}" ]]; then
@@ -10,7 +11,13 @@ emit_prefix() {
   echo "LLVM_SYS_181_PREFIX=${prefix}"
 }
 
-if [[ -x "${prefix}/bin/llvm-config" ]]; then
+has_complete_llvm_18() {
+  [[ -x "${prefix}/bin/llvm-config" ]] &&
+    [[ -f "${lib_dir}/libPolly.a" ]] &&
+    [[ -f "${lib_dir}/libPollyISL.a" ]]
+}
+
+if has_complete_llvm_18; then
   "${prefix}/bin/llvm-config" --version
   emit_prefix
   exit 0
@@ -50,6 +57,11 @@ if ! retry 3 timeout 240s sudo apt-get install -y --no-install-recommends \
     libpolly-18-dev \
     clang-18 \
     lld-18
+fi
+
+if ! has_complete_llvm_18; then
+  echo "LLVM 18 install is incomplete: expected llvm-config plus libPolly.a and libPollyISL.a under ${prefix}" >&2
+  exit 1
 fi
 
 "${prefix}/bin/llvm-config" --version
