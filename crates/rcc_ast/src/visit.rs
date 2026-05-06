@@ -234,6 +234,15 @@ pub fn walk_expr<V: Visitor>(v: &mut V, e: &Expr) {
             v.visit_expr(then_expr);
             v.visit_expr(else_expr);
         }
+        ExprKind::GenericSelection { control, associations } => {
+            v.visit_expr(control);
+            for assoc in associations {
+                if let Some(ty) = &assoc.ty {
+                    v.visit_type_name(ty);
+                }
+                v.visit_expr(&assoc.expr);
+            }
+        }
         ExprKind::OmittedCond { cond, else_expr } => {
             v.visit_expr(cond);
             v.visit_expr(else_expr);

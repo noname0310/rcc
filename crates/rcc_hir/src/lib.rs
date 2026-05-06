@@ -512,6 +512,15 @@ pub struct HirExpr {
     pub kind: HirExprKind,
 }
 
+/// One lowered C11 `_Generic` association.
+#[derive(Debug, Clone)]
+pub struct GenericAssociation {
+    /// `None` for the `default:` association.
+    pub ty: Option<TyId>,
+    /// Association expression.
+    pub expr: HirExprId,
+}
+
 /// Value category (C99 §6.3.2.1).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ValueCat {
@@ -626,6 +635,19 @@ pub enum HirExprKind {
         then_expr: HirExprId,
         /// Value when `cond` is zero.
         else_expr: HirExprId,
+    },
+    /// C11 `_Generic(control, type: expr, default: expr)`.
+    ///
+    /// The controlling expression is used for type selection only and must
+    /// not be emitted into the runtime CFG. Type checking records the selected
+    /// association expression; CFG lowering evaluates only that expression.
+    GenericSelection {
+        /// Controlling expression.
+        control: HirExprId,
+        /// Lowered generic associations.
+        associations: Vec<GenericAssociation>,
+        /// Selected association expression after type checking.
+        selected: Option<HirExprId>,
     },
     /// GNU `a ?: b` omitted-middle conditional.
     ///

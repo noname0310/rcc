@@ -991,6 +991,9 @@ pub fn visit_expr(
                 HirExprKind::Cond { cond: cond2, then_expr: then2, else_expr: else2 };
             expr_id
         }
+        HirExprKind::GenericSelection { control, associations, .. } => {
+            type_generic_selection(expr_id, control, associations, body, tcx, session, def_info)
+        }
         HirExprKind::OmittedCond { cond, else_expr } => {
             let cond2 = visit_expr(cond, body, tcx, session, def_info);
             let cond_precision = expr_bit_precision(cond2, body, tcx, def_info);
@@ -1142,6 +1145,106 @@ pub fn visit_expr(
             expr_id
         }
     }
+}
+
+fn type_generic_selection(
+    expr_id: HirExprId,
+    control: HirExprId,
+    associations: Vec<rcc_hir::GenericAssociation>,
+    body: &mut Body,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+    def_info: &rcc_data_structures::FxHashMap<rcc_hir::DefId, DefSnapshot>,
+) -> HirExprId {
+    let control = visit_expr(control, body, tcx, session, def_info);
+    let control = rvalue_decayed(control, body, tcx);
+    let control_ty = body.exprs[control].ty;
+
+    let mut typed_associations = Vec::with_capacity(associations.len());
+    let mut default_index = None;
+    let mut selected = None;
+    let mut type_assocs: Vec<(usize, TyId)> = Vec::new();
+
+    for assoc in associations {
+        let expr = visit_expr(assoc.expr, body, tcx, session, def_info);
+        let assoc_index = typed_associations.len();
+
+        match assoc.ty {
+            Some(ty) => {
+                for (prev_index, prev_ty) in &type_assocs {
+                    if ty != tcx.error
+                        && *prev_ty != tcx.error
+                        && is_compatible_type(tcx, ty, *prev_ty)
+                    {
+                        session
+                            .handler
+                            .struct_err(
+                                body.exprs[expr].span,
+                                "duplicate compatible `_Generic` association type",
+                            )
+                            .code(rcc_errors::codes::E0083)
+                            .note(format!(
+                                "this association is compatible with association #{prev_index}"
+                            ))
+                            .emit();
+                    }
+                }
+                if control_ty != tcx.error
+                    && ty != tcx.error
+                    && selected.is_none()
+                    && is_compatible_type(tcx, control_ty, ty)
+                {
+                    selected = Some(expr);
+                }
+                type_assocs.push((assoc_index, ty));
+                typed_associations.push(rcc_hir::GenericAssociation { ty: Some(ty), expr });
+            }
+            None => {
+                if let Some(prev) = default_index {
+                    session
+                        .handler
+                        .struct_err(
+                            body.exprs[expr].span,
+                            "duplicate `_Generic` default association",
+                        )
+                        .code(rcc_errors::codes::E0083)
+                        .note(format!("the previous default association is #{prev}"))
+                        .emit();
+                } else {
+                    default_index = Some(assoc_index);
+                }
+                typed_associations.push(rcc_hir::GenericAssociation { ty: None, expr });
+            }
+        }
+    }
+
+    if selected.is_none() {
+        if let Some(default_index) = default_index {
+            selected = Some(typed_associations[default_index].expr);
+        }
+    }
+
+    if selected.is_none() && control_ty != tcx.error {
+        session
+            .handler
+            .struct_err(
+                body.exprs[expr_id].span,
+                "`_Generic` selection has no matching association",
+            )
+            .code(rcc_errors::codes::E0083)
+            .emit();
+    }
+
+    if let Some(selected) = selected {
+        body.exprs[expr_id].ty = body.exprs[selected].ty;
+        body.exprs[expr_id].value_cat = value_category(body, selected);
+    } else {
+        body.exprs[expr_id].ty = tcx.error;
+        body.exprs[expr_id].value_cat = ValueCat::RValue;
+    }
+    body.exprs[expr_id].kind =
+        HirExprKind::GenericSelection { control, associations: typed_associations, selected };
+    expr_id
 }
 
 fn check_overflow_operand(
@@ -3348,6 +3451,10 @@ pub fn value_category(body: &Body, expr: HirExprId) -> ValueCat {
         | HirExprKind::BuiltinOverflow { .. }
         | HirExprKind::BuiltinOverflowP { .. } => ValueCat::RValue,
 
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            value_category(body, selected)
+        }
+        HirExprKind::GenericSelection { selected: None, .. } => ValueCat::RValue,
         HirExprKind::Comma { .. } => body.exprs[expr].value_cat,
 
         // Identifier-style designators are lvalues. String literals are

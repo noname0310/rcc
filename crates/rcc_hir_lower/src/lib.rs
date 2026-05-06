@@ -21,11 +21,12 @@ use rcc_data_structures::FxHashSet;
 use rcc_hir::ty::{IntRank, Qual, Ty};
 use rcc_hir::OverflowOp;
 use rcc_hir::{
-    Body, CommonAttrs, Def, DefId, DefKind, Enumerator, Field, GlobalInit, GlobalInitDesignator,
-    GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId, HirExprKind, HirInlineAsm,
-    HirInlineAsmOperand, HirInlineAsmQuals, HirStmt, HirStmtId, HirStmtKind, IntLiteralBase,
-    IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl, ObjectQuals, RecordKind,
-    ScalarStorageOrder, SwitchCase, SymbolVisibility, TyCtxt, TyId, ValueCat,
+    Body, CommonAttrs, Def, DefId, DefKind, Enumerator, Field, GenericAssociation, GlobalInit,
+    GlobalInitDesignator, GlobalInitEntry, GlobalInitValue, HirCrate, HirExpr, HirExprId,
+    HirExprKind, HirInlineAsm, HirInlineAsmOperand, HirInlineAsmQuals, HirStmt, HirStmtId,
+    HirStmtKind, IntLiteralBase, IntLiteralSuffix, LayoutCx, Linkage, Local, LocalDecl,
+    ObjectQuals, RecordKind, ScalarStorageOrder, SwitchCase, SymbolVisibility, TyCtxt, TyId,
+    ValueCat,
 };
 use rcc_session::Session;
 use rcc_span::{Span, Symbol};
@@ -1167,6 +1168,15 @@ fn walk_expr_labels(
             walk_expr_labels(then_expr, resolver, session, pass);
             walk_expr_labels(else_expr, resolver, session, pass);
         }
+        rcc_ast::ExprKind::GenericSelection { control, associations } => {
+            walk_expr_labels(control, resolver, session, pass);
+            for assoc in associations {
+                if let Some(ty) = &assoc.ty {
+                    walk_type_name_labels(ty, resolver, session, pass);
+                }
+                walk_expr_labels(&assoc.expr, resolver, session, pass);
+            }
+        }
         rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
             walk_expr_labels(cond, resolver, session, pass);
             walk_expr_labels(else_expr, resolver, session, pass);
@@ -1845,6 +1855,10 @@ fn populate_switch_case_tables_in_expr(
             populate_switch_case_tables_in_expr(body, then_expr, switch_depth, session);
             populate_switch_case_tables_in_expr(body, else_expr, switch_depth, session);
         }
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            populate_switch_case_tables_in_expr(body, selected, switch_depth, session);
+        }
+        HirExprKind::GenericSelection { selected: None, .. } => {}
         HirExprKind::OmittedCond { cond, else_expr } => {
             populate_switch_case_tables_in_expr(body, cond, switch_depth, session);
             populate_switch_case_tables_in_expr(body, else_expr, switch_depth, session);
@@ -4421,6 +4435,28 @@ pub fn lower_expr(
             let t = lower_expr(then_expr, body, scope, crate_, tcx, resolver, session);
             let e = lower_expr(else_expr, body, scope, crate_, tcx, resolver, session);
             HirExprKind::Cond { cond: c, then_expr: t, else_expr: e }
+        }
+        rcc_ast::ExprKind::GenericSelection { control, associations } => {
+            let control = lower_expr(control, body, scope, crate_, tcx, resolver, session);
+            let associations = associations
+                .iter()
+                .map(|assoc| {
+                    let ty = assoc.ty.as_ref().map(|ty| {
+                        lower_type_name_in_scope(
+                            ty,
+                            DeclScope::Block,
+                            Some(scope),
+                            tcx,
+                            resolver,
+                            crate_,
+                            session,
+                        )
+                    });
+                    let expr = lower_expr(&assoc.expr, body, scope, crate_, tcx, resolver, session);
+                    GenericAssociation { ty, expr }
+                })
+                .collect();
+            HirExprKind::GenericSelection { control, associations, selected: None }
         }
         rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
             let c = lower_expr(cond, body, scope, crate_, tcx, resolver, session);

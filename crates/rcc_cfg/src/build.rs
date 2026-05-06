@@ -1102,6 +1102,10 @@ impl BodyBuilder {
                 self.collect_expr_labels(hir_body, *then_expr, local_map, scopes);
                 self.collect_expr_labels(hir_body, *else_expr, local_map, scopes);
             }
+            HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+                self.collect_expr_labels(hir_body, *selected, local_map, scopes);
+            }
+            HirExprKind::GenericSelection { selected: None, .. } => {}
             HirExprKind::OmittedCond { cond, else_expr } => {
                 self.collect_expr_labels(hir_body, *cond, local_map, scopes);
                 self.collect_expr_labels(hir_body, *else_expr, local_map, scopes);

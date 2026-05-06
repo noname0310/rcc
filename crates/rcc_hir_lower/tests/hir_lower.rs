@@ -1241,6 +1241,57 @@ fn c11_anonymous_union_member_preserves_layout_and_promoted_lookup() {
 }
 
 #[test]
+fn c11_generic_selection_records_selected_association() {
+    let src = "int f(int x) { return _Generic(x, int: 10, default: 20); }";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
+    let body = hir.bodies.values().next().expect("missing function body");
+    let (associations, selected) = body
+        .exprs
+        .iter()
+        .find_map(|expr| match &expr.kind {
+            HirExprKind::GenericSelection { associations, selected: Some(selected), .. } => {
+                Some((associations, *selected))
+            }
+            _ => None,
+        })
+        .expect("expected generic selection");
+    assert_eq!(associations.len(), 2);
+    assert!(matches!(body.exprs[selected].kind, HirExprKind::IntConst(10)));
+}
+
+#[test]
+fn c11_generic_selection_duplicate_compatible_type_is_diagnosed() {
+    let src = "int f(void) { return _Generic(1, int: 10, signed int: 11, default: 20); }";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("duplicate compatible `_Generic` association type")),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
+fn c11_generic_selection_missing_match_without_default_is_diagnosed() {
+    let src = "int f(void) { return _Generic(1.0, int: 10); }";
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        cap.diagnostics().iter().any(|d| d.message.contains("no matching association")),
+        "{:#?}",
+        cap.diagnostics()
+    );
+}
+
+#[test]
 fn gnu_common_global_and_local_unused_attrs_lower() {
     let src = r#"
         int g __attribute__((unused, visibility("default"), section(".data.rcc")));

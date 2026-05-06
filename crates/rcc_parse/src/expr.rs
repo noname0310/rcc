@@ -140,9 +140,9 @@
 //!
 use rcc_ast::{
     AssignOp, BinOp, CharLiteral as AstCharLiteral, Expr, ExprKind,
-    FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, IntBase as AstIntBase,
-    IntLiteral as AstIntLiteral, IntSuffix as AstIntSuffix, LiteralEncoding, OffsetofDesignator,
-    StringLiteral as AstStringLiteral, UnOp,
+    FloatLiteral as AstFloatLiteral, FloatSuffix as AstFloatSuffix, GenericAssociation,
+    IntBase as AstIntBase, IntLiteral as AstIntLiteral, IntSuffix as AstIntSuffix, LiteralEncoding,
+    OffsetofDesignator, StringLiteral as AstStringLiteral, UnOp,
 };
 use rcc_errors::codes;
 use rcc_lexer::{strip_line_splices, Punct, StringEncoding};
@@ -209,6 +209,7 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
             Some(Expr { id, kind: ExprKind::StringLit(lit), span })
         }
         TokenKind::Punct(Punct::AmpAmp) => parse_gnu_label_addr(p, span),
+        TokenKind::Keyword(Keyword::Generic) => parse_generic_selection(p, span),
         TokenKind::Punct(Punct::LParen) => {
             let lparen_span = span;
             p.bump();
@@ -246,6 +247,160 @@ pub fn parse_primary(p: &mut Parser<'_>) -> Option<Expr> {
         }
         _ => {
             p.session.handler.struct_err(span, "expected primary expression").emit();
+            None
+        }
+    }
+}
+
+fn parse_generic_selection(p: &mut Parser<'_>, generic_span: Span) -> Option<Expr> {
+    p.bump(); // `_Generic`
+    if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+        p.session
+            .handler
+            .struct_err(generic_span, "C11 `_Generic` selection requires `-std=c11`")
+            .code(codes::E0061)
+            .emit();
+    }
+
+    let lparen_span = match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::LParen)) => {
+            let span = tok.span;
+            p.bump();
+            span
+        }
+        _ => {
+            p.session
+                .handler
+                .struct_err(p.cur_span(), "expected `(` after `_Generic`")
+                .code(codes::E0061)
+                .emit();
+            return None;
+        }
+    };
+
+    let Some(control) = parse_assignment_expression(p) else {
+        p.session
+            .handler
+            .struct_err(p.cur_span(), "expected controlling expression in `_Generic`")
+            .label(lparen_span, "`_Generic` argument list starts here")
+            .emit();
+        let end_span = expect_builtin_rparen(p, lparen_span, "_Generic");
+        let id = p.fresh_id();
+        let dummy = Expr {
+            id,
+            kind: ExprKind::IntLit(AstIntLiteral {
+                text: p.session.interner.intern("0"),
+                value: 0,
+                base: AstIntBase::Decimal,
+                suffix: AstIntSuffix::None,
+            }),
+            span: generic_span,
+        };
+        let id = p.fresh_id();
+        return Some(Expr {
+            id,
+            kind: ExprKind::GenericSelection { control: Box::new(dummy), associations: Vec::new() },
+            span: generic_span.to(end_span),
+        });
+    };
+
+    let _ = expect_builtin_comma(p, lparen_span, "_Generic");
+    let associations = parse_generic_associations(p, lparen_span);
+    let end_span = expect_builtin_rparen(p, lparen_span, "_Generic");
+    let id = p.fresh_id();
+    Some(Expr {
+        id,
+        kind: ExprKind::GenericSelection { control: Box::new(control), associations },
+        span: generic_span.to(end_span),
+    })
+}
+
+fn parse_generic_associations(p: &mut Parser<'_>, lparen_span: Span) -> Vec<GenericAssociation> {
+    let mut associations = Vec::new();
+    loop {
+        if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+            if associations.is_empty() {
+                p.session
+                    .handler
+                    .struct_err(p.cur_span(), "expected generic association")
+                    .label(lparen_span, "`_Generic` argument list starts here")
+                    .emit();
+            }
+            break;
+        }
+
+        let Some(assoc) = parse_generic_association(p, lparen_span) else {
+            break;
+        };
+        associations.push(assoc);
+
+        match p.peek() {
+            Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Comma)) => {
+                let comma_span = tok.span;
+                p.bump();
+                if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Punct(Punct::RParen))) {
+                    p.session
+                        .handler
+                        .struct_err(comma_span, "expected generic association after `,`")
+                        .label(lparen_span, "`_Generic` argument list starts here")
+                        .emit();
+                    break;
+                }
+            }
+            Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::RParen)) => break,
+            Some(tok) => {
+                p.session
+                    .handler
+                    .struct_err(tok.span, "expected `,` or `)` in generic association list")
+                    .label(lparen_span, "`_Generic` argument list starts here")
+                    .emit();
+                break;
+            }
+            None => {
+                p.session.handler.struct_err(lparen_span, "unclosed `_Generic` selection").emit();
+                break;
+            }
+        }
+    }
+    associations
+}
+
+fn parse_generic_association(p: &mut Parser<'_>, lparen_span: Span) -> Option<GenericAssociation> {
+    let start = p.cur_span();
+    let ty = if matches!(p.peek().map(|t| &t.kind), Some(TokenKind::Keyword(Keyword::Default))) {
+        p.bump();
+        None
+    } else {
+        Some(parse_type_name(p))
+    };
+    let _ = expect_generic_colon(p, start, lparen_span);
+    let expr = parse_assignment_expression(p)?;
+    let span = start.to(expr.span);
+    Some(GenericAssociation { ty, expr, span })
+}
+
+fn expect_generic_colon(p: &mut Parser<'_>, assoc_span: Span, lparen_span: Span) -> Option<Span> {
+    match p.peek() {
+        Some(tok) if matches!(tok.kind, TokenKind::Punct(Punct::Colon)) => {
+            let span = tok.span;
+            p.bump();
+            Some(span)
+        }
+        Some(tok) => {
+            p.session
+                .handler
+                .struct_err(tok.span, "expected `:` in generic association")
+                .label(assoc_span, "generic association starts here")
+                .label(lparen_span, "`_Generic` argument list starts here")
+                .emit();
+            None
+        }
+        None => {
+            p.session
+                .handler
+                .struct_err(assoc_span, "expected `:` in generic association")
+                .label(lparen_span, "`_Generic` argument list starts here")
+                .emit();
             None
         }
     }

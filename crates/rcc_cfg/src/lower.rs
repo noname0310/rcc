@@ -472,6 +472,12 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         HirExprKind::Cond { cond, then_expr, else_expr } => {
             lower_ternary(builder, cx, ty, span, *cond, *then_expr, *else_expr)
         }
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            lower_as_rvalue(builder, cx, *selected)
+        }
+        HirExprKind::GenericSelection { selected: None, .. } => {
+            Operand::Const(Const { kind: ConstKind::Int(0), ty })
+        }
         HirExprKind::OmittedCond { cond, else_expr } => {
             lower_omitted_ternary(builder, cx, ty, span, *cond, *else_expr)
         }
@@ -658,6 +664,9 @@ pub fn lower_as_place(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: HirE
         HirExprKind::Comma { lhs, rhs } => {
             let _ = lower_as_rvalue(builder, cx, *lhs);
             lower_as_place(builder, cx, *rhs)
+        }
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            lower_as_place(builder, cx, *selected)
         }
         _ => panic!(
             "lower_as_place: HIR expression {expr_id:?} is not an lvalue (kind = {:?})",
@@ -1356,6 +1365,10 @@ fn expr_contains_label(body: &HirBody, expr_id: HirExprId) -> bool {
                 || expr_contains_label(body, *then_expr)
                 || expr_contains_label(body, *else_expr)
         }
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            expr_contains_label(body, *selected)
+        }
+        HirExprKind::GenericSelection { selected: None, .. } => false,
         HirExprKind::OmittedCond { cond, else_expr } => {
             expr_contains_label(body, *cond) || expr_contains_label(body, *else_expr)
         }
@@ -2119,6 +2132,9 @@ fn const_int_expr(cx: &LowerCx<'_>, expr: HirExprId) -> Option<i128> {
                 const_int_expr(cx, else_expr)
             }
         }
+        HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+            const_int_expr(cx, selected)
+        }
         HirExprKind::OmittedCond { cond, else_expr } => {
             let cond_value = const_int_expr(cx, cond)?;
             if cond_value != 0 {
@@ -2168,6 +2184,7 @@ fn const_int_expr(cx: &LowerCx<'_>, expr: HirExprId) -> Option<i128> {
         | HirExprKind::LabelAddr(_)
         | HirExprKind::Deref(_)
         | HirExprKind::Comma { .. }
+        | HirExprKind::GenericSelection { .. }
         | HirExprKind::Assign { .. }
         | HirExprKind::BuiltinVaArea
         | HirExprKind::BuiltinVaArg { .. }

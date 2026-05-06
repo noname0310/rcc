@@ -11,7 +11,7 @@ use rcc_cfg::{
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::{DefId, HirCrate, Local, Ty, TyCtxt, TyId};
 use rcc_hir_lower::lower;
-use rcc_session::{Options, Session};
+use rcc_session::{LanguageStandard, Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
 struct Fixture {
@@ -719,10 +719,35 @@ int f(int limit) {
     );
 }
 
+#[test]
+fn c11_generic_selection_lowers_only_selected_runtime_arm() {
+    let lowered = lower_snippet_with_options(
+        "c11_generic_selection",
+        r#"
+        int picked(void) { return 7; }
+        int unpicked(void) { return 99; }
+        int f(void) {
+            return _Generic(1, int: picked(), default: unpicked());
+        }
+        "#,
+        Options { language_standard: LanguageStandard::C11, ..Options::default() },
+    );
+    let total_calls: usize =
+        lowered.bodies.iter().map(|(_, body)| call_terminator_count(body)).sum();
+    assert_eq!(
+        total_calls, 1,
+        "_Generic must not lower the controlling expression or unselected arms into runtime CFG"
+    );
+}
+
 fn lower_snippet(name: &str, src: &str) -> Lowered {
+    lower_snippet_with_options(name, src, Options::default())
+}
+
+fn lower_snippet_with_options(name: &str, src: &str, opts: Options) -> Lowered {
     let cap = CaptureEmitter::new();
     let handler = Handler::with_emitter(Box::new(cap.clone()));
-    let mut session = Session::with_handler(Options::default(), handler);
+    let mut session = Session::with_handler(opts, handler);
     let file = session
         .source_map
         .write()

@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-07: Generic Selection
 
 **Phase:** 15a-c11-transition  
@@ -24,11 +26,11 @@ type-checked, and lowered without falling back to ad hoc preprocessor hacks.
 
 ## Acceptance
 
-- [ ] `_Generic(1, int: 10, default: 20)` folds/selects the `int` arm.
-- [ ] Duplicate compatible association types are diagnosed.
-- [ ] Missing match without `default` is diagnosed.
-- [ ] Non-selected arms are parsed but not evaluated for runtime codegen.
-- [ ] `<tgmath.h>` remains compatible with or improves from this support.
+- [x] `_Generic(1, int: 10, default: 20)` folds/selects the `int` arm.
+- [x] Duplicate compatible association types are diagnosed.
+- [x] Missing match without `default` is diagnosed.
+- [x] Non-selected arms are parsed but not evaluated for runtime codegen.
+- [x] `<tgmath.h>` remains compatible with or improves from this support.
 
 ## References
 

@@ -200,6 +200,10 @@ impl DeprecatedWalker<'_, '_> {
                 self.visit_expr(*then_expr);
                 self.visit_expr(*else_expr);
             }
+            HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+                self.visit_expr(*selected);
+            }
+            HirExprKind::GenericSelection { selected: None, .. } => {}
             HirExprKind::OmittedCond { cond, else_expr } => {
                 self.visit_expr(*cond);
                 self.visit_expr(*else_expr);
@@ -582,6 +586,10 @@ impl UsageWalker<'_> {
                 self.visit_value_expr(*then_expr);
                 self.visit_value_expr(*else_expr);
             }
+            HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+                self.visit_value_expr(*selected);
+            }
+            HirExprKind::GenericSelection { selected: None, .. } => {}
             HirExprKind::OmittedCond { cond, else_expr } => {
                 self.visit_value_expr(*cond);
                 self.visit_value_expr(*else_expr);

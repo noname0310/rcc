@@ -219,6 +219,10 @@ impl<'a> ConstEval<'a> {
                     self.eval_arith(else_expr)
                 }
             }
+            HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+                self.eval_arith(selected)
+            }
+            HirExprKind::GenericSelection { selected: None, .. } => None,
             HirExprKind::OmittedCond { cond, else_expr } => {
                 if let Some(c) = self.eval_int(cond) {
                     if c != 0 {
@@ -586,6 +590,10 @@ impl<'a> ConstEval<'a> {
                     self.eval_int(else_expr)
                 }
             }
+            HirExprKind::GenericSelection { selected: Some(selected), .. } => {
+                self.eval_int(selected)
+            }
+            HirExprKind::GenericSelection { selected: None, .. } => None,
             HirExprKind::OmittedCond { cond, else_expr } => {
                 let c = self.eval_int(cond)?;
                 if c != 0 {

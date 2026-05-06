@@ -571,6 +571,17 @@ pub struct Expr {
     pub span: Span,
 }
 
+/// One C11 `_Generic` association.
+#[derive(Debug, Clone)]
+pub struct GenericAssociation {
+    /// `None` for the `default:` association.
+    pub ty: Option<TypeName>,
+    /// Association expression.
+    pub expr: Expr,
+    /// Association source span.
+    pub span: Span,
+}
+
 /// Decoded integer literal payload carried by the AST.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntLiteral {
@@ -695,6 +706,13 @@ pub enum ExprKind {
     Unary { op: UnOp, operand: Box<Expr> },
     /// `a ? b : c`
     Cond { cond: Box<Expr>, then_expr: Box<Expr>, else_expr: Box<Expr> },
+    /// C11 `_Generic(control, type: expr, default: expr)`.
+    GenericSelection {
+        /// Controlling assignment-expression. It is not evaluated at runtime.
+        control: Box<Expr>,
+        /// Generic association list.
+        associations: Vec<GenericAssociation>,
+    },
     /// GNU `a ?: b` omitted-middle conditional.
     OmittedCond { cond: Box<Expr>, else_expr: Box<Expr> },
     /// GNU label address expression: `&&label`.

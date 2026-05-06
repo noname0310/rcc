@@ -949,6 +949,39 @@ fn c99_alignof_and_alignas_are_diagnosed() {
 }
 
 #[test]
+fn c11_generic_selection_parses_associations() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        "int f(void) { return _Generic(1, int: 10, long: 11, default: 20); }",
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+    let ExternalDecl::Function(func) = &tu.decls[0] else {
+        panic!("expected function definition");
+    };
+    let BlockItem::Stmt(stmt) = &func.body.items[0] else {
+        panic!("expected return statement");
+    };
+    let StmtKind::Return(Some(expr)) = &stmt.kind else {
+        panic!("expected return expression");
+    };
+    let ExprKind::GenericSelection { control, associations } = &expr.kind else {
+        panic!("expected GenericSelection, got {:?}", expr.kind);
+    };
+    assert!(matches!(control.kind, ExprKind::IntLit(_)));
+    assert_eq!(associations.len(), 3);
+    assert!(associations[0].ty.is_some());
+    assert!(associations[1].ty.is_some());
+    assert!(associations[2].ty.is_none());
+}
+
+#[test]
+fn c99_generic_selection_is_diagnosed() {
+    let errors = parse_err("int f(void) { return _Generic(1, int: 10, default: 20); }");
+    assert!(errors.iter().any(|d| d.message.contains("`_Generic`")), "{errors:#?}");
+}
+
+#[test]
 fn c11_anonymous_record_member_is_standard() {
     let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
     let (_tu, diags) =
