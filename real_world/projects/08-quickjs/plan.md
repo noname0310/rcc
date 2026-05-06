@@ -47,11 +47,11 @@ Both scripts build each source from the same upstream source tree and core
 Makefile flags:
 
 ```sh
--std=c99 -O2 -fwrapv -funsigned-char -D_GNU_SOURCE \
+-std=c11 -O2 -fwrapv -funsigned-char -D_GNU_SOURCE \
   -DCONFIG_VERSION="$(cat upstream/VERSION)" -I upstream
 ```
 
-The host side uses `-std=gnu99`; the rcc side remains `-std=c99` and enables
+The host side uses `-std=gnu99`; the rcc side uses `-std=c11` and enables
 only the GNU extensions QuickJS actually uses: attributes, range designators,
 labels-as-values, inline asm, statement expressions, and common GNU builtin
 libcall declarations.

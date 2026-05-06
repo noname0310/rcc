@@ -223,6 +223,7 @@ fn check_static_assert(
         &assertion.expr,
         scope,
         typedef_scope,
+        None,
         tcx,
         resolver,
         crate_,
@@ -474,6 +475,7 @@ fn lower_param_bound_side_effects(
             size_expr,
             DeclScope::Param,
             Some(scope),
+            Some(body),
             tcx,
             resolver,
             crate_,
@@ -2201,6 +2203,7 @@ fn lower_block_decl(
                 &init_decl.declarator,
                 DeclScope::Block,
                 Some(scope),
+                Some(body),
                 tcx,
                 resolver,
                 crate_,
@@ -2224,6 +2227,7 @@ fn lower_block_decl(
             &init_decl.declarator,
             DeclScope::Block,
             Some(scope),
+            Some(body),
             tcx,
             resolver,
             crate_,
@@ -2591,6 +2595,7 @@ fn lower_top_level_vla_len(
         size_expr,
         DeclScope::Block,
         Some(scope),
+        Some(body),
         tcx,
         resolver,
         crate_,
@@ -3112,7 +3117,8 @@ fn eval_range_designator(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> Option<(u64, u64)> {
-    let Some(lo) = eval_array_bound_as_i128(lo, scope, None, tcx, resolver, crate_, session) else {
+    let Some(lo) = eval_array_bound_as_i128(lo, scope, None, None, tcx, resolver, crate_, session)
+    else {
         emit_invalid_initializer_designator(
             span,
             "initializer range lower bound must be an integer constant",
@@ -3120,7 +3126,8 @@ fn eval_range_designator(
         );
         return None;
     };
-    let Some(hi) = eval_array_bound_as_i128(hi, scope, None, tcx, resolver, crate_, session) else {
+    let Some(hi) = eval_array_bound_as_i128(hi, scope, None, None, tcx, resolver, crate_, session)
+    else {
         emit_invalid_initializer_designator(
             span,
             "initializer range upper bound must be an integer constant",
@@ -5840,6 +5847,27 @@ fn lower_typeof_expr_to_ty(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_sizeof_operand_to_ty(
+    expr: &rcc_ast::Expr,
+    scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+    tcx: &mut TyCtxt,
+    session: &mut Session,
+) -> TyId {
+    let expr = peel_ast_parens(expr);
+    if let rcc_ast::ExprKind::Ident(sym) = expr.kind {
+        if let Some(Binding::Local(local)) = scope.and_then(|scope| scope.lookup(sym)) {
+            if let Some(body) = local_body {
+                return body.locals[local].ty;
+            }
+        }
+    }
+    lower_typeof_expr_to_ty(expr, scope, resolver, crate_, tcx, session)
+}
+
 fn peel_ast_parens(mut expr: &rcc_ast::Expr) -> &rcc_ast::Expr {
     while let rcc_ast::ExprKind::Paren(inner) = &expr.kind {
         expr = inner;
@@ -5929,7 +5957,9 @@ pub fn lower_type_from_parts(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    lower_type_from_parts_in_scope(specs, declarator, scope, None, tcx, resolver, crate_, session)
+    lower_type_from_parts_in_scope(
+        specs, declarator, scope, None, None, tcx, resolver, crate_, session,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5938,6 +5968,7 @@ fn lower_type_from_parts_in_scope(
     declarator: &Declarator,
     scope: DeclScope,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
@@ -5958,6 +5989,7 @@ fn lower_type_from_parts_in_scope(
         declarator,
         scope,
         typedef_scope,
+        local_body,
         tcx,
         resolver,
         crate_,
@@ -6384,6 +6416,7 @@ fn lower_type_name_in_scope(
         &ty.declarator,
         scope,
         typedef_scope,
+        None,
         tcx,
         resolver,
         crate_,
@@ -6716,7 +6749,9 @@ fn apply_declarator_with_context(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> TyId {
-    apply_declarator_with_context_in_scope(base, d, scope, None, tcx, resolver, crate_, session)
+    apply_declarator_with_context_in_scope(
+        base, d, scope, None, None, tcx, resolver, crate_, session,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6725,6 +6760,7 @@ fn apply_declarator_with_context_in_scope(
     d: &Declarator,
     scope: DeclScope,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
@@ -6736,6 +6772,7 @@ fn apply_declarator_with_context_in_scope(
         d,
         scope,
         typedef_scope,
+        local_body,
         tcx,
         resolver,
         crate_,
@@ -6751,6 +6788,7 @@ fn apply_declarator_with_base_quals_in_scope(
     d: &Declarator,
     scope: DeclScope,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
@@ -6798,6 +6836,7 @@ fn apply_declarator_with_base_quals_in_scope(
                         size_expr,
                         scope,
                         typedef_scope,
+                        local_body,
                         tcx,
                         resolver,
                         crate_,
@@ -6859,6 +6898,7 @@ fn apply_declarator_with_base_quals_in_scope(
                         &param.declarator,
                         DeclScope::Param,
                         typedef_scope,
+                        None,
                         tcx,
                         resolver,
                         crate_,
@@ -7165,13 +7205,22 @@ fn eval_array_bound_as_u64(
     expr: &rcc_ast::Expr,
     scope: DeclScope,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> Option<u64> {
-    let value =
-        eval_array_bound_as_i128(expr, scope, typedef_scope, tcx, resolver, crate_, session)?;
+    let value = eval_array_bound_as_i128(
+        expr,
+        scope,
+        typedef_scope,
+        local_body,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )?;
     u64::try_from(value).ok()
 }
 
@@ -7180,6 +7229,7 @@ fn eval_array_bound_as_i128(
     expr: &rcc_ast::Expr,
     scope: DeclScope,
     typedef_scope: Option<&ScopeStack>,
+    local_body: Option<&Body>,
     tcx: &mut TyCtxt,
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
@@ -7213,14 +7263,28 @@ fn eval_array_bound_as_i128(
             Some(i128::from(layout.align))
         }
         rcc_ast::ExprKind::SizeofExpr(operand) => {
-            let ty =
-                lower_typeof_expr_to_ty(operand, typedef_scope, resolver, crate_, tcx, session);
+            let ty = lower_sizeof_operand_to_ty(
+                operand,
+                typedef_scope,
+                local_body,
+                resolver,
+                crate_,
+                tcx,
+                session,
+            );
             let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
             Some(i128::from(layout.size))
         }
         rcc_ast::ExprKind::AlignofExpr(operand) => {
-            let ty =
-                lower_typeof_expr_to_ty(operand, typedef_scope, resolver, crate_, tcx, session);
+            let ty = lower_sizeof_operand_to_ty(
+                operand,
+                typedef_scope,
+                local_body,
+                resolver,
+                crate_,
+                tcx,
+                session,
+            );
             let layout = LayoutCx::with_defs(tcx, &crate_.defs).layout_of(ty).ok()?;
             Some(i128::from(layout.align))
         }
@@ -7236,32 +7300,79 @@ fn eval_array_bound_as_i128(
         rcc_ast::ExprKind::BuiltinOffsetof { ty, designators } => Some(i128::from(
             lower_builtin_offsetof(ty, designators, expr.span, crate_, tcx, resolver, session),
         )),
-        rcc_ast::ExprKind::Cast { expr: operand, .. } => {
-            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
-        }
-        rcc_ast::ExprKind::Paren(inner) => {
-            eval_array_bound_as_i128(inner, scope, typedef_scope, tcx, resolver, crate_, session)
-        }
-        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => {
-            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
-        }
-        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
-            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
-                .and_then(i128::checked_neg)
-        }
+        rcc_ast::ExprKind::Cast { expr: operand, .. } => eval_array_bound_as_i128(
+            operand,
+            scope,
+            typedef_scope,
+            local_body,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        ),
+        rcc_ast::ExprKind::Paren(inner) => eval_array_bound_as_i128(
+            inner,
+            scope,
+            typedef_scope,
+            local_body,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        ),
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Plus, operand } => eval_array_bound_as_i128(
+            operand,
+            scope,
+            typedef_scope,
+            local_body,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        ),
+        rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => eval_array_bound_as_i128(
+            operand,
+            scope,
+            typedef_scope,
+            local_body,
+            tcx,
+            resolver,
+            crate_,
+            session,
+        )
+        .and_then(i128::checked_neg),
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::BitNot, operand } => {
-            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
-                .map(|v| !v)
+            eval_array_bound_as_i128(
+                operand,
+                scope,
+                typedef_scope,
+                local_body,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )
+            .map(|v| !v)
         }
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::LogNot, operand } => {
-            eval_array_bound_as_i128(operand, scope, typedef_scope, tcx, resolver, crate_, session)
-                .map(|v| i128::from(v == 0))
+            eval_array_bound_as_i128(
+                operand,
+                scope,
+                typedef_scope,
+                local_body,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )
+            .map(|v| i128::from(v == 0))
         }
         rcc_ast::ExprKind::Binary { op, lhs, rhs } => {
             let l = eval_array_bound_as_i128(
                 lhs,
                 scope,
                 typedef_scope,
+                local_body,
                 tcx,
                 resolver,
                 crate_,
@@ -7271,6 +7382,7 @@ fn eval_array_bound_as_i128(
                 rhs,
                 scope,
                 typedef_scope,
+                local_body,
                 tcx,
                 resolver,
                 crate_,
@@ -7298,13 +7410,22 @@ fn eval_array_bound_as_i128(
             }
         }
         rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
-            if eval_array_bound_as_i128(cond, scope, typedef_scope, tcx, resolver, crate_, session)?
-                != 0
+            if eval_array_bound_as_i128(
+                cond,
+                scope,
+                typedef_scope,
+                local_body,
+                tcx,
+                resolver,
+                crate_,
+                session,
+            )? != 0
             {
                 eval_array_bound_as_i128(
                     then_expr,
                     scope,
                     typedef_scope,
+                    local_body,
                     tcx,
                     resolver,
                     crate_,
@@ -7315,6 +7436,7 @@ fn eval_array_bound_as_i128(
                     else_expr,
                     scope,
                     typedef_scope,
+                    local_body,
                     tcx,
                     resolver,
                     crate_,
@@ -7327,6 +7449,7 @@ fn eval_array_bound_as_i128(
                 cond,
                 scope,
                 typedef_scope,
+                local_body,
                 tcx,
                 resolver,
                 crate_,
@@ -7339,6 +7462,7 @@ fn eval_array_bound_as_i128(
                     else_expr,
                     scope,
                     typedef_scope,
+                    local_body,
                     tcx,
                     resolver,
                     crate_,
@@ -7383,8 +7507,16 @@ fn eval_bit_width(
     crate_: &mut HirCrate,
     session: &mut Session,
 ) -> Option<i64> {
-    let value =
-        eval_array_bound_as_i128(expr, DeclScope::Block, None, tcx, resolver, crate_, session)?;
+    let value = eval_array_bound_as_i128(
+        expr,
+        DeclScope::Block,
+        None,
+        None,
+        tcx,
+        resolver,
+        crate_,
+        session,
+    )?;
     i64::try_from(value).ok()
 }
 
@@ -7415,6 +7547,9 @@ fn eval_enum_value_as_i128(
             }
         }
         rcc_ast::ExprKind::Paren(inner) => eval_enum_value_as_i128(inner, resolver, crate_),
+        rcc_ast::ExprKind::Cast { expr: operand, .. } => {
+            eval_enum_value_as_i128(operand, resolver, crate_)
+        }
         rcc_ast::ExprKind::Unary { op: rcc_ast::UnOp::Neg, operand } => {
             eval_enum_value_as_i128(operand, resolver, crate_).and_then(i128::checked_neg)
         }
@@ -8209,6 +8344,7 @@ fn align_spec_value(
                 expr,
                 scope,
                 typedef_scope,
+                None,
                 tcx,
                 resolver,
                 crate_,
@@ -8495,6 +8631,9 @@ fn finalize_file_scope_typedef_def_types(
             if matches!(&crate_.defs[def_id].kind, DefKind::Typedef(ty) if *ty != tcx.error) {
                 continue;
             }
+            if typedef_array_bound_needs_source_order(init_decl, tcx, resolver, crate_) {
+                continue;
+            }
             let ty = lower_type_from_parts(
                 &decl.specs,
                 &init_decl.declarator,
@@ -8508,6 +8647,78 @@ fn finalize_file_scope_typedef_def_types(
                 *slot = ty;
             }
         }
+    }
+}
+
+fn typedef_array_bound_needs_source_order(
+    init_decl: &rcc_ast::InitDeclarator,
+    tcx: &TyCtxt,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    init_decl.declarator.derived.iter().any(|derived| match derived {
+        DerivedDeclarator::Array(array) => array
+            .size
+            .as_ref()
+            .is_some_and(|size| expr_sizeof_unfinalized_global(size, tcx, resolver, crate_)),
+        _ => false,
+    })
+}
+
+fn expr_sizeof_unfinalized_global(
+    expr: &rcc_ast::Expr,
+    tcx: &TyCtxt,
+    resolver: &Resolver,
+    crate_: &HirCrate,
+) -> bool {
+    match &expr.kind {
+        rcc_ast::ExprKind::SizeofExpr(operand) | rcc_ast::ExprKind::AlignofExpr(operand) => {
+            let operand = peel_ast_parens(operand);
+            if let rcc_ast::ExprKind::Ident(sym) = operand.kind {
+                if let Some(&def) = resolver.ordinary.get(&sym) {
+                    return matches!(
+                        crate_.defs[def].kind,
+                        DefKind::Global { ty, .. } if ty == tcx.error
+                    );
+                }
+            }
+            expr_sizeof_unfinalized_global(operand, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::Paren(inner)
+        | rcc_ast::ExprKind::Unary { operand: inner, .. }
+        | rcc_ast::ExprKind::Cast { expr: inner, .. } => {
+            expr_sizeof_unfinalized_global(inner, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::Binary { lhs, rhs, .. }
+        | rcc_ast::ExprKind::Assign { lhs, rhs, .. }
+        | rcc_ast::ExprKind::Comma { lhs, rhs }
+        | rcc_ast::ExprKind::Index { base: lhs, index: rhs } => {
+            expr_sizeof_unfinalized_global(lhs, tcx, resolver, crate_)
+                || expr_sizeof_unfinalized_global(rhs, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::Cond { cond, then_expr, else_expr } => {
+            expr_sizeof_unfinalized_global(cond, tcx, resolver, crate_)
+                || expr_sizeof_unfinalized_global(then_expr, tcx, resolver, crate_)
+                || expr_sizeof_unfinalized_global(else_expr, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::OmittedCond { cond, else_expr } => {
+            expr_sizeof_unfinalized_global(cond, tcx, resolver, crate_)
+                || expr_sizeof_unfinalized_global(else_expr, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::Call { callee, args } => {
+            expr_sizeof_unfinalized_global(callee, tcx, resolver, crate_)
+                || args.iter().any(|arg| expr_sizeof_unfinalized_global(arg, tcx, resolver, crate_))
+        }
+        rcc_ast::ExprKind::Member { base, .. } | rcc_ast::ExprKind::Arrow { base, .. } => {
+            expr_sizeof_unfinalized_global(base, tcx, resolver, crate_)
+        }
+        rcc_ast::ExprKind::GenericSelection { control, associations } => {
+            expr_sizeof_unfinalized_global(control, tcx, resolver, crate_)
+                || associations
+                    .iter()
+                    .any(|assoc| expr_sizeof_unfinalized_global(&assoc.expr, tcx, resolver, crate_))
+        }
+        _ => false,
     }
 }
 

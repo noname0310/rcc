@@ -69,6 +69,18 @@ pub struct Preprocessor<'a> {
     /// reports each recursive edge once instead of flooding stderr during fuzz
     /// runs.
     pub diagnosed_include_cycles: FxHashMap<(FileId, FileId), ()>,
+    /// Monotonic revision for source-level macro table mutations.
+    macro_revision: u64,
+    /// Current include expansion stack, mirrored by
+    /// [`Self::self_include_revision_stack`].
+    include_stack: Vec<FileId>,
+    /// Per-frame macro revision for the last same-file recursive include.
+    ///
+    /// Macro-controlled self-inclusion in real headers is linear: each active
+    /// expansion re-enters itself after changing macro state. Unguarded
+    /// branching self-includes (`#include "x"` twice without an intervening
+    /// macro mutation) are cut before they grow exponentially.
+    self_include_revision_stack: Vec<Option<u64>>,
     include_depth: usize,
     /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
     /// snapshots. These pragmas are not part of C99, but system headers
@@ -119,6 +131,9 @@ impl<'a> Preprocessor<'a> {
             pragma_once: FxHashMap::default(),
             active_includes: FxHashMap::default(),
             diagnosed_include_cycles: FxHashMap::default(),
+            macro_revision: 0,
+            include_stack: Vec::new(),
+            self_include_revision_stack: Vec::new(),
             include_depth: 0,
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
@@ -171,6 +186,9 @@ impl<'a> Preprocessor<'a> {
             self.install_cli_undefines();
         }
 
+        self.include_stack.push(root);
+        self.self_include_revision_stack.push(None);
+
         let src = self.session.source_map.read().unwrap().file(root).src.clone();
         let tokens: Vec<PpToken> = rcc_lexer::tokenize(root, &src).collect();
 
@@ -218,7 +236,28 @@ impl<'a> Preprocessor<'a> {
             }
         }
 
+        self.self_include_revision_stack.pop();
+        self.include_stack.pop();
+
         out
+    }
+
+    pub(crate) fn mark_self_include_reentry(&mut self, current_file: FileId) -> bool {
+        if self.include_stack.last().copied() != Some(current_file) {
+            return true;
+        }
+        let Some(last_revision) = self.self_include_revision_stack.last_mut() else {
+            return true;
+        };
+        if *last_revision == Some(self.macro_revision) {
+            return false;
+        }
+        *last_revision = Some(self.macro_revision);
+        true
+    }
+
+    fn bump_macro_revision(&mut self) {
+        self.macro_revision = self.macro_revision.wrapping_add(1);
     }
 
     fn flush_pending_text(&mut self, pending_text: &mut Vec<PpToken>, out: &mut Vec<PpToken>) {
@@ -688,6 +727,7 @@ impl<'a> Preprocessor<'a> {
                     Ok(None) => {}
                     Err(diag) => self.session.handler.emit(&diag),
                 }
+                self.bump_macro_revision();
             }
             Ok(directive::Directive::Undef { name, span }) => {
                 // `#undef` of an undefined macro is a no-op per C99
@@ -695,10 +735,10 @@ impl<'a> Preprocessor<'a> {
                 // intentionally ignored here. Attempting to `#undef`
                 // a predefined macro is a constraint violation per
                 // §6.10.8p2 and yields E0027.
-                if let Err(diag) =
-                    macros::undef_user(name, span, &mut self.macros, &self.session.interner)
-                {
-                    self.session.handler.emit(&diag);
+                match macros::undef_user(name, span, &mut self.macros, &self.session.interner) {
+                    Ok(true) => self.bump_macro_revision(),
+                    Ok(false) => {}
+                    Err(diag) => self.session.handler.emit(&diag),
                 }
             }
             Ok(directive::Directive::Include { span, is_system, header }) => {
@@ -879,9 +919,13 @@ impl<'a> Preprocessor<'a> {
             self.macro_stack.remove(&sym);
         }
         match snapshot {
-            Some(def) => self.macros.define(def),
+            Some(def) => {
+                self.macros.define(def);
+                self.bump_macro_revision();
+            }
             None => {
                 self.macros.undef(sym);
+                self.bump_macro_revision();
             }
         }
     }

@@ -888,6 +888,71 @@ fn s6_7_5_cast_and_offsetof_array_bounds_are_fixed() {
 }
 
 #[test]
+fn block_array_bound_sizeof_expr_sees_parameter_types() {
+    let src = r#"
+        typedef unsigned int js_Instruction;
+        void f(double num, const char *str) {
+            js_Instruction x[sizeof(num) / sizeof(js_Instruction)];
+            js_Instruction y[sizeof(str) / sizeof(js_Instruction)];
+        }
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let body = hir.bodies.values().next().expect("function body");
+    let fixed_two_arrays = body
+        .locals
+        .iter()
+        .filter(|local| matches!(tcx.get(local.ty), Ty::Array { len: Some(2), is_vla: false, .. }))
+        .count();
+    assert_eq!(fixed_two_arrays, 2, "expected two fixed local arrays: {:?}", body.locals);
+}
+
+#[test]
+fn enum_constant_expression_accepts_casted_conditional_shift() {
+    let src = r#"
+        enum {
+            A = 0,
+            B = ((A) < 8 ? (int) ((1UL << (A)) << 24) : 0)
+        };
+        int use_b[B == 16777216 ? 1 : -1];
+    "#;
+    let (_hir, _tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+}
+
+#[test]
+fn typedef_array_bound_sizeof_sees_prior_completed_global_array() {
+    let src = r#"
+        typedef unsigned char uint8_t;
+        const uint8_t s_mp_radix_map_reverse[] = { 1, 2, 3 };
+        typedef char mp_static_assert_correct[
+            (sizeof(s_mp_radix_map_reverse) == 3) ? 1 : -1
+        ];
+    "#;
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics(src);
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+
+    let typedef_tys = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Typedef(ty) => Some(ty),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let assert_ty = typedef_tys
+        .iter()
+        .copied()
+        .find(|ty| matches!(tcx.get(*ty), Ty::Array { len: Some(1), .. }))
+        .unwrap_or_else(|| {
+            let rendered = typedef_tys.iter().map(|ty| tcx.get(*ty)).collect::<Vec<_>>();
+            panic!("static assertion typedef should lower to char[1]; typedefs={rendered:?}")
+        });
+    assert!(matches!(tcx.get(assert_ty), Ty::Array { len: Some(1), is_vla: false, .. }));
+}
+
+#[test]
 fn gnu_aligned_attribute_sets_record_layout_override() {
     let src = r#"
         typedef struct x { int a; int b; } __attribute__((aligned(32))) X;

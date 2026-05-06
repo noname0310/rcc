@@ -46,7 +46,7 @@ common_flags=(
 )
 host_flags=(-std=gnu99)
 rcc_flags=(
-    -std=c99
+    -std=c11
     -fgnu-attributes
     -fgnu-range-designators
     -fgnu-labels-as-values

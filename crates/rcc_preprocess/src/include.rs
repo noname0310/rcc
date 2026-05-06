@@ -28,10 +28,12 @@ use crate::macros::{MacroDef, MacroKind};
 use crate::Preprocessor;
 
 const MAX_INCLUDE_DEPTH: usize = 64;
-// Permit one active self-reentry so macro-controlled self-inclusion still
-// works, but cut branching unguarded self-includes before they grow
-// exponentially under fuzzing.
-const MAX_SELF_INCLUDE_ACTIVE: usize = 2;
+// Permit bounded active self-reentry so macro-controlled self-inclusion still
+// works. LibTomMath's `tommath_class.h` deliberately re-includes itself through
+// three macro-state passes (`LTM1`, `LTM2`, `LTM3`) before stopping, so the
+// active stack can contain four copies of the same file. Branching unguarded
+// self-includes are still cut before they grow exponentially under fuzzing.
+const MAX_SELF_INCLUDE_ACTIVE: usize = 4;
 
 /// Resolve `name` against C99 §6.10.2 search rules.
 ///
@@ -510,8 +512,9 @@ impl Preprocessor<'_> {
         }
 
         if let Some(&active_count) = self.active_includes.get(&new_file) {
-            let finite_self_include =
-                current_file == new_file && active_count < MAX_SELF_INCLUDE_ACTIVE;
+            let finite_self_include = current_file == new_file
+                && active_count < MAX_SELF_INCLUDE_ACTIVE
+                && self.mark_self_include_reentry(current_file);
             if !finite_self_include {
                 let edge = (current_file, new_file);
                 if !self.diagnosed_include_cycles.contains_key(&edge) {
@@ -1344,7 +1347,7 @@ mod tests {
         let text = joined_token_text(&sess, &out);
 
         assert!(
-            text.matches("after_branching_self_include").count() <= 3,
+            text.matches("after_branching_self_include").count() <= MAX_SELF_INCLUDE_ACTIVE,
             "branching self-include should be cut to a linear amount of output: {text}"
         );
         let diags = cap.diagnostics();
@@ -1395,6 +1398,56 @@ int second;
         assert!(cap.diagnostics().is_empty(), "finite self-include must not diagnose");
         assert!(text.contains("intfirst;"), "first branch missing from {text}");
         assert!(text.contains("intsecond;"), "second branch missing from {text}");
+    }
+
+    #[test]
+    fn libtommath_style_three_pass_self_include_is_allowed() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_libtommath_self_include__");
+        let main_path = root.join("main.c");
+        let class_path = root.join("tommath_class.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"tommath_class.h\"\n"));
+        sess.add_virtual_file(
+            class_path.clone(),
+            Arc::from(
+                r#"
+#if !(defined(LTM1) && defined(LTM2) && defined(LTM3))
+#define LTM_INSIDE
+#if defined(LTM2)
+#define LTM3
+#endif
+#if defined(LTM1)
+#define LTM2
+#endif
+#define LTM1
+int ltm_pass_marker;
+#ifdef LTM_INSIDE
+#undef LTM_INSIDE
+#ifdef LTM3
+#define LTM_LAST
+#endif
+#include "tommath_class.h"
+#else
+#define LTM_LAST
+#endif
+#else
+int ltm_terminal_marker;
+#endif
+"#,
+            ),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = joined_token_text(&sess, &out);
+
+        assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+        assert_eq!(
+            text.matches("ltm_pass_marker").count(),
+            3,
+            "expected exactly three LibTomMath macro-state passes: {text}"
+        );
+        assert!(text.contains("ltm_terminal_marker"), "terminal branch missing from {text}");
     }
 
     #[test]
