@@ -40,6 +40,8 @@ exec "${rcc}" \
     -D_XOPEN_SOURCE=700 \
     -funsigned-char \
     -fgnu-attributes \
+    -fgnu-named-variadic \
+    -fgnu-permissive-redefinition \
     -fgnu-statement-expressions \
     -fgnu-labels-as-values \
     -fgnu-inline-asm \

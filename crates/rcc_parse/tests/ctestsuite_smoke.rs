@@ -75,15 +75,81 @@ fn load_xfail(root: &Path) -> BTreeSet<String> {
 /// Run lex→preprocess→parse on a single file.
 /// Returns (parsed_ok, error_count). Catches panics so one file
 /// doesn't abort the entire suite.
-fn try_parse(path: &Path) -> (bool, usize) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseSmoke {
+    Passed,
+    Failed(usize),
+    SkippedHostHeader,
+}
+
+const HOST_OWNED_HEADERS: &[&str] = &[
+    "assert.h",
+    "complex.h",
+    "ctype.h",
+    "errno.h",
+    "fenv.h",
+    "inttypes.h",
+    "locale.h",
+    "math.h",
+    "setjmp.h",
+    "signal.h",
+    "stdio.h",
+    "stdlib.h",
+    "string.h",
+    "tgmath.h",
+    "time.h",
+    "wchar.h",
+    "wctype.h",
+];
+
+fn includes_host_owned_header(src: &str) -> bool {
+    src.lines().any(|line| {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix("#include") else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('<') else {
+            return false;
+        };
+        let Some((name, _)) = rest.split_once('>') else {
+            return false;
+        };
+        HOST_OWNED_HEADERS.contains(&name.trim())
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn options_for_parse_smoke(src: &str) -> Option<Options> {
+    let mut opts = Options::default();
+    if includes_host_owned_header(src) {
+        opts.linux_gnu_hosted = true;
+        opts.system_include_paths =
+            rcc_preprocess::include::discover_system_include_paths(&opts.target, None);
+    }
+    Some(opts)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn options_for_parse_smoke(src: &str) -> Option<Options> {
+    if includes_host_owned_header(src) {
+        return None;
+    }
+    Some(Options::default())
+}
+
+fn try_parse(path: &Path) -> ParseSmoke {
     let path = path.to_path_buf();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let Some(opts) = options_for_parse_smoke(&src) else {
+            return ParseSmoke::SkippedHostHeader;
+        };
 
         let cap = CaptureEmitter::new();
         let handler = Handler::with_emitter(Box::new(cap.clone()));
-        let mut sess = Session::with_handler(Options::default(), handler);
+        let mut sess = Session::with_handler(opts, handler);
         let fid =
             sess.source_map.write().unwrap().add_file(path.to_path_buf(), Arc::from(src.as_str()));
         let pp_tokens = preprocess(&mut sess, fid);
@@ -91,9 +157,13 @@ fn try_parse(path: &Path) -> (bool, usize) {
 
         let errors: Vec<_> =
             cap.diagnostics().into_iter().filter(|d| d.level == Level::Error).collect();
-        (ast.is_some() && errors.is_empty(), errors.len())
+        if ast.is_some() && errors.is_empty() {
+            ParseSmoke::Passed
+        } else {
+            ParseSmoke::Failed(errors.len())
+        }
     }));
-    result.unwrap_or((false, 1))
+    result.unwrap_or(ParseSmoke::Failed(1))
 }
 
 // ── Test ────────────────────────────────────────────────────────────
@@ -121,23 +191,29 @@ fn ctestsuite_parse_smoke() {
 
     let total = files.len();
     let mut pass = 0usize;
+    let mut skipped_host_header = 0usize;
     let mut xfail_pass = 0usize;
     let mut unexpected_fail: Vec<String> = Vec::new();
     let mut xfail_parse_pass: Vec<String> = Vec::new();
 
     for file in &files {
         let stem = file.file_stem().unwrap().to_string_lossy().to_string();
-        let (ok, error_count) = try_parse(file);
+        let outcome = try_parse(file);
 
-        if xfail.contains(&stem) {
-            if ok {
+        if matches!(outcome, ParseSmoke::SkippedHostHeader) {
+            skipped_host_header += 1;
+        } else if xfail.contains(&stem) {
+            if matches!(outcome, ParseSmoke::Passed) {
                 xfail_parse_pass.push(stem);
             } else {
                 xfail_pass += 1;
             }
-        } else if ok {
+        } else if matches!(outcome, ParseSmoke::Passed) {
             pass += 1;
         } else {
+            let ParseSmoke::Failed(error_count) = outcome else {
+                unreachable!("skips handled above");
+            };
             unexpected_fail.push(format!(
                 "{} ({} error{})",
                 stem,
@@ -149,8 +225,11 @@ fn ctestsuite_parse_smoke() {
 
     // Summary
     eprintln!();
-    eprintln!("c-testsuite parse smoke: {pass}/{total} passed, {xfail_pass} xfail, {} unexpected failures",
-        unexpected_fail.len());
+    eprintln!(
+        "c-testsuite parse smoke: {pass}/{total} passed, {xfail_pass} xfail, \
+         {skipped_host_header} host-header skips, {} unexpected failures",
+        unexpected_fail.len()
+    );
     if !unexpected_fail.is_empty() {
         eprintln!();
         eprintln!("Unexpected failures:");

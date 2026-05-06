@@ -10,7 +10,7 @@
 //!                       \ or newline
 //!                     | escape-sequence
 //! escape-sequence    := simple-escape | octal-escape | hex-escape | UCN
-//! simple-escape      := \' \" \? \\ \a \b \f \n \r \t \v
+//! simple-escape      := \' \" \? \\ \a \b \e \f \n \r \t \v
 //! octal-escape       := \ octal-digit{1,3}
 //! hex-escape         := \x hex-digit+
 //! ```
@@ -225,8 +225,9 @@ fn multi_char_constant_produces_no_diagnostic() {
 
 #[test]
 fn all_simple_escapes_are_recognised() {
-    // C99 §6.4.4.4: \' \" \? \\ \a \b \f \n \r \t \v
-    let escapes = [r"\'", r#"\""#, r"\?", r"\\", r"\a", r"\b", r"\f", r"\n", r"\r", r"\t", r"\v"];
+    // GNU hosted Linux headers can contain `\e`; accept it as ESC.
+    let escapes =
+        [r"\'", r#"\""#, r"\?", r"\\", r"\a", r"\b", r"\e", r"\f", r"\n", r"\r", r"\t", r"\v"];
     for esc in escapes {
         let src = format!("'{esc}'");
         let t = only_char_const(&src);

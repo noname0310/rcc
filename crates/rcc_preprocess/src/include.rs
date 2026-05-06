@@ -7,6 +7,7 @@
 //! |-----------------|-----------------------------------------------------|
 //! | `#include "h"`  | current file directory, `-I`, rcc's resource include root, then system paths |
 //! | `#include <h>`  | `-I`, rcc's resource include root, then system paths |
+//! | hosted Linux    | same order; `lib/rcc/include` is restricted to compiler-owned headers, not libc/POSIX shims |
 //!
 //! The first existing file on that path wins; no file-system readdir is
 //! performed. A header whose string resolves to an absolute path bypasses
@@ -19,7 +20,7 @@ use std::process::Command;
 
 use rcc_errors::{codes::E0021, Diagnostic, Label, Level};
 use rcc_lexer::{PpToken, PpTokenKind, Punct};
-use rcc_session::{Arch, Environment, Os, TargetInfo};
+use rcc_session::{Arch, Environment, Options, Os, TargetInfo};
 use rcc_span::{BytePos, FileId, Span};
 
 use crate::guard::detect_guard;
@@ -169,9 +170,10 @@ pub fn builtin_include_dir() -> PathBuf {
 /// Complete include search path for system-header probes.
 ///
 /// User `-I` entries come first so project-owned headers are never stolen by
-/// rcc's resource directory. The compiler resource directory comes next so
-/// selected shims such as `stddef.h` and `stdarg.h` still resolve before host
-/// system headers.
+/// rcc's resource directory. The compiler resource directory comes next because
+/// headers such as `stddef.h`, `stdarg.h`, and `stdatomic.h` describe frontend
+/// builtins and target lowering decisions. ABI-visible libc/POSIX/Linux headers
+/// are intentionally not provided here; they must come from the host sysroot.
 pub fn include_search_paths(user_paths: &[PathBuf], system_paths: &[PathBuf]) -> Vec<PathBuf> {
     let builtin = builtin_include_dir();
     let mut paths =
@@ -182,6 +184,16 @@ pub fn include_search_paths(user_paths: &[PathBuf], system_paths: &[PathBuf]) ->
     }
     paths.extend(system_paths.iter().cloned());
     paths
+}
+
+/// Complete include search path for a compilation session.
+///
+/// The policy is intentionally the same for hosted and non-hosted sessions:
+/// project `-I`, then compiler-owned resource headers, then explicit/default
+/// system paths. Hosted Linux relies on the host sysroot for libc/POSIX/Linux
+/// headers; rcc's resource directory is not a libc overlay.
+pub fn include_search_paths_for_options(opts: &Options) -> Vec<PathBuf> {
+    include_search_paths(&opts.include_paths, &opts.system_include_paths)
 }
 
 /// Discover target-default system include directories.
@@ -212,15 +224,20 @@ fn system_include_candidates(target: &TargetInfo, sysroot: Option<&Path>) -> Vec
 }
 
 fn linux_system_include_candidates(target: &TargetInfo, sysroot: Option<&Path>) -> Vec<PathBuf> {
-    ["/usr/include", "/usr/local/include"]
-        .into_iter()
-        .map(|path| rooted_unix_path(sysroot, path))
-        .chain(
-            linux_multiarch_include_names(target)
-                .into_iter()
-                .map(move |name| rooted_unix_path(sysroot, &format!("/usr/include/{name}"))),
-        )
-        .collect()
+    let mut paths = Vec::new();
+    if sysroot.is_none() {
+        if let Some(path) = host_compiler_include_dir() {
+            paths.push(path);
+        }
+    }
+    paths.push(rooted_unix_path(sysroot, "/usr/local/include"));
+    paths.extend(
+        linux_multiarch_include_names(target)
+            .into_iter()
+            .map(|name| rooted_unix_path(sysroot, &format!("/usr/include/{name}"))),
+    );
+    paths.push(rooted_unix_path(sysroot, "/usr/include"));
+    paths
 }
 
 fn linux_multiarch_include_names(target: &TargetInfo) -> Vec<String> {
@@ -282,6 +299,17 @@ fn xcrun_sdk_path() -> Option<PathBuf> {
     let path = String::from_utf8(output.stdout).ok()?;
     let path = path.trim();
     (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn host_compiler_include_dir() -> Option<PathBuf> {
+    let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let output = Command::new(cc).arg("-print-file-name=include").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(path.trim());
+    path.is_dir().then_some(path)
 }
 
 fn env_include_paths() -> Vec<PathBuf> {
@@ -377,10 +405,7 @@ impl Preprocessor<'_> {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let include_paths = include_search_paths(
-            &self.session.opts.include_paths,
-            &self.session.opts.system_include_paths,
-        );
+        let include_paths = include_search_paths_for_options(&self.session.opts);
 
         let Some(resolved) =
             resolve_header_with(name, is_system, &current_dir, &include_paths, |path| {
@@ -412,10 +437,7 @@ impl Preprocessor<'_> {
                 file.name.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")),
             )
         };
-        let include_paths = include_search_paths(
-            &self.session.opts.include_paths,
-            &self.session.opts.system_include_paths,
-        );
+        let include_paths = include_search_paths_for_options(&self.session.opts);
 
         let (resolved, skipped_dir) =
             resolve_header_next_with(name, &current_path, &current_dir, &include_paths, |path| {
@@ -767,6 +789,32 @@ mod tests {
     }
 
     #[test]
+    fn hosted_linux_include_search_keeps_compiler_resource_before_system_paths() {
+        let user = PathBuf::from("__rcc_user_include__");
+        let system = PathBuf::from("__rcc_system_include__");
+        let opts = Options {
+            include_paths: vec![user.clone()],
+            system_include_paths: vec![system.clone()],
+            linux_gnu_hosted: true,
+            ..Options::default()
+        };
+        let paths = include_search_paths_for_options(&opts);
+
+        let user_pos = paths.iter().position(|path| path == &user).expect("user include path");
+        let system_pos =
+            paths.iter().position(|path| path == &system).expect("system include path");
+        let builtin_pos = paths
+            .iter()
+            .position(|path| path == &builtin_include_dir())
+            .expect("builtin include path");
+        assert!(user_pos < builtin_pos, "-I paths must still precede compiler headers");
+        assert!(
+            builtin_pos < system_pos,
+            "compiler-owned headers must precede host system paths even in hosted mode"
+        );
+    }
+
+    #[test]
     fn project_i_header_precedes_compiler_resource_for_system_form() {
         let src_dir = TempDir::new().unwrap();
         let inc_dir = TempDir::new().unwrap();
@@ -822,13 +870,34 @@ mod tests {
         assert!(text.contains("size_t"), "resource stddef.h must define size_t: {text}");
         assert!(
             !text.contains("host_stddef_marker"),
-            "compiler shim must shadow host system header: {text}"
+            "compiler-owned stddef.h must shadow host system header: {text}"
         );
         assert!(cap.diagnostics().is_empty(), "resource system include must not diagnose");
         let deps = sess.source_dependencies();
         assert!(
             deps.iter().any(|dep| dep.path == builtin_include_dir().join("stddef.h")),
             "dependency trace must record exact resource header: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn hosted_linux_finds_host_system_header_when_resource_root_does_not_own_it() {
+        let src_dir = TempDir::new().unwrap();
+        let sys_dir = TempDir::new().unwrap();
+        let header = write_file(sys_dir.path(), "stdio.h", "int host_stdio_marker;\n");
+        let (mut sess, main_id, cap) =
+            seed_session_with_system_paths(src_dir.path(), Vec::new(), vec![sys_dir.path().into()]);
+        sess.opts.linux_gnu_hosted = true;
+        let span = dummy_span(main_id);
+
+        let tokens = Preprocessor::new(&mut sess).process_include("<stdio.h>", true, span, main_id);
+        let text = joined_token_text(&sess, &tokens);
+
+        assert!(text.contains("host_stdio_marker"), "host system header must be found: {text}");
+        assert!(cap.diagnostics().is_empty(), "hosted system include must not diagnose");
+        assert!(
+            sess.source_dependencies().iter().any(|dep| dep.path == header && dep.system),
+            "dependency trace must record exact host system header"
         );
     }
 
@@ -979,10 +1048,10 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                root.join("usr").join("include"),
                 root.join("usr").join("local").join("include"),
                 root.join("usr").join("include").join("x86_64-linux-gnu"),
                 root.join("usr").join("include").join("x86_64-unknown-linux-gnu"),
+                root.join("usr").join("include"),
             ]
         );
     }
@@ -1191,17 +1260,21 @@ mod tests {
         let src_dir = TempDir::new().unwrap();
         let (mut sess, main_id, cap) = seed_session(src_dir.path(), Vec::new());
         let span = dummy_span(main_id);
+        let compiler_headers = ["stddef.h", "stdarg.h", "stdint.h", "stdbool.h", "iso646.h"];
+        let token_headers = ["stddef.h", "stdarg.h", "stdint.h"];
         {
             let mut pp = Preprocessor::new(&mut sess);
-            for header in ["stddef.h", "stdio.h", "math.h", "ctype.h"] {
+            for header in compiler_headers {
                 let tokens = pp.process_include(&format!("<{header}>"), true, span, main_id);
-                assert!(!tokens.is_empty(), "builtin {header} must contribute tokens");
+                if token_headers.contains(&header) {
+                    assert!(!tokens.is_empty(), "compiler-owned {header} must contribute tokens");
+                }
             }
         }
 
-        assert!(cap.diagnostics().is_empty(), "builtin system include must not diagnose");
+        assert!(cap.diagnostics().is_empty(), "compiler-owned include must not diagnose");
         let deps = sess.source_dependencies();
-        for header in ["stddef.h", "stdio.h", "math.h", "ctype.h"] {
+        for header in compiler_headers {
             assert!(
                 deps.iter().any(|dep| dep.path.ends_with(Path::new(header)) && dep.system),
                 "{header} must be recorded as a system dependency: {deps:?}"

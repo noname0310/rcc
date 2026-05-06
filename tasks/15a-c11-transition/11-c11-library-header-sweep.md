@@ -33,18 +33,20 @@ without copying large libc headers.
 
 ## Completed Surface
 
+This task was originally completed with small rcc-owned declaration shims for
+some C11 library headers. That policy has been superseded by
+`15a-13-real-host-c11-library-headers.md`: C11 coverage remains required, but
+hosted C11 library headers now come from the real target sysroot instead of
+approximate files under `lib/rcc/include`.
+
 - Implemented small C11 resource-header deltas:
   - `stdnoreturn.h`: `noreturn`, `__noreturn_is_defined`.
-  - `assert.h`: `static_assert` macro.
   - `float.h`: decimal-digit/subnormal macros for current target baselines.
-  - `stdlib.h`: `aligned_alloc`, `quick_exit`, `at_quick_exit`.
-  - `time.h`: `TIME_UTC`, `timespec_get`.
   - `stdatomic.h`: full scalar typedef surface, `atomic_flag`, init macros,
     lock-free probes, and declaration-only `atomic_flag_*` functions.
-- Added a hosted Linux driver fixture that includes `assert.h`, `float.h`,
-  `stdalign.h`, `stdatomic.h`, `stdnoreturn.h`, `stdlib.h`, `threads.h`,
-  `time.h`, and `uchar.h` together under `-std=c11 -pthread` without GNU syntax
-  flags.
+- Added a hosted Linux driver fixture that includes C11 library headers under
+  `-std=c11 -pthread`; after task 15a-13 those names are expected to resolve
+  from real host headers, not rcc shims.
 - Documented host-owned runtime behavior and deferred Annex K/analyzability/
   full thread-runtime work in `docs/hosted-linux.md`.
 

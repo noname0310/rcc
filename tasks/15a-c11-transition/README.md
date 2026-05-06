@@ -37,7 +37,9 @@ References:
   Headers such as `stdnoreturn.h` may define convenience macros, but the
   compiler must still parse the underlying keyword.
 - Annex K bounds-checking interfaces and full C11 threads runtime behavior are
-  optional/deferred unless a real-world probe needs declaration coverage.
+  optional/deferred unless a real-world probe needs them. Hosted C11 library
+  headers should come from the real target sysroot; do not add approximate libc
+  shims under `lib/rcc/include`.
 
 ## Tasks
 
@@ -55,6 +57,7 @@ References:
 | 10 | [`10-unicode-character-and-string-literals.md`](10-unicode-character-and-string-literals.md) | Add C11 Unicode literal prefixes and `<uchar.h>`. |
 | 11 | [`11-c11-library-header-sweep.md`](11-c11-library-header-sweep.md) | Add C11 headers/macros not covered by language tasks. |
 | 12 | [`12-c11-conformance-and-realworld-gates.md`](12-c11-conformance-and-realworld-gates.md) | Wire C11 tests and unblock Toybox without macro hacks. |
+| 13 | [`13-real-host-c11-library-headers.md`](13-real-host-c11-library-headers.md) | Keep C11 coverage while replacing shimmed library headers with real host sysroot headers. |
 
 ## Exit Criteria
 

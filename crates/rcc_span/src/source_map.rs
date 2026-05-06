@@ -36,7 +36,18 @@ impl SourceMap {
 
     /// Load a file from disk.
     pub fn load_file(&mut self, path: &Path) -> std::io::Result<FileId> {
-        let src: Arc<str> = Arc::from(std::fs::read_to_string(path)?);
+        let bytes = std::fs::read(path)?;
+        let src: Arc<str> = match String::from_utf8(bytes) {
+            Ok(src) => Arc::from(src),
+            Err(err) => {
+                // C source files are byte streams.  Real-world generated
+                // headers can contain high-bit bytes in comments or string
+                // tables; keep loading them with a Latin-1 byte mapping so
+                // lexing/preprocessing can continue instead of rejecting the
+                // file before phase 1.
+                Arc::from(err.into_bytes().into_iter().map(char::from).collect::<String>())
+            }
+        };
         Ok(self.add_file(path.to_path_buf(), src))
     }
 

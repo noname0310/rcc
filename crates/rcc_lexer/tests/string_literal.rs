@@ -204,7 +204,8 @@ fn u8_followed_by_apostrophe_is_char_constant() {
 #[test]
 fn all_simple_escapes_are_recognised_in_string() {
     // C99 §6.4.5 shares the escape alphabet with §6.4.4.4.
-    let escapes = [r"\'", r#"\""#, r"\?", r"\\", r"\a", r"\b", r"\f", r"\n", r"\r", r"\t", r"\v"];
+    let escapes =
+        [r"\'", r#"\""#, r"\?", r"\\", r"\a", r"\b", r"\e", r"\f", r"\n", r"\r", r"\t", r"\v"];
     for esc in escapes {
         let src = format!(r#""x{esc}y""#);
         let t = only_string_lit(&src);

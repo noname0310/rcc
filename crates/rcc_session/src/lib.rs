@@ -118,12 +118,14 @@ pub struct Options {
     pub include_gpl_tests: bool,
     /// Enable hosted Linux/glibc compatibility policy.
     ///
-    /// This mode opts into rcc's Linux hosted environment model: compiler-owned
-    /// declaration shims, feature-test macro defaults, POSIX/GNU header probes,
-    /// and linker-driver policy for host-provided runtime libraries.  It does
-    /// not automatically enable GNU syntax extensions; those remain gated by
-    /// their explicit `-fgnu-*` flags so strict `-std=c99` diagnostics stay
-    /// visible.
+    /// This mode opts into rcc's Linux hosted environment model: feature-test
+    /// macro defaults, real sysroot/glibc header discovery, and linker-driver
+    /// policy for host-provided runtime libraries. rcc still provides only
+    /// compiler-owned headers such as `stddef.h`, `stdarg.h`, and
+    /// `stdatomic.h`; libc/POSIX/Linux declarations come from the host target
+    /// headers. This mode does not automatically enable GNU syntax extensions;
+    /// those remain gated by their explicit `-fgnu-*` flags so strict
+    /// diagnostics stay visible.
     pub linux_gnu_hosted: bool,
     /// Enable the GNU `, ## __VA_ARGS__` comma-elision extension.
     ///

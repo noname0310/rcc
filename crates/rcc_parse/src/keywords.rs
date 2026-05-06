@@ -149,8 +149,12 @@ pub const C11_KEYWORDS: &[(&str, Keyword)] = &[
 ];
 
 /// GNU compatibility spellings that token-classify like core keywords.
-pub const GNU_KEYWORD_ALIASES: &[(&str, Keyword)] =
-    &[("__inline", Keyword::Inline), ("__inline__", Keyword::Inline)];
+pub const GNU_KEYWORD_ALIASES: &[(&str, Keyword)] = &[
+    ("__inline", Keyword::Inline),
+    ("__inline__", Keyword::Inline),
+    ("__signed", Keyword::Signed),
+    ("__signed__", Keyword::Signed),
+];
 
 /// String -> `Keyword` lookup table.
 pub const KEYWORDS: &[(&str, Keyword)] = &[
@@ -200,6 +204,8 @@ pub const KEYWORDS: &[(&str, Keyword)] = &[
     ("_Thread_local", Keyword::ThreadLocal),
     ("__inline", Keyword::Inline),
     ("__inline__", Keyword::Inline),
+    ("__signed", Keyword::Signed),
+    ("__signed__", Keyword::Signed),
 ];
 
 /// Classify an identifier spelling as a reserved C99/C11 [`Keyword`], or
@@ -309,6 +315,12 @@ mod tests {
     fn gnu_inline_keyword_aliases_are_classified() {
         assert_eq!(classify_ident("__inline"), Some(Keyword::Inline));
         assert_eq!(classify_ident("__inline__"), Some(Keyword::Inline));
+    }
+
+    #[test]
+    fn gnu_signed_keyword_aliases_are_classified() {
+        assert_eq!(classify_ident("__signed"), Some(Keyword::Signed));
+        assert_eq!(classify_ident("__signed__"), Some(Keyword::Signed));
     }
 
     #[test]

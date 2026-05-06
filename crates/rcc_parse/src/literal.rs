@@ -482,7 +482,7 @@ fn hex_digit_value(b: u8) -> Option<u32> {
 /// Supported escape sequences (C99 §6.4.4.4):
 ///
 /// - **Simple escapes** — `\n`, `\t`, `\\`, `\'`, `\"`, `\?`, `\a`,
-///   `\b`, `\f`, `\r`, `\v` (C99 §6.4.4.4p3).
+///   `\b`, `\e`, `\f`, `\r`, `\v` (C99 plus GNU ESC extension).
 /// - **Octal escape** `\NNN` — one to three octal digits; stops at the
 ///   first non-octal character (§6.4.4.4p4).
 /// - **Hex escape** `\xH+` — one *or more* hex digits; C99 puts no
@@ -714,6 +714,7 @@ fn decode_one_char(body: &[u8], i: usize) -> Result<(u32, usize), Diagnostic> {
         b'?' => Ok((0x3f, 2)),
         b'a' => Ok((0x07, 2)),
         b'b' => Ok((0x08, 2)),
+        b'e' => Ok((0x1b, 2)),
         b'f' => Ok((0x0c, 2)),
         b'r' => Ok((0x0d, 2)),
         b'v' => Ok((0x0b, 2)),
@@ -1249,6 +1250,7 @@ mod tests {
     fn simple_escape_alert_bs_ff_cr_vt() {
         assert_eq!(cok("'\\a'", StringEncoding::None).value, 7);
         assert_eq!(cok("'\\b'", StringEncoding::None).value, 8);
+        assert_eq!(cok("'\\e'", StringEncoding::None).value, 27);
         assert_eq!(cok("'\\f'", StringEncoding::None).value, 12);
         assert_eq!(cok("'\\r'", StringEncoding::None).value, 13);
         assert_eq!(cok("'\\v'", StringEncoding::None).value, 11);
@@ -1405,7 +1407,7 @@ mod tests {
     #[test]
     fn string_with_simple_escapes() {
         // `"\n\t\\"` → 0x0a, 0x09, 0x5c — no trailing NUL.
-        assert_eq!(sok("\"\\n\\t\\\\\"", StringEncoding::None), vec![0x0a, 0x09, 0x5c]);
+        assert_eq!(sok("\"\\n\\t\\e\\\\\"", StringEncoding::None), vec![0x0a, 0x09, 0x1b, 0x5c]);
     }
 
     #[test]

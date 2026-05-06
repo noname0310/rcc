@@ -15,11 +15,16 @@ oracle.
 - In: `real_world/projects/10-toybox/scripts/run-applet-smoke.sh`.
 - In: compiler/header fixes required by Toybox's smallest applet set:
   `true false echo cat wc`.
-- In: hosted Linux declarations/types/constants exposed by Toybox:
-  `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`,
-  and duplicate `timespec`/`timeval` protection.
+- In: compiler fixes required to preprocess, parse, lower, and type-check the
+  real host glibc/POSIX/Linux headers reached by Toybox.
+- In: hosted Linux declarations/types/constants exposed by those real headers:
+  `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`, `netinet/tcp.h`, and
+  duplicate `timespec`/`timeval` forms.
 - Out: editing Toybox upstream source files.
 - Out: deleting applets from the selected smoke set to hide a compiler bug.
+- Out: adding approximate libc/POSIX/Linux header shims under `lib/rcc/include`;
+  rcc resource headers are restricted to compiler-owned headers such as
+  `stddef.h`, `stdarg.h`, `stdint.h`, `iso646.h`, and `stdatomic.h`.
 - Out: implementing libc function bodies; host glibc supplies runtime bodies.
 
 ## Acceptance
@@ -51,7 +56,8 @@ Observed result:
 - C11 `_Noreturn` syntax and `sigjmp_buf` coverage are already resolved by the
   C11 transition; do not reintroduce `_Noreturn` macro substitution.
 - Diagnostics mention `timer_t`, `SIGKILL`, `SIGWINCH`, `stpcpy`, `syscall`,
-  `netinet/tcp.h`, and duplicate `timespec`/`timeval`.
+  `netinet/tcp.h`, and duplicate `timespec`/`timeval`. Treat these as real
+  host-header frontend bugs unless proven to be build-wrapper issues.
 
 ## Notes
 

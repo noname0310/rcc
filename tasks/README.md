@@ -32,7 +32,7 @@ tasks/
 ├── 13-quality/               ← opt levels, diag polish, bench, release
 ├── 14-lang-extensions/       ← _Pragma, __attribute__, __has_include, asm, -U, -M
 ├── 15-builtin-rt/            ← TargetInfo, freestanding headers, __builtin_*, sysroot
-└── 16-linux-glibc-compat/    ← glibc/POSIX header shims, -pthread, hosted Linux probes
+└── 16-linux-glibc-compat/    ← real glibc/sysroot headers, -pthread, hosted Linux probes
 ```
 
 ## Phase dependency graph

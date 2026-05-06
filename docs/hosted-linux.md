@@ -39,10 +39,10 @@ flag is rejected for Windows targets instead of being silently ignored.
 - parsing, type checking, HIR/CFG lowering, and LLVM code generation;
 - preprocessor feature-test macro modeling for `_GNU_SOURCE`,
   `_POSIX_C_SOURCE`, `_DEFAULT_SOURCE`, and `_REENTRANT`;
-- small declaration shims for headers that are too glibc-internal for the
-  current parser surface;
-- include ordering between project headers, compiler-provided shims, and host
-  headers;
+- compiler-owned headers that describe frontend builtins or language support,
+  such as `stddef.h`, `stdarg.h`, `stdint.h`, and `stdatomic.h`;
+- include ordering between project headers, compiler-owned headers, and host
+  sysroot headers;
 - forwarding hosted link flags such as `-lm`, `-pthread`, and `-ldl` to the
   selected clang-compatible linker driver.
 
@@ -77,10 +77,16 @@ flags and warning policy.
 
 ## Relationship To Header Shims
 
-The hosted Linux mode is allowed to add compiler-owned declaration shims under
-`lib/rcc/include/`.  These files must stay small and targeted.  They may define
-common glibc declaration macros or expose POSIX type/function declarations, but
-they must not copy large glibc, musl, or Linux kernel headers wholesale.
+Hosted Linux mode must not add approximate libc, POSIX, glibc, musl, or Linux
+kernel header replacements under `lib/rcc/include/`. Those ABI-visible headers
+belong to the selected host sysroot. When a real project exposes a host-header
+failure, the preferred fix is to teach the frontend to preprocess, parse,
+lower, or type-check the real header form.
+
+The only checked-in headers under `lib/rcc/include/` are compiler-owned
+resource headers: language macros, builtin typedefs, target scalar limits, and
+frontend surfaces such as `__builtin_va_list` or C11 atomics that require direct
+compiler cooperation. They are not a libc overlay.
 
 Header lookup keeps project code in control:
 
@@ -90,86 +96,48 @@ Header lookup keeps project code in control:
 | `#include <h>` | project `-I`, `lib/rcc/include`, `-isystem` / host defaults |
 
 This lets a project deliberately provide its own header through `-I`, while
-still allowing selected rcc shims to shadow problematic host system headers
-when no project header is present.  Normal host headers remain reachable after
-the shim layer.
+keeping compiler-owned headers deterministic. Because rcc no longer ships libc
+or POSIX declaration shims, ordinary hosted headers such as `stdio.h`,
+`pthread.h`, `unistd.h`, `sys/stat.h`, or `netinet/tcp.h` resolve from the host
+sysroot.
 
-When a shim declares a function such as `pthread_create`, `dlopen`,
-`clock_gettime`, `malloc`, or `printf`, that declaration only lets the frontend
-type-check a call.  The implementation is resolved by the host linker and
-runtime libraries.
+## Compiler-Owned Header Inventory
 
-## Header Shim Inventory
+The resource directory is intentionally small:
 
-Each hosted shim must have a source failure, a semantic status, and a removal
-criterion.  "Declaration only" means rcc owns the type/prototype/macro surface
-needed by the frontend; the function body remains host-owned.
+| Header | Owner | Notes |
+| --- | --- | --- |
+| `stddef.h` | compiler | `size_t`, `ptrdiff_t`, `wchar_t`, `NULL`, and `offsetof` definitions tied to rcc target layout/lowering |
+| `stdarg.h` | compiler | `va_list` and builtin varargs hooks |
+| `stdint.h`, `limits.h`, `float.h` | compiler | target scalar limits and integer typedefs |
+| `stdbool.h`, `iso646.h`, `stdalign.h`, `stdnoreturn.h` | compiler | language macro surfaces |
+| `stdatomic.h` | compiler | C11 atomic macro/type surface that maps onto rcc atomic lowering |
 
-| Header or group | Kind | Source failure / owner | Semantic status | Removal criterion |
-| --- | --- | --- | --- | --- |
-| `sys/cdefs.h` | glibc annotation macros | QuickJS and coreutils host headers used `__THROW`, `__nonnull`, `__wur`, `__attr_*`, and related declaration annotations | declaration-shape macro erasure only; no fortified libc, symbol redirection, C++ linkage, or ABI dispatch | remove individual macros when parser can preserve the real host header forms directly |
-| `bits/rcc-posix-types.h`, `sys/types.h` | opaque/scalar POSIX typedefs | QuickJS and coreutils required `pid_t`, `uid_t`, `gid_t`, `mode_t`, `off_t`, `ssize_t`, clock/time names | LP64 glibc-oriented typedef surface; target-layout sensitive | replace with target-info-backed system-header parsing or per-target generated declarations |
-| `unistd.h`, `signal.h`, `time.h` | POSIX declarations and constants | inih/cJSON/Lua/MuJS plus coreutils needed process, sleep, signal, and time prototypes | declaration only; runtime belongs to host libc | remove a declaration when host headers parse cleanly and tests still lower with `--linux-gnu-hosted` |
-| `fcntl.h`, `dirent.h`, `sys/stat.h`, `sys/time.h`, `sys/wait.h` | filesystem/process declarations, macros, and selected layout-known structs | GNU coreutils filesystem probes reached `open`, `fstat`, `DIR`, `struct dirent`, `struct stat`, wait/status macros | declarations plus selected LP64 struct fields; no syscall wrappers | shrink when coreutils can use host/generated headers without shim gaps |
-| `pthread.h` | pthread declaration shim | QuickJS and pthread smoke tests required `pthread_create`, `pthread_join`, mutex/cond/key declarations | declaration plus ABI-sized opaque storage placeholders; host libpthread owns behavior | replace with host header parsing once glibc attributes, typedefs, and layout requirements are handled |
-| `dlfcn.h` | dynamic loader declaration shim | QuickJS/plugin probes and task 16-12 required `dlopen`, `dlsym`, `dlclose`, `dlerror`, `Dl_info`, and `RTLD_*` | declaration/constants only; host libc/libdl owns behavior | remove when host `<dlfcn.h>` parses under the same target policy |
-| `errno.h` | errno macro declarations/constants | LibTomMath and coreutils probes needed POSIX errno constants beyond C99 `EDOM`/`ERANGE` | constants plus host errno accessor declaration; storage is host-owned | narrow constants when project probes no longer reference them or host header parses |
-| `stdio.h`, `stdlib.h`, `string.h`, `ctype.h`, `math.h`, `locale.h`, `wchar.h`, `wctype.h`, `fenv.h`, `complex.h`, `tgmath.h` | hosted C/POSIX declaration surface | inih, cJSON, Lua, MuJS, and upcoming coreutils probes need libc/libm declarations while rcc cannot yet parse all host headers | declarations/macros only; libc/libm bodies are linked from host | keep only declarations justified by conformance or real-world probes; prefer parser fixes over broad libc copying |
+Do not add `stdio.h`, `stdlib.h`, `string.h`, `pthread.h`, `unistd.h`,
+`sys/*.h`, or Linux networking headers here. If one of those headers fails, add
+a minimized compiler bug task and keep using the host header as the oracle.
 
 ## C11 Library Surface
 
-The C11 resource-header surface is intentionally split into compiler-owned
-syntax/type support and host-owned runtime bodies:
+C11 coverage is intentionally split into compiler-owned language support and
+host-owned library headers/runtime bodies:
 
 | Header | Status | Runtime owner / deferred work |
 | --- | --- | --- |
 | `stdalign.h` | implemented macro surface: `alignas`, `alignof`, `__alignas_is_defined`, `__alignof_is_defined` | no runtime |
 | `stdnoreturn.h` | implemented macro surface: `noreturn`, `__noreturn_is_defined` | no runtime |
 | `stdatomic.h` | declaration/macro surface for atomic typedefs, lock-free macros, memory-order constants, simple load/store/fetch helpers, `atomic_flag`, and fences | rcc lowers atomic lvalue load/store to LLVM atomics; full generic-operation lowering and link-free `atomic_flag_*` bodies are deferred compiler/runtime work |
-| `threads.h` | declaration surface over pthread-compatible hosted Linux types plus `thread_local` | host libc/pthread owns thread scheduling, mutex/cond/key behavior, and `thrd_*`/`mtx_*`/`cnd_*`/`tss_*` bodies |
-| `uchar.h` | declaration surface for `char16_t`, `char32_t`, `mbstate_t`, and conversion functions | host libc owns multibyte conversion state and locale behavior |
-| `assert.h` | C11 `static_assert` macro plus existing `assert` behavior | `assert` abort path uses host `abort`; static assertions are compile-time only |
 | `float.h` | C11 decimal-digit/subnormal macro deltas for the current LP64/Linux and Windows baselines | target-info-backed generation is deferred |
-| `stdlib.h` | C11 declarations for `aligned_alloc`, `quick_exit`, and `at_quick_exit` | host libc owns allocation and quick-exit behavior |
-| `time.h` | C11 `TIME_UTC` and `timespec_get` declaration | host libc owns clock behavior |
 
-Deferred C11 library pieces are explicit: Annex K bounds-checking interfaces,
-the analyzability annex, a fully conforming C11 thread runtime independent of
-pthread, and generated per-target floating-point macro tables. Do not paper over
-these with large copied libc headers; add a targeted shim or a compiler task
-when a real source file reaches a missing declaration.
+Hosted C11 library headers such as `assert.h`, `threads.h`, `uchar.h`,
+`stdlib.h`, and `time.h` are part of the C11 target, but they are supplied by
+the real target sysroot in hosted mode. Do not paper over host-header failures
+with copied libc headers; add a compiler task when a real source file reaches a
+host-header parse or lowering bug.
 
-`lib/rcc/include/pthread.h` is a declaration shim for hosted Linux projects. It
-declares common pthread entry points such as `pthread_create`, `pthread_join`,
-mutex/condition-variable basics, thread-specific storage, and attribute helpers.
-The exposed object types (`pthread_attr_t`, `pthread_mutex_t`,
-`pthread_cond_t`, and related attr types) are ABI-sized opaque storage
-placeholders for the current glibc-oriented probes, not scheduler or locking
-implementations. Programs must still link with `-pthread`.
-
-Core POSIX scalar typedefs live in `lib/rcc/include/bits/rcc-posix-types.h` and
-are re-exported through `sys/types.h`, `time.h`, `unistd.h`, and `signal.h`.
-This keeps `pid_t`, `uid_t`, `gid_t`, `mode_t`, `off_t`, `ssize_t`, `time_t`,
-`clockid_t`, and related names single-sourced inside rcc's resource headers.
-The current definitions match the LP64 glibc-oriented hosted probes; adding a
-layout-sensitive type for another data model requires a target-info-backed
-test.
-
-Filesystem-oriented shims live in `fcntl.h`, `dirent.h`, `sys/stat.h`,
-`sys/time.h`, and `sys/wait.h`.  `DIR` remains opaque.  `struct dirent` and
-`struct stat` expose the fields commonly read by GNU userland probes; the
-`struct stat` shape follows the current LP64 glibc field order closely enough
-for compile-time field access and simple hosted smoke tests.  Treat it as a
-target-specific ABI surface: changes to field order, size, or timestamp storage
-need explicit target-layout coverage before they are broadened.
-
-`lib/rcc/include/dlfcn.h` is a declaration shim for hosted Linux dynamic-loader
-APIs.  It exposes `dlopen`, `dlsym`, `dlclose`, `dlerror`, `dladdr`, common
-`RTLD_*` flags, and `Dl_info`.  The implementation is intentionally external:
-the host runtime resolves these symbols during final linking.  Projects that
-still require a separate dynamic-loader library must pass `-ldl`; the driver
-preserves that explicit flag in the clang/lld-compatible link command and in
-missing-linker diagnostics.
+Annex K bounds-checking interfaces, the analyzability annex, and a C11 threads
+runtime independent of the host libc remain optional/deferred unless a
+conformance or real-world probe requires them.
 
 The repeatable hosted header gate is:
 
@@ -197,26 +165,11 @@ LLVM_SYS_181_PREFIX=/usr/lib/llvm-18 RCC_RUN_LINK_E2E=1 \
 Non-Linux targets must reject `-pthread` clearly instead of silently compiling a
 program that cannot link against a pthread implementation.
 
-## Common Glibc Annotation Macros
+## Common Glibc Header Forms
 
-`lib/rcc/include/sys/cdefs.h` provides a deliberately small set of glibc
-annotation macro shims used by hosted Linux headers:
-
-| Macro family | rcc behavior |
-| --- | --- |
-| `__BEGIN_DECLS`, `__END_DECLS` | expands to nothing; C++ linkage is not modeled |
-| `__THROW`, `__THROWNL`, `__NTH`, `__NTHNL` | strips exception/nothrow annotations while preserving the declarator |
-| `__nonnull`, `__wur`, `__attribute_malloc__` | strips function declaration annotations |
-| `__attribute_alloc_size__`, `__attr_access`, `__attr_dealloc` | strips allocation/access annotations |
-| `__P`, `__PMT` | preserves the prototype argument list |
-
-These definitions are parse/type compatibility only.  They must not grow into a
-copy of glibc `sys/cdefs.h`, and they do not provide fortified libc behavior,
-symbol redirection, ABI dispatch, or runtime code.
-
-Raw GNU `__attribute__((...))` syntax is also parsed so hosted headers can keep
-their declaration shape.  The supported attribute table includes the glibc and
-gnulib annotations currently needed by the hosted probes: `nothrow`, `leaf`,
+Raw GNU `__attribute__((...))` syntax is parsed so hosted headers can keep their
+declaration shape.  The supported attribute table includes the glibc and gnulib
+annotations currently needed by the hosted probes: `nothrow`, `leaf`,
 `nonnull`, `pure`, `const`, `malloc`, `format`, `warn_unused_result`,
 `visibility`, `deprecated`, `aligned`, `packed`, `section`, `weak`,
 `alloc_size`, `alloc_align`, `access`, `copy`, and related spelling variants
@@ -236,8 +189,6 @@ parameter qualifiers in `ObjectQuals`; for array parameters, qualifiers inside
 The phase-16 task tree is the authoritative hosted Linux queue:
 
 - `tasks/16-linux-glibc-compat/03-feature-test-macro-model.md`
-- `tasks/16-linux-glibc-compat/04-resource-header-overlay-order.md`
-- `tasks/16-linux-glibc-compat/05-glibc-common-macro-shims.md`
 - `tasks/16-linux-glibc-compat/08-pthread-driver-flag.md`
 - `tasks/16-linux-glibc-compat/14-glibc-system-header-parse-gate.md`
 - `tasks/16-linux-glibc-compat/16-gnu-coreutils-bootstrap-probe.md`

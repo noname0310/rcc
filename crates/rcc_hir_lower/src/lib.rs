@@ -5962,6 +5962,7 @@ fn lower_type_from_parts_in_scope(
         resolver,
         crate_,
         session,
+        specs.storage == Some(StorageClass::Typedef),
     );
     ty = apply_vector_size_attrs_to_type(ty, &specs.attrs, tcx, session);
     ty = apply_vector_size_attrs_to_type(ty, &declarator.attrs, tcx, session);
@@ -6739,6 +6740,7 @@ fn apply_declarator_with_context_in_scope(
         resolver,
         crate_,
         session,
+        false,
     )
 }
 
@@ -6753,6 +6755,7 @@ fn apply_declarator_with_base_quals_in_scope(
     resolver: &mut Resolver,
     crate_: &mut HirCrate,
     session: &mut Session,
+    allow_void_declarator: bool,
 ) -> TyId {
     let mut ty = base;
     let mut pending_component_quals = base_quals;
@@ -6887,7 +6890,11 @@ fn apply_declarator_with_base_quals_in_scope(
     // But only if there were no derivations — if there were
     // derivations, void was either wrapped in a pointer (legal) or
     // caught above.
-    if d.derived.is_empty() && *tcx.get(ty) == Ty::Void && d.name.is_some() {
+    if !allow_void_declarator
+        && d.derived.is_empty()
+        && *tcx.get(ty) == Ty::Void
+        && d.name.is_some()
+    {
         session
             .handler
             .struct_err(d.span, "cannot declare variable of type `void`".to_string())

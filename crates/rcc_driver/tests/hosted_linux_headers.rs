@@ -262,7 +262,7 @@ int probe(struct c11_probe *p) {
         },
         Fixture {
             name: "coreutils-posix-declaration-sweep",
-            reason: "GNU coreutils true probe reaches gnulib wrappers for unlocked stdio, at-functions, errno, and wide-char width",
+            reason: "GNU coreutils true probe reaches real glibc unlocked stdio, at-functions, errno, and wide-char width",
             args: &[],
             source: r#"
 #include <errno.h>
@@ -283,11 +283,60 @@ int probe(FILE *fp, const char *path, int fd, wchar_t wc, struct stat *st, va_li
     status += (int) fwrite_unlocked(path, 1, 1, fp);
     status += fflush_unlocked(fp);
     clearerr_unlocked(fp);
-    status += fpurge(fp);
     status += vasprintf(&allocated, "%s", ap);
     status += S_TYPEISSHM(st);
-    status += S_TYPEISTMO(st);
     return status == EOPNOTSUPP || status == ENOTSUP;
+}
+"#,
+        },
+        Fixture {
+            name: "toybox-hosted-surface",
+            reason: "Toybox applet smoke needs Linux/POSIX timers, signals, syscalls, TCP constants, and GNU keyword aliases",
+            args: &[
+                "-std=c11",
+                "-fgnu-attributes",
+                "-fgnu-named-variadic",
+                "-fgnu-permissive-redefinition",
+            ],
+            source: r#"
+#include <fcntl.h>
+#include <netinet/tcp.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/inotify.h>
+#include <sys/mount.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+#define STRUCT_GROUP(TAG, NAME, ATTRS, MEMBERS...) \
+    union { struct { MEMBERS } ATTRS; struct TAG { MEMBERS } ATTRS NAME; } ATTRS
+
+struct toybox_group {
+    STRUCT_GROUP(timer_group, timer_fields, ,
+        __signed__ int signo;
+        timer_t timer;
+    );
+};
+
+int probe(char *dst, const char *src, struct sigevent *sev) {
+    struct inotify_event event;
+    struct itimerspec its;
+    struct timeval tv;
+    timer_t timer;
+    int flags = O_DIRECT | AT_FDCWD | TCP_NODELAY | TCP_CLOSING;
+    int sigs = SIGKILL + SIGPROF + SIGWINCH + SIGEV_SIGNAL + sev->sigev_notify;
+    int wd = inotify_add_watch(-1, src, IN_MODIFY | IN_IGNORED);
+    char *end = stpcpy(dst, src);
+    long rc = syscall(SYS_timer_create, CLOCK_REALTIME, sev, &timer);
+    timer_create(CLOCK_MONOTONIC, sev, &timer);
+    timer_settime(timer, 0, &its, &its);
+    gettimeofday(&tv, 0);
+    mount(src, dst, "tmpfs", MS_BIND | MS_REC, 0);
+    umount2(dst, MNT_DETACH);
+    return (int)(end - dst) + flags + sigs + wd + event.wd + (int)rc;
 }
 "#,
         },

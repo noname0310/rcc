@@ -1,27 +1,29 @@
 # Standard Header Surface
 
 `rcc` does not implement a C standard library. Hosted builds use the target
-system's C runtime and libraries for the actual symbols, while `rcc` ships a
-small compiler-provided include directory with declarations that the frontend can
-parse and type-check.
+system's C runtime, libraries, and headers for libc/POSIX/Linux declarations.
+The small compiler-provided include directory is reserved for headers that need
+direct compiler cooperation.
 
 The current declaration coverage audit lives in
 [`docs/hosted-c99-header-audit.md`](hosted-c99-header-audit.md).
 
-The files under `lib/rcc/include/` are therefore ABI-facing declaration shims,
-not libc implementations. They should contain only the C99 declarations needed
-by current conformance fixtures and compiler-owned builtins. Adding a prototype
-here is acceptable when:
+The files under `lib/rcc/include/` are therefore compiler-owned resource
+headers, not libc implementations and not approximate glibc/musl/POSIX header
+replacements. Adding a file here is acceptable when:
 
-- the symbol is provided by the host C runtime or an explicitly linked host
-  library such as `libm`;
-- the declaration is stable for the current target ABI;
-- the compiler needs the declaration to parse, type-check, lower, or call the
-  symbol correctly.
+- the header describes frontend builtins or language support, such as
+  `stddef.h`, `stdarg.h`, `stdint.h`, `stdbool.h`, `stdalign.h`,
+  `stdatomic.h`, `iso646.h`, or target scalar limits;
+- the contents are generated from rcc's target model or are otherwise part of
+  the compiler contract;
+- using the host header would make compiler-owned behavior ambiguous.
 
-Do not add function bodies, data structure internals, or broad glibc/musl
-surface area just to make unknown programs compile. New declarations should be
-driven by a concrete conformance fixture or a separate task.
+Do not add `stdio.h`, `stdlib.h`, `string.h`, `pthread.h`, `unistd.h`,
+`sys/*.h`, networking headers, function bodies, data structure internals, or
+broad glibc/musl surface area just to make unknown programs compile. A failure
+inside a real host header should become a minimized preprocessor/parser/lowering
+task, not a copied declaration shim.
 
 For math functions, the driver must still pass the requested library flag (for
 example `-lm`) through to the linker. Header declarations only make the frontend

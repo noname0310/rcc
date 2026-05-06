@@ -28,6 +28,7 @@ work, because Toybox and similar Linux projects expose C11 syntax directly.
 - [x] [10-unicode-character-and-string-literals](10-unicode-character-and-string-literals.md)
 - [x] [11-c11-library-header-sweep](11-c11-library-header-sweep.md)
 - [x] [12-c11-conformance-and-realworld-gates](12-c11-conformance-and-realworld-gates.md)
+- [x] [13-real-host-c11-library-headers](13-real-host-c11-library-headers.md)
 
 ## Downstream
 

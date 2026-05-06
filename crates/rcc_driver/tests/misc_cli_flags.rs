@@ -9,6 +9,7 @@ use rcc_session::{LanguageStandard, OptLevel};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(target_os = "linux")]
 const PTHREAD_RUNTIME_SMOKE: &str = include_str!("fixtures/pthread_runtime_smoke.c");
 
 struct TempCFile {
@@ -358,6 +359,7 @@ int marker;
     assert!(result.status.success(), "stderr: {}", String::from_utf8_lossy(&result.stderr));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn glibc_cdefs_coreutils_style_annotations_parse_after_expansion() {
     let input = TempCFile::new(
@@ -389,8 +391,9 @@ int main(void) { return 0; }
     assert!(output.exists(), "AST output should be emitted after successful parsing");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn pthread_header_shim_parses_and_typechecks_for_linux_target() {
+fn pthread_host_header_parses_and_typechecks_for_linux_target() {
     let input = TempCFile::new("pthread-header", PTHREAD_RUNTIME_SMOKE);
     let output = input.sibling("hir");
     let result = Command::new(rcc_bin())
@@ -408,6 +411,7 @@ fn pthread_header_shim_parses_and_typechecks_for_linux_target() {
     assert!(output.exists(), "HIR output should be emitted after pthread header typecheck");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn posix_core_type_headers_parse_and_lower_for_linux_target() {
     let input = TempCFile::new(
@@ -456,6 +460,7 @@ ssize_t rw_once(int fd, void *buf, size_t n) {
     assert!(output.exists(), "HIR output should be emitted after POSIX type lowering");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn filesystem_posix_headers_parse_and_typecheck_for_linux_target() {
     let input = TempCFile::new(
@@ -510,6 +515,7 @@ int inspect_path(const char *path) {
     assert!(output.exists(), "HIR output should be emitted after filesystem header typecheck");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn dlfcn_header_parses_and_typechecks_for_linux_target() {
     let input = TempCFile::new(
@@ -589,9 +595,9 @@ fn sysroot_discovers_existing_linux_system_include_dirs_under_root() {
 
     assert_eq!(opts.sysroot.as_deref(), Some(root.path()));
     assert!(opts.system_include_paths.starts_with(&[
-        root.path().join("usr/include"),
         root.path().join("usr/local/include"),
         root.path().join("usr/include/x86_64-unknown-linux-gnu"),
+        root.path().join("usr/include"),
     ]));
 }
 

@@ -1392,9 +1392,16 @@ fn c11_unicode_string_literal_elements_have_target_widths() {
 }
 
 #[test]
-fn c11_uchar_header_parses_and_lowers() {
+fn c11_uchar_declared_surface_parses_and_lowers() {
     let src = r#"
-        #include <uchar.h>
+        typedef unsigned long size_t;
+        typedef unsigned short char16_t;
+        typedef unsigned int char32_t;
+        typedef struct { unsigned long __opaque; } mbstate_t;
+        size_t mbrtoc16(char16_t *restrict, const char *restrict, size_t, mbstate_t *restrict);
+        size_t c16rtomb(char *restrict, char16_t, mbstate_t *restrict);
+        size_t mbrtoc32(char32_t *restrict, const char *restrict, size_t, mbstate_t *restrict);
+        size_t c32rtomb(char *restrict, char32_t, mbstate_t *restrict);
 
         _Static_assert(sizeof(char16_t) == sizeof(u"x"[0]), "char16_t matches u string");
         _Static_assert(sizeof(char32_t) == sizeof(U"x"[0]), "char32_t matches U string");
@@ -1418,7 +1425,7 @@ fn c11_uchar_header_parses_and_lowers() {
     );
     assert!(
         hir.defs.iter().any(|def| matches!(def.kind, DefKind::Function { .. })),
-        "uchar.h probe should lower a function body"
+        "uchar declaration probe should lower a function body"
     );
 }
 
@@ -2848,6 +2855,15 @@ fn snippet_file_scope_typedef_and_global_types_are_finalized() {
     assert_eq!(hir.defs.len(), 2);
     assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(ty) if ty == tcx.int));
     assert!(matches!(hir.defs[DefId(1)].kind, DefKind::Global { ty, .. } if ty == tcx.int));
+}
+
+#[test]
+fn snippet_typedef_void_is_allowed_for_glibc_opaque_handles() {
+    let (hir, tcx, cap) = checked_snippet_with_diagnostics("typedef void _IO_lock_t;");
+
+    assert!(cap.diagnostics().is_empty(), "diagnostics: {:?}", cap.diagnostics());
+    assert_eq!(hir.defs.len(), 1);
+    assert!(matches!(hir.defs[DefId(0)].kind, DefKind::Typedef(ty) if ty == tcx.void));
 }
 
 #[test]

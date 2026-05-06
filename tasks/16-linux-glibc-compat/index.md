@@ -1,8 +1,8 @@
 # 16-linux-glibc-compat: index
 
-Linux hosted compatibility: glibc/POSIX/GNU header shims, `-pthread`, runtime
-library linking, and real-world probes that depend on host glibc instead of
-rcc-owned libc bodies.
+Linux hosted compatibility: real glibc/POSIX/GNU/Linux sysroot headers,
+`-pthread`, runtime library linking, and real-world probes that depend on host
+glibc instead of rcc-owned libc bodies.
 
 ## Upstream deps
 
@@ -21,9 +21,9 @@ rcc-owned libc bodies.
 - [x] [06-gnu-header-attribute-tolerance](06-gnu-header-attribute-tolerance.md)
 - [x] [07-restrict-and-qualifier-aliases](07-restrict-and-qualifier-aliases.md)
 - [x] [08-pthread-driver-flag](08-pthread-driver-flag.md)
-- [x] [09-pthread-header-shim](09-pthread-header-shim.md)
-- [x] [10-posix-core-type-shims](10-posix-core-type-shims.md)
-- [x] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md)
+- [x] [09-pthread-header-shim](09-pthread-header-shim.md) *(historical; superseded by real sysroot header policy)*
+- [x] [10-posix-core-type-shims](10-posix-core-type-shims.md) *(historical; superseded by real sysroot header policy)*
+- [x] [11-fcntl-dirent-stat-shims](11-fcntl-dirent-stat-shims.md) *(historical; superseded by real sysroot header policy)*
 - [x] [12-dlfcn-and-runtime-linking](12-dlfcn-and-runtime-linking.md)
 - [x] [13-gnulib-config-header-probe](13-gnulib-config-header-probe.md)
 - [x] [14-glibc-system-header-parse-gate](14-glibc-system-header-parse-gate.md)
@@ -36,9 +36,9 @@ rcc-owned libc bodies.
 - [x] [21-gnu-include-next-directive](21-gnu-include-next-directive.md)
 - [x] [22-gnulib-funcdecl-macro-surface](22-gnulib-funcdecl-macro-surface.md)
 - [x] [22a-gnu-extension-inline-header-functions](22a-gnu-extension-inline-header-functions.md)
-- [x] [23-coreutils-posix-declaration-sweep](23-coreutils-posix-declaration-sweep.md)
+- [x] [23-coreutils-posix-declaration-sweep](23-coreutils-posix-declaration-sweep.md) *(historical; superseded by real sysroot header policy)*
 - [x] [24-coreutils-true-runtime-oracle](24-coreutils-true-runtime-oracle.md)
-- [ ] [25-toybox-applet-hosted-surface](25-toybox-applet-hosted-surface.md)
+- [~] [25-toybox-applet-hosted-surface](25-toybox-applet-hosted-surface.md)
 
 ## Downstream
 

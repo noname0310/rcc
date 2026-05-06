@@ -993,7 +993,7 @@ impl Tokenizer<'_> {
 /// forms `\u` / `\U`, which are recognised separately, and excluding
 /// the octal / hex numeric escapes).
 fn is_simple_escape(c: char) -> bool {
-    matches!(c, '\'' | '"' | '?' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v')
+    matches!(c, '\'' | '"' | '?' | '\\' | 'a' | 'b' | 'e' | 'f' | 'n' | 'r' | 't' | 'v')
 }
 
 /// Whether `c` can begin a C99 §6.4.6 punctuator. Used as the

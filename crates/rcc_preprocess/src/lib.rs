@@ -1093,10 +1093,7 @@ impl<'a> Preprocessor<'a> {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        let include_paths = include::include_search_paths(
-            &self.session.opts.include_paths,
-            &self.session.opts.system_include_paths,
-        );
+        let include_paths = include::include_search_paths_for_options(&self.session.opts);
         let mut has_include = |name: &str, system: bool, _span: Span| {
             include::resolve_header(name, system, &current_dir, &include_paths).is_some()
         };
@@ -2295,9 +2292,16 @@ mod run_tests {
     }
 
     #[test]
-    fn glibc_cdefs_annotation_macros_expand_to_declarator_compatible_tokens() {
+    fn glibc_style_annotation_macros_expand_to_declarator_compatible_tokens() {
         let src = r#"
-#include <sys/cdefs.h>
+#define __BEGIN_DECLS
+#define __END_DECLS
+#define __THROW
+#define __nonnull(args)
+#define __wur
+#define __attribute_malloc__
+#define __attribute_alloc_size__(args)
+#define __NTH(args) args
 __BEGIN_DECLS
 extern int one(const char *) __THROW __nonnull ((1)) __wur;
 extern void *two(unsigned long)
