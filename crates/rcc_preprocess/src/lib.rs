@@ -187,7 +187,7 @@ impl<'a> Preprocessor<'a> {
         }
 
         self.include_stack.push(root);
-        self.self_include_revision_stack.push(None);
+        self.self_include_revision_stack.push(Some(self.macro_revision));
 
         let src = self.session.source_map.read().unwrap().file(root).src.clone();
         let tokens: Vec<PpToken> = rcc_lexer::tokenize(root, &src).collect();

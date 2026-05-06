@@ -1330,6 +1330,32 @@ mod tests {
     }
 
     #[test]
+    fn immediate_self_include_without_macro_mutation_is_cut() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_vfs__");
+        let main_path = root.join("main.c");
+        let header_path = root.join("self.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"self.h\"\n"));
+        sess.add_virtual_file(
+            header_path.clone(),
+            Arc::from("#include \"self.h\"\nint after_self_include;\n"),
+        );
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = joined_token_text(&sess, &out);
+
+        assert_eq!(
+            text.matches("after_self_include").count(),
+            1,
+            "plain self-inclusion must be cut before recursively duplicating the body: {text}"
+        );
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one include-cycle diagnostic: {diags:?}");
+        assert!(diags[0].message.contains("recursive include cycle"));
+    }
+
+    #[test]
     fn branching_self_include_is_cut_before_exponential_growth() {
         let (mut sess, cap) = Session::for_test();
         let root = PathBuf::from("__rcc_vfs__");
