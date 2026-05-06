@@ -69,18 +69,34 @@ pub struct Preprocessor<'a> {
     /// reports each recursive edge once instead of flooding stderr during fuzz
     /// runs.
     pub diagnosed_include_cycles: FxHashMap<(FileId, FileId), ()>,
+    /// Number of include bodies expanded during this preprocessing run.
+    ///
+    /// This is a final guard against macro-controlled include graphs that are
+    /// technically finite under the active-depth rule but still large enough to
+    /// behave as denial-of-service inputs.
+    include_expansions: usize,
+    /// Latch for the include-expansion budget diagnostic.
+    include_expansion_limit_reported: bool,
     /// Monotonic revision for source-level macro table mutations.
     macro_revision: u64,
     /// Current include expansion stack, mirrored by
     /// [`Self::self_include_revision_stack`].
     include_stack: Vec<FileId>,
-    /// Per-frame macro revision for the last same-file recursive include.
+    /// Per-frame local macro revision for the last same-file recursive include.
     ///
     /// Macro-controlled self-inclusion in real headers is linear: each active
-    /// expansion re-enters itself after changing macro state. Unguarded
-    /// branching self-includes (`#include "x"` twice without an intervening
-    /// macro mutation) are cut before they grow exponentially.
+    /// expansion re-enters itself after changing macro state in the same file.
+    /// Unguarded branching self-includes (`#include "x"` twice without an
+    /// intervening local macro mutation) are cut before they grow
+    /// exponentially. Macro mutations from child headers do not count; allowing
+    /// those to unlock parent self-inclusion lets malformed include graphs
+    /// bounce through a macro-heavy child forever.
     self_include_revision_stack: Vec<Option<u64>>,
+    /// Per-frame count of source-level macro mutations made by the currently
+    /// running file. This is intentionally separate from [`Self::macro_revision`],
+    /// which remains a global monotonic counter for the whole preprocessing
+    /// run.
+    local_macro_revision_stack: Vec<u64>,
     include_depth: usize,
     /// GNU-compatible `#pragma push_macro` / `#pragma pop_macro`
     /// snapshots. These pragmas are not part of C99, but system headers
@@ -131,9 +147,12 @@ impl<'a> Preprocessor<'a> {
             pragma_once: FxHashMap::default(),
             active_includes: FxHashMap::default(),
             diagnosed_include_cycles: FxHashMap::default(),
+            include_expansions: 0,
+            include_expansion_limit_reported: false,
             macro_revision: 0,
             include_stack: Vec::new(),
             self_include_revision_stack: Vec::new(),
+            local_macro_revision_stack: Vec::new(),
             include_depth: 0,
             macro_stack: FxHashMap::default(),
             line_overrides: LineMap::new(),
@@ -187,7 +206,8 @@ impl<'a> Preprocessor<'a> {
         }
 
         self.include_stack.push(root);
-        self.self_include_revision_stack.push(Some(self.macro_revision));
+        self.self_include_revision_stack.push(Some(0));
+        self.local_macro_revision_stack.push(0);
 
         let src = self.session.source_map.read().unwrap().file(root).src.clone();
         let tokens: Vec<PpToken> = rcc_lexer::tokenize(root, &src).collect();
@@ -237,6 +257,7 @@ impl<'a> Preprocessor<'a> {
         }
 
         self.self_include_revision_stack.pop();
+        self.local_macro_revision_stack.pop();
         self.include_stack.pop();
 
         out
@@ -249,15 +270,19 @@ impl<'a> Preprocessor<'a> {
         let Some(last_revision) = self.self_include_revision_stack.last_mut() else {
             return true;
         };
-        if *last_revision == Some(self.macro_revision) {
+        let local_revision = self.local_macro_revision_stack.last().copied().unwrap_or_default();
+        if *last_revision == Some(local_revision) {
             return false;
         }
-        *last_revision = Some(self.macro_revision);
+        *last_revision = Some(local_revision);
         true
     }
 
     fn bump_macro_revision(&mut self) {
         self.macro_revision = self.macro_revision.wrapping_add(1);
+        if let Some(local) = self.local_macro_revision_stack.last_mut() {
+            *local = local.wrapping_add(1);
+        }
     }
 
     fn flush_pending_text(&mut self, pending_text: &mut Vec<PpToken>, out: &mut Vec<PpToken>) {

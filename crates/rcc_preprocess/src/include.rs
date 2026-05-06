@@ -28,6 +28,7 @@ use crate::macros::{MacroDef, MacroKind};
 use crate::Preprocessor;
 
 const MAX_INCLUDE_DEPTH: usize = 64;
+const MAX_INCLUDE_EXPANSIONS: usize = 512;
 // Permit bounded active self-reentry so macro-controlled self-inclusion still
 // works. LibTomMath's `tommath_class.h` needs four active copies of the same
 // file, and TinyCC's `95_bitfields.c` builds a deeper macro-controlled include
@@ -546,6 +547,18 @@ impl Preprocessor<'_> {
             }
         }
 
+        if self.include_expansions >= MAX_INCLUDE_EXPANSIONS {
+            if !self.include_expansion_limit_reported {
+                self.session.handler.emit(&include_expansion_limit_exceeded(
+                    directive_span,
+                    &resolved,
+                    MAX_INCLUDE_EXPANSIONS,
+                ));
+                self.include_expansion_limit_reported = true;
+            }
+            return Vec::new();
+        }
+
         if self.include_depth >= MAX_INCLUDE_DEPTH {
             self.session.handler.emit(&include_depth_exceeded(
                 directive_span,
@@ -555,6 +568,7 @@ impl Preprocessor<'_> {
             return Vec::new();
         }
 
+        self.include_expansions += 1;
         *self.active_includes.entry(new_file).or_insert(0) += 1;
         self.include_depth += 1;
         let tokens = self.run(new_file);
@@ -684,6 +698,25 @@ fn include_depth_exceeded(span: Span, path: &Path, limit: usize) -> Diagnostic {
                 .into(),
         ],
         help: vec!["break the include cycle or add a guard around the recursive include".into()],
+    }
+}
+
+fn include_expansion_limit_exceeded(span: Span, path: &Path, limit: usize) -> Diagnostic {
+    Diagnostic {
+        level: Level::Error,
+        code: Some(E0021),
+        message: format!("include expansion limit exceeded while loading `{}`", path.display()),
+        labels: vec![Label {
+            span,
+            message: format!("preprocessing stopped after {limit} expanded includes"),
+            primary: true,
+        }],
+        notes: vec![
+            "the preprocessor stopped expanding includes so malformed include graphs do not run \
+             indefinitely"
+                .into(),
+        ],
+        help: vec!["add include guards or simplify macro-controlled recursive includes".into()],
     }
 }
 
@@ -1369,6 +1402,34 @@ mod tests {
             text.matches("after_self_include").count(),
             1,
             "plain self-inclusion must be cut before recursively duplicating the body: {text}"
+        );
+        let diags = cap.diagnostics();
+        assert_eq!(diags.len(), 1, "expected one include-cycle diagnostic: {diags:?}");
+        assert!(diags[0].message.contains("recursive include cycle"));
+    }
+
+    #[test]
+    fn child_header_macro_mutation_does_not_unlock_parent_self_include() {
+        let (mut sess, cap) = Session::for_test();
+        let root = PathBuf::from("__rcc_vfs__");
+        let main_path = root.join("main.c");
+        let parent_path = root.join("parent.h");
+        let child_path = root.join("child.h");
+        sess.add_virtual_file(main_path.clone(), Arc::from("#include \"parent.h\"\n"));
+        sess.add_virtual_file(
+            parent_path.clone(),
+            Arc::from("#include \"child.h\"\n#include \"parent.h\"\nint parent_tail;\n"),
+        );
+        sess.add_virtual_file(child_path.clone(), Arc::from("#define CHILD_MUTATION 1\n"));
+        let main_id = sess.load_source_file(&main_path).expect("load virtual main");
+
+        let out = Preprocessor::new(&mut sess).run(main_id);
+        let text = joined_token_text(&sess, &out);
+
+        assert_eq!(
+            text.matches("parent_tail").count(),
+            1,
+            "child macro mutations must not make parent self-inclusion repeat: {text}"
         );
         let diags = cap.diagnostics();
         assert_eq!(diags.len(), 1, "expected one include-cycle diagnostic: {diags:?}");
