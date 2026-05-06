@@ -372,7 +372,8 @@ impl<'a> ConstEval<'a> {
             // `arr` decays to `&arr[0]` — handled via the `Convert`
             // wrappers the typeck pass inserts.
             HirExprKind::Convert { operand, kind } => match kind {
-                ConvertKind::ArrayToPtr | ConvertKind::FuncToPtr => self.eval_address(operand),
+                ConvertKind::ArrayToPtr => self.eval_address_of(operand),
+                ConvertKind::FuncToPtr => self.eval_address(operand),
                 ConvertKind::Pointer => {
                     if let Some(addr) = self.eval_address(operand) {
                         return Some(addr);
@@ -425,6 +426,7 @@ impl<'a> ConstEval<'a> {
         let body = self.body?;
         let e = body.exprs.get(operand)?;
         match e.kind.clone() {
+            HirExprKind::StringRef(def_id) => Some((Some(def_id), 0)),
             HirExprKind::DefRef(def_id) => {
                 let defs = self.defs?;
                 let def = defs.get(def_id)?;

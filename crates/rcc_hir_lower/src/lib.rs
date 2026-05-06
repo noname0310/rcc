@@ -6729,6 +6729,14 @@ fn merge_type_quals(
 }
 
 fn declaration_object_quals(specs: &rcc_ast::DeclSpecs, declarator: &Declarator) -> ObjectQuals {
+    if declarator.derived.iter().all(|derived| matches!(derived, DerivedDeclarator::Pointer(_))) {
+        return match declarator.derived.first() {
+            Some(DerivedDeclarator::Pointer(quals)) => object_quals_from_type_quals(quals),
+            Some(_) => unreachable!("all derived declarators are pointers"),
+            None => object_quals_from_type_quals(&specs.quals),
+        };
+    }
+
     match declarator.derived.last() {
         Some(DerivedDeclarator::Pointer(quals)) => object_quals_from_type_quals(quals),
         Some(_) => ObjectQuals::none(),
@@ -6843,9 +6851,10 @@ fn apply_declarator_with_base_quals_in_scope(
 ) -> TyId {
     let mut ty = base;
     let mut pending_component_quals = base_quals;
+    let derived = derived_chain_for_type_construction(d);
 
     // Iterate the derived chain in forward order (outermost-to-innermost).
-    for dd in d.derived.iter() {
+    for dd in derived.iter() {
         match dd {
             DerivedDeclarator::Pointer(quals) => {
                 // Build a pointer to the current qualified component.
@@ -6990,6 +6999,24 @@ fn apply_declarator_with_base_quals_in_scope(
     }
 
     ty
+}
+
+fn derived_chain_for_type_construction(d: &Declarator) -> Vec<DerivedDeclarator> {
+    let mut out = Vec::with_capacity(d.derived.len());
+    let mut i = 0;
+    while i < d.derived.len() {
+        if matches!(d.derived[i], DerivedDeclarator::Pointer(_)) {
+            let start = i;
+            while i < d.derived.len() && matches!(d.derived[i], DerivedDeclarator::Pointer(_)) {
+                i += 1;
+            }
+            out.extend(d.derived[start..i].iter().rev().cloned());
+        } else {
+            out.push(d.derived[i].clone());
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Adjust a parameter type per C99 §6.7.5.3p7-8:

@@ -234,6 +234,63 @@ fn global_object_read_lowers_to_explicit_load() {
 }
 
 #[test]
+fn gnu_lvalue_comma_global_rhs_lowers_as_object_value() {
+    let lowered = expect_warnings_and_lower(
+        "gnu-lvalue-comma-global-rhs",
+        "volatile int g2; int g3; void f(void) { volatile int *p = &g2; *p = (g3, g2); }",
+        &["W0021"],
+    );
+    let body = only_body(&lowered);
+    let g2 = find_global(&lowered.hir);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Copy(src) | Operand::Move(src)),
+                    ..
+                } if matches!(src.projection.as_slice(), [Projection::Global(def)] if *def == g2)
+            )
+        }),
+        "the rhs of a GNU lvalue comma should be copied from global object storage"
+    );
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).all(|stmt| {
+            !matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Const(c)),
+                    ..
+                } if c.ty == lowered.tcx.int
+                    && matches!(c.kind, ConstKind::Global(def) if def == g2)
+            )
+        }),
+        "the global object rhs must not lower as an int-typed address constant"
+    );
+}
+
+#[test]
+fn logical_and_with_constant_true_normalizes_short_lhs_to_int() {
+    let lowered = lower_checked(
+        "logical-and-constant-true-normalization",
+        "int g; void f(void) { short s = 7; g = (s < (s && 4294967293UL)); }",
+    );
+    let body = only_body(&lowered);
+    assert!(
+        body.blocks.iter().flat_map(|block| &block.statements).any(|stmt| {
+            let StatementKind::Assign { rvalue: Rvalue::BinaryOp(BinOp::SLt, lhs, rhs), .. } =
+                &stmt.kind
+            else {
+                return false;
+            };
+            operand_direct_ty(body, lhs) == Some(lowered.tcx.int)
+                && operand_direct_ty(body, rhs) == Some(lowered.tcx.int)
+        }),
+        "`s && constant-true` should still materialize an int 0/1 before comparison"
+    );
+}
+
+#[test]
 fn global_object_address_stays_address_value() {
     let lowered = lower_checked("global-address", "static int x; int *f(void) { return &x; }");
     let body = only_body(&lowered);
@@ -498,4 +555,14 @@ fn find_global(hir: &HirCrate) -> DefId {
 
 fn volatile_quals() -> ObjectQuals {
     ObjectQuals { is_const: false, is_volatile: true, is_restrict: false }
+}
+
+fn operand_direct_ty(body: &Body, operand: &Operand) -> Option<rcc_hir::TyId> {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => {
+            body.locals.get(place.base).map(|decl| decl.ty)
+        }
+        Operand::Const(c) => Some(c.ty),
+        _ => None,
+    }
 }

@@ -365,9 +365,19 @@ pub fn lower_as_rvalue(builder: &mut BodyBuilder, cx: &LowerCx<'_>, expr_id: Hir
         }
         HirExprKind::Comma { lhs, rhs } => {
             // Sequence point: evaluate lhs for its side effects, drop
-            // the value, then evaluate rhs and use that.
+            // the value, then evaluate rhs and use that. GNU lvalue
+            // comma expressions preserve the rhs as an lvalue; in a
+            // value context this must become a Copy from the rhs place,
+            // not recursive rvalue lowering. Recursive rvalue lowering
+            // turns a bare global rhs into a Global address constant,
+            // which is only valid for pointer/function values.
             let _ = lower_as_rvalue(builder, cx, *lhs);
-            lower_as_rvalue(builder, cx, *rhs)
+            if expr.value_cat == ValueCat::LValue {
+                let place = lower_as_place(builder, cx, *rhs);
+                Operand::Copy(place)
+            } else {
+                lower_as_rvalue(builder, cx, *rhs)
+            }
         }
         HirExprKind::BuiltinExpect { value, expected } => {
             // GNU `__builtin_expect` returns its first operand, but the
@@ -1454,18 +1464,22 @@ fn lower_short_circuit(
     if let Some(lhs_truth) = const_condition_expr(cx, lhs) {
         return match (is_and, lhs_truth) {
             (true, false) => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
-            (true, true) => lower_condition_operand(builder, cx, span, rhs),
+            (true, true) => lower_truth_value_operand(builder, cx, span, rhs),
             (false, true) => Operand::Const(Const { kind: ConstKind::Int(1), ty }),
-            (false, false) => lower_condition_operand(builder, cx, span, rhs),
+            (false, false) => lower_truth_value_operand(builder, cx, span, rhs),
         };
     }
     if let Some(rhs_truth) = const_condition_expr(cx, rhs) {
         let lhs_op = lower_condition_operand(builder, cx, span, lhs);
         return match (is_and, rhs_truth) {
-            (true, true) => lhs_op,
+            (true, true) => {
+                normalize_truth_value_operand(builder, cx, span, lhs_op, cx.body.exprs[lhs].ty)
+            }
             (true, false) => Operand::Const(Const { kind: ConstKind::Int(0), ty }),
             (false, true) => Operand::Const(Const { kind: ConstKind::Int(1), ty }),
-            (false, false) => lhs_op,
+            (false, false) => {
+                normalize_truth_value_operand(builder, cx, span, lhs_op, cx.body.exprs[lhs].ty)
+            }
         };
     }
 
@@ -2057,6 +2071,21 @@ fn lower_condition_operand(
     normalize_condition_operand(builder, cx, span, value, ty)
 }
 
+fn lower_truth_value_operand(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    expr: HirExprId,
+) -> Operand {
+    if let Some(truth) = const_condition_expr(cx, expr) {
+        return Operand::Const(Const { kind: ConstKind::Int(i128::from(truth)), ty: cx.tcx.int });
+    }
+
+    let value = lower_as_rvalue(builder, cx, expr);
+    let ty = cx.body.exprs[expr].ty;
+    normalize_truth_value_operand(builder, cx, span, value, ty)
+}
+
 fn normalize_condition_operand(
     builder: &mut BodyBuilder,
     cx: &LowerCx<'_>,
@@ -2070,6 +2099,22 @@ fn normalize_condition_operand(
 
     if matches!(cx.tcx.get(ty), rcc_hir::Ty::Int { .. }) {
         return value;
+    }
+
+    let result = builder.alloc_temp(cx.tcx.int, span);
+    push_assign(builder, span, result, Rvalue::BinaryOp(BinOp::Ne, value, scalar_zero(cx.tcx, ty)));
+    Operand::Copy(Place { base: result, projection: Vec::new() })
+}
+
+fn normalize_truth_value_operand(
+    builder: &mut BodyBuilder,
+    cx: &LowerCx<'_>,
+    span: Span,
+    value: Operand,
+    ty: rcc_hir::TyId,
+) -> Operand {
+    if let Some(truth) = const_operand_truth(&value) {
+        return Operand::Const(Const { kind: ConstKind::Int(i128::from(truth)), ty: cx.tcx.int });
     }
 
     let result = builder.alloc_temp(cx.tcx.int, span);

@@ -4011,6 +4011,35 @@ fn snippet_typeck_folds_global_address_initializer() {
 }
 
 #[test]
+fn snippet_typeck_folds_global_array_element_address_initializer() {
+    let (hir, _tcx, cap) = checked_snippet_with_diagnostics("int g[3][6]; int *p = &g[2][5];");
+    let globals: Vec<_> = hir
+        .defs
+        .iter_enumerated()
+        .filter(|(_, d)| matches!(d.kind, DefKind::Global { .. }))
+        .collect();
+    let (g_def, _) = globals[0];
+    let (_, p_def) = globals
+        .into_iter()
+        .find(|(_, d)| {
+            matches!(&d.kind, DefKind::Global { init: Some(init), .. } if !init.entries.is_empty())
+        })
+        .expect("missing pointer initializer");
+    let DefKind::Global { init: Some(init), .. } = &p_def.kind else {
+        panic!("expected initialized pointer global");
+    };
+    assert_eq!(init.entries.len(), 1);
+    assert!(matches!(
+        init.entries[0].value,
+        GlobalInitValue::Address { def: Some(base), offset: 68 } if base == g_def
+    ));
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0084)),
+        "array element address initializer should not emit E0084"
+    );
+}
+
+#[test]
 fn snippet_typeck_preserves_global_string_pointer_initializer() {
     let (hir, _tcx, cap) = checked_snippet_with_diagnostics("char *p = \"hi\";");
     let def = hir
@@ -5098,6 +5127,54 @@ fn regression_gate_distinguishes_const_pointer_object_from_pointer_to_const() {
         }
         other => panic!("expected q to be pointer-to-const-int, got {other:?}"),
     }
+}
+
+#[test]
+fn regression_gate_distinguishes_const_double_pointer_object_from_pointer_to_const_pointer() {
+    let (hir, mut tcx) = lower_snippet("int ** const q; int * const *r;");
+    let globals: Vec<_> = hir
+        .defs
+        .iter()
+        .filter_map(|def| match def.kind {
+            DefKind::Global { ty, quals, .. } => Some((ty, quals)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(globals.len(), 2);
+
+    let ptr_int = tcx.intern(Ty::Ptr(Qual::plain(tcx.int)));
+    let ptr_ptr_int = tcx.intern(Ty::Ptr(Qual::plain(ptr_int)));
+
+    let (q_ty, q_quals) = globals[0];
+    assert_eq!(
+        q_quals,
+        ObjectQuals { is_const: true, is_volatile: false, is_restrict: false },
+        "`int ** const q` qualifies q itself, not the pointed-to pointer"
+    );
+    assert_eq!(q_ty, ptr_ptr_int);
+
+    let (r_ty, r_quals) = globals[1];
+    assert_eq!(r_quals, ObjectQuals::none(), "`int * const *r` leaves r assignable");
+    match tcx.get(r_ty) {
+        Ty::Ptr(pointee) => {
+            assert_eq!(pointee.ty, ptr_int);
+            assert!(pointee.is_const, "`int * const *r` points at a const pointer-to-int");
+            assert!(!pointee.is_volatile);
+            assert!(!pointee.is_restrict);
+        }
+        other => panic!("expected r to be pointer-to-const-pointer-to-int, got {other:?}"),
+    }
+}
+
+#[test]
+fn snippet_typeck_allows_assignment_through_const_pointer_object() {
+    let (_hir, _tcx, cap) =
+        checked_snippet_with_diagnostics("void f(void) { int *p; int ** const q = &p; *q = 0; }");
+    assert!(
+        cap.diagnostics().iter().all(|d| d.code != Some(rcc_errors::codes::E0080)),
+        "`*q = 0` modifies p, not the const pointer object q: {:?}",
+        cap.diagnostics()
+    );
 }
 
 #[test]

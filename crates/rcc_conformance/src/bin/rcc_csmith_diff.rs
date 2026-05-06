@@ -286,9 +286,7 @@ fn compile_with_host_cc(
     cmd.arg("-std=c99").arg("-O0");
     add_include_args(&mut cmd, runtime_includes);
     cmd.arg(source).arg("-o").arg(exe);
-    if !cfg!(windows) {
-        cmd.arg("-lm");
-    }
+    add_csmith_link_args(&mut cmd);
     run_command(&mut cmd, timeout)
 }
 
@@ -302,12 +300,25 @@ fn compile_with_rcc(
     let mut cmd = Command::new(rcc);
     add_include_args(&mut cmd, runtime_includes);
     cmd.arg(source).arg("-o").arg(exe);
+    add_csmith_link_args(&mut cmd);
     run_command(&mut cmd, timeout)
 }
 
 fn add_include_args(cmd: &mut Command, dirs: &[PathBuf]) {
     for dir in dirs {
         cmd.arg("-I").arg(dir);
+    }
+}
+
+fn add_csmith_link_args(cmd: &mut Command) {
+    cmd.args(csmith_link_args());
+}
+
+fn csmith_link_args() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[]
+    } else {
+        &["-lm"]
     }
 }
 
@@ -506,5 +517,11 @@ mod tests {
         let a = PathBuf::from("a");
         let b = PathBuf::from("b");
         assert_eq!(dedupe_paths(vec![a.clone(), b.clone(), a.clone()]), vec![a, b]);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn csmith_link_args_include_math_library_for_rcc_and_host_cc() {
+        assert_eq!(csmith_link_args(), ["-lm"]);
     }
 }
