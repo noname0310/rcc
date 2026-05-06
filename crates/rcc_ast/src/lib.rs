@@ -119,11 +119,13 @@ pub struct TypeQuals {
     pub restrict: bool,
 }
 
-/// Bitset of function specifiers (C99).
+/// Bitset of function specifiers (C99/C11).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FuncSpecs {
     /// `inline`
     pub inline: bool,
+    /// `_Noreturn` (C11)
+    pub noreturn: bool,
 }
 
 /// A single type specifier keyword / tag reference.

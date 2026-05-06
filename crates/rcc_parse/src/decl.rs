@@ -11,7 +11,7 @@
 //!   `_Complex`, `_Imaginary`, a `struct`/`union`/`enum` specifier,
 //!   or a `typedef-name`.
 //! - *type-qualifier*            — `const`, `volatile`, `restrict`.
-//! - *function-specifier*        — `inline`.
+//! - *function-specifier*        — `inline`, `_Noreturn` in C11 mode.
 //!
 //! The parser loops on the lookahead token and appends to the in-
 //! progress [`DeclSpecs`] until it hits something that is not a
@@ -277,6 +277,25 @@ fn consume_kw_specifier(
                     .emit();
             } else {
                 specs.func_specs.inline = true;
+            }
+            p.bump();
+        }
+        Keyword::Noreturn => {
+            if p.session.opts.language_standard != rcc_session::LanguageStandard::C11 {
+                p.session
+                    .handler
+                    .struct_err(span, "C11 `_Noreturn` function specifier requires `-std=c11`")
+                    .code(codes::E0061)
+                    .emit();
+            }
+            if specs.func_specs.noreturn {
+                p.session
+                    .handler
+                    .struct_warn(span, "duplicate `_Noreturn` function specifier")
+                    .code(codes::W0004)
+                    .emit();
+            } else {
+                specs.func_specs.noreturn = true;
             }
             p.bump();
         }
@@ -868,7 +887,8 @@ fn parse_field_decl(p: &mut Parser<'_>) -> Option<FieldDecl> {
         && !specs.quals.const_
         && !specs.quals.volatile
         && !specs.quals.restrict
-        && !specs.func_specs.inline;
+        && !specs.func_specs.inline
+        && !specs.func_specs.noreturn;
     if specs_empty {
         p.session
             .handler
@@ -1402,6 +1422,7 @@ fn looks_like_decl_specifier_start(p: &Parser<'_>) -> bool {
                 | Keyword::Volatile
                 | Keyword::Restrict
                 | Keyword::Inline
+                | Keyword::Noreturn
                 | Keyword::Struct
                 | Keyword::Union
                 | Keyword::Enum
@@ -1437,7 +1458,8 @@ pub fn parse_declaration(p: &mut Parser<'_>) -> Option<Decl> {
         && !specs.quals.const_
         && !specs.quals.volatile
         && !specs.quals.restrict
-        && !specs.func_specs.inline;
+        && !specs.func_specs.inline
+        && !specs.func_specs.noreturn;
     if specs_empty {
         p.cursor = saved_cursor;
         return None;
@@ -1677,13 +1699,17 @@ fn validate_type_name_specs(p: &mut Parser<'_>, specs: &mut DeclSpecs, start: Sp
             .emit();
     }
 
-    if specs.func_specs.inline {
+    if specs.func_specs.inline || specs.func_specs.noreturn {
+        let message = if specs.func_specs.inline && specs.func_specs.noreturn {
+            "function specifiers are not allowed in a type name"
+        } else if specs.func_specs.inline {
+            "`inline` function specifier is not allowed in a type name"
+        } else {
+            "`_Noreturn` function specifier is not allowed in a type name"
+        };
         specs.func_specs.inline = false;
-        p.session
-            .handler
-            .struct_err(span, "`inline` function specifier is not allowed in a type name")
-            .code(codes::E0061)
-            .emit();
+        specs.func_specs.noreturn = false;
+        p.session.handler.struct_err(span, message).code(codes::E0061).emit();
     }
 
     if specs.type_specs.is_empty() {

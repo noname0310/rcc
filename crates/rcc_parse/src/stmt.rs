@@ -982,6 +982,7 @@ fn looks_like_decl(p: &Parser<'_>) -> bool {
                     | Keyword::Volatile
                     | Keyword::Restrict
                     | Keyword::Inline
+                    | Keyword::Noreturn
                     | Keyword::Struct
                     | Keyword::Union
                     | Keyword::Enum

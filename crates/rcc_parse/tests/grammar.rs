@@ -14,7 +14,7 @@ use std::sync::Arc;
 use rcc_ast::*;
 use rcc_errors::{CaptureEmitter, Diagnostic, Handler};
 use rcc_preprocess::preprocess;
-use rcc_session::{Options, Session};
+use rcc_session::{LanguageStandard, Options, Session};
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -831,6 +831,35 @@ fn s6_7_3_type_qualifiers() {
 #[test]
 fn s6_7_4_function_specifier_inline() {
     parse_ok("inline int f(void) { return 0; }");
+}
+
+#[test]
+fn c11_noreturn_function_specifier_parses_declarations_and_definitions() {
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (tu, diags) = parse_ok_with_options(
+        r#"
+        _Noreturn void f(void);
+        static _Noreturn void g(void) { for (;;) {} }
+        "#,
+        opts,
+    );
+    assert!(diags.is_empty(), "clean C11 parse: {diags:?}");
+
+    let ExternalDecl::Decl(decl) = &tu.decls[0] else {
+        panic!("expected prototype declaration");
+    };
+    assert!(decl.specs.func_specs.noreturn);
+
+    let ExternalDecl::Function(func) = &tu.decls[1] else {
+        panic!("expected function definition");
+    };
+    assert!(func.specs.func_specs.noreturn);
+}
+
+#[test]
+fn c99_noreturn_function_specifier_is_diagnosed() {
+    let errors = parse_err("_Noreturn void f(void);");
+    assert!(errors.iter().any(|d| d.message.contains("requires `-std=c11`")), "{errors:#?}");
 }
 
 #[test]

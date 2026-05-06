@@ -10,7 +10,7 @@ use rcc_codegen_llvm::codegen;
 use rcc_errors::{CaptureEmitter, Handler};
 use rcc_hir::TyCtxt;
 use rcc_hir_lower::lower;
-use rcc_session::{Options, Session};
+use rcc_session::{LanguageStandard, Options, Session};
 use rcc_typeck::{check, verify_typed_hir};
 
 fn render(name: &str, src: &str) -> String {
@@ -101,6 +101,20 @@ fn common_gnu_attrs_lower_to_llvm_ir() {
     assert!(ir.contains("section \".text.fatal\""), "{ir}");
     assert!(ir.contains("noreturn"), "{ir}");
     assert!(ir.contains("@data = weak hidden global i32 0, section \".data.rcc\""), "{ir}");
+}
+
+#[test]
+fn c11_noreturn_function_specifier_lowers_to_llvm_ir() {
+    let ir = render_with_options(
+        "c11_noreturn",
+        r#"
+        _Noreturn void fatal(void) { for (;;) {} }
+        "#,
+        Options { language_standard: LanguageStandard::C11, ..Options::default() },
+    );
+
+    assert!(ir.contains("define void @fatal()"), "{ir}");
+    assert!(ir.contains("noreturn"), "{ir}");
 }
 
 #[test]

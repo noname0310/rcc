@@ -30,7 +30,7 @@ use rcc_hir_lower::{
     lower_typedef_name, resolve_expr_ident, resolve_labels, resolve_tag, Binding, DeclScope,
     Resolver, ScopeStack, TagKind,
 };
-use rcc_session::{Options, Session};
+use rcc_session::{LanguageStandard, Options, Session};
 use rcc_span::{Symbol, DUMMY_SP};
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -987,6 +987,40 @@ fn gnu_common_function_attrs_lower_to_def_attrs() {
     assert_eq!(attrs.visibility, Some(SymbolVisibility::Hidden));
     assert!(attrs.section.is_some());
     assert!(attrs.weak);
+}
+
+#[test]
+fn c11_noreturn_function_specifier_lowers_to_common_attrs() {
+    let src = r#"
+        _Noreturn void fatal(void) { for (;;) {} }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(!cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error));
+
+    let (def, _) = hir
+        .defs
+        .iter_enumerated()
+        .find(|(_, def)| matches!(def.kind, DefKind::Function { .. }))
+        .expect("function def");
+    let attrs = hir.def_attrs.get(&def).copied().expect("function attrs");
+    assert!(attrs.noreturn);
+}
+
+#[test]
+fn c11_noreturn_does_not_change_function_pointer_compatibility() {
+    let src = r#"
+        int (*p)(void);
+        _Noreturn int fatal(void) { for (;;) {} }
+        void use(void) { p = fatal; }
+    "#;
+    let opts = Options { language_standard: LanguageStandard::C11, ..Options::default() };
+    let (_hir, _tcx, cap) = checked_snippet_with_options(src, opts);
+    assert!(
+        !cap.diagnostics().iter().any(|d| d.level == rcc_errors::Level::Error),
+        "{:#?}",
+        cap.diagnostics()
+    );
 }
 
 #[test]

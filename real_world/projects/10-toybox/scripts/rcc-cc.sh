@@ -34,7 +34,7 @@ done
 exec "${rcc}" \
     --target=x86_64-unknown-linux-gnu \
     --linux-gnu-hosted \
-    -std=c99 \
+    -std=c11 \
     -D_GNU_SOURCE \
     -D_DEFAULT_SOURCE \
     -D_XOPEN_SOURCE=700 \

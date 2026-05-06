@@ -7811,6 +7811,9 @@ fn lower_common_attrs(
     session: &mut Session,
 ) -> CommonAttrs {
     let mut out = CommonAttrs::default();
+    if specs.func_specs.noreturn {
+        out.noreturn = true;
+    }
     for attr in specs.attrs.iter().chain(&declarator.attrs) {
         lower_common_attr(attr, session, &mut out);
     }

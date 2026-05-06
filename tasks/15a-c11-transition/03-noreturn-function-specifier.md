@@ -1,3 +1,5 @@
+> ✓ done — 2026-05-06
+
 # 15a-03: `_Noreturn` Function Specifier
 
 **Phase:** 15a-c11-transition  
